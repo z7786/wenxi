@@ -1,3 +1,4 @@
+import 'package:asterlink/data/providers/baidu_link_service.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
@@ -326,7 +327,7 @@ void main() {
                     'https://link.example.test/v1/baidu/link',
                     {'fileId': fileId},
                   );
-                  return (
+                  return BaiduResolvedLink(
                     url: response.json.list('urls').single.str('url'),
                     preview: false,
                   );

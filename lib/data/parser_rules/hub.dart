@@ -10,6 +10,7 @@ import '../../core/login_crypto.dart';
 import '../../diagnostics/app_log.dart';
 import '../../domain/models.dart';
 import '../../domain/remote_control.dart' show parserHubUri;
+import '../../domain/backend_endpoints.dart';
 import '../http.dart';
 import '../state_store.dart';
 import 'engine.dart';
@@ -317,7 +318,7 @@ class ParserRuleHub extends ChangeNotifier {
     this.publicKey = buildPublicKey,
     this.backupUrl = buildBackupUrl,
     DateTime Function()? clock,
-  }) : _url = url.trim(),
+  }) : _url = BackendEndpoints.parserUrl(url),
        http = http ?? ParserRuleHttp(),
        clock = clock ?? DateTime.now,
        root = Directory('${directory.path}/parser-rules') {
@@ -325,13 +326,16 @@ class ParserRuleHub extends ChangeNotifier {
     // A relocated service keeps the same signing identity, archived rules and
     // device IDs. Older releases used the URL as part of their cache identity.
     _namespace = _cacheId('identity-v2|$publicKey');
-    for (final legacy in {url, buildUrl}) {
+    for (final legacy in {url, buildUrl, BackendEndpoints.legacyParser}) {
       if (legacy.isNotEmpty) {
         _legacyNamespaces.add(_cacheId('$legacy|$publicKey'));
       }
     }
   }
-  static const buildUrl = String.fromEnvironment('ASTERLINK_PARSER_HUB_URL');
+  static const buildUrl = String.fromEnvironment(
+    'ASTERLINK_PARSER_HUB_URL',
+    defaultValue: BackendEndpoints.parser,
+  );
   static const buildKey = String.fromEnvironment('ASTERLINK_PARSER_HUB_KEY');
   static const buildPublicKey = String.fromEnvironment(
     'ASTERLINK_PARSER_HUB_PUBLIC_KEY',
@@ -387,7 +391,9 @@ class ParserRuleHub extends ChangeNotifier {
   /// replace the new manifest or password. Direct file transfers are untouched.
   bool updateEndpoint(Uri? endpoint) {
     if (_closed || endpoint == null) return false;
-    final next = parserHubUri(endpoint.toString()).toString();
+    final next = parserHubUri(
+      BackendEndpoints.parserUrl(endpoint.toString()),
+    ).toString();
     if (next == _url.replaceFirst(RegExp(r'/+$'), '')) return false;
     _url = next;
     _endpointVersion++;
@@ -456,7 +462,6 @@ class ParserRuleHub extends ChangeNotifier {
   }
 
   bool publicPreferred(CloudPlatform platform) =>
-      platform == CloudPlatform.baidu ||
       _secret('public.${platform.key}') == 'true';
   Future<void> preferPublic(CloudPlatform platform, bool value) async {
     await store.putSecret('$_prefix.public.${platform.key}', '$value');

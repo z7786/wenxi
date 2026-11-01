@@ -462,7 +462,8 @@ class LoginCredentials {
     CloudPlatform.pikpak =>
       '请粘贴 PikPak 的登录令牌 JSON（access_token、refresh_token）；也可切换账号密码登录',
     CloudPlatform.feijipan => '请粘贴小飞机网页登录的 appToken，或包含 appToken 和 uuid 的 JSON',
-    CloudPlatform.ctfile => '请粘贴城通网盘「开放接口登录密钥管理」中的 Session Token；也可切换邮箱密码登录',
+    CloudPlatform.ctfile =>
+      '请粘贴城通网盘的 Session Token 或含 ctfile_session 的 Cookie；也可使用邮箱密码或网页登录',
     CloudPlatform.pan115 => '请粘贴 115 登录后的完整 Cookie，需包含 UID、CID 和 SEID',
     CloudPlatform.baidu => 'Cookie 需包含非空的 BDUSS',
     CloudPlatform.quark || CloudPlatform.uc => 'Cookie 需同时包含非空的 __pus 和 __puus',
@@ -734,6 +735,13 @@ class WebLoginTarget {
   static const mobileUserAgent =
       'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
   static const targets = {
+    CloudPlatform.ctfile:
+        WebLoginTarget(CloudPlatform.ctfile, 'https://my.ctfile.com/login', [
+          'https://my.ctfile.com',
+          'https://www.ctfile.com',
+          'https://rest.ctfile.com',
+          'https://api.ctfile.com',
+        ]),
     CloudPlatform.pan115: WebLoginTarget(
       CloudPlatform.pan115,
       'https://115.com/?cid=0&offset=0&tab=&mode=wangpan',
@@ -1025,6 +1033,8 @@ class WebLoginTarget {
       ],
       if (platform == CloudPlatform.tianyi)
         'https://cloud.189.cn/api/open/user/getUserInfoForPortal.action',
+      if (platform == CloudPlatform.ctfile)
+        'https://api.ctfile.com/v4/user/auth/exchange-token',
       // Prefer the cookies the account API receives, including HttpOnly cookies
       // scoped below /webapp/json/, over a same-name cookie on the disk page.
       if (platform == CloudPlatform.weiyun)

@@ -36,7 +36,7 @@ List<int> _encode(Object value) {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  final executable = File('native/bin/asterlink_gopeed.exe').absolute.path;
+  final executable = gopeedTestExecutable();
   final library = [
     Platform.environment['ASTERLINK_MPV_LIBRARY'],
     '.local/player-test/libmpv/libmpv-2.dll',

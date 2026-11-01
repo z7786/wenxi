@@ -95,7 +95,8 @@ class AppServices extends ChangeNotifier {
     ParserRuleHub? parserRuleHub,
     RemoteSources? remoteSources,
     ResourceSearch? resourceSearch,
-  }) : _instanceLock = instanceLock {
+  }) : _instanceLock = instanceLock,
+       _preloadResources = platformFeatures || resourceSearch != null {
     vault = Vault(store);
     announcements = AnnouncementService(
       store,
@@ -131,7 +132,12 @@ class AppServices extends ChangeNotifier {
         resourceSearch ??
         ResourceSearch(
           store: store,
-          api: HttpResourceSearchApi(cleanups.http, store: store),
+          api: HttpResourceSearchApi(
+            cleanups.http,
+            store: store,
+            localSearch: platformFeatures,
+            browserEnvironment: webEnvironment,
+          ),
           linkChecks: ResourceLinkChecks(
             LocalResourceLinkCheckApi(clock: clock),
             clock: clock,
@@ -379,6 +385,7 @@ class AppServices extends ChangeNotifier {
   final Directory dataDirectory, cacheDirectory;
   final FileAccess files;
   final bool platformFeatures;
+  final bool _preloadResources;
   final DateTime Function() clock;
   final RandomAccessFile? _instanceLock;
   late final Vault vault;
@@ -421,14 +428,12 @@ class AppServices extends ChangeNotifier {
   late final RemoteSources sources;
   late final ResourceSearch resourceSearch;
 
-  void refreshPublicDownloadPassword() {
-    if (!platformFeatures ||
-        _closed ||
-        !control.cloudEnabled(CloudPlatform.baidu)) {
-      return;
-    }
+  void refreshEntryData() {
+    if (_closed) return;
     parserRules.start();
     unawaited(parserRules.refresh());
+    sources.start();
+    if (_preloadResources) unawaited(resourceSearch.preload());
   }
 
   void requestGuestDownloadNotice() {
@@ -562,7 +567,9 @@ class AppServices extends ChangeNotifier {
   }
 
   Future<void> initialize() async {
-    sources.start();
+    // Entry refresh starts after MainShell's first frame. Cached search rules
+    // are verified synchronously and remote updates share this store's write
+    // gate; neither should compete with local account/queue initialization.
     if (platformFeatures && Platform.isWindows) {
       windowsExternalOpenChannel.setMethodCallHandler((call) async {
         if (call.method == 'externalOpenAvailable') {

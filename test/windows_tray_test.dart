@@ -45,7 +45,7 @@ class _Services extends AppServices {
   Completer<void>? holdClose;
 
   @override
-  void refreshPublicDownloadPassword() {}
+  void refreshEntryData() {}
 
   @override
   Future<void> close() async {
@@ -186,6 +186,7 @@ void main() {
         expect(desktop.calls, isNot(contains('unmaximize')));
         expect(native.calls, isEmpty);
         await tester.pumpWidget(const SizedBox());
+        await tester.runAsync(services.cleanup);
       });
     }
 
@@ -206,6 +207,7 @@ void main() {
       expect(desktop.focused, isTrue);
       expect(desktop.minimized, isFalse);
       await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(services.cleanup);
     });
 
     testWidgets('unavailable tray keeps ordinary minimization accessible', (
@@ -222,6 +224,7 @@ void main() {
       expect(services.closeCalls, 0);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(services.cleanup);
     });
 
     testWidgets('minimizing during tray initialization waits for its menu', (
@@ -238,6 +241,7 @@ void main() {
       expect(desktop.visible, isFalse);
       expect(desktop.trayVisible, isTrue);
       await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(services.cleanup);
     });
 
     testWidgets('a stale minimize event does not hide a restored window', (
@@ -249,6 +253,7 @@ void main() {
       expect(desktop.visible, isTrue);
       expect(desktop.calls, isNot(contains('hide')));
       await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(services.cleanup);
     });
 
     testWidgets('native failures do not break subsequent tray actions', (
@@ -275,6 +280,7 @@ void main() {
       expect(desktop.focused, isTrue);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(services.cleanup);
     });
 
     testWidgets('tray exit cleans up once and ignores late window actions', (
@@ -298,6 +304,7 @@ void main() {
       expect(desktop.visible, isFalse);
       expect(desktop.calls, isNot(contains('show')));
       await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(services.cleanup);
     });
 
     testWidgets(
@@ -356,6 +363,7 @@ void main() {
         expect(services.closeCalls, 0);
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());
+        await tester.runAsync(services.cleanup);
       },
     );
   }, skip: !Platform.isWindows);

@@ -7,7 +7,19 @@ import '../../domain/auth.dart';
 import '../../diagnostics/app_log.dart';
 import '../http.dart';
 
-typedef BaiduResolvedLink = ({String url, bool preview});
+class BaiduResolvedLink {
+  const BaiduResolvedLink({
+    required this.url,
+    this.preview = false,
+    this.headers = const {},
+    String? profile,
+  }) : profile = profile ?? (preview ? 'baidu_preview' : 'baidu');
+
+  final String url, profile;
+  final bool preview;
+  final Map<String, String> headers;
+}
+
 typedef BaiduLinkLookup =
     Future<BaiduResolvedLink> Function({
       required String cookie,
@@ -76,7 +88,7 @@ class BaiduLinkService {
             'path': path,
             'fileId': fileId,
             'appId': appId,
-            'device': device,
+            'device': {...device, 'directDelivery': 1},
           }),
         ),
       );
@@ -140,6 +152,7 @@ class BaiduLinkService {
           'unauthorized' => '百度取链服务授权不匹配，请更新应用',
           'clock' => '设备时间有误，请校准系统时间',
           'invalid_request' => '百度文件或账号参数无效，请刷新列表',
+          'client_update' => '请更新应用后使用百度取链服务',
           _ => '百度取链服务暂不可用，请稍后重试',
         };
         throw HttpRequestFailure(
@@ -165,20 +178,59 @@ class BaiduLinkService {
               'baidupcs.com',
               'baidubce.com',
             ].any((domain) => host == domain || host.endsWith('.$domain')) &&
-            {'baidu', 'baidu_preview'}.contains(data.str('profile')),
+            {
+              'baidu',
+              'baidu_preview',
+              'baidu_direct',
+            }.contains(data.str('profile')),
         '百度取链服务返回的下载地址无效',
       );
+      final profile = data.str('profile');
+      final mediaHeaders = <String, String>{};
+      if (profile == 'baidu_direct') {
+        final raw = data['headers'];
+        require(raw is Map && raw.length == 3, '百度取链服务返回的请求头无效');
+        for (final entry in (raw as Map).entries) {
+          require(
+            entry.key is String && entry.value is String,
+            '百度取链服务返回的请求头无效',
+          );
+          final name = (entry.key as String).toLowerCase();
+          final value = entry.value as String;
+          require(
+            {'host', 'user-agent', 'accept-encoding'}.contains(name) &&
+                !mediaHeaders.containsKey(name) &&
+                value.length <= 256 &&
+                !RegExp(r'[\x00-\x20\x7f]').hasMatch(value),
+            '百度取链服务返回的请求头无效',
+          );
+          mediaHeaders[name] = value;
+        }
+        final deliveryHost = mediaHeaders['host'] ?? '';
+        require(
+          uri!.scheme == 'https' &&
+              RegExp(r'^[a-zA-Z0-9._-]+$').hasMatch(deliveryHost) &&
+              deliveryHost.endsWith('.baidu-int.com') &&
+              mediaHeaders['user-agent'] == 'netdisk' &&
+              mediaHeaders['accept-encoding'] == 'identity',
+          '百度取链服务返回的请求头无效',
+        );
+      } else {
+        require(data['headers'] == null, '百度取链服务返回的请求头无效');
+      }
       DiagnosticLog.event(
         'baidu.link_resolved',
         fields: {
-          'profile': data.str('profile'),
+          'profile': profile,
           'host': host,
           'elapsedMs': elapsed.elapsedMilliseconds,
         },
       );
-      return (
+      return BaiduResolvedLink(
         url: uri.toString(),
-        preview: data.str('profile') == 'baidu_preview',
+        preview: profile == 'baidu_preview',
+        profile: profile,
+        headers: Map.unmodifiable(mediaHeaders),
       );
     } finally {
       key.fillRange(0, key.length, 0);

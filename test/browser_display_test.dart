@@ -12,33 +12,38 @@ import 'package:asterlink/ui/downloads_page.dart';
 import 'browser_test_support.dart';
 import 'support.dart';
 
-class _FileTimeConnector extends BrowserTestConnector {
-  _FileTimeConnector() : super(CloudPlatform.tianyi);
+class _FileListConnector extends BrowserTestConnector {
+  _FileListConnector([this.files]) : super(CloudPlatform.tianyi);
+
+  final List<CloudFile>? files;
 
   @override
   Future<List<CloudFile>> list(
     BrowseSession session,
     String parentId,
     Credential? credential,
-  ) async => [
-    const CloudFile(id: 'folder', name: 'Folder', isDirectory: true),
-    const CloudFile(id: 'missing', name: 'A missing.txt'),
-    CloudFile(
-      id: 'new',
-      name: 'B new.txt',
-      modifiedAt: DateTime(2026, 9, 17, 10).toUtc().toIso8601String(),
-    ),
-    const CloudFile(
-      id: 'middle',
-      name: 'C middle.txt',
-      modifiedAt: '20260916150000',
-    ),
-    CloudFile(
-      id: 'old',
-      name: 'D old.txt',
-      modifiedAt: '${DateTime(2026, 9, 16, 10).millisecondsSinceEpoch ~/ 1000}',
-    ),
-  ];
+  ) async =>
+      files ??
+      [
+        const CloudFile(id: 'folder', name: 'Folder', isDirectory: true),
+        const CloudFile(id: 'missing', name: 'A missing.txt'),
+        CloudFile(
+          id: 'new',
+          name: 'B new.txt',
+          modifiedAt: DateTime(2026, 9, 17, 10).toUtc().toIso8601String(),
+        ),
+        const CloudFile(
+          id: 'middle',
+          name: 'C middle.txt',
+          modifiedAt: '20260916150000',
+        ),
+        CloudFile(
+          id: 'old',
+          name: 'D old.txt',
+          modifiedAt:
+              '${DateTime(2026, 9, 16, 10).millisecondsSinceEpoch ~/ 1000}',
+        ),
+      ];
 }
 
 class _EpisodeNameConnector extends BrowserTestConnector {
@@ -126,8 +131,13 @@ void main() {
     WidgetTester tester, {
     CloudPlatform platform = CloudPlatform.tianyi,
     String view = 'list',
+    DateTime Function() clock = DateTime.now,
   }) async {
-    final value = await BrowserUiFixture.create(platform: platform, view: view);
+    final value = await BrowserUiFixture.create(
+      platform: platform,
+      view: view,
+      clock: clock,
+    );
     active.add(value);
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -267,7 +277,7 @@ void main() {
   ) async {
     final value = await fixture(tester);
     value.services.cloud.connectors[CloudPlatform.tianyi] =
-        _FileTimeConnector();
+        _FileListConnector();
     await value.render(tester, size: const Size(1100, 900));
     expect(find.text('2026-09-16 10:00'), findsOneWidget);
     expect(find.text('2026-09-16 15:00'), findsOneWidget);
@@ -303,6 +313,164 @@ void main() {
     }
     expect(tester.takeException(), isNull);
   });
+
+  for (final view in ['list', 'grid']) {
+    browserTest('Date $view sort includes relative provider times', (
+      tester,
+    ) async {
+      var now = DateTime(2026, 10, 29, 23, 59);
+      final value = await fixture(tester, view: view, clock: () => now);
+      value.services.cloud.connectors[CloudPlatform
+          .tianyi] = _FileListConnector(const [
+        CloudFile(id: 'folder', name: 'Folder', isDirectory: true),
+        CloudFile(id: 'missing', name: 'A missing.txt'),
+        CloudFile(id: 'now', name: 'B now.txt', modifiedAt: '刚刚'),
+        CloudFile(
+          id: 'yesterday',
+          name: 'C yesterday.txt',
+          modifiedAt: '昨天 12:30',
+        ),
+        // Lanzou returns these labels without a space before the clock time.
+        CloudFile(
+          id: 'day-before-late',
+          name: 'C late.txt',
+          modifiedAt: '前天06:17',
+        ),
+        CloudFile(
+          id: 'day-before-early',
+          name: 'C early.txt',
+          modifiedAt: '前天06:16',
+        ),
+        CloudFile(
+          id: 'three-days',
+          name: 'D three days.txt',
+          modifiedAt: '3 天前',
+        ),
+        CloudFile(id: 'two-hours', name: 'E two hours.txt', modifiedAt: '2小时前'),
+        CloudFile(
+          id: 'absolute',
+          name: 'F absolute.txt',
+          modifiedAt: '2026-10-30 06:00',
+        ),
+      ]);
+      await value.render(tester, size: const Size(1100, 1200));
+
+      void expectOrder({required bool ascending, bool refreshed = false}) {
+        final dated = [
+          'D three days.txt',
+          'C early.txt',
+          'C late.txt',
+          'C yesterday.txt',
+          if (refreshed) 'F absolute.txt',
+          'E two hours.txt',
+          'B now.txt',
+          if (!refreshed) 'F absolute.txt',
+        ];
+        final names = [
+          'Folder',
+          ...(ascending ? dated : dated.reversed),
+          'A missing.txt',
+        ];
+        for (var i = 1; i < names.length; i++) {
+          final before = tester.getTopLeft(find.text(names[i - 1]));
+          final after = tester.getTopLeft(find.text(names[i]));
+          expect(
+            before.dy < after.dy ||
+                before.dy == after.dy && before.dx < after.dx,
+            isTrue,
+            reason: '${names[i - 1]} should precede ${names[i]} in $view view',
+          );
+        }
+      }
+
+      for (final ascending in [true, false]) {
+        await tester.tap(find.byTooltip('排序'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('时间'));
+        await tester.pumpAndSettle();
+        expectOrder(ascending: ascending);
+      }
+      expect(find.text('刚刚'), findsOneWidget);
+      expect(find.text('昨天 12:30'), findsOneWidget);
+      expect(find.text('前天06:17'), findsOneWidget);
+      expect(find.text('前天06:16'), findsOneWidget);
+      expect(find.text('3 天前'), findsOneWidget);
+      now = now.add(const Duration(days: 1));
+      await setView(tester, view == 'list' ? '大图标' : '列表');
+      expectOrder(ascending: false);
+      await tester.tap(find.byTooltip('刷新文件'));
+      await tester.pumpAndSettle();
+      expectOrder(ascending: false, refreshed: true);
+      expect(tester.takeException(), isNull);
+    });
+
+    browserTest('Date $view sort orders files modified within one second', (
+      tester,
+    ) async {
+      final value = await fixture(tester, view: view);
+      final second = DateTime.utc(2026, 10, 4, 7, 8, 9);
+      value.services.cloud.connectors[CloudPlatform.tianyi] =
+          _FileListConnector([
+            const CloudFile(id: 'folder', name: 'Folder', isDirectory: true),
+            CloudFile(
+              id: 'late',
+              name: 'A late.txt',
+              modifiedAt: second
+                  .add(const Duration(milliseconds: 900))
+                  .toIso8601String(),
+            ),
+            CloudFile(
+              id: 'near',
+              name: 'B near.txt',
+              modifiedAt: '${second.microsecondsSinceEpoch + 100002}',
+            ),
+            const CloudFile(id: 'missing', name: 'C missing.txt'),
+            CloudFile(
+              id: 'early',
+              name: 'D early.txt',
+              modifiedAt: second
+                  .toLocal()
+                  .add(const Duration(microseconds: 100001))
+                  .toIso8601String(),
+            ),
+            CloudFile(
+              id: 'middle',
+              name: 'E middle.txt',
+              modifiedAt: '${second.millisecondsSinceEpoch + 500}',
+            ),
+          ]);
+      await value.render(tester, size: const Size(1100, 1000));
+
+      for (final ascending in [true, false]) {
+        await tester.tap(find.byTooltip('排序'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('时间'));
+        await tester.pumpAndSettle();
+        final dated = [
+          'D early.txt',
+          'B near.txt',
+          'E middle.txt',
+          'A late.txt',
+        ];
+        final names = [
+          'Folder',
+          ...(ascending ? dated : dated.reversed),
+          'C missing.txt',
+        ];
+        for (var i = 1; i < names.length; i++) {
+          final before = tester.getTopLeft(find.text(names[i - 1]));
+          final after = tester.getTopLeft(find.text(names[i]));
+          expect(
+            before.dy < after.dy ||
+                before.dy == after.dy && before.dx < after.dx,
+            isTrue,
+            reason: '${names[i - 1]} should precede ${names[i]} in $view view',
+          );
+        }
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   for (final view in ['list', 'grid']) {
     browserTest('Name $view sort compares episode numbers in both directions', (
@@ -342,6 +510,70 @@ void main() {
       ]);
       expect(tester.takeException(), isNull);
     });
+
+    for (final size in [const Size(393, 1200), const Size(1100, 1200)]) {
+      browserTest(
+        'Name $view sort uses pinyin and keeps folders first at $size',
+        (tester) async {
+          final value = await fixture(tester, view: view);
+          value.services.cloud.connectors[CloudPlatform.tianyi] =
+              _FileListConnector(const [
+                CloudFile(id: 'folder-z', name: '资料', isDirectory: true),
+                CloudFile(id: 'file-z', name: '资料10.txt'),
+                CloudFile(id: 'folder-g', name: '工作', isDirectory: true),
+                CloudFile(id: 'file-a10', name: '阿里10.txt'),
+                CloudFile(id: 'folder-a', name: '阿里', isDirectory: true),
+                CloudFile(id: 'file-g', name: '工作.txt'),
+                CloudFile(id: 'file-t1', name: '同1.txt'),
+                CloudFile(id: 'file-t01', name: '童01.txt'),
+                CloudFile(id: 'file-a2', name: '阿里2.txt'),
+              ]);
+          await value.render(tester, size: size);
+
+          void expectOrder(List<String> names) {
+            for (var i = 1; i < names.length; i++) {
+              final before = tester.getTopLeft(find.text(names[i - 1]));
+              final after = tester.getTopLeft(find.text(names[i]));
+              expect(
+                before.dy < after.dy ||
+                    before.dy == after.dy && before.dx < after.dx,
+                isTrue,
+                reason:
+                    '${names[i - 1]} should precede ${names[i]} in $view view',
+              );
+            }
+          }
+
+          expectOrder([
+            '阿里',
+            '工作',
+            '资料',
+            '阿里2.txt',
+            '阿里10.txt',
+            '工作.txt',
+            '同1.txt',
+            '童01.txt',
+            '资料10.txt',
+          ]);
+          await tester.tap(find.byTooltip('排序'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('名称'));
+          await tester.pumpAndSettle();
+          expectOrder([
+            '资料',
+            '工作',
+            '阿里',
+            '资料10.txt',
+            '同1.txt',
+            '童01.txt',
+            '工作.txt',
+            '阿里10.txt',
+            '阿里2.txt',
+          ]);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
   }
 
   browserTest(

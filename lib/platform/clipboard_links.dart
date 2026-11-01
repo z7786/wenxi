@@ -38,6 +38,7 @@ class ClipboardLinkSuggestion {
           LinkKind.unsupportedCloud =>
             '${links.single.unsupportedPlatform?.shortName ?? '网盘'}分享链接（暂未接入）',
           LinkKind.magnet => '磁力链接',
+          LinkKind.ed2k => 'ED2K 文件链接',
           _ => '种子链接',
         };
 
@@ -53,7 +54,7 @@ class ClipboardLinkSuggestion {
     final links = LinkParser.parse(text)
         .where(
           (link) => switch (link.kind) {
-            LinkKind.cloudShare || LinkKind.torrent => true,
+            LinkKind.cloudShare || LinkKind.torrent || LinkKind.ed2k => true,
             LinkKind.unsupportedCloud => link.shareId != null,
             LinkKind.magnet => _magnet.hasMatch(link.url),
             LinkKind.direct => false,

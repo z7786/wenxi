@@ -120,7 +120,12 @@ class MediaKitBackend extends PlaybackBackend {
       _video = VideoController(
         this.player,
         configuration: VideoControllerConfiguration(
-          enableHardwareAcceleration: hardwareAcceleration,
+          // On Windows this flag controls GPU rendering, not video decoding.
+          // Keep it when decoding on the CPU; the native output already falls
+          // back to CPU rendering if ANGLE cannot initialize.
+          enableHardwareAcceleration:
+              defaultTargetPlatform == TargetPlatform.windows ||
+              hardwareAcceleration,
           hwdec: hardwareAcceleration ? null : 'no',
         ),
       );
@@ -448,6 +453,11 @@ class MediaKitBackend extends PlaybackBackend {
   double _resumeBufferSeconds = 1;
   final _transportChecks = <Timer>[];
   int _connections = 12, _segmentSizeMiB = 4;
+  int? _sourceConnectionLimit;
+  int get _effectiveConnectionLimit => math.min(
+    _connections,
+    _sourceConnectionLimit ?? PlaybackPreferences.maxConnections,
+  );
   String _streamingDescription = '';
   @override
   String get streamingDescription => _streamingDescription;
@@ -462,6 +472,7 @@ class MediaKitBackend extends PlaybackBackend {
     ..._nativeMetrics,
     ..._metrics.fields(_openWatch?.elapsed ?? Duration.zero),
     'effectiveConnections': _proxy?.connections ?? 1,
+    'sourceConnectionLimit': ?_sourceConnectionLimit,
     'packetCacheBytes': _bufferPolicy.forwardBytes,
     'proxyCacheLimit': ?_proxy?.maxCacheBytes,
     'preloadSeconds': _enhancedPrefetch
@@ -552,7 +563,7 @@ class MediaKitBackend extends PlaybackBackend {
       PlaybackPreferences.minConnections,
       PlaybackPreferences.maxConnections,
     );
-    _bufferPolicy.setLimit(_connections);
+    _bufferPolicy.setLimit(_effectiveConnectionLimit);
     _proxy?.connections = downloadCache == null ? _bufferPolicy.connections : 2;
     if (_proxy?.supported == true) {
       _streamingDescription = _proxyDescription;
@@ -561,7 +572,7 @@ class MediaKitBackend extends PlaybackBackend {
   }
 
   String get _proxyDescription => downloadCache == null
-      ? '最多 $_connections 个连接 · $_segmentSizeMiB MiB / 片'
+      ? '最多 $_effectiveConnectionLimit 个连接 · $_segmentSizeMiB MiB / 片'
       : '边下边播 · 优先读取已下载片段';
   @override
   Future<void> setSegmentSizeMiB(int value) async {
@@ -588,8 +599,15 @@ class MediaKitBackend extends PlaybackBackend {
     _cancelTransportChecks();
     _performanceTimer?.cancel();
     _openWatch = Stopwatch()..start();
+    _nativeMetrics.clear();
     _metrics = PlaybackMetrics();
-    _bufferPolicy = PlaybackBufferPolicy(connectionLimit: _connections);
+    final sourceLimit = source.maxPlaybackConnections;
+    _sourceConnectionLimit = sourceLimit != null && sourceLimit > 0
+        ? sourceLimit
+        : null;
+    _bufferPolicy = PlaybackBufferPolicy(
+      connectionLimit: _effectiveConnectionLimit,
+    );
     _sourceBytes = source.expectedSize;
     _transport = 'pending';
     _networkTimeoutSeconds = null;
@@ -778,12 +796,20 @@ class MediaKitBackend extends PlaybackBackend {
                 math.max(.25, state.rate),
             buffering: state.buffering,
             playing: _wantsPlay && state.playing,
+            requiredBytesPerSecond:
+                _sourceBytes > 0 && state.duration > Duration.zero
+                ? _sourceBytes /
+                      (state.duration.inMicroseconds / 1000000) *
+                      state.rate
+                : 0,
           );
         }
       }
       for (final entry in const {
         'hwdec-current': 'hwdecCurrent',
-        'video-codec': 'videoCodec',
+        'video-format': 'videoCodec',
+        'estimated-vf-fps': 'videoFps',
+        'video-params/pixelformat': 'videoPixelFormat',
         'decoder-frame-drop-count': 'decoderDroppedFrames',
         'frame-drop-count': 'outputDroppedFrames',
         'avsync': 'avSyncSeconds',

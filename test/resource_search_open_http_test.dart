@@ -23,6 +23,101 @@ const selection = ResourceSearchFileSelection(
 );
 
 void main() {
+  for (final reason in ['insufficient_space', 'no_account']) {
+    test(
+      'HTTP $reason keeps original password without activating outage bypass',
+      () async {
+        final original = hit(ticket: false);
+        final http = FakeHttp(
+          (_) => jsonResponse({
+            'success': true,
+            'data': {
+              'mode': 'original',
+              'url': original.url,
+              'password': original.password,
+              'reason': reason,
+              'message': '使用原链接预览',
+            },
+          }),
+        );
+        final api = HttpResourceSearchApi(http, endpoint: 'http://127.0.0.1:1');
+        for (var attempt = 0; attempt < 2; attempt++) {
+          final result = await api.open(
+            original,
+            CancelToken(),
+            selection: selection,
+          );
+          expect(result.mode, 'original');
+          expect(result.reason, reason);
+          expect(result.transferred, false);
+          expect(result.hit, same(original));
+          expect(result.hit.password, 'old1');
+        }
+        expect(http.calls, hasLength(2));
+      },
+    );
+  }
+
+  test(
+    'native open submits public link and selection without account credentials',
+    () async {
+      final http = FakeHttp((call) {
+        expect(call.url, 'http://127.0.0.1:1/api/v1/search/client/open/file');
+        expect(jsonDecode(call.body as String), {
+          'url': hit(ticket: false).url,
+          'title': hit().title,
+          'password': hit().password,
+          'selection': selection.toJson(),
+        });
+        return jsonResponse({
+          'success': true,
+          'data': {'mode': 'original', 'reason': 'pool_disabled'},
+        });
+      });
+      final api = HttpResourceSearchApi(http, endpoint: 'http://127.0.0.1:1');
+      expect(
+        (await api.open(
+          hit(ticket: false),
+          CancelToken(),
+          selection: selection,
+        )).reason,
+        'pool_disabled',
+      );
+      expect(http.calls, hasLength(1));
+    },
+  );
+  test('policy denial and throttling do not activate outage bypass', () async {
+    for (final status in [403, 429]) {
+      final http = FakeHttp(
+        (call) => HttpResult(
+          status,
+          jsonEncode({'success': false, 'message': 'request denied'}),
+        ),
+      );
+      final api = HttpResourceSearchApi(http, endpoint: 'http://127.0.0.1:1');
+      for (var i = 0; i < 2; i++) {
+        await expectLater(
+          api.open(hit(), CancelToken(), selection: selection),
+          throwsA(isA<AppException>()),
+        );
+      }
+      expect(http.calls, hasLength(2));
+    }
+  });
+  test(
+    'backend outage circuit avoids repeated requests during preview',
+    () async {
+      final http = FakeHttp((call) => const HttpResult(503, 'unavailable'));
+      final api = HttpResourceSearchApi(http, endpoint: 'http://127.0.0.1:1');
+      for (var i = 0; i < 3; i++) {
+        expect(
+          (await api.open(hit(), CancelToken(), selection: selection)).reason,
+          'backend_unavailable',
+        );
+      }
+      expect(http.calls, hasLength(1));
+    },
+  );
   test(
     'the plain transport also sends one file mutation without account tokens',
     () async {
@@ -224,12 +319,9 @@ void main() {
       endpoint: 'http://127.0.0.1:${server.port}',
     );
     try {
-      await expectLater(
-        api.open(hit(), CancelToken(), selection: selection),
-        throwsA(
-          isA<AppException>().having((e) => e.message, 'message', '转存暂时未完成'),
-        ),
-      );
+      final result = await api.open(hit(), CancelToken(), selection: selection);
+      expect(result.reason, 'backend_unavailable');
+      expect(result.hit.url, hit().url);
       expect(requests, 1);
     } finally {
       http.dio.close(force: true);
@@ -270,21 +362,18 @@ void main() {
   });
 
   test(
-    'old search responses require refresh without submitting an arbitrary URL',
+    'native search result silently previews original when backend is unreachable',
     () async {
       final http = DioJsonHttp();
       final api = HttpResourceSearchApi(http, endpoint: 'http://127.0.0.1:1');
       try {
-        await expectLater(
-          api.open(hit(ticket: false), CancelToken(), selection: selection),
-          throwsA(
-            isA<AppException>().having(
-              (e) => e.message,
-              'message',
-              contains('刷新搜索'),
-            ),
-          ),
+        final result = await api.open(
+          hit(ticket: false),
+          CancelToken(),
+          selection: selection,
         );
+        expect(result.reason, 'backend_unavailable');
+        expect(result.hit.url, hit(ticket: false).url);
       } finally {
         http.dio.close(force: true);
       }

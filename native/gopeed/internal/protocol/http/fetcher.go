@@ -67,6 +67,8 @@ type connection struct {
 
 	failed     bool
 	retryTimes int
+	terminated bool
+	tail       tailSample
 }
 
 // get remain to download bytes
@@ -89,6 +91,7 @@ type Fetcher struct {
 	meta         *fetcher.FetcherMeta
 	connections  []*connection
 	helpLock     sync.Mutex
+	tailChanged  chan struct{}
 	redirectURL  string
 	redirectLock sync.Mutex
 
@@ -398,6 +401,15 @@ func (f *Fetcher) fetch() {
 	f.eg, _ = errgroup.WithContext(ctx)
 	f.stopped = make(chan struct{})
 	group, file, stopped := f.eg, f.file, f.stopped
+	f.helpLock.Lock()
+	f.tailChanged = make(chan struct{})
+	f.helpLock.Unlock()
+	for _, connection := range f.connections {
+		connection.mu.Lock()
+		connection.terminated = false
+		connection.tail = tailSample{}
+		connection.mu.Unlock()
+	}
 	connectionErrs := make([]error, len(f.connections))
 	var connectionSlots chan struct{}
 	if limit := connectionLimit(f.meta.Opts.Extra.(*fhttp.OptsExtra)); limit > 0 {
@@ -408,15 +420,7 @@ func (f *Fetcher) fetch() {
 	for i := 0; i < len(f.connections); i++ {
 		i := i
 		f.eg.Go(func() error {
-			if connectionSlots != nil {
-				select {
-				case connectionSlots <- struct{}{}:
-					defer func() { <-connectionSlots }()
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-			err := f.run(i, ctx)
+			err := f.run(i, ctx, connectionSlots)
 			// if canceled, fail fast
 			if errors.Is(err, context.Canceled) {
 				return err
@@ -450,13 +454,19 @@ func (f *Fetcher) fetch() {
 	}()
 }
 
-func (f *Fetcher) run(index int, ctx context.Context) (err error) {
+func (f *Fetcher) run(index int, ctx context.Context, connectionSlots chan struct{}) (err error) {
 	connection := f.connections[index]
 	connection.mu.Lock()
 	connection.failed = false
 	connection.retryTimes = 0
 	connection.Completed = false
 	connection.mu.Unlock()
+	defer func() {
+		connection.mu.Lock()
+		connection.terminated = true
+		connection.mu.Unlock()
+		f.notifyTailChanged()
+	}()
 	// These providers return signed original-file URLs. Slow response headers
 	// on one request must not hold every other range in a redirect lookup queue.
 	profile := f.meta.Opts.Extra.(*fhttp.OptsExtra).ConnectionProfile
@@ -480,6 +490,16 @@ func (f *Fetcher) run(index int, ctx context.Context) (err error) {
 				return nil
 			}
 			err = func() (requestErr error) {
+				// Only a live request owns a slot. Idle helpers must not keep
+				// queued checkpoint ranges from obtaining their own request.
+				if connectionSlots != nil {
+					select {
+					case connectionSlots <- struct{}{}:
+						defer func() { <-connectionSlots }()
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
 				host := ""
 				if uri, parseErr := url.Parse(f.meta.Req.URL); parseErr == nil {
 					host = uri.Host
@@ -547,6 +567,9 @@ func (f *Fetcher) run(index int, ctx context.Context) (err error) {
 						if profile == "baidu_preview" && last-first >= baiduPreviewRequestSize {
 							last = first + baiduPreviewRequestSize - 1
 						}
+						if profile == "baidu_direct" && last-first >= minRangeSize {
+							last = first + minRangeSize - 1
+						}
 						if profile == "aliyun" {
 							last = aliyunRangeEnd(first, last)
 						}
@@ -570,6 +593,9 @@ func (f *Fetcher) run(index int, ctx context.Context) (err error) {
 					}
 					f.activeConnections.Add(1)
 					counted = true
+					connection.mu.Lock()
+					connection.tail.start(time.Now())
+					connection.mu.Unlock()
 					resp, err = client.Do(httpReq)
 					if err != nil {
 						return
@@ -691,45 +717,60 @@ func (f *Fetcher) run(index int, ctx context.Context) (err error) {
 		}
 
 		// check this connection is completed
-		if !f.meta.Res.Range || fhttp.BaiduConnectionLimit(profile) > 0 || !f.helpOtherConnection(connection) {
-			connection.mu.Lock()
-			connection.Completed = true
-			connection.mu.Unlock()
+		connection.mu.Lock()
+		connection.Completed = true
+		connection.mu.Unlock()
+		f.notifyTailChanged()
+		if !f.meta.Res.Range || fhttp.BaiduConnectionLimit(profile) > 0 {
+			return nil
+		}
+		if helped, waitErr := f.waitForOtherConnection(ctx, connection); waitErr != nil {
+			return waitErr
+		} else if !helped {
 			return
 		}
 	}
 }
 
-func (f *Fetcher) helpOtherConnection(helper *connection) bool {
+func (f *Fetcher) helpOtherConnection(helper *connection) (helped, pending bool, changed <-chan struct{}) {
 	f.helpLock.Lock()
 	defer f.helpLock.Unlock()
 
 	minimum := int64(helpMinSize)
-	if f.meta.Opts.Extra.(*fhttp.OptsExtra).ConnectionProfile == "xunlei" {
+	extra := f.meta.Opts.Extra.(*fhttp.OptsExtra)
+	if extra.ConnectionProfile == "xunlei" {
 		// At 64 connections, a 100 MiB file starts with ~1.6 MiB per worker.
 		// Help the smaller tail too, keeping each new half at least 256 KiB.
 		minimum = 2 * minRangeSize
 	}
+	adaptive := extra.SpeedLimit <= 0
 	for {
+		pending = false
 		var target *connection
 		var maxRemain int64
+		now := time.Now()
 		for _, candidate := range f.connections {
 			if candidate == helper {
 				continue
 			}
 			candidate.mu.RLock()
-			remain, completed := candidate.Chunk.remain(), candidate.Completed
+			remain := candidate.Chunk.remain()
+			available := !candidate.Completed && !candidate.terminated
+			worthHelping := available && !candidate.failed &&
+				(remain > minimum || adaptive && candidate.tail.slow(remain, now))
+			pending = pending || adaptive && available && remain >= 2*tailMinRangeSize
 			candidate.mu.RUnlock()
-			if !completed && remain > minimum && remain > maxRemain {
+			if worthHelping && remain > maxRemain {
 				target, maxRemain = candidate, remain
 			}
 		}
 		if target == nil {
-			return false
+			return false, pending, f.tailChanged
 		}
 		target.mu.Lock()
 		remain := target.Chunk.remain()
-		if target.Completed || remain <= minimum {
+		if target.Completed || target.terminated || target.failed ||
+			!(remain > minimum || adaptive && target.tail.slow(remain, time.Now())) {
 			target.mu.Unlock()
 			continue
 		}
@@ -739,9 +780,10 @@ func (f *Fetcher) helpOtherConnection(helper *connection) bool {
 		helper.Chunk = newChunk(target.Chunk.End-remain/2+1, target.Chunk.End)
 		target.Chunk.End = helper.Chunk.Begin - 1
 		helper.Completed = false
+		helper.tail = tailSample{}
 		helper.mu.Unlock()
 		target.mu.Unlock()
-		return true
+		return true, false, nil
 	}
 }
 

@@ -44,7 +44,7 @@ func handle(input request) (result any, err error) {
 	}
 	switch input.Method {
 	case "version":
-		return map[string]any{"version": gopeed.Version(), "protocol": 1, "taskCacheRoots": true, "sourceNetworkPolicy": true, "parserHttp2": true}, nil
+		return map[string]any{"version": gopeed.Version(), "protocol": 1, "taskCacheRoots": true, "sourceNetworkPolicy": true, "parserHttp2": true, "ed2k": true}, nil
 	case "freeSpace":
 		bytes, err := availableSpace(args.Path)
 		return map[string]any{"bytes": bytes}, err

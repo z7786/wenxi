@@ -41,9 +41,7 @@ class _TorrentPageState extends State<TorrentPage> {
     if (!mounted) return;
     if (!_initialized && session.info != null) {
       _initialized = true;
-      if (session.info!.files.length <= 1000) {
-        selected.addAll(session.info!.files.map((f) => f.index));
-      }
+      selected.addAll(session.info!.files.map((f) => f.index));
     }
     setState(() {});
   }
@@ -183,7 +181,7 @@ class _TorrentPageState extends State<TorrentPage> {
                   Row(
                     children: [
                       TextButton(
-                        onPressed: _adding || info.files.length > 1000
+                        onPressed: _adding
                             ? null
                             : () => setState(
                                 () => selected.addAll(

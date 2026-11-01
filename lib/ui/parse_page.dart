@@ -19,6 +19,7 @@ import '../domain/baidu_share_route.dart';
 import '../domain/public_share_route.dart';
 import '../domain/links.dart';
 import '../domain/models.dart';
+import '../domain/ed2k.dart';
 import '../domain/resource_search.dart';
 import 'cloud_command_page.dart';
 import '../platform/file_access.dart';
@@ -27,6 +28,7 @@ import 'baidu_share_route_picker.dart';
 import 'resource_preferences.dart';
 import 'parser_site_picker.dart';
 import 'common.dart';
+import 'liquid_glass.dart';
 import 'app_context_menu.dart';
 import 'app_popup_menu.dart';
 import 'login_page.dart';
@@ -66,7 +68,6 @@ class ParsePageState extends State<ParsePage> {
   String? _recognizedText;
   String? _parserPasswordGrant;
   CloudPlatform? _loginPlatform;
-  BaiduShareRoute _baiduRoute = BaiduShareRoute.publicParser;
   RequestScope? _request;
   ParsedLink? get current => links.elementAtOrNull(selected);
   bool _publicRoute(CloudPlatform? platform) =>
@@ -74,10 +75,9 @@ class ParsePageState extends State<ParsePage> {
       widget.services.parserRules.publicParsingAllowed(platform) &&
       (_openingResource && _resourceRoute != null
           ? _resourceRoute == BaiduShareRoute.publicParser
-          : platform == CloudPlatform.baidu
-          ? _baiduRoute == BaiduShareRoute.publicParser
           : PublicShareRoute.platforms.contains(platform) &&
-                widget.services.parserRules.configured &&
+                (platform == CloudPlatform.baidu ||
+                    widget.services.parserRules.configured) &&
                 widget.services.parserRules.publicPreferred(platform));
   bool _showParser(ParsedLink? link) =>
       link != null &&
@@ -96,8 +96,11 @@ class ParsePageState extends State<ParsePage> {
     widget.services.parserRules.addListener(_parserRulesChanged);
     widget.services.sources.addListener(_parserRulesChanged);
     _shared();
-    widget.services.parserRules.start();
-    widget.services.sources.start();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      widget.services.parserRules.start();
+      widget.services.sources.start();
+    });
   }
 
   void _parserRulesChanged() {
@@ -672,6 +675,7 @@ class ParsePageState extends State<ParsePage> {
       switch (link.kind) {
         LinkKind.magnet => '磁力链接',
         LinkKind.torrent => '种子文件链接',
+        LinkKind.ed2k => 'ED2K 文件链接',
         _ => 'HTTP 文件链接',
       };
 
@@ -926,7 +930,7 @@ class ParsePageState extends State<ParsePage> {
               ),
             ],
     ),
-    child: child,
+    child: Material(type: MaterialType.transparency, child: child),
   );
 
   Widget _inputHeader(
@@ -1105,47 +1109,68 @@ class ParsePageState extends State<ParsePage> {
         ),
       );
     }
+    final colors = Theme.of(context).colorScheme;
+    final secondaryFill = Color.alphaBlend(
+      colors.primary.withValues(
+        alpha: Theme.of(context).brightness == Brightness.dark ? .16 : .08,
+      ),
+      colors.surface,
+    );
     final add = Tooltip(
       message: '选择本地 BT 种子文件',
-      child: FilledButton.tonalIcon(
+      child: LiquidGlassButton(
         key: const Key('parse-bt'),
+        tonal: true,
         onPressed: working ? null : addTorrent,
         style: FilledButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-          disabledBackgroundColor: themeAccent(context).withValues(alpha: .09),
-          disabledForegroundColor: themeAccent(context).withValues(alpha: .55),
+          minimumSize: const Size(0, 60),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          backgroundColor: secondaryFill,
+          foregroundColor: colors.primary,
+          disabledBackgroundColor: secondaryFill,
+          disabledForegroundColor: colors.onSurfaceVariant,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(17),
+            borderRadius: BorderRadius.circular(16),
           ),
         ),
-        icon: const Icon(CupertinoIcons.add_circled_solid, size: 19),
-        label: const Column(
+        child: const Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              '添加BT',
-              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+            Icon(CupertinoIcons.add_circled_solid, size: 18),
+            SizedBox(width: 8),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '添加BT',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                SizedBox(height: 2),
+                Text('选择种子文件', style: TextStyle(fontSize: 10, height: 1.2)),
+              ],
             ),
-            Text('选择种子文件', style: TextStyle(fontSize: 9, height: 1.1)),
           ],
         ),
       ),
     );
-    final submit = FilledButton(
+    final submit = LiquidGlassButton(
       key: const Key('parse-start'),
       onPressed: working || current == null ? null : parse,
       style: FilledButton.styleFrom(
-        backgroundColor: themeAccent(context),
-        disabledBackgroundColor: Theme.of(context).brightness == Brightness.dark
-            ? const Color(0xff3a3a3c)
-            : const Color(0xffd2d2d7),
-        disabledForegroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 18),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(17)),
+        minimumSize: const Size(0, 60),
+        backgroundColor: colors.primary,
+        foregroundColor: colors.onPrimary,
+        disabledBackgroundColor: Color.alphaBlend(
+          colors.onSurface.withValues(alpha: .08),
+          colors.surface,
+        ),
+        disabledForegroundColor: colors.onSurfaceVariant,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       ),
       child: Text(
         working ? '解析中…' : '开始解析',
-        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+        style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
       ),
     );
     return LayoutBuilder(
@@ -1312,7 +1337,7 @@ class ParsePageState extends State<ParsePage> {
         ),
         const SizedBox(height: 8),
         Text(
-          'HTTP / HTTPS 文件\n磁力链接与 BT 种子',
+          'HTTP / HTTPS 与 ED2K 文件\n磁力链接与 BT 种子',
           style: TextStyle(
             fontSize: 12,
             height: 1.8,
@@ -1445,14 +1470,10 @@ class ParsePageState extends State<ParsePage> {
                       onChanged: working
                           ? null
                           : (value) async {
-                              if (link.platform == CloudPlatform.baidu) {
-                                _baiduRoute = value;
-                              } else {
-                                await widget.services.parserRules.preferPublic(
-                                  link.platform!,
-                                  value == BaiduShareRoute.publicParser,
-                                );
-                              }
+                              await widget.services.parserRules.preferPublic(
+                                link.platform!,
+                                value == BaiduShareRoute.publicParser,
+                              );
                               if (mounted) {
                                 setState(() {
                                   error = '';
@@ -1646,7 +1667,7 @@ class ParsePageState extends State<ParsePage> {
                             ),
                             const SizedBox(height: 9),
                             Text(
-                              '${CloudPlatform.values.where((platform) => platform.supportsShareParsing).map((platform) => platform.label).join('、')}；支持带提取码文本、HTTP 文件、磁力链接和 BT 种子。',
+                              '${CloudPlatform.values.where((platform) => platform.supportsShareParsing).map((platform) => platform.label).join('、')}；支持带提取码文本、HTTP 文件、磁力链接、BT 种子和 ED2K 文件链接。',
                               style: TextStyle(
                                 fontSize: 14,
                                 height: 1.6,
@@ -1812,15 +1833,22 @@ class _DirectDialog extends StatefulWidget {
 }
 
 class _DirectDialogState extends State<_DirectDialog> {
+  bool get isEd2k => url.text.trim().toLowerCase().startsWith('ed2k://');
+  String initialName() {
+    if (widget.fileName.isNotEmpty) return widget.fileName;
+    if (widget.initial.toLowerCase().startsWith('ed2k://')) {
+      try {
+        return Ed2kLink.parse(widget.initial).name;
+      } catch (_) {
+        return 'download.bin';
+      }
+    }
+    return Uri.tryParse(widget.initial)?.pathSegments.lastOrNull ??
+        'download.bin';
+  }
+
   late final url = TextEditingController(text: widget.initial);
-  late final name = TextEditingController(
-    text: safeFileName(
-      widget.fileName.isNotEmpty
-          ? widget.fileName
-          : Uri.tryParse(widget.initial)?.pathSegments.lastOrNull ??
-                'download.bin',
-    ),
-  );
+  late final name = TextEditingController(text: safeFileName(initialName()));
   late final headers = TextEditingController(text: jsonEncode(widget.headers));
   late final connections = TextEditingController(text: '${widget.connections}');
   String error = '';
@@ -1835,6 +1863,18 @@ class _DirectDialogState extends State<_DirectDialog> {
 
   void submit() {
     try {
+      if (isEd2k) {
+        final link = Ed2kLink.parse(url.text);
+        Navigator.pop(context, (
+          spec: DownloadSpec(
+            url: link.url,
+            fileName: safeFileName(name.text),
+            expectedSize: link.size,
+          ),
+          connections: 1,
+        ));
+        return;
+      }
       final normalized = LinkParser.normalize(url.text),
           decoded = jsonDecode(headers.text);
       final count = int.tryParse(connections.text.trim());
@@ -1886,7 +1926,17 @@ class _DirectDialogState extends State<_DirectDialog> {
             TextField(
               key: const Key('direct-download-url'),
               controller: url,
-              decoration: const InputDecoration(labelText: 'HTTP / HTTPS 链接'),
+              onChanged: (_) => setState(() {
+                error = '';
+                if (isEd2k && name.text == 'download.bin') {
+                  try {
+                    name.text = safeFileName(Ed2kLink.parse(url.text).name);
+                  } catch (_) {}
+                }
+              }),
+              decoration: InputDecoration(
+                labelText: isEd2k ? 'ED2K 文件链接' : 'HTTP / HTTPS 链接',
+              ),
               maxLines: 3,
               minLines: 1,
             ),
@@ -1897,46 +1947,52 @@ class _DirectDialogState extends State<_DirectDialog> {
               decoration: const InputDecoration(labelText: '保存文件名'),
             ),
             const SizedBox(height: 16),
-            TextField(
-              key: const Key('direct-download-connections'),
-              controller: connections,
-              keyboardType: TextInputType.number,
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              decoration: const InputDecoration(
-                labelText: '本次下载线程数',
-                suffixText: '线程',
-                helperText: '1–512，仅用于本次任务；实际连接数由服务器决定',
-                helperMaxLines: 2,
+            if (isEd2k)
+              const Text(
+                'ED2K 自动查找来源并排队，下载速度取决于在线来源和网络。下载期间会共享已校验的分片，上传上限为 128 KiB/s；暂停会停止传输。',
               ),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                for (final count in [1, 8, 16, 32, 64])
-                  ActionChip(
-                    label: Text('$count'),
-                    tooltip: '$count 个线程',
-                    onPressed: () => connections.text = '$count',
-                  ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('自定义请求头', style: TextStyle(fontSize: 13)),
-              value: advanced,
-              onChanged: (v) => setState(() => advanced = v),
-            ),
-            if (advanced)
+            if (!isEd2k) ...[
               TextField(
-                controller: headers,
-                maxLines: 4,
+                key: const Key('direct-download-connections'),
+                controller: connections,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                 decoration: const InputDecoration(
-                  labelText: 'JSON 请求头',
-                  hintText: '{"Referer": "https://…"}',
+                  labelText: '本次下载线程数',
+                  suffixText: '线程',
+                  helperText: '1–512，仅用于本次任务；实际连接数由服务器决定',
+                  helperMaxLines: 2,
                 ),
               ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                children: [
+                  for (final count in [1, 8, 16, 32, 64])
+                    ActionChip(
+                      label: Text('$count'),
+                      tooltip: '$count 个线程',
+                      onPressed: () => connections.text = '$count',
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('自定义请求头', style: TextStyle(fontSize: 13)),
+                value: advanced,
+                onChanged: (v) => setState(() => advanced = v),
+              ),
+              if (advanced)
+                TextField(
+                  controller: headers,
+                  maxLines: 4,
+                  decoration: const InputDecoration(
+                    labelText: 'JSON 请求头',
+                    hintText: '{"Referer": "https://…"}',
+                  ),
+                ),
+            ],
             if (error.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 12),

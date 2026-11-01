@@ -411,6 +411,35 @@ void main() {
       await tap(tester, find.byTooltip('更多操作'));
       await tap(tester, find.text('账号管理'));
       expect(find.byType(CloudAccountsPage), findsOneWidget);
+      final vault = fixture.services.vault;
+      final previous = vault.activeAccountId(platform);
+      await tester.scrollUntilVisible(
+        find.byKey(ValueKey('account-add-${platform.key}')),
+        180,
+        scrollable: find.descendant(
+          of: find.byType(CloudAccountsPage),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tap(tester, find.byKey(ValueKey('account-add-${platform.key}')));
+      expect(find.byType(NativePasswordLoginPage), findsOneWidget);
+      final owner = tester
+          .widget<NativePasswordLoginPage>(find.byType(NativePasswordLoginPage))
+          .accountId;
+      expect(owner, isNotNull);
+      expect(owner, isNot(previous));
+      expect(vault.activeAccountId(platform), previous);
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+      expect(find.byType(CloudAccountsPage), findsOneWidget);
+      expect(vault.credentialFor(platform, previous), isNotNull);
+      expect(
+        vault.store.data
+            .obj('cloudAccounts')
+            .obj(platform.key)
+            .containsKey(owner),
+        isFalse,
+      );
     }),
   );
 

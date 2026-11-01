@@ -2,8 +2,8 @@ import '../core/json.dart';
 import 'models.dart';
 
 enum BaiduShareRoute {
-  publicParser('mf_dg22', '公益解析'),
-  account('account', '账号下载');
+  account('account', '账号下载'),
+  publicParser('mf_dg22', '公益解析');
 
   const BaiduShareRoute(this.key, this.label);
   final String key, label;
@@ -34,5 +34,5 @@ enum BaiduShareRoute {
   static bool usesAccountDownload(DownloadSpec spec) =>
       !usesPublicDownload(spec) &&
       (spec.platform == CloudPlatform.baidu ||
-          {'baidu', 'baidu_preview'}.contains(spec.profile));
+          {'baidu', 'baidu_preview', 'baidu_direct'}.contains(spec.profile));
 }

@@ -185,7 +185,7 @@ void main() {
         final checks = ResourceLinkChecks(api);
         final hit = probeHit('one');
         final searchApi = SearchApiFixture(
-          (_, _) => Stream.value(ResourceSearchBatch([hit], complete: true)),
+          (_, _) => Stream.value(const ResourceSearchBatch([], complete: true)),
         );
         final search = ResourceSearch(
           store: StateStore.memory(),
@@ -209,6 +209,192 @@ void main() {
         search.dispose();
         expect(api.calls.last.cancellation.isCancelled, isTrue);
         expect(api.disposed, isTrue);
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test(
+    'search batches check every returned link, not just fifty visible rows',
+    () {
+      fakeAsync((fake) {
+        final api = LinkCheckApiFixture();
+        final checks = ResourceLinkChecks(api);
+        final hits = List.generate(75, (i) => probeHit('batch$i'));
+        final magnet = probeHit(
+          'magnet',
+          url: 'magnet:?xt=urn:btih:1234567890123456789012345678901234567890',
+        );
+        final batch = checks.beginBatch();
+        batch.update([...hits, hits.first, magnet]);
+        var finished = false;
+        unawaited(batch.finish().then((_) => finished = true));
+        expect(batch.totalCount, 76);
+        expect(batch.checkedCount, 1);
+        expect(api.calls, hasLength(3));
+        checks.setVisible([hits.last]);
+        checks.clearVisible();
+        expect(api.calls.any((call) => call.cancellation.isCancelled), isFalse);
+        for (var i = 0; i < hits.length; i++) {
+          expect(
+            api.calls.where((call) => !call.result.isCompleted).length,
+            lessThanOrEqualTo(3),
+          );
+          api.calls[i].complete(ResourceLinkState.valid);
+          fake.flushMicrotasks();
+        }
+        expect(finished, isTrue);
+        expect(batch.checkedCount, batch.totalCount);
+        expect(
+          api.calls.map((call) => call.hit.identity).toSet(),
+          hits.map((hit) => hit.identity).toSet(),
+        );
+        expect(
+          batch.results[resourceLinkKey(magnet)]!.state,
+          ResourceLinkState.unsupported,
+        );
+        checks.dispose();
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test(
+    'single probe timeout unblocks the batch and ignores late responses',
+    () {
+      fakeAsync((fake) {
+        final api = LinkCheckApiFixture();
+        final checks = ResourceLinkChecks(
+          api,
+          timeout: const Duration(seconds: 2),
+          concurrency: 1,
+        );
+        final hits = [probeHit('slow'), probeHit('fast')];
+        final batch = checks.beginBatch()..update(hits);
+        var finished = false;
+        unawaited(batch.finish().then((_) => finished = true));
+        fake.elapse(const Duration(seconds: 2));
+        expect(api.calls.first.cancellation.isCancelled, isTrue);
+        expect(api.calls, hasLength(2));
+        expect(
+          batch.results[resourceLinkKey(hits.first)]!.state,
+          ResourceLinkState.unknown,
+        );
+        api.calls.last.complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        expect(finished, isTrue);
+        api.calls.first.complete(ResourceLinkState.invalid);
+        fake.flushMicrotasks();
+        expect(checks.health(hits.first).state, ResourceLinkState.unknown);
+        checks.dispose();
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test(
+    'rate limited batches finish as unconfirmed without waiting for cooldown',
+    () {
+      fakeAsync((fake) {
+        final api = LinkCheckApiFixture();
+        final checks = ResourceLinkChecks(api, concurrency: 1);
+        final hits = [
+          probeHit('one'),
+          probeHit('two'),
+          probeHit('ali', url: 'https://www.alipan.com/s/abc123'),
+        ];
+        final batch = checks.beginBatch()..update(hits);
+        var finished = false;
+        unawaited(batch.finish().then((_) => finished = true));
+        api.calls.first.result.completeError(ResourceLinkCheckLimited());
+        fake.flushMicrotasks();
+        expect(api.calls, hasLength(2));
+        expect(api.calls.last.hit.identity, hits.last.identity);
+        api.calls.last.complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        expect(finished, isTrue);
+        expect(batch.checkedCount, 3);
+        expect(
+          batch.results[resourceLinkKey(hits[1])]!.state,
+          ResourceLinkState.unknown,
+        );
+        fake.elapse(const Duration(minutes: 1));
+        expect(api.calls, hasLength(2));
+        checks.dispose();
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test('batch results remain pinned across cache expiry and pause/resume', () {
+    fakeAsync((fake) {
+      final api = LinkCheckApiFixture();
+      final checks = ResourceLinkChecks(
+        api,
+        concurrency: 1,
+        clock: () => DateTime(2026, 10, 29).add(fake.elapsed),
+      );
+      final hits = [probeHit('unknown'), probeHit('next')];
+      final batch = checks.beginBatch()..update(hits);
+      var finished = false;
+      unawaited(batch.finish().then((_) => finished = true));
+      api.calls.first.complete(ResourceLinkState.unknown);
+      fake.flushMicrotasks();
+      final cancelled = api.calls.last;
+      batch.pause();
+      fake.flushMicrotasks();
+      expect(cancelled.cancellation.isCancelled, isTrue);
+      expect(batch.paused, isTrue);
+      fake.elapse(const Duration(minutes: 2));
+      expect(api.calls, hasLength(2));
+      expect(batch.checkedCount, 1);
+      batch.resume();
+      expect(api.calls, hasLength(3));
+      expect(api.calls.last.hit.identity, hits.last.identity);
+      cancelled.complete(ResourceLinkState.invalid);
+      fake.flushMicrotasks();
+      expect(batch.checkedCount, 1);
+      api.calls.last.complete(ResourceLinkState.valid);
+      fake.flushMicrotasks();
+      expect(finished, isTrue);
+      expect(
+        batch.results[resourceLinkKey(hits.first)]!.state,
+        ResourceLinkState.unknown,
+      );
+      checks.dispose();
+      fake.flushMicrotasks();
+      expect(fake.pendingTimers, isEmpty);
+    });
+  });
+
+  test(
+    'new extraction codes cancel obsolete checks and cancellation settles waiters',
+    () {
+      fakeAsync((fake) {
+        final api = LinkCheckApiFixture();
+        final checks = ResourceLinkChecks(api);
+        final hit = probeHit('password');
+        final protected = probeHit('password', password: '1234');
+        final batch = checks.beginBatch()..update([hit]);
+        batch.update([protected]);
+        expect(api.calls, hasLength(2));
+        expect(api.calls.first.cancellation.isCancelled, isTrue);
+        var finished = false;
+        unawaited(batch.finish().then((_) => finished = true));
+        batch.cancel();
+        fake.flushMicrotasks();
+        expect(finished, isTrue);
+        expect(api.calls.last.cancellation.isCancelled, isTrue);
+        expect(batch.results, isEmpty);
+        api.calls.first.complete(ResourceLinkState.invalid);
+        api.calls.last.complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        expect(checks.health(protected).state, ResourceLinkState.pending);
+        checks.dispose();
         fake.flushMicrotasks();
         expect(fake.pendingTimers, isEmpty);
       });

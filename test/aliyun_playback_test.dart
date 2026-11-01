@@ -9,6 +9,7 @@ import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/playback_store.dart';
 import 'package:asterlink/data/providers/aliyun.dart';
+import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/playback/playback_sources.dart';
@@ -18,10 +19,49 @@ import 'support.dart';
 import 'token_cloud_support.dart';
 
 const platform = CloudPlatform.aliyun;
-const previewPath = '/v2/file/get_video_preview_play_info';
+const previewPath = '/adrive/v1.0/openFile/getVideoPreviewPlayInfo';
+const openDownloadPath = '/adrive/v1.0/openFile/getDownloadUrl';
 const downloadPath = '/v2/file/get_download_url';
+const openAccess = 'fixture-open-access-token-0123456789';
+const openRefresh = 'fixture-open-refresh-token-0123456789';
+const renewedOpenAccess = 'renewed-open-access-token-0123456789';
+const openOAuth = 'https://api.oplist.org/alicloud/callback';
 const originalUrl = 'https://cdn.example/original.mp4?signature=download';
 const streamUrl = 'https://cdn.example/video.m3u8?signature=playback';
+
+Future<Vault> playbackVault() => tokenVault(
+  platform,
+  tokenCredential(
+    platform,
+    fields: {
+      'openAccessToken': openAccess,
+      'openRefreshToken': openRefresh,
+      'openTokenType': 'Bearer',
+      'openExpiresAt': '${tokenClock + 3600000}',
+    },
+  ),
+);
+
+HttpResult openAuthResponse(
+  RecordedRequest request,
+) => switch (request.uri.path) {
+  '/alicloud/requests' => jsonResponse({
+    'text': query('https://openapi.aliyundrive.com/oauth/authorize', {
+      'client_id': 'fixture-client',
+      'redirect_uri': openOAuth,
+      'response_type': 'code',
+    }),
+  }),
+  '/oauth/users/authorize' => jsonResponse({
+    'redirectUri': '$openOAuth?code=fixture-code',
+  }),
+  '/alicloud/callback' => HttpResult(302, '', {
+    'location': [
+      'https://doc.oplist.org/#${base64.encode(utf8.encode(encoded({'access_token': renewedOpenAccess, 'refresh_token': openRefresh, 'token_type': 'Bearer', 'expires_in': 7200, 'user_id': 'user-1'})))}',
+    ],
+  }),
+  _ => aliDefaultResponse(request),
+};
 
 Json streamTask({
   String template = 'HD',
@@ -39,18 +79,20 @@ Json streamTask({
 
 HttpResult previewResponse({
   List<Json>? tasks,
+  List<Json>? quick,
   String file = 'file-1',
   String drive = 'resource',
 }) => jsonResponse({
   'drive_id': drive,
   'file_id': file,
   'video_preview_play_info': {
+    'quick_video_list': ?quick,
     'live_transcoding_task_list': tasks ?? [streamTask()],
   },
 });
 
 HttpResult originalResponse() =>
-    jsonResponse({...aliFile('file-1'), 'download_url': originalUrl});
+    jsonResponse({...aliFile('file-1'), 'url': originalUrl});
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -58,21 +100,21 @@ void main() {
   test(
     'personal video uses the highest available full stream and CDN headers',
     () async {
-      final vault = await tokenVault(platform);
+      final vault = await playbackVault();
       final http = FakeHttp((r) {
-        expect(r.uri.host, 'api.alipan.com');
+        expect(r.uri.host, 'open.aliyundrive.com');
         expect(r.uri.path, previewPath);
         expect(r.json, {
           'drive_id': 'backup',
           'file_id': 'file-1',
           'category': 'live_transcoding',
-          'url_expire_sec': 14400,
+          'url_expire_sec': '14400',
         });
         expect(JsonHttp.isReadRequest(r.method, r.url), isTrue);
-        expect(r.headers['Authorization'], 'Bearer $accessToken');
-        expect(r.headers['X-Signature'], isNotEmpty);
-        expect(r.headers['X-Device-Id'], 'device-1');
-        expect(r.headers['X-Canary'], AliyunConnector.downloadCanary);
+        expect(r.headers['Authorization'], 'Bearer $openAccess');
+        expect(r.headers['X-Signature'], isNull);
+        expect(r.headers['X-Device-Id'], isNull);
+        expect(r.headers['X-Canary'], isNull);
         return previewResponse(
           drive: 'backup',
           tasks: [
@@ -124,8 +166,67 @@ void main() {
     },
   );
 
+  test(
+    'quick-video streams take precedence and can omit task status',
+    () async {
+      final vault = await playbackVault();
+      final quick = <String, dynamic>{
+        ...streamTask(
+          template: 'FHD',
+          width: 1920,
+          height: 1080,
+          url: '$streamUrl-quick',
+        ),
+      }..remove('status');
+      final http = FakeHttp((r) {
+        expect(r.uri.path, previewPath);
+        return previewResponse(
+          quick: [streamTask(), quick],
+          tasks: [
+            streamTask(
+              template: 'QHD',
+              width: 2560,
+              height: 1440,
+              url: '$streamUrl-transcoded',
+            ),
+          ],
+        );
+      });
+      final source = await AliyunConnector(http, vault, now: () => tokenClock)
+          .playback(
+            tokenPersonal(platform),
+            tokenFile,
+            vault.credential(platform),
+          );
+      expect(source.url, '$streamUrl-quick');
+    },
+  );
+
+  test(
+    'stream selection follows template width rather than pixel area',
+    () async {
+      final vault = await playbackVault();
+      final http = FakeHttp(
+        (_) => previewResponse(
+          tasks: [
+            streamTask(width: 1080, height: 1920, url: '$streamUrl-portrait'),
+            streamTask(width: 1920, height: 800, url: '$streamUrl-wide'),
+          ],
+        ),
+      );
+      final source = await AliyunConnector(http, vault, now: () => tokenClock)
+          .playback(
+            tokenPersonal(platform),
+            tokenFile,
+            vault.credential(platform),
+          );
+      expect(source.url, '$streamUrl-wide');
+    },
+  );
+
   for (final unavailable in [
     ('no transcodes', previewResponse(tasks: [])),
+    ('empty quick list', previewResponse(quick: [])),
     (
       'pending transcode',
       previewResponse(tasks: [streamTask(status: 'running')]),
@@ -154,10 +255,11 @@ void main() {
     test(
       '${unavailable.$1} falls back to the complete original file',
       () async {
-        final vault = await tokenVault(platform);
+        final vault = await playbackVault();
         final http = FakeHttp((r) {
           if (r.uri.path == previewPath) return unavailable.$2;
-          expect(r.uri.path, downloadPath);
+          expect(r.uri.path, openDownloadPath);
+          expect(r.headers['Authorization'], 'Bearer $openAccess');
           return originalResponse();
         });
         final source = await AliyunConnector(http, vault, now: () => tokenClock)
@@ -168,7 +270,55 @@ void main() {
             );
         expect(source.url, originalUrl);
         expect(source.expectedSize, tokenFile.size);
-        expect(http.calls.map((r) => r.uri.path), [previewPath, downloadPath]);
+        expect(http.calls.map((r) => r.uri.path), [
+          previewPath,
+          openDownloadPath,
+        ]);
+      },
+    );
+  }
+
+  for (final invalid in [
+    ('file ID', {...aliFile('another-file'), 'url': originalUrl}),
+    (
+      'drive ID',
+      {...aliFile('file-1'), 'drive_id': 'another-drive', 'url': originalUrl},
+    ),
+    ('size', {...aliFile('file-1'), 'size': 400, 'url': originalUrl}),
+    ('folder', {...aliFile('file-1', folder: true), 'url': originalUrl}),
+    (
+      'URL',
+      {
+        ...aliFile('file-1'),
+        'url': 'https://user:secret@cdn.example/original.mp4',
+      },
+    ),
+    (
+      'download-only field',
+      {...aliFile('file-1'), 'download_url': originalUrl},
+    ),
+  ]) {
+    test(
+      'invalid original ${invalid.$1} is rejected by the open playback fallback',
+      () async {
+        final vault = await playbackVault();
+        final http = FakeHttp(
+          (r) => r.uri.path == previewPath
+              ? previewResponse(tasks: [])
+              : jsonResponse(invalid.$2),
+        );
+        await expectLater(
+          AliyunConnector(http, vault, now: () => tokenClock).playback(
+            tokenPersonal(platform),
+            tokenFile,
+            vault.credential(platform),
+          ),
+          throwsA(isA<AppException>()),
+        );
+        expect(http.calls.map((r) => r.uri.path), [
+          previewPath,
+          openDownloadPath,
+        ]);
       },
     );
   }
@@ -176,7 +326,7 @@ void main() {
   test(
     'a retryable preview network failure can still use the original file',
     () async {
-      final vault = await tokenVault(platform);
+      final vault = await playbackVault();
       final http = FakeHttp((r) {
         if (r.uri.path == previewPath) {
           throw const HttpRequestFailure(
@@ -198,9 +348,9 @@ void main() {
   );
 
   test(
-    'video previews renew expired tokens and device sessions before retrying',
+    'video previews renew a rejected OpenToken through the ordinary login',
     () async {
-      final vault = await tokenVault(platform);
+      final vault = await playbackVault();
       var previews = 0;
       final http = FakeHttp((r) {
         if (r.uri.path == previewPath) {
@@ -208,14 +358,11 @@ void main() {
           if (previews == 1) {
             return jsonResponse({'code': 'AccessTokenExpired'}, 401);
           }
-          expect(r.headers['Authorization'], 'Bearer $renewedAccess');
-          if (previews == 2) {
-            return jsonResponse({'code': 'DeviceSessionSignatureInvalid'}, 403);
-          }
-          expect(r.headers['X-Signature'], isNot('fixture-signature'));
+          expect(r.headers['Authorization'], 'Bearer $renewedOpenAccess');
+          expect(r.headers['X-Signature'], isNull);
           return previewResponse();
         }
-        return aliDefaultResponse(r);
+        return openAuthResponse(r);
       });
       final source = await AliyunConnector(http, vault, now: () => tokenClock)
           .playback(
@@ -224,8 +371,12 @@ void main() {
             vault.credential(platform),
           );
       expect(source.url, streamUrl);
-      expect(previews, 3);
-      expect(vault.credential(platform)!.field('refreshToken'), renewedRefresh);
+      expect(previews, 2);
+      expect(vault.credential(platform)!.field('refreshToken'), refreshToken);
+      expect(
+        vault.credential(platform)!.field('openAccessToken'),
+        renewedOpenAccess,
+      );
       expect(vault.credential(platform)!.updatedAt, 42);
       expect(http.calls.where((r) => r.uri.path == downloadPath), isEmpty);
     },
@@ -241,7 +392,7 @@ void main() {
     ),
   ]) {
     test('${invalid.$1} is not hidden by a download fallback', () async {
-      final vault = await tokenVault(platform);
+      final vault = await playbackVault();
       final http = FakeHttp((_) => invalid.$2);
       await expectLater(
         AliyunConnector(http, vault, now: () => tokenClock).playback(
@@ -258,10 +409,12 @@ void main() {
   test(
     'invalid login is reported without trying an original download',
     () async {
-      final vault = await tokenVault(platform);
+      final vault = await playbackVault();
       final http = FakeHttp(
         (r) => r.uri.path == '/v2/account/token'
             ? jsonResponse({'code': 'InvalidParameter.RefreshToken'}, 400)
+            : r.uri.path == '/alicloud/requests'
+            ? openAuthResponse(r)
             : jsonResponse({'code': 'AccessTokenExpired'}, 401),
       );
       await expectLater(
@@ -272,7 +425,7 @@ void main() {
         ),
         throwsA(isA<AccountLoginRequired>()),
       );
-      expect(http.calls.where((r) => r.uri.path == downloadPath), isEmpty);
+      expect(http.calls.where((r) => r.uri.path == openDownloadPath), isEmpty);
     },
   );
 
@@ -280,7 +433,7 @@ void main() {
     test(
       '${replaceAccount ? 'account replacement' : 'cancellation'} rejects a pending preview',
       () async {
-        final vault = await tokenVault(platform);
+        final vault = await playbackVault();
         final entered = Completer<void>(), release = Completer<void>();
         final http = FakeHttp((r) async {
           expect(r.uri.path, previewPath);
@@ -317,9 +470,10 @@ void main() {
   test(
     'non-video playback and direct video downloads keep original bytes',
     () async {
-      final vault = await tokenVault(platform);
+      final vault = await playbackVault();
       final http = FakeHttp((r) {
         expect(r.uri.path, downloadPath);
+        expect(r.headers['Authorization'], 'Bearer $accessToken');
         return originalResponse();
       });
       final connector = AliyunConnector(http, vault, now: () => tokenClock);
@@ -344,29 +498,33 @@ void main() {
     test(
       'share ${fallback ? 'fallback' : 'stream'} keeps its copied file until playback releases it',
       () async {
-        final vault = await tokenVault(platform);
+        final vault = await playbackVault();
         var name = '', copies = 0, deletions = 0;
         late CleanupOutbox cleanups;
         final http = FakeHttp((r) {
           switch (r.uri.path) {
-            case '/adrive/v2/file/createWithFolders':
+            case '/adrive/v1.0/user/getDriveInfo':
+              return jsonResponse({
+                'resource_drive_id': 'resource',
+                'backup_drive_id': 'backup',
+                'user_id': 'user-1',
+              });
+            case '/adrive/v1.0/openFile/create':
               name = r.json.str('name');
               return jsonResponse(
                 aliFile('temporary', folder: true, name: name),
               );
-            case '/adrive/v4/batch':
+            case '/adrive/v2/file/copy':
               copies++;
               expect(cleanups.pendingCount, 1);
-              return jsonResponse({
-                'responses': [
-                  {
-                    'id': '0',
-                    'status': 200,
-                    'body': {'file_id': 'copied'},
-                  },
-                ],
-              });
-            case '/adrive/v3/file/list':
+              expect(r.json['to_drive_id'], 'resource');
+              expect(r.json['to_parent_file_id'], 'temporary');
+              expect(r.json['share_id'], 'Share123');
+              expect(r.headers['Authorization'], 'Bearer $accessToken');
+              expect(r.headers['X-Signature'], isNull);
+              expect(r.headers['X-Share-Token'], 'fixture-share-token');
+              return jsonResponse({'file_id': 'copied'});
+            case '/adrive/v1.0/openFile/list':
               return jsonResponse({
                 'items': [aliFile('copied', parent: 'temporary')],
               });
@@ -377,12 +535,9 @@ void main() {
                 file: 'copied',
                 tasks: fallback ? [] : null,
               );
-            case downloadPath:
+            case openDownloadPath:
               expect(r.json['file_id'], 'copied');
-              return jsonResponse({
-                ...aliFile('copied'),
-                'download_url': originalUrl,
-              });
+              return jsonResponse({...aliFile('copied'), 'url': originalUrl});
             case '/v2/file/get':
               return jsonResponse(
                 aliFile('temporary', folder: true, name: name),
@@ -433,6 +588,9 @@ void main() {
           fields: {
             'expiresAt': '4102444800000',
             'sessionExpiresAt': '4102444800000',
+            'openAccessToken': openAccess,
+            'openRefreshToken': openRefresh,
+            'openExpiresAt': '4102444800000',
           },
         ),
       );
@@ -501,6 +659,8 @@ void main() {
       final serialized = jsonEncode(vault.store.data['playbackHistory']);
       expect(serialized, isNot(contains('signature=')));
       expect(serialized, isNot(contains(accessToken)));
+      expect(serialized, isNot(contains(openAccess)));
+      expect(serialized, isNot(contains(openRefresh)));
       await controller.close();
       final reopened = await restoreRecentPlayback(
         services,

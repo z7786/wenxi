@@ -432,7 +432,7 @@ class CloudRepository {
 
   Future<BrowseSession> share(
     ParsedLink link, {
-    BaiduShareRoute baiduRoute = BaiduShareRoute.publicParser,
+    BaiduShareRoute baiduRoute = BaiduShareRoute.account,
     String? parserSiteId,
     String? parserPasswordGrant,
   }) async {
@@ -619,33 +619,52 @@ class CloudRepository {
     }, guard);
   });
 
-  DownloadSpec planDownload(BrowseSession session, CloudFile file) =>
-      withSession(session, () {
-        ensureAvailable(session.platform);
-        RequestScope.checkpoint();
-        require(file.id.isNotEmpty && !file.isDirectory, '下载文件信息不完整');
-        final account = session.mode == BrowseMode.personal
-            ? credential(session.platform)
-            : vault.credential(session.platform);
-        return DownloadSpec(
-          url: '',
-          fileName: file.name,
-          expectedSize: session.platform.exactFileSize ? file.size : 0,
-          profile: PublicShareRoute.uses(session)
-              ? PublicShareRoute.profile(session.platform)
-              : null,
-          checksumType: file.hashType,
-          checksumValue: file.hashValue,
-          source: DownloadOrigin(
-            bindSession(session),
-            file,
-            account?.updatedAt,
-          ).toJson(),
-        );
-      });
+  BrowseSession _bindNewDownloadSession(BrowseSession session) {
+    // A share opened before login is pinned to an empty owner. New downloads
+    // can use the newly selected account; stored tasks keep their original owner.
+    if (session.platform == CloudPlatform.quark &&
+        session.mode == BrowseMode.share &&
+        session.accountId == '' &&
+        !PublicShareRoute.uses(session) &&
+        vault is Vault) {
+      final accounts = vault as Vault;
+      final owner = accounts.activeAccountId(session.platform);
+      if (accounts.credentialFor(session.platform, owner) != null) {
+        return session.withAccount(owner);
+      }
+    }
+    return session;
+  }
+
+  DownloadSpec planDownload(BrowseSession session, CloudFile file) {
+    session = _bindNewDownloadSession(session);
+    return withSession(session, () {
+      ensureAvailable(session.platform);
+      RequestScope.checkpoint();
+      require(file.id.isNotEmpty && !file.isDirectory, '下载文件信息不完整');
+      final account = session.mode == BrowseMode.personal
+          ? credential(session.platform)
+          : vault.credential(session.platform);
+      return DownloadSpec(
+        url: '',
+        fileName: file.name,
+        expectedSize: session.platform.exactFileSize ? file.size : 0,
+        profile: PublicShareRoute.uses(session)
+            ? PublicShareRoute.profile(session.platform)
+            : null,
+        checksumType: file.hashType,
+        checksumValue: file.hashValue,
+        source: DownloadOrigin(
+          bindSession(session),
+          file,
+          account?.updatedAt,
+        ).toJson(),
+      );
+    });
+  }
 
   Future<DownloadSpec> prepare(BrowseSession session, CloudFile file) =>
-      _prepare(session, file, playback: false);
+      _prepare(_bindNewDownloadSession(session), file, playback: false);
 
   Future<DownloadSpec> preparePlayback(BrowseSession session, CloudFile file) =>
       _prepare(session, file, playback: true);

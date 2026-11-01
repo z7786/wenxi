@@ -212,6 +212,7 @@ class GopeedEngine {
   bool? _taskCacheRootsSupported;
   bool? _directOutputSupported;
   bool? _sourceNetworkPolicySupported;
+  bool? _ed2kSupported;
   void validateId(String id) =>
       require(RegExp(r'^[A-Za-z0-9_-]{1,100}$').hasMatch(id), '无效的下载任务编号');
   Future<void> _start() async {
@@ -249,28 +250,37 @@ class GopeedEngine {
       _taskCacheRootsSupported = null;
       _directOutputSupported = null;
       _sourceNetworkPolicySupported = null;
+      _ed2kSupported = null;
     }
     final pending = (store.data['nativeRemovals'] as List? ?? [])
         .map((e) => e.toString())
         .toList();
-    for (final id in pending) {
-      validateId(id);
-      try {
-        await transport.call('remove', {'id': id});
-      } catch (_) {
-        // A forgotten history row must not prevent unrelated downloads from
-        // starting. Its durable removal marker remains available for retry.
-        continue;
+    final removed = <String>{};
+    try {
+      for (final id in pending) {
+        validateId(id);
+        try {
+          await transport.call('remove', {'id': id});
+        } catch (_) {
+          // A forgotten history row must not prevent unrelated downloads from
+          // starting. Its durable removal marker remains available for retry.
+          continue;
+        }
+        removed.add(id);
       }
-      await _forgetRemoval(id);
+    } finally {
+      await _forgetRemovals(removed);
     }
   }
 
-  Future<void> _forgetRemoval(String id) async {
-    if (!(store.data['nativeRemovals'] as List? ?? []).contains(id)) return;
+  Future<void> _forgetRemovals(Set<String> ids) async {
+    if (ids.isEmpty ||
+        !(store.data['nativeRemovals'] as List? ?? []).any(ids.contains)) {
+      return;
+    }
     await store.change((draft) {
       draft['nativeRemovals'] = (draft['nativeRemovals'] as List? ?? [])
-          .where((value) => value != id)
+          .where((value) => !ids.contains(value))
           .toList();
     });
   }
@@ -330,6 +340,12 @@ class GopeedEngine {
     final id = request.str('id');
     validateId(id);
     await _start();
+    if (request.str('url').toLowerCase().startsWith('ed2k://')) {
+      _ed2kSupported ??= asJson(
+        await transport.call('version'),
+      ).boolean('ed2k');
+      require(_ed2kSupported!, '下载组件版本过旧，请安装支持 ED2K 的完整新版应用');
+    }
     if (request['networkPolicy'] != null) {
       _sourceNetworkPolicySupported ??= asJson(
         await transport.call('version'),
@@ -373,20 +389,27 @@ class GopeedEngine {
       await transport.call('pause', {'id': id});
     }
   });
-  Future<void> remove(String id) => _gate.run(() async {
-    validateId(id);
-    if (_started && transport.connected) {
-      await transport.call('remove', {'id': id});
-      await _forgetRemoval(id);
-    } else {
-      await store.change((draft) {
-        draft['nativeRemovals'] = <String>{
-          ...(draft['nativeRemovals'] as List? ?? []).map((e) => '$e'),
-          id,
-        }.toList();
+
+  /// Returns whether the native record was removed now. A durable history
+  /// cleanup can acknowledge many removals in its own state transaction.
+  Future<bool> remove(String id, {bool deferPersistence = false}) =>
+      _gate.run(() async {
+        validateId(id);
+        if (_started && transport.connected) {
+          await transport.call('remove', {'id': id});
+          if (!deferPersistence) await _forgetRemovals({id});
+          return true;
+        }
+        if (!(store.data['nativeRemovals'] as List? ?? []).contains(id)) {
+          await store.change((draft) {
+            draft['nativeRemovals'] = <String>{
+              ...(draft['nativeRemovals'] as List? ?? []).map((e) => '$e'),
+              id,
+            }.toList();
+          });
+        }
+        return false;
       });
-    }
-  });
   Future<void> close() => _gate.run(() async {
     await transport.dispose();
     _started = false;

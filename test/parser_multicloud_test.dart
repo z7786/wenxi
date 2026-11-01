@@ -278,8 +278,12 @@ void main() {
     test(
       'Selection and route preference persist separately for each drive',
       () async {
+        expect(hub.publicPreferred(CloudPlatform.baidu), isFalse);
+        expect(hub.publicPreferred(CloudPlatform.uc), isFalse);
+        expect(hub.publicPreferred(CloudPlatform.quark), isFalse);
         await hub.select('panapidown_uc');
         await hub.select('mdx_quark');
+        await hub.preferPublic(CloudPlatform.baidu, true);
         await hub.preferPublic(CloudPlatform.uc, true);
         final restarted = ParserRuleHub(
           store: vault,
@@ -296,6 +300,9 @@ void main() {
           expect(restarted.selectedFor(CloudPlatform.baidu), 'mf_dg22');
           expect(restarted.publicPreferred(CloudPlatform.uc), isTrue);
           expect(restarted.publicPreferred(CloudPlatform.quark), isFalse);
+          expect(restarted.publicPreferred(CloudPlatform.baidu), isTrue);
+          await restarted.preferPublic(CloudPlatform.baidu, false);
+          expect(hub.publicPreferred(CloudPlatform.baidu), isFalse);
           final site = await restarted.forNewShare(platform: CloudPlatform.uc);
           expect(site?.rule.platform, CloudPlatform.uc);
           await expectLater(

@@ -268,13 +268,23 @@ void main() {
       expect(find.text('AsterLink'), findsNothing);
       expect(
         tester
-            .widget<FilledButton>(find.byKey(const Key('parse-start')))
+            .widget<FilledButton>(
+              find.descendant(
+                of: find.byKey(const Key('parse-start')),
+                matching: find.byType(FilledButton),
+              ),
+            )
             .onPressed,
         isNull,
       );
       expect(
         tester
-            .widget<FilledButton>(find.byKey(const Key('parse-bt')))
+            .widget<FilledButton>(
+              find.descendant(
+                of: find.byKey(const Key('parse-bt')),
+                matching: find.byType(FilledButton),
+              ),
+            )
             .onPressed,
         isNotNull,
       );

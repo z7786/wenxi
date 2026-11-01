@@ -94,6 +94,16 @@ void main() {
       expect(fileKind('backup.zip'), FileKind.archive);
       expect(fileKind('photo.png.zip'), FileKind.archive);
       expect(fileKind('file.py', directory: true), FileKind.folder);
+      for (final name in [
+        'guide.docx',
+        'table.xlsx',
+        'slides.pptx',
+        'notes.odt',
+      ]) {
+        expect(isOfficeDocument(name), true, reason: name);
+      }
+      expect(isOfficeDocument('archive.docx.zip'), false);
+      expect(isOfficeDocument('guide.pdf'), false);
     },
   );
   test(

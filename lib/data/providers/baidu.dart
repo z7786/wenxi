@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import '../../core/json.dart';
 import '../../domain/auth.dart';
 import '../../domain/baidu_share_route.dart';
+import '../../domain/file_types.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
 import '../http.dart';
@@ -14,6 +15,8 @@ import '../../diagnostics/app_log.dart';
 import 'baidu_link_service.dart';
 import 'baidu_app_client.dart';
 import 'baidu_public_parser.dart';
+import 'baidu_playback.dart';
+import 'baidu_download_resolver.dart';
 
 class _BaiduFileMissing extends AppException {
   const _BaiduFileMissing() : super('百度文件或分享已失效');
@@ -27,14 +30,17 @@ class BaiduConnector extends CloudConnector {
     BaiduAppClient? client,
     BaiduLinkLookup? linkLookup,
     BaiduPublicParser? publicParser,
+    BaiduPlaybackClient? playbackClient,
   }) : _client = client ?? BaiduAppClient(store: store),
-       _linkLookup = linkLookup ?? BaiduLinkService(http).resolve,
-       _publicParser = publicParser ?? BaiduPublicParser(http, store: store);
+       _linkLookup = linkLookup ?? BaiduDownloadResolver(http).resolve,
+       _publicParser = publicParser ?? BaiduPublicParser(http, store: store),
+       _playbackClient = playbackClient ?? BaiduPlaybackClient(http);
   final JsonHttp http;
   final BaiduAppClient _client;
   final Future<void> Function(DownloadCleanup)? stageCleanup;
   final BaiduLinkLookup _linkLookup;
   final BaiduPublicParser _publicParser;
+  final BaiduPlaybackClient _playbackClient;
   @override
   CloudPlatform get platform => CloudPlatform.baidu;
   static const defaultAppId = '250528';
@@ -459,8 +465,93 @@ class BaiduConnector extends CloudConnector {
     return files;
   }
 
-  /// 个人网盘和“账号下载”通过中转取链；公益分享通道使用独立解析站。
-  /// 两条通道的文件内容均由客户端直连百度下载。
+  /// 视频播放直连内置的 App/DLNA 接口；下载单独获取原文件地址。
+  @override
+  Future<DownloadSpec> playback(
+    BrowseSession session,
+    CloudFile file,
+    Credential? credential,
+  ) async {
+    require(!file.isDirectory && file.id.isNotEmpty, '请选择要播放的文件');
+    if (fileKind(file.name) != FileKind.video ||
+        BaiduShareRoute.usesPublicParser(session) && credential == null) {
+      return download(session, file, credential);
+    }
+    if (credential == null) {
+      throw const AccountLoginRequired('百度视频播放需要登录账号');
+    }
+    final ck = cookie(credential);
+    if (session.mode == BrowseMode.share) {
+      var current = session;
+      final reopened =
+          session.meta('shareId').isEmpty || session.meta('uk').isEmpty;
+      if (reopened) {
+        final link = session.sourceLink;
+        require(link != null, '百度分享信息不完整，请重新解析');
+        current = await OperationProgress.step(
+          OperationStage.verifyShare,
+          () => openShare(link!, credential, route: BaiduShareRoute.account),
+        );
+      }
+      var sekey = current.meta('sekey');
+      final link = current.sourceLink;
+      if (!reopened && link?.passcode?.isNotEmpty == true) {
+        sekey = await OperationProgress.step(
+          OperationStage.verifyShare,
+          () async {
+            final shortId = current
+                .meta('shortId')
+                .ifEmpty(link!.shareId ?? '');
+            require(
+              RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(shortId),
+              '百度分享信息不完整，请重新解析',
+            );
+            final verified = check(
+              await http.postFormRead(
+                query('https://pan.baidu.com/share/verify', {'surl': shortId}),
+                form({'pwd': link.passcode, 'vcode_str': '', 'vcode': ''}),
+                {
+                  ...webHeaders(ck),
+                  'Referer': 'https://pan.baidu.com/s/1$shortId',
+                },
+              ),
+            ).str('randsk');
+            require(verified.isNotEmpty, '百度没有返回分享凭证，请重新解析');
+            return verified;
+          },
+        );
+      }
+      return OperationProgress.step(
+        OperationStage.playbackLink,
+        () => _playbackClient.share(
+          current,
+          file,
+          cookie: _shareCookie(ck, sekey),
+          sekey: sekey.isEmpty ? '' : _shareKey(sekey),
+        ),
+      );
+    }
+    var current = file;
+    if (!file.token.startsWith('/') && !file.id.startsWith('/')) {
+      final files = await list(
+        await openPersonal(credential),
+        file.parentId.ifEmpty('/'),
+        credential,
+      );
+      final resolved = files
+          .where((f) => f.id == file.id && !f.isDirectory)
+          .firstOrNull;
+      require(resolved != null, '百度视频文件已失效，请刷新文件列表');
+      current = resolved!;
+    }
+    return OperationProgress.step(
+      OperationStage.playbackLink,
+      () => _playbackClient.personal(current, ck),
+    );
+  }
+
+  /// 账号视频下载使用在线播放取链，非视频优先中转直链再回退内置预览。
+  /// 公益分享使用独立解析站；文件内容由客户端直接读取返回的媒体地址。
   /// 因百度网盘接口的特殊性，服务端取链实现暂不开源，避免公开后接口很快失效。
   /// 后续会根据接口稳定性和实际情况考虑开源；此处保留客户端对接与下载流程。
   @override
@@ -473,11 +564,16 @@ class BaiduConnector extends CloudConnector {
     if (BaiduShareRoute.usesPublicParser(s)) {
       return _publicParser.download(s, file);
     }
+    // Video downloads use a fresh ticket from the same API as online playback.
+    // Keep ordinary files on the account relay/local-preview download route.
+    if (fileKind(file.name) == FileKind.video) {
+      return playback(s, file, c);
+    }
     if (c == null) throw const AccountLoginRequired('百度下载需要登录账号');
     final account = c, ck = cookie(c), id = appId(c);
     DownloadCleanup? cleanup;
     Json? transfer;
-    ({String url, bool preview}) direct;
+    BaiduResolvedLink direct;
     if (s.mode == BrowseMode.share && !await _ownsShare(s, c)) {
       const root = '/文析助手临时转存';
       final directory = '$root/tr_${newId()}';
@@ -549,16 +645,18 @@ class BaiduConnector extends CloudConnector {
       expectedSize: file.size,
       checksumType: file.hashType,
       checksumValue: file.hashValue,
-      headers: {
-        'Cookie': ck,
-        'User-Agent': _client.downloadUserAgent,
-        'Referer': 'https://pan.baidu.com/',
-        'Accept-Encoding': 'identity',
-        'Content-Transfer-Encoding': 'binary',
-      },
+      headers: direct.profile == 'baidu_direct'
+          ? direct.headers
+          : {
+              'Cookie': ck,
+              'User-Agent': _client.downloadUserAgent,
+              'Referer': 'https://pan.baidu.com/',
+              'Accept-Encoding': 'identity',
+              'Content-Transfer-Encoding': 'binary',
+            },
       cleanup: cleanup,
       source: transfer == null ? null : {'baiduTransfer': transfer},
-      profile: direct.preview ? 'baidu_preview' : 'baidu',
+      profile: direct.profile,
     );
   }
 

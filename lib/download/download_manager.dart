@@ -1,17 +1,21 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
+import '../core/operation_progress.dart';
 import '../diagnostics/app_log.dart';
 import '../data/cleanup_outbox.dart';
 import '../data/http.dart';
 import '../data/state_store.dart';
 import '../domain/auth.dart';
 import '../domain/baidu_share_route.dart';
+import '../domain/bt_sources.dart';
 import '../domain/downloads.dart';
+import '../domain/ed2k.dart';
 import '../domain/file_types.dart';
 import '../domain/models.dart';
 import '../domain/settings.dart';
@@ -51,6 +55,59 @@ class _GuestDownloadBatch {
   bool notified = false;
 }
 
+class _DeletionProgress {
+  _DeletionProgress(this.total);
+
+  final int total;
+  int processed = 0, succeeded = 0, failed = 0, skipped = 0;
+  bool cancelled = false;
+  OperationStage _activity = OperationStage.waitDownloadOperation;
+  final _clock = Stopwatch()..start();
+  int _lastReport = -100000;
+  Timer? _pending;
+
+  void report({OperationStage? activity, bool force = false}) {
+    if (activity != null) _activity = activity;
+    final remaining = 100000 - (_clock.elapsedMicroseconds - _lastReport);
+    if (force || remaining <= 0) {
+      _publish();
+    } else {
+      // Keep a fast item visible even when the next file or record save stalls.
+      _pending ??= Timer(Duration(microseconds: remaining), _publish);
+    }
+  }
+
+  void processedItem({int succeeded = 0, int failed = 0, int skipped = 0}) {
+    processed++;
+    this.succeeded += succeeded;
+    this.failed += failed;
+    this.skipped += skipped;
+    report();
+  }
+
+  void confirm({int succeeded = 0, int failed = 0}) {
+    this.succeeded += succeeded;
+    this.failed += failed;
+    report(force: true);
+  }
+
+  void _publish() {
+    _pending?.cancel();
+    _pending = null;
+    _lastReport = _clock.elapsedMicroseconds;
+    OperationProgress.reportItems((
+      processed: processed,
+      total: total,
+      succeeded: succeeded,
+      failed: failed,
+      skipped: skipped,
+      activity: _activity,
+    ));
+  }
+
+  void finish() => _publish();
+}
+
 class _Run {
   _Run(this.clock);
   final Stopwatch clock;
@@ -65,6 +122,7 @@ class _Run {
   int networkRetries = 0;
   bool networkActive = true;
   ({int active, int total})? httpConnections;
+  BtSources? btSources;
   late StoragePlan storage;
   void stop() {
     stopped = true;
@@ -84,6 +142,56 @@ class _Run {
     } finally {
       timer.cancel();
     }
+  }
+}
+
+class _DownloadTasks extends MapBase<String, DownloadTask> {
+  final _entries = <String, DownloadTask>{};
+  List<String>? _orderedIds;
+
+  @override
+  DownloadTask? operator [](Object? key) => _entries[key];
+
+  @override
+  void operator []=(String key, DownloadTask value) {
+    if (_entries[key]?.createdAt != value.createdAt) _orderedIds = null;
+    _entries[key] = value;
+  }
+
+  @override
+  Iterable<String> get keys => _entries.keys;
+
+  @override
+  Iterable<DownloadTask> get values => _entries.values;
+
+  @override
+  int get length => _entries.length;
+
+  @override
+  bool containsKey(Object? key) => _entries.containsKey(key);
+
+  @override
+  DownloadTask? remove(Object? key) {
+    final removed = _entries.remove(key);
+    if (removed != null) _orderedIds = null;
+    return removed;
+  }
+
+  @override
+  void clear() {
+    _entries.clear();
+    _orderedIds = null;
+  }
+
+  List<DownloadTask> get ordered {
+    final ids = _orderedIds ??=
+        (_entries.values.toList()
+              ..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
+            .map((task) => task.id)
+            .toList(growable: false);
+    // Return a fresh snapshot containing the latest progress. Callers can
+    // filter or sort it without changing the manager's cached order.
+    return [for (final id in ids) _entries[id]!];
   }
 }
 
@@ -123,7 +231,8 @@ class DownloadManager extends ChangeNotifier {
   final Stopwatch Function() transferClock;
   final Future<void> Function(DownloadActivity activity)? foreground;
   late final SpaceBudget space;
-  final _tasks = <String, DownloadTask>{}, _running = <String, _Run>{};
+  final _tasks = _DownloadTasks();
+  final _running = <String, _Run>{};
   final _unsettledRuns = <_Run>{};
   final _controls = <String, AsyncGate>{};
   final _guestDownloadBatches = <String, _GuestDownloadBatch>{};
@@ -155,13 +264,21 @@ class DownloadManager extends ChangeNotifier {
         : null;
   }
 
+  BtSources? btSources(String id) {
+    final run = _running[id];
+    return run != null &&
+            !run.stopped &&
+            run.networkActive &&
+            _tasks[id]?.status == DownloadStatus.running
+        ? run.btSources
+        : null;
+  }
+
   int get _networkCount =>
       _running.values.where((run) => run.networkActive).length;
   bool _closing = false, _initialised = false;
   String? lastError;
-  List<DownloadTask> get tasks =>
-      _tasks.values.toList()
-        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  List<DownloadTask> get tasks => _tasks.ordered;
   Iterable<DownloadTask> get activeTasks =>
       _tasks.values.where((task) => task.active);
   int get activeCount => _running.length;
@@ -196,9 +313,10 @@ class DownloadManager extends ChangeNotifier {
       } else {
         _playbackHolds[id] = count;
       }
-      if (source != null) {
-        await cleanups.release(source.cleanup);
-        await cleanups.ready(source.cleanup);
+      final retainedSource = source;
+      if (retainedSource != null) {
+        await cleanups.release(retainedSource.cleanup);
+        await cleanups.ready(retainedSource.cleanup);
       }
       if (!_closing) {
         await _pumpGate.run(() async {
@@ -386,6 +504,24 @@ class DownloadManager extends ChangeNotifier {
         _interrupted.add(task.id);
         task = task.update({'status': 'paused', 'phase': '', 'speed': 0});
       }
+      if (store.data.integer('baiduConnectionsPolicy') < 1 &&
+          BaiduShareRoute.usesAccountDownload(task.spec) &&
+          task.spec.profile != 'baidu_direct' &&
+          task.status == DownloadStatus.paused &&
+          task.connections == 1) {
+        task = task.update({
+          'connections': settings.connectionsFor(
+            task.spec.platform,
+            task.spec.profile,
+          ),
+          if (task.spec.needsPreparation)
+            'connectionOptions': {
+              ...task.connectionOptions,
+              for (final profile in ['baidu', 'baidu_direct'])
+                profile: settings.connectionsFor(CloudPlatform.baidu, profile),
+            },
+        });
+      }
       loaded[task.id] = task;
     }
     _interrupted.removeWhere(
@@ -422,6 +558,7 @@ class DownloadManager extends ChangeNotifier {
     _progressFlush?.cancel();
     _progressFlush = null;
     return store.change((draft) {
+      draft['baiduConnectionsPolicy'] = 1;
       final removed = {?removedDownload, ...removedDownloads};
       final retained = _tasks.values
           .where((task) => !removed.contains(task.id))
@@ -476,11 +613,13 @@ class DownloadManager extends ChangeNotifier {
     Json fields, {
     bool persist = true,
     bool progress = false,
+    bool connectionsChanged = false,
   }) async {
     final old = _tasks[id];
     if (old == null) return;
-    _tasks[id] = old.update(fields);
-    notifyListeners();
+    final updated = old.update(fields);
+    if (!identical(old, updated)) _tasks[id] = updated;
+    if (!identical(old, updated) || connectionsChanged) notifyListeners();
     if (persist) {
       if (progress) {
         _progressFlush ??= Timer(const Duration(seconds: 2), () {
@@ -580,6 +719,11 @@ class DownloadManager extends ChangeNotifier {
     final target = destination ?? options.destination;
     final cacheRoot = await files.downloadCacheRoot(target);
     final tasks = <DownloadTask>[];
+    final ed2kIdentities = <String>{
+      for (final existing in _tasks.values)
+        if (!existing.terminal && existing.spec.isEd2k)
+          '${Ed2kLink.parse(existing.spec.url).hash}:${Ed2kLink.parse(existing.spec.url).size}',
+    };
     for (final spec in specs) {
       if (tasks.isNotEmpty && tasks.length % 128 == 0) {
         await RequestScope.wait(Duration.zero);
@@ -597,6 +741,13 @@ class DownloadManager extends ChangeNotifier {
       } else {
         _validateDownloadUrl(spec);
       }
+      if (spec.isEd2k) {
+        final file = Ed2kLink.parse(spec.url);
+        require(
+          ed2kIdentities.add('${file.hash}:${file.size}'),
+          '相同 ED2K 文件已有下载任务，请继续原任务',
+        );
+      }
       final safeSpec = spec.copyWith(
         fileName: safeFileName(spec.fileName),
         relativePath: safeRelativePath(spec.relativePath),
@@ -607,11 +758,15 @@ class DownloadManager extends ChangeNotifier {
           id: newId(),
           spec: safeSpec,
           createdAt: DateTime.now().millisecondsSinceEpoch,
-          total: spec.expectedSize,
-          connections: connectionSettings.connectionsFor(
-            safeSpec.platform,
-            safeSpec.profile,
-          ),
+          total: spec.isEd2k
+              ? Ed2kLink.parse(spec.url).size
+              : spec.expectedSize,
+          connections: spec.isEd2k
+              ? 1
+              : connectionSettings.connectionsFor(
+                  safeSpec.platform,
+                  safeSpec.profile,
+                ),
           retries: options.retries,
           speedLimit: options.speedLimit,
           destination: target,
@@ -681,6 +836,18 @@ class DownloadManager extends ChangeNotifier {
   });
 
   void _validateDownloadUrl(DownloadSpec spec) {
+    if (spec.isEd2k) {
+      final link = Ed2kLink.parse(spec.url);
+      require(
+        spec.headers.isEmpty && spec.networkPolicy == null,
+        'ED2K 不支持 HTTP 请求头',
+      );
+      require(
+        spec.expectedSize == 0 || spec.expectedSize == link.size,
+        'ED2K 文件大小与链接不一致',
+      );
+      return;
+    }
     require(
       spec.source?['kind'] != 'remoteSource' || spec.networkPolicy != null,
       '来源下载权限缺失，请重新解析链接',
@@ -703,9 +870,9 @@ class DownloadManager extends ChangeNotifier {
     final indices = selected.toSet().toList()..sort();
     require(
       indices.isNotEmpty &&
-          indices.length <= 1000 &&
+          indices.length <= maxTorrentFiles &&
           indices.every((i) => i >= 0 && i < info.files.length),
-      '每次请选择 1–1000 个文件',
+      '每次请选择 1–$maxTorrentFiles 个文件',
     );
     if (confirmDownload != null) await _confirmDownload();
     return _enqueueTorrent(info, indices);
@@ -715,47 +882,57 @@ class DownloadManager extends ChangeNotifier {
       _pumpGate.run(() async {
         require(!_closing, '应用正在退出');
         RequestScope.checkpoint();
+        final selectedIndices = indices.toSet();
         require(
           !_tasks.values.any(
             (t) =>
                 !t.terminal &&
                 t.spec.torrent?.str('hash') == info.hash &&
-                indices.contains(t.spec.torrent!.integer('index')),
+                selectedIndices.contains(t.spec.torrent!.integer('index')),
           ),
           '选中的文件已有下载任务，请在下载页继续',
         );
-        final ids = <String>[], options = settings;
+        final tasks = <DownloadTask>[], options = settings;
         final cacheRoot = await files.downloadCacheRoot(options.destination);
         for (final index in indices) {
+          if (tasks.isNotEmpty && tasks.length % 128 == 0) {
+            await RequestScope.wait(Duration.zero);
+            require(!_closing, '应用正在退出');
+          }
           final file = info.files[index], id = newId();
-          ids.add(id);
-          _tasks[id] = DownloadTask(
-            id: id,
-            createdAt: DateTime.now().millisecondsSinceEpoch,
-            spec: DownloadSpec(
-              url: info.magnet,
-              fileName: safeFileName(file.name),
-              relativePath: safeRelativePath(file.directory),
-              expectedSize: file.size,
-              torrent: {
-                'hash': info.hash,
-                'index': file.index,
-                'path': file.path,
-              },
+          tasks.add(
+            DownloadTask(
+              id: id,
+              createdAt: DateTime.now().millisecondsSinceEpoch,
+              spec: DownloadSpec(
+                url: info.magnet,
+                fileName: safeFileName(file.name),
+                relativePath: safeRelativePath(file.directory),
+                expectedSize: file.size,
+                torrent: {
+                  'hash': info.hash,
+                  'index': file.index,
+                  'path': file.path,
+                },
+              ),
+              total: file.size,
+              connections: 80,
+              retries: options.retries,
+              speedLimit: options.speedLimit,
+              destination: options.destination,
+              directOutput: files.directDownloads,
             ),
-            total: file.size,
-            connections: 80,
-            retries: options.retries,
-            speedLimit: options.speedLimit,
-            destination: options.destination,
-            directOutput: files.directDownloads,
           );
+        }
+        RequestScope.checkpoint();
+        for (final task in tasks) {
+          _tasks[task.id] = task;
         }
         try {
           await _persist(
             cacheRoots: {
               if (cacheRoot != null)
-                for (final id in ids) id: cacheRoot,
+                for (final task in tasks) task.id: cacheRoot,
             },
             addedTorrents: {
               info.hash: {
@@ -766,14 +943,14 @@ class DownloadManager extends ChangeNotifier {
             },
           );
         } catch (_) {
-          for (final id in ids) {
-            _tasks.remove(id);
+          for (final task in tasks) {
+            _tasks.remove(task.id);
           }
           rethrow;
         }
         notifyListeners();
         _schedule();
-        return ids;
+        return tasks.map((task) => task.id).toList();
       });
 
   void _schedule() {
@@ -789,6 +966,10 @@ class DownloadManager extends ChangeNotifier {
                 (t) =>
                     t.status == DownloadStatus.pending &&
                     !_running.containsKey(t.id) &&
+                    (!t.spec.isEd2k ||
+                        !_running.keys.any(
+                          (id) => _tasks[id]?.spec.isEd2k == true,
+                        )) &&
                     (!t.spec.isTorrent ||
                         (_torrentPlaybackHolds == 0 &&
                             !_running.keys.any(
@@ -1059,7 +1240,7 @@ class DownloadManager extends ChangeNotifier {
     });
     _schedule();
   });
-  Future<void> _control(String id, Future<void> Function() action) =>
+  Future<T> _control<T>(String id, Future<T> Function() action) =>
       (_controls[id] ??= AsyncGate()).run(action);
   Future<void> _stop(String id) async {
     final run = _running[id];
@@ -1287,75 +1468,145 @@ class DownloadManager extends ChangeNotifier {
     try {
       // Hold scheduling so stopping one writer cannot start another selected
       // queued task before its pause or deletion is processed.
-      return await _pumpGate.run(() async {
-        if (action != DownloadBatchAction.delete) {
-          return _changeStatuses(selected, action);
-        }
-        final succeeded = <String>[], skipped = <String>[];
-        final failed = <String, Object>{};
-        var cancelled = false;
-        for (var index = 0; index < selected.length; index++) {
-          final id = selected[index];
-          if (_closing || RequestScope.current?.isCancelled == true) {
-            cancelled = true;
-            break;
-          }
-          if (action == DownloadBatchAction.delete && !deleteFiles) {
-            final chunk = selected.sublist(
-              index,
-              (index + 64).clamp(0, selected.length),
-            );
-            final result = await _deleteIdleRecords(chunk);
-            if (result != null) {
-              succeeded.addAll(result.succeeded);
-              skipped.addAll(result.skipped);
-              failed.addAll(result.failed);
-              index += chunk.length - 1;
-              if (result.cancelled) {
-                cancelled = true;
-                break;
-              }
-              continue;
-            }
-          }
-          final task = _tasks[id];
-          if (task == null || !action.accepts(task)) {
-            skipped.add(id);
-            continue;
-          }
-          try {
-            switch (action) {
-              case DownloadBatchAction.pause:
-                await pause(id);
-              case DownloadBatchAction.resume:
-                await resume(id);
-              case DownloadBatchAction.delete:
-                await delete(id, deleteFile: deleteFiles);
-            }
-            succeeded.add(id);
-          } catch (e) {
-            failed[id] = e;
-          }
-        }
-        return DownloadBatchResult(
-          succeeded: succeeded,
-          skipped: skipped,
-          failed: failed,
-          cancelled: cancelled || RequestScope.current?.isCancelled == true,
-        );
-      });
+      if (action != DownloadBatchAction.delete) {
+        return await _pumpGate.run(() => _changeStatuses(selected, action));
+      }
+      return await _trackDeletion(
+        selected.length,
+        (progress) =>
+            _pumpGate.run(() => _deleteBatch(selected, deleteFiles, progress)),
+        deleteFiles: deleteFiles,
+      );
     } finally {
       _schedule();
     }
   }
 
-  Future<void> delete(
+  Future<T> _trackDeletion<T>(
+    int total,
+    Future<T> Function(_DeletionProgress progress) action, {
+    required bool deleteFiles,
+  }) {
+    final progress = _DeletionProgress(total);
+    return OperationProgress.step<T>(
+      deleteFiles
+          ? OperationStage.deleteDownloads
+          : OperationStage.removeDownloadRecords,
+      () async {
+        progress.report(force: true);
+        try {
+          return await action(progress);
+        } finally {
+          progress.finish();
+        }
+      },
+      statusForResult: (_) =>
+          progress.cancelled ||
+              _closing ||
+              RequestScope.current?.isCancelled == true
+          ? OperationStepStatus.cancelled
+          : progress.failed > 0
+          ? OperationStepStatus.failed
+          : OperationStepStatus.completed,
+    );
+  }
+
+  Future<DownloadBatchResult> _deleteBatch(
+    List<String> selected,
+    bool deleteFiles,
+    _DeletionProgress progress,
+  ) async {
+    final succeeded = <String>[], skipped = <String>[];
+    final failed = <String, Object>{};
+    var cancelled = false;
+    for (var index = 0; index < selected.length; index++) {
+      final id = selected[index];
+      if (_closing || RequestScope.current?.isCancelled == true) {
+        cancelled = true;
+        break;
+      }
+      final chunk = selected.sublist(
+        index,
+        (index + 64).clamp(0, selected.length),
+      );
+      final result = await _deleteIdleRecords(
+        chunk,
+        deleteFiles: deleteFiles,
+        progress: progress,
+      );
+      if (result != null) {
+        succeeded.addAll(result.succeeded);
+        skipped.addAll(result.skipped);
+        failed.addAll(result.failed);
+        index += chunk.length - 1;
+        if (result.cancelled) {
+          cancelled = true;
+          break;
+        }
+        continue;
+      }
+      try {
+        final removed = await _deleteTask(
+          id,
+          deleteFile: deleteFiles,
+          progress: progress,
+        );
+        if (removed == null) {
+          cancelled = true;
+          break;
+        }
+        if (removed) {
+          succeeded.add(id);
+          progress.processedItem(succeeded: 1);
+        } else {
+          skipped.add(id);
+          progress.processedItem(skipped: 1);
+        }
+      } catch (e) {
+        failed[id] = e;
+        progress.processedItem(failed: 1);
+      }
+    }
+    progress.cancelled = cancelled || RequestScope.current?.isCancelled == true;
+    return DownloadBatchResult(
+      succeeded: succeeded,
+      skipped: skipped,
+      failed: failed,
+      cancelled: progress.cancelled,
+    );
+  }
+
+  Future<void> delete(String id, {bool deleteFile = false}) =>
+      _trackDeletion<void>(1, (progress) async {
+        try {
+          final removed = await _deleteTask(
+            id,
+            deleteFile: deleteFile,
+            progress: progress,
+          );
+          if (removed == null) {
+            progress.cancelled = true;
+          } else {
+            progress.processedItem(
+              succeeded: removed ? 1 : 0,
+              skipped: removed ? 0 : 1,
+            );
+          }
+        } catch (_) {
+          progress.processedItem(failed: 1);
+          rethrow;
+        }
+      }, deleteFiles: deleteFile);
+
+  Future<bool?> _deleteTask(
     String id, {
-    bool deleteFile = false,
+    required bool deleteFile,
+    required _DeletionProgress progress,
   }) => _control(id, () async {
+    if (_closing || RequestScope.current?.isCancelled == true) return null;
     _interrupted.remove(id);
     var current = _tasks[id];
-    if (current == null) return;
+    if (current == null) return false;
     require(!_playbackHolds.containsKey(id), '请先关闭此任务的播放器再删除');
     DiagnosticLog.event(
       'download.remove_start',
@@ -1365,6 +1616,14 @@ class DownloadManager extends ChangeNotifier {
         'deleteFile': deleteFile,
       },
     );
+    if (current.active ||
+        current.status != DownloadStatus.completed &&
+            _running.containsKey(id)) {
+      progress.report(
+        activity: OperationStage.stopDownloads,
+        force: progress.total == 1,
+      );
+    }
     if (current.active) {
       _running[id]?.stop();
       await _update(id, {'status': 'paused', 'speed': 0});
@@ -1375,16 +1634,16 @@ class DownloadManager extends ChangeNotifier {
       if (current.status != DownloadStatus.completed) await _stop(id);
       current = _tasks[id]!;
       if (deleteFile) {
-        var savedPath = current.savedPath;
-        if (savedPath == null && current.directOutput) {
-          final target = await files.inspectDownloadTarget(id);
-          if (target != null &&
-              (target.boolean('published') || target.boolean('publishing'))) {
-            savedPath = await _finishStoredTarget(id, target);
-          }
-        }
-        await files.delete(savedPath);
+        progress.report(
+          activity: OperationStage.deleteFiles,
+          force: progress.total == 1,
+        );
+        await _deleteSavedFile(current);
       }
+      progress.report(
+        activity: OperationStage.removeDownloadRecords,
+        force: true,
+      );
       _tasks.remove(id);
       // Once writers are stopped, persist removal before slow native or
       // filesystem cleanup. The durable markers retry after a restart.
@@ -1395,8 +1654,13 @@ class DownloadManager extends ChangeNotifier {
         fields: {'ref': DiagnosticLog.reference(id)},
       );
       notifyListeners();
-      _background(_drainRemovedDownloads());
-      _background(_readyRemovedCleanup(current.spec.cleanup));
+      _background(OperationProgress.detached(_drainRemovedDownloads));
+      _background(
+        OperationProgress.detached(
+          () => _readyRemovedCleanup(current!.spec.cleanup),
+        ),
+      );
+      return true;
     } catch (e, stack) {
       DiagnosticLog.error(
         'download.remove_failed',
@@ -1412,7 +1676,23 @@ class DownloadManager extends ChangeNotifier {
     }
   });
 
-  Future<DownloadBatchResult?> _deleteIdleRecords(List<String> ids) async {
+  Future<void> _deleteSavedFile(DownloadTask task) async {
+    var savedPath = task.savedPath;
+    if (savedPath == null && task.directOutput) {
+      final target = await files.inspectDownloadTarget(task.id);
+      if (target != null &&
+          (target.boolean('published') || target.boolean('publishing'))) {
+        savedPath = await _finishStoredTarget(task.id, target);
+      }
+    }
+    await files.delete(savedPath);
+  }
+
+  Future<DownloadBatchResult?> _deleteIdleRecords(
+    List<String> ids, {
+    bool deleteFiles = false,
+    required _DeletionProgress progress,
+  }) async {
     bool idle() => ids.every((id) {
       final task = _tasks[id];
       return task == null ||
@@ -1441,27 +1721,73 @@ class DownloadManager extends ChangeNotifier {
         return;
       }
       final removed = <String, DownloadTask>{};
+      var cancelled = false;
+      progress.report(
+        activity: deleteFiles
+            ? OperationStage.deleteFiles
+            : OperationStage.removeDownloadRecords,
+        force: true,
+      );
       for (final id in ids) {
+        if (_closing || RequestScope.current?.isCancelled == true) {
+          cancelled = true;
+          break;
+        }
         final task = _tasks[id];
         if (task == null) {
           skipped.add(id);
+          progress.processedItem(skipped: 1);
           continue;
         }
         if (_playbackHolds.containsKey(id)) {
           failed[id] = const AppException('请先关闭此任务的播放器再删除');
+          progress.processedItem(failed: 1);
           continue;
         }
+        if (deleteFiles) {
+          try {
+            await _deleteSavedFile(task);
+          } catch (error, stack) {
+            failed[id] = error;
+            progress.processedItem(failed: 1);
+            _tasks[id] = task.update({
+              'error': error is AppException
+                  ? error.message
+                  : '删除未完成，记录已保留，请重试',
+            });
+            DiagnosticLog.error(
+              'download.remove_failed',
+              error,
+              stack,
+              fields: {'ref': DiagnosticLog.reference(id), 'deleteFile': true},
+            );
+            continue;
+          }
+        }
         removed[id] = task;
+        progress.processedItem();
       }
-      if (removed.isNotEmpty) {
+      if (removed.isNotEmpty || deleteFiles && failed.isNotEmpty) {
+        progress.report(
+          activity: OperationStage.removeDownloadRecords,
+          force: true,
+        );
         try {
           await _persist(
             removedDownloads: removed.keys.toList(),
             removedCleanups: removed.values.map((t) => t.spec.cleanup).toList(),
           );
         } catch (error) {
+          progress.confirm(failed: removed.length);
           for (final id in removed.keys) {
             failed[id] = error;
+            if (deleteFiles) {
+              _tasks[id] = _tasks[id]!.update({
+                'error': error is AppException
+                    ? error.message
+                    : '删除未完成，记录已保留，请重试',
+              });
+            }
           }
           removed.clear();
           notifyListeners();
@@ -1478,16 +1804,19 @@ class DownloadManager extends ChangeNotifier {
             'download.records_removed',
             fields: {'count': removed.length},
           );
+          progress.confirm(succeeded: removed.length);
           notifyListeners();
-          _background(_drainRemovedDownloads());
-          _background(cleanups.drain());
+          _background(OperationProgress.detached(_drainRemovedDownloads));
+          _background(OperationProgress.detached(cleanups.drain));
+        } else if (deleteFiles && failed.isNotEmpty) {
+          notifyListeners();
         }
       }
       result = DownloadBatchResult(
         succeeded: removed.keys.toList(),
         skipped: skipped,
         failed: failed,
-        cancelled: RequestScope.current?.isCancelled == true,
+        cancelled: cancelled || RequestScope.current?.isCancelled == true,
       );
     }
 
@@ -1506,33 +1835,73 @@ class DownloadManager extends ChangeNotifier {
     final ids = (store.data['downloadRemovals'] as List? ?? [])
         .map((value) => '$value')
         .toList();
-    for (final id in ids) {
-      if (_closing) return;
-      if (_tasks.containsKey(id)) continue;
-      try {
-        await engine.remove(id);
-        if (_tasks.containsKey(id)) continue;
-        await _cleanRemovedTarget(id);
-        await _deleteCache(id);
-        await store.change((draft) {
+    final removed = <String>{}, nativeRemoved = <String>{};
+    Future<void> commit() async {
+      if (removed.isEmpty && nativeRemoved.isEmpty) return;
+      await store.change((draft) {
+        final cleaned = removed.where((id) => !_tasks.containsKey(id)).toSet();
+        final nativeCleaned = nativeRemoved
+            .where((id) => !_tasks.containsKey(id))
+            .toSet();
+        if (cleaned.isNotEmpty) {
           draft['downloadRemovals'] = (draft['downloadRemovals'] as List? ?? [])
-              .where((value) => value != id)
+              .where((value) => !cleaned.contains(value))
               .toList();
-          final roots = draft.obj('downloadCacheRoots')..remove(id);
+          final roots = draft.obj('downloadCacheRoots')
+            ..removeWhere((id, _) => cleaned.contains(id));
           if (draft.containsKey('downloadCacheRoots')) {
             draft['downloadCacheRoots'] = roots;
           }
-        });
-      } catch (error, stack) {
-        DiagnosticLog.error(
-          'download.cleanup_deferred',
-          error,
-          stack,
-          fields: {'ref': DiagnosticLog.reference(id)},
-        );
-        // The next removal or app start retries this task. Exported files are
-        // never touched here, even when the original URI is no longer usable.
+          if (draft.containsKey('completedCacheRemovals')) {
+            draft['completedCacheRemovals'] =
+                (draft['completedCacheRemovals'] as List? ?? [])
+                    .where((value) => !cleaned.contains(value))
+                    .toList();
+          }
+        }
+        if (nativeCleaned.isNotEmpty) {
+          draft['nativeRemovals'] = (draft['nativeRemovals'] as List? ?? [])
+              .where((value) => !nativeCleaned.contains(value))
+              .toList();
+        }
+      });
+      removed.clear();
+      nativeRemoved.clear();
+    }
+
+    var processed = 0;
+    try {
+      for (final id in ids) {
+        if (_closing) break;
+        if (_tasks.containsKey(id)) continue;
+        try {
+          if (await engine.remove(id, deferPersistence: true)) {
+            nativeRemoved.add(id);
+          }
+          if (_tasks.containsKey(id)) continue;
+          await _cleanRemovedTarget(id);
+          await _deleteCache(id);
+          removed.add(id);
+        } catch (error, stack) {
+          DiagnosticLog.error(
+            'download.cleanup_deferred',
+            error,
+            stack,
+            fields: {'ref': DiagnosticLog.reference(id)},
+          );
+          // Failed items retain their marker for the next removal or restart.
+          // Exported files are never touched here.
+        }
+        if (++processed >= 64) {
+          await commit();
+          processed = 0;
+          await Future<void>.delayed(Duration.zero);
+        }
       }
+    } finally {
+      // Flush a partial batch on shutdown as well. A failed commit leaves the
+      // markers intact, so repeating an already-finished cleanup is safe.
+      await commit();
     }
   });
 
@@ -1943,7 +2312,21 @@ class DownloadManager extends ChangeNotifier {
             'phase': _tasks[id]?.phase,
             if (e is HttpRequestFailure) 'kind': e.kind,
             if (e is HttpRequestFailure) 'status': e.status ?? 0,
-            if (e is DownloadSpaceException) 'volume': e.volume,
+            if (e is DownloadSpaceException) ...{
+              'volume': e.volume,
+              'disk': _spaceFailureDisk(run, e),
+              'spaceRole': run.storage.cache.id == run.storage.target.id
+                  ? 'cache_and_target'
+                  : e.volume == run.storage.cache.id
+                  ? 'cache'
+                  : 'target',
+              'sameVolume': run.storage.cache.id == run.storage.target.id,
+              'copyOnSave': run.storage.copyOnSave,
+              'freeBytes': e.freeBytes,
+              'requiredBytes': e.requiredBytes,
+              'reservedBytes': e.reservedBytes,
+              'marginBytes': e.marginBytes,
+            },
           },
         );
       }
@@ -2055,14 +2438,24 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
+  String? _spaceFailureDisk(_Run run, DownloadSpaceException error) {
+    if (!Platform.isWindows || error.volume == null) return null;
+    final volume = error.volume == run.storage.cache.id
+        ? run.storage.cache
+        : run.storage.target;
+    // Only retain the drive letter, never the directory or UNC share name.
+    final root = p.rootPrefix(volume.path);
+    return RegExp(r'^[A-Za-z]:[\\/]').hasMatch(root)
+        ? root.substring(0, 2).toUpperCase()
+        : null;
+  }
+
   String _spaceFailureMessage(_Run run, DownloadSpaceException error) {
-    if (!Platform.isWindows || error.volume == null) return error.message;
+    final disk = _spaceFailureDisk(run, error);
+    if (disk == null) return error.message;
     final cacheOnly =
         error.volume == run.storage.cache.id &&
         run.storage.cache.id != run.storage.target.id;
-    final volume = cacheOnly ? run.storage.cache : run.storage.target;
-    final disk = p.rootPrefix(volume.path).replaceFirst(RegExp(r'[\\/]+$'), '');
-    if (disk.isEmpty) return error.message;
     final location = cacheOnly ? '下载缓存' : '下载目录';
     return '$location所在磁盘（$disk）空间不足，进度已保留，请释放空间后继续';
   }
@@ -2087,7 +2480,7 @@ class DownloadManager extends ChangeNotifier {
       if (preserveProgress) {
         require(
           previous.spec.profile != 'baidu_preview' ||
-              fresh.profile == 'baidu_preview',
+              {'baidu_preview', 'baidu_direct'}.contains(fresh.profile),
           '预览通道暂不可用，保留当前下载地址',
         );
         final probe = await http.probeDownload(
@@ -2124,14 +2517,18 @@ class DownloadManager extends ChangeNotifier {
       try {
         await _update(id, {
           'spec': spec,
-          'connections': BaiduShareRoute.usesAccountDownload(fresh)
-              ? 1
+          'connections':
+              fresh.profile == 'baidu_direct' &&
+                  previous.spec.profile != 'baidu_direct'
+              ? settings.connectionsFor(fresh.platform, profile)
               : BaiduShareRoute.usesPublicDownload(previous.spec) &&
                     previous.spec.profile !=
                         BaiduShareRoute.publicDownloadProfile
               ? settings.connectionsFor(fresh.platform, profile)
               : previous.spec.needsPreparation
-              ? previous.connectionOptions[profile ?? 'default'] ??
+              ? previous.connectionOptions[profile == 'baidu_preview'
+                        ? 'baidu'
+                        : profile ?? 'default'] ??
                     previous.connections
               : previous.connections,
           'connectionOptions': <String, int>{},
@@ -2245,6 +2642,7 @@ class DownloadManager extends ChangeNotifier {
     run.httpConnections = null;
     var task = _tasks[id]!;
     if (task.spec.isTorrent) return _torrent(id, run);
+    if (task.spec.isEd2k) return _ed2k(id, run);
     _validateDownloadUrl(task.spec);
     // Choose once per transfer so the probe and native engine use the same
     // endpoint even if settings change while the connection is being opened.
@@ -2278,7 +2676,6 @@ class DownloadManager extends ChangeNotifier {
     await _update(id, {
       'identity': probe.identity.toJson(),
       'total': total,
-      if (BaiduShareRoute.usesAccountDownload(task.spec)) 'connections': 1,
       if (BaiduShareRoute.usesPublicDownload(task.spec) &&
           task.spec.profile != BaiduShareRoute.publicDownloadProfile) ...{
         'spec': task.spec
@@ -2360,6 +2757,7 @@ class DownloadManager extends ChangeNotifier {
       final nativeTotal = state.integer('total'),
           downloaded = state.integer('downloaded');
       final connections = state.integer('totalConnections');
+      final previousConnections = run.httpConnections;
       run.httpConnections = connections > 0
           ? (
               active: state.str('status') == 'running'
@@ -2423,19 +2821,33 @@ class DownloadManager extends ChangeNotifier {
       if (now - persisted >= 1500) {
         await _reserve(id, run, currentTotal, downloaded);
         persisted = now;
-        await _update(id, {
-          'total': currentTotal,
-          'downloaded': downloaded,
-          'speed': state.integer('speed'),
-          if (aliyun) 'phase': aliyunPhase,
-        }, progress: true);
+        await _update(
+          id,
+          {
+            'total': currentTotal,
+            'downloaded': downloaded,
+            'speed': state.str('status') == 'running'
+                ? state.integer('speed').clamp(0, 1 << 60)
+                : 0,
+            if (aliyun) 'phase': aliyunPhase,
+          },
+          progress: true,
+          connectionsChanged: previousConnections != run.httpConnections,
+        );
       } else {
-        await _update(id, {
-          'total': currentTotal,
-          'downloaded': downloaded,
-          'speed': state.integer('speed'),
-          if (aliyun) 'phase': aliyunPhase,
-        }, persist: false);
+        await _update(
+          id,
+          {
+            'total': currentTotal,
+            'downloaded': downloaded,
+            'speed': state.str('status') == 'running'
+                ? state.integer('speed').clamp(0, 1 << 60)
+                : 0,
+            if (aliyun) 'phase': aliyunPhase,
+          },
+          persist: false,
+          connectionsChanged: previousConnections != run.httpConnections,
+        );
       }
       if (state.str('status') == 'done') {
         final file = target?.file ?? File(state.str('path'));
@@ -2554,6 +2966,90 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
+  Future<File> _ed2k(String id, _Run run) async {
+    final task = _tasks[id]!;
+    _validateDownloadUrl(task.spec);
+    final link = Ed2kLink.parse(task.spec.url);
+    await _reserve(id, run, link.size, task.downloaded);
+    run.check();
+    final target = await _openDirectTarget(id, run);
+    run.check();
+    await engine.begin({
+      'id': id,
+      'url': link.url,
+      'connections': 1,
+      'retries': task.retries,
+      'speedLimit': task.speedLimit,
+      if (target != null) ...target.engineArguments,
+    });
+    var persisted = 0;
+    while (true) {
+      run.check();
+      final state = await engine.snapshot(id);
+      require(
+        state.integer('total') == link.size || state.integer('total') == 0,
+        'ED2K 文件长度与链接不一致',
+      );
+      final downloaded = state.integer('downloaded').clamp(0, link.size);
+      final peers = state.integer('totalConnections').clamp(0, 100000);
+      final active = state.integer('activeConnections').clamp(0, peers);
+      run.httpConnections = (active: active, total: peers);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final persist = now - persisted >= 1500;
+      if (persist) {
+        persisted = now;
+        await _reserve(id, run, link.size, downloaded);
+      }
+      await _update(
+        id,
+        {
+          'total': link.size,
+          'downloaded': downloaded,
+          'speed': state.str('status') == 'running'
+              ? state.integer('speed').clamp(0, 1 << 60)
+              : 0,
+          'phase': downloaded == link.size
+              ? 'ED2K 校验分片'
+              : active > 0
+              ? 'ED2K 分片下载'
+              : peers > 0
+              ? 'ED2K 等待来源排队'
+              : 'ED2K 正在查找来源',
+        },
+        persist: persist,
+        progress: true,
+      );
+      if (state.str('status') == 'done') {
+        // Drain and close native writers before publishing the document.
+        await engine.pause(id);
+        run.check();
+        final file = target?.file ?? File(state.str('path'));
+        require(
+          await file.exists() && await file.length() == link.size,
+          'ED2K 下载结果不完整或目标已失效',
+        );
+        if (target != null) {
+          require(state.str('path') == target.path, 'ED2K 下载目标已失效');
+        } else {
+          final root = await engine.taskDirectory(id).resolveSymbolicLinks();
+          require(
+            p.isWithin(root, await file.resolveSymbolicLinks()),
+            'ED2K 下载路径无效',
+          );
+        }
+        return file;
+      }
+      if (state.str('status') == 'error') {
+        throw AppException(state.str('error').ifEmpty('ED2K 下载失败，请重试'));
+      }
+      if (state.str('status') == 'pause') {
+        run.check();
+        throw const AppException('ED2K 下载已暂停，请继续任务');
+      }
+      await run.delay(const Duration(milliseconds: 350));
+    }
+  }
+
   Future<File> _torrent(String id, _Run run) async {
     final task = _tasks[id]!, selection = _tasks[id]!.spec.torrent!;
     final metadata = store.data.obj('torrents').obj(selection.str('hash'));
@@ -2575,6 +3071,7 @@ class DownloadManager extends ChangeNotifier {
       'url': task.spec.url,
       'torrentData': data,
       'torrentIndex': selection.integer('index'),
+      'btUploadLimit': settings.btUploadLimit,
       'connections': task.connections,
       'retries': task.retries,
       'speedLimit': task.speedLimit,
@@ -2601,15 +3098,22 @@ class DownloadManager extends ChangeNotifier {
           overhead: boundaryBytes,
         );
       }
+      final previousSources = run.btSources;
+      run.btSources = state['bt'] is Map
+          ? BtSources.fromJson(state.obj('bt'))
+          : null;
       await _update(
         id,
         {
           'downloaded': downloaded.clamp(0, task.total),
-          'speed': state.integer('speed'),
+          'speed': state.str('status') == 'running'
+              ? state.integer('speed').clamp(0, 1 << 60)
+              : 0,
           'phase': downloaded == 0 ? '连接做种者 / 校验分片' : 'BT 分片下载',
         },
         persist: persist,
         progress: true,
+        connectionsChanged: previousSources != run.btSources,
       );
       if (state.str('status') == 'done') {
         if (target != null) {

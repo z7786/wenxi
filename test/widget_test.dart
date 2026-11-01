@@ -1188,7 +1188,7 @@ void main() {
     await render(tester, const Size(393, 864), 0);
     for (final (index, pageKey) in [
       (0, 'parse'),
-      (1, 'resource-search-results'),
+      (1, 'resource-catalog-home'),
       (2, 'cloud-list'),
       (3, 'downloads'),
       (4, 'mine'),

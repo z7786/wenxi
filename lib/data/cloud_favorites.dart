@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import '../core/json.dart';
+import '../core/natural_name.dart';
 import '../domain/models.dart';
 import 'cloud_repository.dart';
 import 'state_store.dart';
@@ -112,6 +113,12 @@ class CloudFavorites {
     final positions = {
       for (final (index, favorite) in favorites.indexed) favorite.id: index,
     };
+    final names = sort == CloudFavoriteSort.name
+        ? {
+            for (final favorite in favorites)
+              favorite.id: NaturalName(favorite.name),
+          }
+        : <String, NaturalName>{};
     int manual(CloudFavorite a, CloudFavorite b) {
       final order = (a.sortOrder ?? 0x7fffffffffffffff).compareTo(
         b.sortOrder ?? 0x7fffffffffffffff,
@@ -129,9 +136,7 @@ class CloudFavorites {
         CloudFavoriteSort.manual => manual(a, b),
         CloudFavoriteSort.newest => b.createdAt.compareTo(a.createdAt),
         CloudFavoriteSort.recent => b.lastOpenedAt.compareTo(a.lastOpenedAt),
-        CloudFavoriteSort.name => a.name.toLowerCase().compareTo(
-          b.name.toLowerCase(),
-        ),
+        CloudFavoriteSort.name => names[a.id]!.compareTo(names[b.id]!),
       };
       return compared != 0 ? compared : manual(a, b);
     });

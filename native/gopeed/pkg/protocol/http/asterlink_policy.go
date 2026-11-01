@@ -4,8 +4,8 @@ package http
 // Zero means this provider does not use the Baidu connection policy.
 func BaiduConnectionLimit(profile string) int {
 	switch profile {
-	case "baidu", "baidu_preview":
-		return 1
+	case "baidu_direct":
+		return 8
 	default:
 		return 0
 	}

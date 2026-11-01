@@ -45,6 +45,7 @@ class AppSettings {
     this.concurrent = 3,
     this.retries = defaultDownloadRetries,
     this.speedLimit = 0,
+    this.btUploadLimit = 512 * 1024,
     this.threadOverrides = const {},
     this.githubAcceleration = const GitHubAcceleration(),
     this.destination,
@@ -68,6 +69,7 @@ class AppSettings {
   static const maxFontScalePercent = 180;
   static const maxConcurrentDownloads = 32;
   final int threads, concurrent, retries, speedLimit;
+  final int btUploadLimit;
   final Map<String, int> threadOverrides;
   final GitHubAcceleration githubAcceleration;
   final String? destination;
@@ -88,7 +90,8 @@ class AppSettings {
     'pikpak': ('PikPak网盘', 8),
     'feijipan': ('小飞机网盘', 8),
     'ctfile': ('城通网盘', 8),
-    'baidu': ('百度网盘', 1),
+    'baidu': ('百度网盘', 8),
+    'baidu_direct': ('百度网盘 · 账号直链', 3),
     'baidu_public': ('百度网盘 · 公益解析', 64),
     'quark_route_1': ('夸克 · 直链', 512),
     'quark_route_2': ('夸克 · 快传', 64),
@@ -129,13 +132,8 @@ class AppSettings {
         };
   int connectionsFor(CloudPlatform? platform, [String? profile]) {
     if (profile == 'lan' && platform == null) return threads.clamp(1, 4);
-    if (profile != 'baidu_public' &&
-        (platform == CloudPlatform.baidu ||
-            profile == 'baidu' ||
-            profile == 'baidu_preview')) {
-      return 1;
-    }
-    final key = connectionProfileFor(platform, profile);
+    final resolved = connectionProfileFor(platform, profile);
+    final key = resolved == 'baidu_preview' ? 'baidu' : resolved;
     if (key == null) return threads.clamp(1, 512);
     final override = threadOverrides[key];
     final configured =
@@ -145,7 +143,9 @@ class AppSettings {
                 ? threads
                 : override)
             .clamp(1, 512);
-    return key == 'aliyun' ? configured.clamp(1, 8) : configured;
+    return {'aliyun', 'baidu_direct'}.contains(key)
+        ? configured.clamp(1, 8)
+        : configured;
   }
 
   Json toJson() => {
@@ -160,6 +160,7 @@ class AppSettings {
     'retries': retries,
     'downloadRetryPolicy': 1,
     'speedLimit': speedLimit,
+    'btUploadLimit': btUploadLimit,
     'downloadThreadOverrides': threadOverrides,
     'githubAcceleration': githubAcceleration.toJson(),
     'githubAccelerationPolicy': 1,
@@ -200,6 +201,9 @@ class AppSettings {
               .integer('retries', defaultDownloadRetries)
               .clamp(0, maxDownloadRetries),
     speedLimit: j.integer('speedLimit').clamp(0, 1 << 50),
+    btUploadLimit: j
+        .integer('btUploadLimit', 512 * 1024)
+        .clamp(0, 10000000 * 1024),
     threadOverrides: {
       for (final e in j.obj('downloadThreadOverrides').entries)
         if (profiles.containsKey(e.key))

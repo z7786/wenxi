@@ -46,5 +46,5 @@ func snapshotOutputPath(task *download.Task, logical string) string {
 
 // Capabilities lets Android distinguish this runtime from an older bundled AAR.
 func Capabilities() string {
-	return `{"directOutput":true,"directOutputFd":true,"taskCacheRoots":true,"sourceNetworkPolicy":true,"parserHttp2":true}`
+	return `{"directOutput":true,"directOutputFd":true,"taskCacheRoots":true,"sourceNetworkPolicy":true,"parserHttp2":true,"ed2k":true}`
 }

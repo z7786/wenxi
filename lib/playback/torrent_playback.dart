@@ -111,6 +111,7 @@ PlaybackController _playback(
           'torrentData': data,
           'torrentIndex': file.index,
           'speedLimit': services.settings.speedLimit,
+          'btUploadLimit': services.settings.btUploadLimit,
         });
         require(!scope.token.isCancelled, '播放已取消');
         final uri = Uri.tryParse(result.str('url'));

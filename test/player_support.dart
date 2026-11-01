@@ -15,6 +15,9 @@ import 'package:asterlink/playback/playback_controller.dart';
 import 'package:asterlink/playback/playback_failure.dart';
 import 'package:asterlink/playback/subtitle_matching.dart';
 import 'package:asterlink/playback/external_stream.dart';
+import 'package:asterlink/playback/cast/cast_session.dart';
+import 'package:asterlink/playback/cast/dlna.dart';
+import 'package:asterlink/playback/cast/cast_platform.dart';
 
 class FakePlaybackBackend extends PlaybackBackend {
   FakePlaybackBackend(this.name, this.events);
@@ -209,6 +212,8 @@ class PlaybackFixture {
     int initialIndex = 0,
     DateTime Function()? now,
     ExternalPlaybackStream Function(DownloadSpec)? externalStreamFactory,
+    CastSession Function(CastDevice, DownloadSpec)? castSessionFactory,
+    CastPlatform? castPlatform,
     List<PlaybackSubtitle> Function(PlaybackEntry)? subtitlesFor,
     Future<File> Function(PlaybackEntry, PlaybackSubtitle, RequestScope)?
     readSubtitle,
@@ -246,6 +251,11 @@ class PlaybackFixture {
     }
 
     controller = PlaybackController(
+      castSessionFactory:
+          castSessionFactory ??
+          ((device, source) =>
+              CastSession(device, source, managePlatform: false)),
+      castPlatform: castPlatform,
       externalStreamFactory:
           externalStreamFactory ?? ExternalPlaybackStream.new,
       entries: entries,
@@ -337,16 +347,19 @@ class FakePlaybackDevice extends PlaybackDevice {
     int? width,
     int? height,
     bool autoRotate = true,
+    PlaybackOrientation? orientation,
     bool locked = false,
     bool controlsVisible = true,
   }) async {
     updates++;
-    orientation = playbackOrientation(
-      video: _video,
-      automatic: autoRotate,
-      width: width,
-      height: height,
-    );
+    this.orientation = _video && orientation != null
+        ? orientation
+        : playbackOrientation(
+            video: _video,
+            automatic: autoRotate,
+            width: width,
+            height: height,
+          );
     orientationLocked = locked;
     barsVisible = controlsVisible && !full;
   }

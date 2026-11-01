@@ -751,19 +751,126 @@ void main() {
   );
 
   test(
-    'A distant range cancels old prefetch without mixing bytes into the new response',
+    'Distant concurrent media ranges remain exact without cancelling each other',
     () async {
       expect(await proxy.start(), isTrue);
       origin.delay = const Duration(milliseconds: 50);
-      final first = read(
-        0,
-        origin.bytes.length - 1,
-      ).then<Object>((data) => data, onError: (Object e) => e);
+      final first = read(0, origin.bytes.length - 1);
       await until(() => origin.calls.length > 1);
       final second = await read(400000, 420000);
       expect(second, origin.bytes.sublist(400000, 420001));
-      await first;
+      expect(await first, origin.bytes);
+      expect(proxy.generation, 0);
+      expect(origin.peak, lessThanOrEqualTo(4));
       expect(proxy.cachedBytes, lessThanOrEqualTo(proxy.maxCacheBytes));
+    },
+  );
+
+  test(
+    'Distant open-ended audio and video reads both finish within the shared budget',
+    () async {
+      expect(await proxy.start(), isTrue);
+      final gate = Completer<void>();
+      origin.firstRangeBarrier = gate.future;
+      final video = read(0, origin.bytes.length - 1);
+      try {
+        await until(() => origin.calls.length > 1);
+        final audio = read(400000, origin.bytes.length - 1);
+        await until(() => proxy.diagnosticFields['readers'] == 2);
+        expect(proxy.generation, 0);
+        expect(proxy.bufferedBytes, lessThanOrEqualTo(proxy.maxCacheBytes));
+        gate.complete();
+        final results = await Future.wait([video, audio]);
+        expect(results[0], origin.bytes);
+        expect(results[1], origin.bytes.sublist(400000));
+        expect(proxy.generation, 0);
+        expect(origin.peak, lessThanOrEqualTo(4));
+        expect(failures, isEmpty);
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+      }
+    },
+  );
+
+  test(
+    'A reopened nearby range reuses its partial chunk after a distant audio read',
+    () async {
+      expect(await proxy.start(), isTrue);
+      final gate = Completer<void>();
+      origin.firstPacketBytes = 1024;
+      origin.bodyRemainderBarrier = gate.future;
+      final socket = await Socket.connect(proxy.uri.host, proxy.uri.port);
+      var received = 0;
+      final incoming = socket.listen((bytes) => received += bytes.length);
+      try {
+        socket.write(
+          'GET ${proxy.uri.path} HTTP/1.1\r\n'
+          'Host: ${proxy.uri.host}\r\n'
+          'Range: bytes=65536-\r\n\r\n',
+        );
+        await socket.flush();
+        await until(() => received > 1024);
+        socket.destroy();
+        await until(() => proxy.diagnosticFields['readers'] == 0);
+        expect(proxy.activeRequests, greaterThan(0));
+        expect(
+          await read(400000, 400511),
+          origin.bytes.sublist(400000, 400512),
+        );
+        final nearby = read(66560, 71536);
+        await until(() => proxy.diagnosticFields['interleavedReads'] == true);
+        expect(proxy.generation, 0);
+        expect(proxy.bufferedBytes, lessThanOrEqualTo(proxy.maxCacheBytes));
+        gate.complete();
+        expect(await nearby, origin.bytes.sublist(66560, 71537));
+        expect(origin.calls.where((r) => r.$1 == 66560), isEmpty);
+        expect(origin.calls.where((r) => r == (65536, 73727)), hasLength(1));
+        expect(failures, isEmpty);
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+        socket.destroy();
+        await incoming.cancel();
+      }
+    },
+  );
+
+  test(
+    'A disconnected demuxer read releases blocked ranges before their bodies arrive',
+    () async {
+      expect(await proxy.start(), isTrue);
+      final gate = Completer<void>();
+      final requested = Completer<void>();
+      origin.rangeBarrier = (start, end) async {
+        if (end > 1023) {
+          if (!requested.isCompleted) requested.complete();
+          await gate.future;
+        }
+      };
+      final socket = await Socket.connect(proxy.uri.host, proxy.uri.port);
+      try {
+        socket.write(
+          'GET ${proxy.uri.path} HTTP/1.1\r\n'
+          'Host: ${proxy.uri.host}\r\n'
+          'Range: bytes=0-\r\n\r\n',
+        );
+        await socket.flush();
+        await requested.future;
+        expect(proxy.activeRequests, greaterThan(0));
+        socket.destroy();
+        await until(() => proxy.activeRequests == 0);
+        expect(proxy.diagnosticFields['readers'], 0);
+        expect(proxy.diagnosticFields['queuedSegments'], 0);
+        expect(proxy.bufferedBytes, 0);
+        origin.rangeBarrier = null;
+        expect(
+          await read(400000, 410000),
+          origin.bytes.sublist(400000, 410001),
+        );
+        expect(failures, isEmpty);
+      } finally {
+        socket.destroy();
+        gate.complete();
+      }
     },
   );
 
@@ -928,6 +1035,99 @@ void main() {
         expect(proxy.bufferedBytes, lessThanOrEqualTo(65536));
         gate.complete();
         expect(await transfer, origin.bytes.sublist(131072, 450560));
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+        await transfer;
+      }
+    },
+  );
+
+  test(
+    'Signed source cap bounds parallel reads after runtime thread changes',
+    () async {
+      await proxy.close();
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(
+          url: origin.uri.toString(),
+          fileName: 'movie.mkv',
+          maxPlaybackConnections: 2,
+        ),
+        connections: 8,
+        chunkBytes: 8192,
+        maxCacheBytes: 65536,
+        warmupBytes: 0,
+        onFailure: failures.add,
+      );
+      expect(proxy.connections, 2);
+      expect(await proxy.start(), isTrue);
+      origin.statusFor = (_, _, _) => origin.active > 2 ? 403 : 0;
+      final gate = Completer<void>();
+      origin.firstPacketBytes = 1024;
+      origin.bodyRemainderBarrier = gate.future;
+      final transfer = read(131072, 450559);
+      try {
+        await until(() => proxy.activeRequests == 2);
+        proxy.connections = 128;
+        expect(proxy.connections, 2);
+        gate.complete();
+        expect(await transfer, origin.bytes.sublist(131072, 450560));
+        expect(origin.peak, 2);
+        expect(origin.faults, 0);
+        expect(failures, isEmpty);
+        expect(proxy.segmentFailures, 0);
+        proxy.connections = 1;
+        expect(proxy.connections, 1);
+        proxy.connections = 8;
+        expect(proxy.connections, 2);
+        expect(await read(0, 32767), origin.bytes.sublist(0, 32768));
+        expect(
+          await read(458752, 491519),
+          origin.bytes.sublist(458752, 491520),
+        );
+        expect(origin.peak, 2);
+        expect(origin.faults, 0);
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+        await transfer;
+      }
+    },
+  );
+
+  test(
+    'An unaligned seek starts at the requested byte on a slow capped source',
+    () async {
+      await proxy.close();
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(
+          url: origin.uri.toString(),
+          fileName: 'movie.mkv',
+          maxPlaybackConnections: 2,
+        ),
+        connections: 8,
+        chunkBytes: 8192,
+        maxCacheBytes: 65536,
+        onFailure: failures.add,
+      );
+      expect(await proxy.start(), isTrue);
+      const start = 139000, end = 450559;
+      final gate = Completer<void>();
+      origin.rangeBarrier = (first, _) async {
+        if (first < start) await gate.future;
+      };
+      proxy.prepareSeek();
+      final transfer = read(start, end);
+      try {
+        expect(
+          await transfer.timeout(const Duration(seconds: 3)),
+          origin.bytes.sublist(start, end + 1),
+        );
+        expect(origin.calls[1], (start, 139263));
+        expect(
+          origin.calls.skip(1).every((range) => range.$1 >= start),
+          isTrue,
+        );
+        expect(origin.peak, lessThanOrEqualTo(2));
+        expect(failures, isEmpty);
       } finally {
         if (!gate.isCompleted) gate.complete();
         await transfer;

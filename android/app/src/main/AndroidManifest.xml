@@ -9,6 +9,7 @@
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
@@ -21,6 +22,8 @@
         android:allowBackup="false" android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:usesCleartextTraffic="true" android:extractNativeLibs="true">
+        <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="true"/>
+        <service android:name=".SearchBrowserService" android:exported="false" android:process=":search" />
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask"
             android:supportsPictureInPicture="true" android:resizeableActivity="true"
             android:theme="@style/LaunchTheme"
@@ -401,6 +404,7 @@
             </intent-filter>
         </activity-alias>
         <service android:name=".FlutterDownloadService" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="dataSync"/>
+        <service android:name=".CastService" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="mediaPlayback"/>
         <service android:name=".AppKeepAliveService" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Retain the user-opened Flutter app session during app switching with a visible persistent notification. File transfers use the separate dataSync download service."/>

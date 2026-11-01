@@ -111,7 +111,7 @@ void main() {
           .toList();
       expect(
         requests.map((r) => r.uri.queryParameters['request_id']).toSet(),
-        hasLength(1),
+        hasLength(requests.length),
       );
       expect(
         requests.map((r) => r.uri.queryParameters['v']),
@@ -120,6 +120,10 @@ void main() {
       expect(
         requests.last.headers['Cookie'],
         contains('qr_session=fixture-qr'),
+      );
+      expect(
+        requests.map((r) => r.headers['Cache-Control']),
+        everyElement('no-cache, no-store'),
       );
       qr.close();
     },
@@ -218,6 +222,30 @@ void main() {
     final before = f.http.calls.length;
     await expectLater(login.pollQr(qr), throwsA(isA<QuarkQrExpired>()));
     expect(f.http.calls, hasLength(before));
+    qr.close();
+  });
+
+  test('an unconfirmed QR remains usable after two minutes', () async {
+    var now = quarkClock;
+    final f = QuarkLoginFixture();
+    final login = QuarkLoginService(f.http, now: () => now);
+    final qr = await login.createQr();
+    now += 122000;
+    expect(await login.pollQr(qr), isNull);
+    f.scanned = true;
+    expect(await login.pollQr(qr), 'fixture-qr-ticket');
+    qr.close();
+  });
+
+  test('slow QR creation counts its lifetime from the token request', () async {
+    var now = quarkClock;
+    final f = QuarkLoginFixture();
+    f.override = (r) {
+      if (r.uri.path.endsWith('/getTokenForQrcodeLogin')) now += 15000;
+      return null;
+    };
+    final qr = await QuarkLoginService(f.http, now: () => now).createQr();
+    expect(qr.expiresAt, quarkClock + 180000);
     qr.close();
   });
 

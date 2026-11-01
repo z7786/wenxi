@@ -31,7 +31,7 @@ void main() {
   });
 
   test(
-    'Only Android exposes external playback and hands off title and position',
+    'Android and Windows expose external playback; Android hands off title and position',
     () async {
       final mobile = NativePlaybackDevice(
         targetPlatform: TargetPlatform.android,
@@ -40,7 +40,7 @@ void main() {
         targetPlatform: TargetPlatform.windows,
       );
       expect(mobile.supportsExternalPlayer, isTrue);
-      expect(desktop.supportsExternalPlayer, isFalse);
+      expect(desktop.supportsExternalPlayer, isTrue);
       expect(
         await mobile.openExternalPlayer(
           url: 'content://fixture/video/1',
@@ -171,11 +171,71 @@ void main() {
     },
   );
 
+  test(
+    'Manual Android direction overrides geometry without changing video dimensions',
+    () async {
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      await device.update(
+        playing: true,
+        width: 1920,
+        height: 1080,
+        orientation: PlaybackOrientation.portrait,
+      );
+      expect(calls.last.arguments['orientation'], 'portrait');
+      expect(calls.last.arguments['width'], 1920);
+      expect(calls.last.arguments['height'], 1080);
+      await device.update(
+        playing: false,
+        width: 1920,
+        height: 1080,
+        orientation: PlaybackOrientation.portrait,
+      );
+      expect(calls.last.arguments['orientation'], 'portrait');
+      await device.update(
+        playing: true,
+        width: 1080,
+        height: 1920,
+        autoRotate: false,
+        orientation: PlaybackOrientation.landscape,
+      );
+      expect(calls.last.arguments['orientation'], 'landscape');
+      final count = calls.length;
+      await device.update(
+        playing: true,
+        width: 1080,
+        height: 1920,
+        autoRotate: false,
+        orientation: PlaybackOrientation.landscape,
+      );
+      expect(calls.length, count);
+      await device.update(
+        playing: true,
+        width: 1080,
+        height: 1920,
+        autoRotate: false,
+      );
+      expect(calls.last.arguments['orientation'], 'system');
+      await device.update(playing: true, width: 1080, height: 1920);
+      expect(calls.last.arguments['orientation'], 'portrait');
+    },
+  );
+
   test('Audio playback never requests a video orientation', () async {
     final device = NativePlaybackDevice(targetPlatform: TargetPlatform.android);
     addTearDown(device.finish);
     await device.start(video: false);
     await device.update(playing: true, width: 1920, height: 1080);
+    expect(calls.last.arguments['orientation'], 'system');
+    await device.update(
+      playing: true,
+      width: 1920,
+      height: 1080,
+      orientation: PlaybackOrientation.portrait,
+    );
     expect(calls.last.arguments['orientation'], 'system');
   });
 

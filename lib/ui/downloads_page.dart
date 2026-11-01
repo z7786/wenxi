@@ -8,7 +8,6 @@ import 'package:share_plus/share_plus.dart';
 import '../app_services.dart';
 import '../core/json.dart';
 import '../domain/downloads.dart';
-import '../domain/baidu_share_route.dart';
 import '../domain/models.dart' show CloudPlatform;
 import '../download/completed_files.dart';
 import '../platform/file_access.dart';
@@ -172,19 +171,22 @@ class _DownloadsPageState extends State<DownloadsPage>
       final concurrent = widget.services.settings.concurrent;
       final concurrencyOptions = {1, 2, 3, 5, 8, 16, 32, concurrent}.toList()
         ..sort();
-      final tasks = all.where((t) => accepts(t, filter)).toList()
-        ..sort((a, b) {
-          int rank(DownloadTask t) => switch (t.status) {
-            DownloadStatus.running => 0,
-            DownloadStatus.pending => 1,
-            DownloadStatus.paused => 2,
-            DownloadStatus.failed => 3,
-            DownloadStatus.completed => 4,
-            _ => 5,
-          };
-          final order = rank(a).compareTo(rank(b));
-          return order == 0 ? b.createdAt.compareTo(a.createdAt) : order;
-        });
+      final groups = List.generate(6, (_) => <DownloadTask>[]);
+      for (final task in all) {
+        if (!accepts(task, filter)) continue;
+        final rank = switch (task.status) {
+          DownloadStatus.running => 0,
+          DownloadStatus.pending => 1,
+          DownloadStatus.paused => 2,
+          DownloadStatus.failed => 3,
+          DownloadStatus.completed => 4,
+          _ => 5,
+        };
+        groups[rank].add(task);
+      }
+      // Manager snapshots already have descending creation times. Grouping
+      // preserves that order within each status without sorting on every tick.
+      final tasks = [for (final group in groups) ...group];
       final taskIndices = {
         for (var i = 0; i < tasks.length; i++) ValueKey(tasks[i].id): i,
       };
@@ -319,7 +321,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                         child: Padding(
                           padding: const EdgeInsets.only(right: 16),
                           child: Text(
-                            '${formatBytes(all.fold<int>(0, (n, t) => n + t.speed))}/s',
+                            '${formatBytes(all.where((t) => t.active).fold<int>(0, (n, t) => n + t.speed))}/s',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -882,32 +884,28 @@ class _DownloadsPageState extends State<DownloadsPage>
                               size: 14,
                             ),
                           ),
-                        if (!_isBaiduDownload(task)) ...[
-                          const SizedBox(width: 5),
-                          Tooltip(
-                            message: _connectionDescription(task),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 4,
-                                vertical: 1,
-                              ),
-                              decoration: BoxDecoration(
-                                color: fill(context),
-                                borderRadius: BorderRadius.circular(3),
-                              ),
-                              child: Text(
-                                _connectionLabel(task),
-                                key: ValueKey(
-                                  'download-connections-${task.id}',
-                                ),
-                                style: TextStyle(
-                                  fontSize: 9,
-                                  color: secondary(context),
-                                ),
+                        const SizedBox(width: 5),
+                        Tooltip(
+                          message: _connectionDescription(task),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 1,
+                            ),
+                            decoration: BoxDecoration(
+                              color: fill(context),
+                              borderRadius: BorderRadius.circular(3),
+                            ),
+                            child: Text(
+                              _connectionLabel(task),
+                              key: ValueKey('download-connections-${task.id}'),
+                              style: TextStyle(
+                                fontSize: 9,
+                                color: secondary(context),
                               ),
                             ),
                           ),
-                        ],
+                        ),
                       ],
                     ),
                     const SizedBox(height: 4),
@@ -1149,11 +1147,17 @@ class _DownloadsPageState extends State<DownloadsPage>
     });
   }
 
-  bool _isBaiduDownload(DownloadTask task) =>
-      BaiduShareRoute.usesAccountDownload(task.spec);
-
   String _connectionLabel(DownloadTask task) {
-    if (task.spec.isTorrent) return 'BT';
+    if (task.spec.isEd2k) {
+      final counts = widget.services.downloads.httpConnections(task.id);
+      return counts == null ? 'ED2K' : '${counts.active} 来源';
+    }
+    if (task.spec.isTorrent) {
+      final sources = widget.services.downloads.btSources(task.id);
+      return sources == null
+          ? 'BT'
+          : '${sources.connected + sources.webseeds} 来源';
+    }
     if (task.hls.isNotEmpty) return 'HLS';
     final counts = widget.services.downloads.httpConnections(task.id);
     if (counts != null) return '${counts.active} 连接';
@@ -1164,8 +1168,20 @@ class _DownloadsPageState extends State<DownloadsPage>
   }
 
   String _connectionDescription(DownloadTask task) {
-    if (_isBaiduDownload(task)) return '${task.retries} 次重试';
-    if (task.spec.isTorrent) return 'BT · 最多 80 个对等节点';
+    if (task.spec.isEd2k) {
+      final counts = widget.services.downloads.httpConnections(task.id);
+      return counts == null
+          ? 'ED2K · 自动找源与排队'
+          : 'ED2K · 传输来源 ${counts.active} / 已知来源 ${counts.total}';
+    }
+    if (task.spec.isTorrent) {
+      final sources = widget.services.downloads.btSources(task.id);
+      if (sources == null) return 'BT · 最多 80 个对等节点';
+      return 'BT · 已连接 ${sources.connected} / 已知 ${sources.known}\n'
+          '完整做种者 ${sources.seeders} · 网页源 ${sources.webseeds} · Tracker ${sources.trackers}\n'
+          '上传上限 ${sources.uploadLimit == 0 ? '不限速' : '${formatBytes(sources.uploadLimit)}/s'}'
+          '${sources.sessionReused ? '\n已复用同种子连接' : ''}';
+    }
     if (task.hls.isNotEmpty) return 'HLS 分片下载 · ${task.retries} 次重试';
     final counts = widget.services.downloads.httpConnections(task.id);
     final active = counts == null
@@ -1173,7 +1189,7 @@ class _DownloadsPageState extends State<DownloadsPage>
         : '工作连接 ${counts.active} · 分段 ${counts.total}\n';
     final ceiling =
         task.spec.platform == CloudPlatform.aliyun ||
-            task.spec.profile == 'aliyun'
+            {'aliyun', 'baidu_direct'}.contains(task.spec.profile)
         ? task.connections.clamp(1, 8)
         : task.connections;
     return '$active连接上限 $ceiling · ${task.retries} 次重试';

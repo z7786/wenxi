@@ -1,4 +1,12 @@
+param(
+    [ValidateSet('x64', 'arm64')][string]$Architecture = 'x64',
+    [string]$SevenZip
+)
 $ErrorActionPreference = 'Stop'
+if ($Architecture -eq 'arm64') {
+    & (Join-Path $PSScriptRoot 'prepare-windows-arm64-media.ps1') -SevenZip $SevenZip
+    return
+}
 $projectPath = Split-Path -Parent $PSScriptRoot
 $cachePath = Join-Path $projectPath '.local\windows-dependencies'
 $buildPath = Join-Path $projectPath 'build\windows\x64'

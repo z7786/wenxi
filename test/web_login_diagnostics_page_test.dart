@@ -6,16 +6,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
+import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/data/providers/guangya_login.dart';
+import 'package:asterlink/data/providers/ctfile.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/domain/auth.dart';
+import 'package:asterlink/domain/ctfile_captcha.dart';
 import 'package:asterlink/domain/aliyun_web_password.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/weiyun_web_login.dart';
 import 'package:asterlink/domain/tianyi_web_login.dart';
 import 'package:asterlink/ui/login_page.dart';
 import 'package:asterlink/ui/guangya_verification_page.dart';
+import 'package:asterlink/ui/ctfile_verification_page.dart';
 import 'native_login_support.dart';
 import 'support.dart';
 import 'token_cloud_support.dart';
@@ -75,6 +79,31 @@ class _Controller extends PlatformInAppWebViewController {
     : super.implementation(
         PlatformInAppWebViewControllerCreationParams(id: id),
       );
+}
+
+class _CtfileController extends _Controller {
+  _CtfileController(super.id, this.challenge);
+  final CtfileCaptchaChallenge challenge;
+  late WebUri url = WebUri.uri(challenge.url);
+  Json? message;
+  Completer<dynamic>? pending;
+  bool navigateDuringCapture = false;
+  int captures = 0;
+  @override
+  Future<WebUri?> getUrl() async => url;
+  @override
+  Future<dynamic> evaluateJavascript({
+    required String source,
+    ContentWorld? contentWorld,
+  }) async {
+    if (source != challenge.captureScript) return null;
+    captures++;
+    if (navigateDuringCapture) url = WebUri('https://untrusted.invalid/');
+    if (pending != null) return pending!.future;
+    final current = message;
+    message = null;
+    return current == null ? '' : jsonEncode(current);
+  }
 }
 
 class _StorageController extends _Controller {
@@ -321,7 +350,11 @@ void main() {
               onPressed: () => Navigator.push<void>(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => cloud == CloudPlatform.xunlei
+                  builder: (_) =>
+                      {
+                        CloudPlatform.xunlei,
+                        CloudPlatform.ctfile,
+                      }.contains(cloud)
                       ? PasswordLoginFlow(services, cloud)
                       : WebLoginPage(services, WebLoginTarget.targets[cloud]!),
                 ),
@@ -337,6 +370,9 @@ void main() {
     if (cloud == CloudPlatform.xunlei) {
       await tester.tap(find.byKey(const ValueKey('xunlei-login-web')));
       await tester.pumpAndSettle();
+    } else if (cloud == CloudPlatform.ctfile) {
+      await tester.tap(find.byKey(const ValueKey('native-login-web')));
+      await tester.pumpAndSettle();
     }
   }
 
@@ -347,6 +383,163 @@ void main() {
     });
     await tester.pumpAndSettle();
   }
+
+  Future<void> automaticPoll(
+    WidgetTester tester,
+    InAppWebViewController web,
+  ) async {
+    await tester.runAsync(() async {
+      final view = platform.views.last;
+      view.params.onUpdateVisitedHistory!(
+        web,
+        WebUri('https://my.ctfile.com/'),
+        false,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets(
+    'Ctfile web login automatically captures HttpOnly cookies and validates v4 identity',
+    (tester) async {
+      const cloud = CloudPlatform.ctfile;
+      final http = FakeHttp((request) {
+        expect(request.uri.host, 'api.ctfile.com');
+        if (request.uri.path.endsWith('/exchange-token')) {
+          expect(request.headers['Cookie'], 'ctfile_session=private-current');
+          expect(request.json['rotate_token'], isFalse);
+          return jsonResponse({
+            'code': 200,
+            'data': {
+              'token': 'fixture-access',
+              'userid': '12',
+              'expires_in': 900,
+            },
+          });
+        }
+        expect(request.headers['Authorization'], 'Bearer fixture-access');
+        expect(request.headers.containsKey('Cookie'), isFalse);
+        return jsonResponse({
+          'code': 200,
+          'data': request.uri.path.endsWith('/profile/info')
+              ? {'userid': '12', 'username': '城通网页登录测试'}
+              : {
+                  'workspaces': [
+                    {
+                      'id': '45',
+                      'owner_id': '12',
+                      'space_used': 40,
+                      'space_quota': 200,
+                    },
+                  ],
+                  'has_more': false,
+                },
+        });
+      });
+      services.login.webAuthenticators[cloud] = CtfileConnector(
+        http,
+      ).authenticate;
+      await openLogin(tester, cloud);
+      final (view, web) = attach(440);
+      expect(
+        view.params.initialUrlRequest!.url!.toString(),
+        'https://my.ctfile.com/login',
+      );
+      expect(platform.cookies.deleteAllCalls, 1);
+      platform
+          .cookies
+          .values['https://api.ctfile.com/v4/user/auth/exchange-token'] = [
+        Cookie(name: 'tracking', value: 'optional'),
+      ];
+      await automaticPoll(tester, web);
+      expect(http.calls, isEmpty);
+      expect(services.vault.credential(cloud), isNull);
+      platform
+          .cookies
+          .values['https://api.ctfile.com/v4/user/auth/exchange-token'] = [
+        Cookie(
+          name: 'ctfile_session',
+          value: 'private-current',
+          isHttpOnly: true,
+        ),
+      ];
+      platform.cookies.values['https://my.ctfile.com'] = [
+        Cookie(name: 'ctfile_session', value: 'private-stale'),
+      ];
+      await automaticPoll(tester, web);
+      final saved = services.vault.credential(cloud);
+      expect(saved?.primary, 'ctfile_session=private-current');
+      expect(saved?.field('authType'), 'webCookie');
+      expect(saved?.field('userId'), '12');
+      expect(saved?.field('nickname'), '城通网页登录测试');
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(
+        http.calls.where(
+          (request) => request.uri.path.endsWith('/exchange-token'),
+        ),
+        hasLength(1),
+      );
+      expect(platform.cookies.deleteAllCalls, 2);
+      expect(
+        log.entries().map((entry) => '${entry.detail} ${entry.data}').join(),
+        isNot(contains('private-')),
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: const TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.windows,
+    }),
+  );
+
+  testWidgets(
+    'Ctfile rejected website session stays open without saving an account',
+    (tester) async {
+      const cloud = CloudPlatform.ctfile;
+      final http = FakeHttp(
+        (request) => jsonResponse({'code': 401, 'message': '城通登录已过期，请重新登录'}),
+      );
+      services.login.webAuthenticators[cloud] = CtfileConnector(
+        http,
+      ).authenticate;
+      await openLogin(tester, cloud);
+      final (_, web) = attach(441);
+      platform
+          .cookies
+          .values['https://api.ctfile.com/v4/user/auth/exchange-token'] = [
+        Cookie(
+          name: 'ctfile_session',
+          value: 'private-expired',
+          isHttpOnly: true,
+        ),
+      ];
+      await automaticPoll(tester, web);
+      expect(services.vault.credential(cloud), isNull);
+      expect(find.byType(WebLoginPage), findsOneWidget);
+      expect(find.text('城通登录已过期，请重新登录'), findsOneWidget);
+      expect(http.calls, hasLength(1));
+      await automaticPoll(tester, web);
+      expect(http.calls, hasLength(1));
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'Ctfile web login can switch back to password in the same route',
+    (tester) async {
+      await openLogin(tester, CloudPlatform.ctfile);
+      expect(find.text('切换账号密码登录'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('web-login-password')));
+      await tester.pumpAndSettle();
+      expect(find.byType(NativePasswordLoginPage), findsOneWidget);
+      expect(find.byKey(const ValueKey('native-login-web')), findsOneWidget);
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(services.vault.credential(CloudPlatform.ctfile), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 
   testWidgets(
     'Xunlei offers account-center login and captures only the returning cloud session',
@@ -1000,6 +1193,152 @@ void main() {
   WebResourceRequest request(bool mainFrame) => WebResourceRequest(
     url: WebUri('https://example.invalid/private-login?token=private-token'),
     isForMainFrame: mainFrame,
+  );
+
+  Json ctfileSuccess() => {
+    'source': 'ctfile-captcha',
+    'type': 'altcha',
+    'event': 'success',
+    'token': 'verified-widget-proof-0123456789',
+  };
+
+  Future<void> openCtfileVerification(
+    WidgetTester tester,
+    CtfileCaptchaChallenge challenge,
+    void Function(CtfileCaptchaProof?) result,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async => result(
+                await Navigator.push<CtfileCaptchaProof>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => CtfileVerificationPage(services, challenge),
+                  ),
+                ),
+              ),
+              child: const Text('城通验证测试'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('城通验证测试'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets(
+    'Ctfile captcha accepts Android wrappers for the same official WebView',
+    (tester) async {
+      final challenge = CtfileCaptchaChallenge('altcha');
+      CtfileCaptchaProof? result;
+      await openCtfileVerification(
+        tester,
+        challenge,
+        (proof) => result = proof,
+      );
+      final view = platform.views.last;
+      expect(view.params.initialSettings!.incognito, isTrue);
+      expect(view.params.initialSettings!.saveFormData, isFalse);
+      expect(
+        view.params.initialSettings!.userAgent,
+        WebLoginTarget.desktopUserAgent,
+      );
+      expect(view.params.initialUserScripts!.single.forMainFrameOnly, isTrue);
+      final native = _CtfileController(301, challenge);
+      final created = view.controllerFromPlatform<InAppWebViewController>(
+        native,
+      );
+      final loaded = view.controllerFromPlatform<InAppWebViewController>(
+        native,
+      );
+      view.params.onWebViewCreated!(created);
+      expect(
+        await view.params.shouldOverrideUrlLoading!(
+          loaded,
+          NavigationAction(
+            request: URLRequest(url: WebUri('https://untrusted.invalid/')),
+            isForMainFrame: true,
+          ),
+        ),
+        NavigationActionPolicy.CANCEL,
+      );
+      view.params.onLoadStop!(loaded, native.url);
+      await tester.pump();
+      native.message = {...ctfileSuccess(), 'type': 'turnstile'};
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(result, isNull);
+      native.message = ctfileSuccess();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(result!.fields.keys, ['altcha_token']);
+      expect(find.byType(CtfileVerificationPage), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets('Ctfile ignores a proof after navigating away during capture', (
+    tester,
+  ) async {
+    final challenge = CtfileCaptchaChallenge('altcha');
+    CtfileCaptchaProof? result;
+    await openCtfileVerification(tester, challenge, (proof) => result = proof);
+    final native = _CtfileController(302, challenge)
+      ..navigateDuringCapture = true
+      ..message = ctfileSuccess();
+    final (view, web) = attach(302, instance: native);
+    view.params.onLoadStop!(web, native.url);
+    await tester.pump();
+    expect(result, isNull);
+    expect(find.byType(CtfileVerificationPage), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(result, isNull);
+    final captures = native.captures;
+    await tester.pump(const Duration(seconds: 1));
+    expect(native.captures, captures);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'Ctfile refresh discards a late old document proof and cancellation stops capture',
+    (tester) async {
+      final challenge = CtfileCaptchaChallenge('altcha');
+      CtfileCaptchaProof? result;
+      await openCtfileVerification(
+        tester,
+        challenge,
+        (proof) => result = proof,
+      );
+      final oldNative = _CtfileController(303, challenge)
+        ..pending = Completer<dynamic>();
+      final (oldView, oldWeb) = attach(303, instance: oldNative);
+      oldView.params.onLoadStop!(oldWeb, oldNative.url);
+      await tester.pump();
+      expect(oldNative.captures, 1);
+      await tester.tap(find.byKey(const ValueKey('ctfile-captcha-refresh')));
+      await tester.pumpAndSettle();
+      final native = _CtfileController(304, challenge);
+      final (view, web) = attach(304, instance: native);
+      view.params.onLoadStop!(web, native.url);
+      oldNative.pending!.complete(jsonEncode(ctfileSuccess()));
+      await tester.pump();
+      expect(result, isNull);
+      native.pending = Completer<dynamic>();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      native.pending!.complete(jsonEncode(ctfileSuccess()));
+      await tester.pump();
+      expect(result, isNull);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
   );
 
   testWidgets(

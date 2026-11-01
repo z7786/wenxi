@@ -292,12 +292,50 @@ void main() {
   });
 
   test(
+    '115 signed connection limits survive playback refresh and storage',
+    () async {
+      for (final value in ['1', '2', '8', '0', '-1', 'invalid', '']) {
+        final cipher = ResponseCipher({
+          file.id: {
+            'file_size': file.size,
+            'pick_code': file.token,
+            'url': {'url': 'https://cdn.example.org/video?c=$value&f=1'},
+          },
+        });
+        final http = FakeHttp(
+          (_) => jsonResponse({'state': true, 'data': 'encoded'}),
+        );
+        final source = await Pan115Connector(
+          http,
+          cipherFactory: () => cipher,
+        ).playback(session, file, credential);
+        final expected = int.tryParse(value);
+        final limit = expected != null && expected > 0 ? expected : null;
+        expect(source.maxPlaybackConnections, limit);
+        final saved = DownloadSpec.fromJson(source.toJson());
+        expect(saved.maxPlaybackConnections, limit);
+        expect(
+          saved.copyWith(source: {'refresh': true}).maxPlaybackConnections,
+          limit,
+        );
+      }
+      expect(
+        DownloadSpec.fromJson({
+          'url': 'https://cdn.example.org/old-video',
+          'fileName': 'old-video.mkv',
+        }).maxPlaybackConnections,
+        isNull,
+      );
+    },
+  );
+
+  test(
     'share pagination, encrypted download, and receive retain share identity',
     () async {
       final cipher = ResponseCipher({
         'fid': file.id,
         'fs': '${file.size}',
-        'url': {'url': 'https://cdn.example.org/shared'},
+        'url': {'url': 'https://cdn.example.org/shared?c=2&f=3'},
       });
       final http = FakeHttp((r) {
         if (r.uri.path.endsWith('downurl')) {
@@ -316,7 +354,8 @@ void main() {
       ).single;
       final share = await connector.openShare(link, credential);
       expect(await connector.list(share, '0', credential), hasLength(1));
-      await connector.download(share, file, credential);
+      final shared = await connector.playback(share, file, credential);
+      expect(shared.maxPlaybackConnections, 2);
       expect(http.calls.last.uri.path, '/app/share/downurl');
       expect(http.calls.last.headers['User-Agent'], contains('115Browser'));
       expect(cipher.sent, {

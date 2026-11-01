@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/main.dart' show MainShell;
 import 'package:asterlink/data/resource_search.dart';
+import 'package:asterlink/data/resource_search_api.dart';
 import 'package:asterlink/data/resource_link_checks.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
@@ -22,6 +24,7 @@ import 'package:asterlink/ui/browser_page.dart';
 import 'package:asterlink/ui/preview_page.dart';
 import 'package:asterlink/ui/resource_search_page.dart';
 import 'package:asterlink/ui/resource_home_page.dart';
+import 'package:asterlink/ui/search_security_dialog.dart';
 import 'resource_search_test.dart' show SearchApiFixture;
 import 'support.dart';
 import 'fixtures/resource_search_samples.dart';
@@ -61,6 +64,7 @@ class _SearchShareConnector extends CloudConnector {
   @override
   CloudPlatform get platform => CloudPlatform.quark;
   ParsedLink? opened;
+  int downloadCalls = 0;
   @override
   Future<BrowseSession> openShare(
     ParsedLink link,
@@ -88,6 +92,16 @@ class _SearchShareConnector extends CloudConnector {
       parentId: session.rootId,
     ),
   ];
+  @override
+  Future<DownloadSpec> download(
+    BrowseSession session,
+    CloudFile file,
+    Credential? credential,
+  ) async {
+    downloadCalls++;
+    throw UnsupportedError('Fixture does not download files');
+  }
+
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
@@ -212,7 +226,13 @@ void main() {
         }
       });
     }
-    if (populated) await tester.runAsync(() => service.search('Python'));
+    if (populated) {
+      if (linkChecks == null) {
+        await tester.runAsync(() => service.search('Python'));
+      } else {
+        unawaited(service.search('Python'));
+      }
+    }
     final theme =
         appTheme(
           dark ? Brightness.dark : Brightness.light,
@@ -248,7 +268,12 @@ void main() {
             : ResourceSearchPage(services, onOpen: onOpen ?? (_) async {}),
       ),
     );
-    await tester.pumpAndSettle();
+    if (linkChecks != null && service.searching) {
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+    } else {
+      await tester.pumpAndSettle();
+    }
     if (root && populated) {
       await tester.enterText(
         find.byKey(const Key('resource-home-search-input')),
@@ -267,7 +292,11 @@ void main() {
         );
       }
     });
-    await tester.pumpAndSettle();
+    if (linkChecks != null && service.searching) {
+      await tester.pump();
+    } else {
+      await tester.pumpAndSettle();
+    }
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
       var closed = false;
@@ -482,12 +511,23 @@ void main() {
   );
 
   testWidgets(
-    'resource tab remains visible by default without the old source button',
+    'starting on parse preloads resource cards and opening the tab reuses them',
     (tester) async {
-      await render(tester, root: true, initialTab: 0);
+      final (services, api) = await render(tester, root: true, initialTab: 0);
       expect(find.byKey(const ValueKey('navigation-1')), findsOneWidget);
       expect(find.byKey(const Key('parse-resources')), findsNothing);
       expect(find.text('更新来源'), findsNothing);
+      expect(services.resourceSearch.catalogLoaded, isTrue);
+      expect(services.resourceSearch.recommendationsLoaded, isTrue);
+      expect(api.catalogCalls, hasLength(1));
+      final recommendationCount = api.recommendationCalls.length;
+      expect(api.calls, isEmpty);
+      await tester.tap(find.byKey(const ValueKey('navigation-1')));
+      await tester.pumpAndSettle();
+      expect(api.catalogCalls, hasLength(1));
+      expect(api.recommendationCalls, hasLength(recommendationCount));
+      expect(api.calls, isEmpty);
+      expect(tester.takeException(), isNull);
     },
   );
 
@@ -987,6 +1027,9 @@ void main() {
     await tester.tap(find.text('Python 学习指南.pdf'));
     await settlePreview(tester);
     expect(find.text('暂未完成资源准备'), findsOneWidget);
+    expect(find.byKey(const Key('pool-preview-original')), findsNothing);
+    expect(find.text('使用原链接预览'), findsNothing);
+    expect(connector.downloadCalls, 0);
     expect(api.openCalls, hasLength(1));
     expect(connector.opened!.shareId, 'books');
     api.resolve = (hit, _, selection) async =>
@@ -1005,28 +1048,162 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('preview can explicitly continue using the original share', (
-    tester,
-  ) async {
-    final (api, connector) = await openOriginalBrowser(tester);
-    api.resolve = (hit, _, _) async => ResourceSearchOpenResult(
-      hit: hit,
-      mode: 'original',
-      reason: 'no_account',
-      message: '该网盘暂时没有可用的转存账号',
-    );
-    await tester.tap(find.text('Python 学习指南.pdf'));
-    await settlePreview(tester);
-    expect(find.text('该网盘暂时没有可用的转存账号'), findsOneWidget);
-    await tester.tap(find.byKey(const Key('pool-preview-original')));
-    await tester.pumpAndSettle();
-    expect(find.text('暂未完成资源准备'), findsNothing);
-    expect(find.text('下载文件'), findsOneWidget);
-    expect(api.openCalls, hasLength(1));
-    expect(connector.opened!.shareId, 'books');
-    expect(connector.opened!.passcode, 'aB12');
-    expect(tester.takeException(), isNull);
-  });
+  testWidgets(
+    'failed transfer offers retry and return without original preview',
+    (tester) async {
+      final (api, connector) = await openOriginalBrowser(tester);
+      api.resolve = (hit, _, _) async => ResourceSearchOpenResult(
+        hit: hit,
+        mode: 'original',
+        reason: 'transfer_failed',
+        message: '暂时未能生成新的分享链接',
+      );
+      await tester.tap(find.text('Python 学习指南.pdf'));
+      await settlePreview(tester);
+      expect(find.text('暂时未能生成新的分享链接'), findsOneWidget);
+      expect(find.text('暂未完成资源准备'), findsOneWidget);
+      expect(find.byKey(const Key('pool-preview-retry')), findsOneWidget);
+      expect(find.byKey(const Key('pool-preview-original')), findsNothing);
+      expect(find.text('使用原链接预览'), findsNothing);
+      expect(find.text('下载文件'), findsNothing);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byWidgetPredicate(
+                (widget) => widget is IconButton && widget.tooltip == '下载文件',
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(connector.downloadCalls, 0);
+      expect(api.openCalls, hasLength(1));
+      expect(connector.opened!.shareId, 'books');
+      expect(connector.opened!.passcode, 'aB12');
+      Navigator.of(tester.element(find.byType(PreviewPage))).pop();
+      await tester.pumpAndSettle();
+      expect(find.byType(BrowserPage), findsOneWidget);
+      expect(find.text('Python 学习指南.pdf'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'closing transfer captcha blocks original preview and retry verifies again',
+    (tester) async {
+      final (api, connector) = await openOriginalBrowser(tester);
+      final services = tester
+          .widget<BrowserPage>(find.byType(BrowserPage))
+          .services;
+      final browserContext = tester.element(find.byType(BrowserPage));
+      final http = FakeHttp((call) {
+        if (call.uri.path.endsWith('/open/file')) {
+          return jsonResponse({
+            'success': false,
+            'code': 'HUMAN_VERIFICATION_REQUIRED',
+          }, 403);
+        }
+        if (call.uri.path.endsWith('/challenge')) {
+          return jsonResponse(
+            jsonDecode(
+                  File('test/fixtures/search_captcha.json').readAsStringSync(),
+                )
+                as Map<String, dynamic>,
+          );
+        }
+        throw StateError('Unexpected request: ${call.uri.path}');
+      });
+      final transferApi = HttpResourceSearchApi(
+        http,
+        endpoint: 'http://search.test',
+      );
+      transferApi.security.onVerification = (client, cancellation) async =>
+          await showDialog<bool>(
+            context: browserContext,
+            barrierDismissible: false,
+            builder: (_) =>
+                SearchSecurityDialog(services, client, cancellation),
+          ) ??
+          false;
+      api.resolve = (hit, cancellation, selection) =>
+          transferApi.open(hit, cancellation, selection: selection);
+
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await tester.tap(
+          attempt == 0
+              ? find.text('Python 学习指南.pdf')
+              : find.byKey(const Key('pool-preview-retry')),
+        );
+        // The preview progress keeps animating while verification is pending.
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 40)),
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.byType(SearchSecurityDialog), findsOneWidget);
+        await tester.tap(find.byTooltip('取消验证'));
+        await settlePreview(tester);
+        expect(find.byType(SearchSecurityDialog), findsNothing);
+        expect(find.text('已取消安全验证'), findsOneWidget);
+        expect(find.text('暂未完成资源准备'), findsOneWidget);
+        expect(find.byKey(const Key('pool-preview-retry')), findsOneWidget);
+        expect(find.byKey(const Key('pool-preview-original')), findsNothing);
+        expect(find.text('使用原链接预览'), findsNothing);
+        expect(find.text('下载文件'), findsNothing);
+        expect(
+          tester
+              .widget<IconButton>(
+                find.byWidgetPredicate(
+                  (widget) => widget is IconButton && widget.tooltip == '下载文件',
+                ),
+              )
+              .onPressed,
+          isNull,
+        );
+        expect(connector.downloadCalls, 0);
+        expect(connector.opened!.shareId, 'books');
+        expect(api.openCalls, hasLength(attempt + 1));
+        expect(
+          http.calls.where((call) => call.uri.path.endsWith('/open/file')),
+          hasLength(attempt + 1),
+        );
+        expect(
+          http.calls.where((call) => call.uri.path.endsWith('/verify')),
+          isEmpty,
+        );
+      }
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final reason in ['insufficient_space', 'no_account']) {
+    testWidgets('$reason silently starts preview using the original share', (
+      tester,
+    ) async {
+      final (api, connector) = await openOriginalBrowser(tester);
+      api.resolve = (hit, _, _) async => ResourceSearchOpenResult(
+        hit: hit,
+        mode: 'original',
+        reason: reason,
+        message: '号池暂不可用，使用原链接预览',
+      );
+      await tester.tap(find.text('Python 学习指南.pdf'));
+      await settlePreview(tester);
+      expect(find.byType(PreviewPage), findsOneWidget);
+      expect(find.text('号池暂不可用，使用原链接预览'), findsNothing);
+      expect(find.byKey(const Key('pool-preview-original')), findsNothing);
+      expect(find.text('暂未完成资源准备'), findsNothing);
+      expect(find.text('下载文件'), findsOneWidget);
+      expect(api.openCalls, hasLength(1));
+      expect(connector.opened!.shareId, 'books');
+      expect(connector.opened!.passcode, 'aB12');
+      Navigator.of(tester.element(find.byType(PreviewPage))).pop();
+      await tester.pumpAndSettle();
+      expect(find.byType(BrowserPage), findsOneWidget);
+      expect(find.textContaining('删除临时'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('leaving preview cancels the request and ignores late results', (
     tester,
@@ -1228,7 +1405,7 @@ void main() {
   );
 
   testWidgets(
-    'results appear before local probes finish and invalid links move to the end',
+    'only checked result batches appear and valid/unconfirmed/invalid ordering is preserved',
     (tester) async {
       final checkerApi = LinkCheckApiFixture();
       final checks = ResourceLinkChecks(checkerApi);
@@ -1241,11 +1418,10 @@ void main() {
           opened.add(hit.identity);
         },
       );
-      expect(services.resourceSearch.phase, ResourceSearchPhase.complete);
-      expect(find.byType(ResourceSearchResultRow), findsWidgets);
-      await tester.pump(const Duration(milliseconds: 200));
+      expect(services.resourceSearch.phase, ResourceSearchPhase.checking);
+      expect(find.byType(ResourceSearchResultRow), findsNothing);
       expect(checkerApi.calls, hasLength(3));
-      expect(find.text('检测中'), findsWidgets);
+      expect(find.text('正在检测链接 0/4'), findsOneWidget);
       expect(api.openCalls, isEmpty);
       for (final (index, state) in [
         ResourceLinkState.valid,
@@ -1256,6 +1432,11 @@ void main() {
       }
       await tester.pump();
       expect(checkerApi.calls, hasLength(4));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.byType(ResourceSearchResultRow), findsNWidgets(3));
+      expect(find.text('正在检测链接 3/4'), findsOneWidget);
+      expect(find.text('待检测'), findsNothing);
+      expect(find.text('检测中'), findsNothing);
       checkerApi.calls.last.complete(ResourceLinkState.unknown);
       await tester.pumpAndSettle();
       for (final label in ['链接有效', '链接失效', '提取码待确认', '暂无法确认']) {
@@ -1278,7 +1459,7 @@ void main() {
   );
 
   testWidgets(
-    'local probes follow actual viewport rows instead of prebuilt cache extent rows',
+    'all returned search links are checked once and scrolling does not start new probes',
     (tester) async {
       final checkerApi = LinkCheckApiFixture(
         (_) async => ResourceLinkHealth.checked(
@@ -1287,7 +1468,7 @@ void main() {
         ),
       );
       final checks = ResourceLinkChecks(checkerApi);
-      await render(
+      final (services, _) = await render(
         tester,
         populated: true,
         linkChecks: checks,
@@ -1320,7 +1501,7 @@ void main() {
           .toSet();
       expect(
         checkerApi.calls.map((call) => call.hit.identity).toSet(),
-        visible,
+        services.resourceSearch.allItems.map((hit) => hit.identity).toSet(),
       );
       expect(builtRows.length, greaterThan(visible.length));
       final initial = checkerApi.calls.length;
@@ -1331,10 +1512,10 @@ void main() {
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 200));
       await tester.pumpAndSettle();
-      expect(checkerApi.calls.length, greaterThan(initial));
+      expect(checkerApi.calls.length, initial);
       expect(
         checkerApi.calls.map((call) => call.hit.identity),
-        isNot(contains('Quark:viewport49')),
+        contains('Quark:viewport49'),
       );
       await tester.drag(scroller, const Offset(0, 650));
       await tester.pumpAndSettle();
@@ -1384,6 +1565,30 @@ void main() {
   );
 
   testWidgets(
+    'stopping a search with pending checks displays retained links without pending badges',
+    (tester) async {
+      final checkerApi = LinkCheckApiFixture();
+      final (services, _) = await render(
+        tester,
+        populated: true,
+        linkChecks: ResourceLinkChecks(checkerApi),
+      );
+      await tester.tap(find.byKey(const Key('resource-search-stop')));
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.phase, ResourceSearchPhase.stopped);
+      expect(find.text('搜索已停止'), findsOneWidget);
+      expect(find.byType(ResourceSearchResultRow), findsNWidgets(4));
+      expect(find.text('待检测'), findsNothing);
+      expect(find.text('检测中'), findsNothing);
+      expect(
+        checkerApi.calls.every((call) => call.cancellation.isCancelled),
+        isTrue,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'resource details show local detection and allow an uncached manual recheck',
     (tester) async {
       final checkerApi = LinkCheckApiFixture((call) async {
@@ -1418,6 +1623,135 @@ void main() {
       Navigator.of(tester.element(find.text('资源详情'))).pop();
       await tester.pumpAndSettle();
       expect(checks.health(results().first).state, ResourceLinkState.invalid);
+      expect(
+        tester
+            .widget<ResourceSearchResultRow>(
+              find.byType(ResourceSearchResultRow).first,
+            )
+            .hit
+            .identity,
+        'Quark:books',
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'returning to the top naturally applies waiting checked results',
+    (tester) async {
+      final checkerApi = LinkCheckApiFixture();
+      final hits = List.generate(18, (i) => probeHit('return$i'));
+      await render(
+        tester,
+        populated: true,
+        linkChecks: ResourceLinkChecks(checkerApi),
+        response: (_, _) =>
+            Stream.value(ResourceSearchBatch(hits, complete: true)),
+      );
+      for (var i = 0; i < 15; i++) {
+        checkerApi.calls[i].complete(ResourceLinkState.unknown);
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 300));
+      final scroller = find.byKey(
+        const PageStorageKey('resource-search-results'),
+      );
+      await tester.drag(scroller, const Offset(0, -650));
+      await tester.pump(const Duration(milliseconds: 800));
+      for (var i = 15; i < 18; i++) {
+        checkerApi.calls[i].complete(ResourceLinkState.valid);
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.byKey(const Key('resource-search-new-results')),
+        findsOneWidget,
+      );
+      await tester.drag(scroller, const Offset(0, 1500));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('resource-search-new-results')),
+        findsNothing,
+      );
+      expect(
+        tester
+            .widget<ResourceSearchResultRow>(
+              find.byType(ResourceSearchResultRow).first,
+            )
+            .health!
+            .state,
+        ResourceLinkState.valid,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'later checked batches keep scrolled rows still until new results are opened',
+    (tester) async {
+      final checkerApi = LinkCheckApiFixture();
+      final hits = List.generate(24, (i) => probeHit('stable$i'));
+      final (services, _) = await render(
+        tester,
+        populated: true,
+        linkChecks: ResourceLinkChecks(checkerApi),
+        response: (_, _) =>
+            Stream.value(ResourceSearchBatch(hits, complete: true)),
+      );
+      for (var i = 0; i < 15; i++) {
+        checkerApi.calls[i].complete(ResourceLinkState.unknown);
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 260));
+      final scroller = find.byKey(
+        const PageStorageKey('resource-search-results'),
+      );
+      await tester.drag(scroller, const Offset(0, -650));
+      await tester.pump(const Duration(milliseconds: 800));
+      final state = tester.state<ScrollableState>(
+        find.descendant(of: scroller, matching: find.byType(Scrollable)).first,
+      );
+      final offset = state.position.pixels;
+      final viewport = tester.getRect(scroller);
+      final visibleRow =
+          find
+                  .byType(ResourceSearchResultRow)
+                  .evaluate()
+                  .firstWhere(
+                    (element) => tester
+                        .getRect(find.byWidget(element.widget))
+                        .overlaps(viewport),
+                  )
+                  .widget
+              as ResourceSearchResultRow;
+      final key = find.byKey(
+        ValueKey('resource-result-${visibleRow.hit.identity}'),
+      );
+      final before = tester.getRect(key);
+      for (var i = 15; i < hits.length; i++) {
+        checkerApi.calls[i].complete(ResourceLinkState.valid);
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(services.resourceSearch.phase, ResourceSearchPhase.complete);
+      expect(state.position.pixels, closeTo(offset, .01));
+      expect(tester.getRect(key), before);
+      expect(
+        find.byKey(const Key('resource-search-new-results')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const Key('resource-search-new-results')));
+      await tester.pumpAndSettle();
+      expect(state.position.pixels, 0);
+      expect(
+        find.byKey(const Key('resource-search-new-results')),
+        findsNothing,
+      );
+      final first = tester.widget<ResourceSearchResultRow>(
+        find.byType(ResourceSearchResultRow).first,
+      );
+      expect(first.health!.state, ResourceLinkState.valid);
+      expect(checkerApi.calls, hasLength(24));
       expect(tester.takeException(), isNull);
     },
   );

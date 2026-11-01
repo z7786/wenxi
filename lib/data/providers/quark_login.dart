@@ -87,6 +87,7 @@ class QuarkLoginService {
   final int Function() now;
 
   static const clientId = '532';
+  static const qrLifetime = Duration(minutes: 3);
   static const accountOrigin = 'https://uop.quark.cn';
   static const mobilePage =
       '$accountOrigin/cas/custom/login?custom_login_type=mobile&client_id=$clientId&display=pc';
@@ -179,6 +180,7 @@ class QuarkLoginService {
 
   Future<QuarkQrChallenge> createQr() async {
     final attempt = _QuarkLoginAttempt(http, now);
+    final requestedAt = now();
     try {
       final data = await attempt.qr('getTokenForQrcodeLogin');
       final token = data.obj('data').obj('members').str('token');
@@ -186,7 +188,11 @@ class QuarkLoginService {
         data.integer('status') == 2000000 && _validTicket(token),
         '夸克登录二维码获取失败，请重试或切换网页登录',
       );
-      return QuarkQrChallenge._(token, now() + 120000, attempt);
+      return QuarkQrChallenge._(
+        token,
+        requestedAt + qrLifetime.inMilliseconds,
+        attempt,
+      );
     } catch (_) {
       attempt.close();
       rethrow;
@@ -226,7 +232,6 @@ class _QuarkLoginAttempt {
   final JsonHttp http;
   final int Function() now;
   final LoginCookieJar cookies;
-  final requestId = newId();
   bool _closed = false;
 
   void close() {
@@ -255,6 +260,11 @@ class _QuarkLoginAttempt {
             ? QuarkLoginService.mobilePage
             : 'https://pan.quark.cn/',
         'Accept': 'application/json, text/plain, */*',
+        if (uri.host == 'uop.quark.cn' &&
+            uri.path.startsWith('/cas/ajax/')) ...{
+          'Cache-Control': 'no-cache, no-store',
+          'Pragma': 'no-cache',
+        },
         if (cookies.header(uri).isNotEmpty) 'Cookie': cookies.header(uri),
       },
       followRedirects: false,
@@ -285,7 +295,9 @@ class _QuarkLoginAttempt {
       queryParameters: {
         'client_id': QuarkLoginService.clientId,
         'v': '1.2',
-        'request_id': requestId,
+        // This identifies one request, not the QR session. The token and
+        // cookie jar retain the session while each poll gets a fresh ID.
+        'request_id': newId(),
         ...extra,
       },
     ),

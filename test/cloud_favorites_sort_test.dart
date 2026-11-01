@@ -104,6 +104,37 @@ void main() {
   );
 
   test(
+    'Favorite names use pinyin and natural numbers with pins first',
+    () async {
+      final names = ['资料10', '阿里10', '阿里2', '音乐', '重庆'];
+      for (final (index, name) in names.indexed) {
+        await favorites.rename('f$index', name);
+      }
+      await favorites.setSort(CloudFavoriteSort.name);
+      expect(ids(), ['f2', 'f1', 'f4', 'f3', 'f0']);
+      await favorites.setPinned('f0', true);
+      expect(ids(), ['f0', 'f2', 'f1', 'f4', 'f3']);
+      await favorites.rename('f1', '阿里1');
+      expect(ids(), ['f0', 'f1', 'f2', 'f4', 'f3']);
+      await favorites.setSort(CloudFavoriteSort.manual);
+      expect(ids(), ['f0', 'f1', 'f2', 'f3', 'f4']);
+    },
+  );
+
+  test(
+    'Homophone favorites keep their manual order as a tie breaker',
+    () async {
+      await favorites.rename('f0', '同01');
+      await favorites.rename('f1', '童1');
+      await favorites.reorder(['f1', 'f0', 'f2', 'f3', 'f4']);
+      await favorites.setSort(CloudFavoriteSort.name);
+      expect(ids(), ['f2', 'f3', 'f4', 'f1', 'f0']);
+      await favorites.setPinned('f0', true);
+      expect(ids(), ['f0', 'f2', 'f3', 'f4', 'f1']);
+    },
+  );
+
+  test(
     'Filtered and stale reorder requests preserve hidden and newly added favorites',
     () async {
       await favorites.reorder(['f4', 'f1']);

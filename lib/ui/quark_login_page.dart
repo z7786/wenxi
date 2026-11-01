@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../app_services.dart';
 import '../core/json.dart';
@@ -31,19 +30,17 @@ class QuarkLoginPage extends StatefulWidget {
   State<QuarkLoginPage> createState() => _QuarkLoginPageState();
 }
 
-class _QuarkLoginPageState extends State<QuarkLoginPage>
-    with WidgetsBindingObserver {
+class _QuarkLoginPageState extends State<QuarkLoginPage> {
   static const _platform = CloudPlatform.quark;
   final _mobile = TextEditingController(), _code = TextEditingController();
   late final _login = QuarkLoginService(widget.services.cloud.http);
   late final String? _selection;
   QuarkSmsChallenge? _sms;
-  QuarkQrChallenge? _qr;
   RequestScope? _request;
-  Timer? _ticker, _pollTimer;
+  Timer? _ticker;
   DateTime? _resendAt;
-  bool _qrMode = false, _busy = false, _agreed = false, _visible = true;
-  bool _leaving = false, _completed = false, _polling = false;
+  bool _busy = false, _agreed = false;
+  bool _leaving = false, _completed = false;
   int _generation = 0;
   String _error = '', _status = '';
 
@@ -52,15 +49,9 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
       ? 0
       : ((_resendAt!.difference(DateTime.now()).inMilliseconds + 999) ~/ 1000)
             .clamp(0, 60);
-  int get _qrSeconds => _qr == null
-      ? 0
-      : ((_qr!.expiresAt - DateTime.now().millisecondsSinceEpoch + 999) ~/ 1000)
-            .clamp(0, 120);
-
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _selection = widget.services.vault.activeAccountId(_platform);
     final saved = widget.services.vault.credentialFor(
       _platform,
@@ -72,9 +63,7 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!_active) return;
       final resendExpired = _resendAt != null && _seconds == 0;
-      if (_qr != null && _qrSeconds == 0 && _error.isEmpty && !_busy) {
-        _qrFailed(const QuarkQrExpired());
-      } else if (_seconds > 0 || resendExpired || _qr != null) {
+      if (_seconds > 0 || resendExpired) {
         setState(() {
           if (resendExpired) _resendAt = null;
         });
@@ -114,12 +103,8 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     _generation++;
     _request?.cancel();
     _request = null;
-    _pollTimer?.cancel();
     _sms?.close();
     _sms = null;
-    _qr?.close();
-    _qr = null;
-    _polling = false;
     widget.services.login.invalidate(_platform);
   }
 
@@ -138,35 +123,11 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     callback();
   }
 
-  void _mode(bool qr) {
-    if (!_active || qr == _qrMode) return;
-    _cancelRequests();
-    _code.clear();
-    FocusScope.of(context).unfocus();
-    TextInput.finishAutofillContext(shouldSave: false);
-    setState(() {
-      _qrMode = qr;
-      _busy = false;
-      _error = '';
-      _status = '';
-    });
-    if (qr) unawaited(_startQr());
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    _visible = state == AppLifecycleState.resumed;
-    if (_visible && _qrMode) unawaited(_pollQr());
-  }
-
   @override
   void dispose() {
     _cancel();
     _ticker?.cancel();
-    _pollTimer?.cancel();
     _sms?.close();
-    _qr?.close();
-    WidgetsBinding.instance.removeObserver(this);
     _mobile.dispose();
     _code.clear();
     _code.dispose();
@@ -199,7 +160,7 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
   }
 
   Future<void> _send() async {
-    if (!_active || _qrMode || _busy || _seconds > 0 || !_validateMobile()) {
+    if (!_active || _busy || _seconds > 0 || !_validateMobile()) {
       return;
     }
     final mobile = _mobile.text.trim(), generation = _generation;
@@ -252,7 +213,7 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
   }
 
   Future<void> _submitSms() async {
-    if (!_active || _qrMode || _busy || !_validateMobile()) return;
+    if (!_active || _busy || !_validateMobile()) return;
     final challenge = _sms;
     if (challenge == null || challenge.mobile != _mobile.text.trim()) {
       setState(() => _error = '请先获取当前手机号的验证码');
@@ -292,89 +253,10 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     }
   }
 
-  Future<void> _startQr() async {
-    if (!_active || !_qrMode || _busy) return;
-    _cancelRequests();
-    final generation = _generation, request = RequestScope();
-    _request = request;
-    setState(() {
-      _busy = true;
-      _error = '';
-      _status = '正在获取登录二维码…';
-    });
-    try {
-      final qr = await _run(request, generation, _login.createQr);
-      if (!_active || generation != _generation) {
-        qr.close();
-        return;
-      }
-      setState(() {
-        _qr = qr;
-        _status = '请使用夸克或夸克网盘 App 扫码，并在手机上确认登录';
-      });
-      _pollTimer = Timer.periodic(
-        const Duration(seconds: 2),
-        (_) => unawaited(_pollQr()),
-      );
-    } catch (error) {
-      if (_active && generation == _generation) _qrFailed(error);
-    } finally {
-      if (identical(_request, request)) _request = null;
-      if (_active && generation == _generation) setState(() => _busy = false);
-    }
-  }
-
-  void _qrFailed(Object error) {
-    _cancelRequests();
-    if (_active) {
-      setState(() {
-        _busy = false;
-        _error = errorText(error);
-        _status = '';
-      });
-    }
-  }
-
-  Future<void> _pollQr() async {
-    final qr = _qr;
-    if (!_active || !_qrMode || !_visible || _busy || _polling || qr == null) {
-      return;
-    }
-    final generation = _generation, request = RequestScope();
-    _request = request;
-    _polling = true;
-    try {
-      await _run(request, generation, () async {
-        final ticket = await _login.pollQr(qr);
-        RequestScope.checkpoint();
-        if (ticket == null) return;
-        _pollTimer?.cancel();
-        setState(() {
-          _busy = true;
-          _status = '扫码已确认，正在登录…';
-        });
-        await widget.services.login.submit(_platform, (_) async {
-          final credential = await _login.finishQr(qr, ticket);
-          RequestScope.checkpoint();
-          return (widget.services.cloud.connector(_platform) as QuarkConnector)
-              .authenticate(credential);
-        }, accountId: widget.accountId);
-        if (_active && generation == _generation) _finish();
-      });
-    } catch (error) {
-      if (_active && generation == _generation) _qrFailed(error);
-    } finally {
-      if (identical(_request, request)) _request = null;
-      if (generation == _generation) _polling = false;
-    }
-  }
-
   void _finish() {
     _completed = true;
-    _pollTimer?.cancel();
     _ticker?.cancel();
     _sms?.close();
-    _qr?.close();
     _code.clear();
     TextInput.finishAutofillContext(shouldSave: false);
     message(context, '夸克登录成功');
@@ -438,7 +320,7 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            _qrMode ? '扫码登录' : '手机号验证码登录',
+                            '手机号验证码登录',
                             style: const TextStyle(
                               fontSize: 22,
                               fontWeight: FontWeight.w600,
@@ -458,152 +340,75 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
                   ],
                 ),
                 const SizedBox(height: 28),
-                SegmentedButton<bool>(
-                  key: const ValueKey('quark-login-method'),
-                  segments: const [
-                    ButtonSegment(
-                      value: false,
-                      label: Text('手机号登录'),
-                      icon: Icon(CupertinoIcons.phone),
+                TextField(
+                  key: const ValueKey('quark-sms-mobile'),
+                  controller: _mobile,
+                  enabled: !_busy,
+                  keyboardType: TextInputType.phone,
+                  textInputAction: TextInputAction.next,
+                  autofillHints: const [AutofillHints.telephoneNumberNational],
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(11),
+                  ],
+                  decoration: const InputDecoration(
+                    labelText: '手机号',
+                    prefixIcon: Icon(CupertinoIcons.phone, size: 20),
+                    prefixText: '+86 ',
+                  ),
+                ),
+                const SizedBox(height: 18),
+                TextField(
+                  key: const ValueKey('quark-sms-code'),
+                  controller: _code,
+                  enabled: !_busy,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.done,
+                  autofillHints: const [AutofillHints.oneTimeCode],
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(4),
+                  ],
+                  onSubmitted: (_) => _submitSms(),
+                  decoration: InputDecoration(
+                    labelText: '短信验证码',
+                    prefixIcon: const Icon(CupertinoIcons.lock, size: 20),
+                    suffixIcon: TextButton(
+                      key: const ValueKey('quark-sms-send'),
+                      onPressed: _busy || _seconds > 0 ? null : _send,
+                      child: Text(_seconds > 0 ? '${_seconds}s 后重发' : '获取验证码'),
                     ),
-                    ButtonSegment(
-                      value: true,
-                      label: Text('扫码登录'),
-                      icon: Icon(CupertinoIcons.qrcode),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Checkbox(
+                      key: const ValueKey('quark-sms-agreement'),
+                      value: _agreed,
+                      onChanged: _busy
+                          ? null
+                          : (value) => setState(() => _agreed = value == true),
+                    ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 8),
+                          Text(
+                            '我已阅读并同意，未注册手机号将自动注册',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: secondary(context),
+                            ),
+                          ),
+                          _policies(),
+                        ],
+                      ),
                     ),
                   ],
-                  selected: {_qrMode},
-                  showSelectedIcon: false,
-                  onSelectionChanged: (value) => _mode(value.first),
                 ),
-                const SizedBox(height: 28),
-                if (!_qrMode) ...[
-                  TextField(
-                    key: const ValueKey('quark-sms-mobile'),
-                    controller: _mobile,
-                    enabled: !_busy,
-                    keyboardType: TextInputType.phone,
-                    textInputAction: TextInputAction.next,
-                    autofillHints: const [
-                      AutofillHints.telephoneNumberNational,
-                    ],
-                    inputFormatters: [
-                      FilteringTextInputFormatter.digitsOnly,
-                      LengthLimitingTextInputFormatter(11),
-                    ],
-                    decoration: const InputDecoration(
-                      labelText: '手机号',
-                      prefixIcon: Icon(CupertinoIcons.phone, size: 20),
-                      prefixText: '+86 ',
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  TextField(
-                    key: const ValueKey('quark-sms-code'),
-                    controller: _code,
-                    enabled: !_busy,
-                    keyboardType: TextInputType.number,
-                    textInputAction: TextInputAction.done,
-                    autofillHints: const [AutofillHints.oneTimeCode],
-                    inputFormatters: [
-                      FilteringTextInputFormatter.digitsOnly,
-                      LengthLimitingTextInputFormatter(4),
-                    ],
-                    onSubmitted: (_) => _submitSms(),
-                    decoration: InputDecoration(
-                      labelText: '短信验证码',
-                      prefixIcon: const Icon(CupertinoIcons.lock, size: 20),
-                      suffixIcon: TextButton(
-                        key: const ValueKey('quark-sms-send'),
-                        onPressed: _busy || _seconds > 0 ? null : _send,
-                        child: Text(
-                          _seconds > 0 ? '${_seconds}s 后重发' : '获取验证码',
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Checkbox(
-                        key: const ValueKey('quark-sms-agreement'),
-                        value: _agreed,
-                        onChanged: _busy
-                            ? null
-                            : (value) =>
-                                  setState(() => _agreed = value == true),
-                      ),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const SizedBox(height: 8),
-                            Text(
-                              '我已阅读并同意，未注册手机号将自动注册',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: secondary(context),
-                              ),
-                            ),
-                            _policies(),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ] else ...[
-                  Center(
-                    child: SizedBox(
-                      width: 248,
-                      height: 248,
-                      child: _qr != null && _error.isEmpty
-                          ? ColoredBox(
-                              color: Colors.white,
-                              child: QrImageView(
-                                key: const ValueKey('quark-login-qr'),
-                                data: _qr!.url,
-                                size: 248,
-                                backgroundColor: Colors.white,
-                                padding: const EdgeInsets.all(16),
-                                semanticsLabel: '夸克登录二维码',
-                              ),
-                            )
-                          : Center(
-                              child: _busy
-                                  ? _spinner()
-                                  : Icon(
-                                      CupertinoIcons.qrcode,
-                                      size: 72,
-                                      color: secondary(context),
-                                    ),
-                            ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (_qr != null && _error.isEmpty)
-                    Text(
-                      '等待扫码确认 · ${_qrSeconds}s',
-                      key: const ValueKey('quark-qr-status'),
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: secondary(context)),
-                    ),
-                  TextButton.icon(
-                    key: const ValueKey('quark-qr-refresh'),
-                    onPressed: _busy ? null : _startQr,
-                    icon: const Icon(CupertinoIcons.arrow_clockwise, size: 18),
-                    label: Text(
-                      _qr == null && _error.isEmpty ? '获取登录二维码' : '重新获取二维码',
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    '扫码并确认登录表示你已阅读并同意',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 13, color: secondary(context)),
-                  ),
-                  Center(child: _policies()),
-                ],
                 if (_error.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 18),
@@ -617,15 +422,14 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
                       ),
                     ),
                   ),
-                if (!_qrMode)
-                  FilledButton(
-                    key: const ValueKey('quark-sms-submit'),
-                    onPressed: _busy ? null : _submitSms,
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(50),
-                    ),
-                    child: _busy ? _spinner(onPrimary: true) : const Text('登录'),
+                FilledButton(
+                  key: const ValueKey('quark-sms-submit'),
+                  onPressed: _busy ? null : _submitSms,
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(50),
                   ),
+                  child: _busy ? _spinner(onPrimary: true) : const Text('登录'),
+                ),
                 const SizedBox(height: 16),
                 if (_status.isNotEmpty)
                   Text(

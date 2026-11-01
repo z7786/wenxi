@@ -5,9 +5,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../app_services.dart';
 import '../core/json.dart';
 import '../data/resource_link_checks.dart';
-import '../data/resource_search_api.dart';
 import '../domain/resource_search.dart';
 import 'common.dart';
+import 'resource_search_bar.dart';
 import 'resource_preferences.dart';
 import 'resource_search_page.dart';
 
@@ -32,12 +32,12 @@ class _ResourceHomePageState extends State<ResourceHomePage>
   final viewportKey = GlobalKey();
   final rowKeys = <String, GlobalKey>{};
   bool visibilityScheduled = false;
-  ResourceCatalog catalog = const ResourceCatalog();
-  final loading = <String>{};
-  String error = '';
+  ResourceCatalog get catalog => widget.services.resourceSearch.catalog;
+  Set<String> get loading => widget.services.resourceSearch.catalogLoading;
+  String get error => widget.services.resourceSearch.catalogError;
   String? opening;
-  int generation = 0;
-  bool loaded = false;
+  bool get loaded => widget.services.resourceSearch.catalogLoaded;
+  int catalogRevision = 0;
   String tileKey(ResourceSearchHit hit) =>
       '${hit.recommendationId}:${resourceLinkKey(hit)}';
 
@@ -46,18 +46,29 @@ class _ResourceHomePageState extends State<ResourceHomePage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     scroll.addListener(scheduleVisibility);
-    if (widget.active) unawaited(load());
+    catalogRevision = widget.services.resourceSearch.catalogRevision;
+    widget.services.resourceSearch.addListener(catalogChanged);
+    if (widget.active) {
+      unawaited(widget.services.resourceSearch.loadCatalog());
+    }
   }
 
   @override
   void didUpdateWidget(ResourceHomePage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.active && !oldWidget.active) {
-      unawaited(load());
+      unawaited(widget.services.resourceSearch.loadCatalog());
       scheduleVisibility();
     } else if (!widget.active && oldWidget.active) {
       widget.services.resourceSearch.linkChecks?.clearVisible();
     }
+  }
+
+  void catalogChanged() {
+    final revision = widget.services.resourceSearch.catalogRevision;
+    if (!mounted || revision == catalogRevision) return;
+    setState(() => catalogRevision = revision);
+    scheduleVisibility();
   }
 
   @override
@@ -115,7 +126,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
 
   @override
   void dispose() {
-    generation++;
+    widget.services.resourceSearch.removeListener(catalogChanged);
     WidgetsBinding.instance.removeObserver(this);
     widget.services.resourceSearch.linkChecks?.clearVisible();
     scroll.dispose();
@@ -123,73 +134,8 @@ class _ResourceHomePageState extends State<ResourceHomePage>
     super.dispose();
   }
 
-  Future<void> load({String section = ''}) async {
-    if (loading.contains(section) || loading.contains('')) return;
-    final requestGeneration = section.isEmpty ? ++generation : generation;
-    setState(() {
-      loading.add(section);
-      error = '';
-    });
-    try {
-      final api = widget.services.resourceSearch.api;
-      final old = section == 'popular'
-          ? catalog.popular
-          : catalog.categories
-                    .where((c) => '${c.id}' == section)
-                    .firstOrNull
-                    ?.resources ??
-                <ResourceSearchHit>[];
-      final exclude = old
-          .map((r) => r.recommendationId)
-          .where((id) => id > 0)
-          .toList();
-      final ResourceCatalog next;
-      if (api is ResourceCatalogApi) {
-        next = await (api as ResourceCatalogApi).catalog(
-          refreshSection: section,
-          exclude: exclude,
-        );
-      } else if (api is ResourceDiscoveryApi) {
-        next = ResourceCatalog(
-          popular: await (api as ResourceDiscoveryApi).recommendations(
-            refresh: section.isNotEmpty,
-            exclude: exclude,
-          ),
-        );
-      } else {
-        next = const ResourceCatalog();
-      }
-      if (!mounted || requestGeneration != generation) return;
-      setState(() {
-        loaded = true;
-        if (section.isEmpty) {
-          catalog = next;
-        } else if (section == 'popular') {
-          catalog = ResourceCatalog(
-            popular: next.popular,
-            categories: catalog.categories,
-          );
-        } else {
-          final replacement = next.categories
-              .where((c) => '${c.id}' == section)
-              .firstOrNull;
-          catalog = ResourceCatalog(
-            popular: catalog.popular,
-            categories: [
-              for (final category in catalog.categories)
-                if ('${category.id}' != section) category else ?replacement,
-            ],
-          );
-        }
-      });
-    } catch (e) {
-      if (mounted && requestGeneration == generation) {
-        setState(() => error = '资源暂时加载失败，请稍后重试');
-      }
-    } finally {
-      if (mounted) setState(() => loading.remove(section));
-    }
-  }
+  Future<void> load({String section = ''}) => widget.services.resourceSearch
+      .loadCatalog(section: section, refresh: true);
 
   Future<void> submit([String? keyword]) async {
     final term = (keyword ?? input.text).trim();
@@ -526,74 +472,37 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                               ],
                             ),
                             const SizedBox(height: 23),
-                            DecoratedBox(
-                              decoration: BoxDecoration(
-                                color: backgroundSurface(context),
-                                borderRadius: BorderRadius.circular(32),
-                                border: Border.all(
-                                  color: border(context),
-                                  width: .7,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: themeAccent(
-                                      context,
-                                    ).withValues(alpha: .05),
-                                    blurRadius: 20,
-                                    offset: const Offset(0, 4),
-                                  ),
-                                ],
+                            ResourceSearchBar(
+                              buttonKey: const Key(
+                                'resource-home-search-submit',
                               ),
-                              child: Padding(
-                                padding: const EdgeInsets.all(5),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: TextField(
-                                        key: const Key(
-                                          'resource-home-search-input',
-                                        ),
-                                        controller: input,
-                                        maxLength: 120,
-                                        textInputAction: TextInputAction.search,
-                                        onSubmitted: (_) => submit(),
-                                        decoration: InputDecoration(
-                                          counterText: '',
-                                          hintText: '搜索电影、学习资料、软件…',
-                                          hintStyle: TextStyle(
-                                            fontSize: 12,
-                                            color: secondary(context),
-                                          ),
-                                          prefixIcon: const Icon(
-                                            Icons.search_rounded,
-                                            size: 23,
-                                          ),
-                                          border: InputBorder.none,
-                                          enabledBorder: InputBorder.none,
-                                          focusedBorder: InputBorder.none,
-                                          filled: false,
-                                          contentPadding:
-                                              const EdgeInsets.symmetric(
-                                                vertical: 13,
-                                              ),
-                                        ),
-                                      ),
-                                    ),
-                                    FilledButton(
-                                      key: const Key(
-                                        'resource-home-search-submit',
-                                      ),
-                                      onPressed: () => submit(),
-                                      style: FilledButton.styleFrom(
-                                        minimumSize: const Size(68, 44),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 20,
-                                        ),
-                                        shape: const StadiumBorder(),
-                                      ),
-                                      child: const Text('搜索'),
-                                    ),
-                                  ],
+                              onPressed: () => submit(),
+                              field: TextField(
+                                key: const Key('resource-home-search-input'),
+                                controller: input,
+                                maxLength: 120,
+                                textInputAction: TextInputAction.search,
+                                onSubmitted: (_) => submit(),
+                                style: const TextStyle(fontSize: 15),
+                                decoration: InputDecoration(
+                                  counterText: '',
+                                  hintText: '搜索电影、学习资料、软件…',
+                                  hintStyle: TextStyle(
+                                    fontSize: 13,
+                                    color: secondary(context),
+                                  ),
+                                  prefixIcon: Icon(
+                                    Icons.search_rounded,
+                                    size: 20,
+                                    color: secondary(context),
+                                  ),
+                                  border: InputBorder.none,
+                                  enabledBorder: InputBorder.none,
+                                  focusedBorder: InputBorder.none,
+                                  filled: false,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    vertical: 12,
+                                  ),
                                 ),
                               ),
                             ),

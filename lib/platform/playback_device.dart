@@ -6,12 +6,14 @@ import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/playback.dart';
 import 'windows_pip.dart';
+import 'windows_external_player.dart';
 
 abstract class PlaybackDevice extends ChangeNotifier {
   bool get supportsOrientation => false;
   bool get supportsPip;
   bool get supportsDesktopPip => false;
   bool get supportsExternalPlayer => false;
+  WindowsExternalPlayer? get windowsExternalPlayer => null;
   bool get supportsBrightness;
   bool get inPip;
   double get brightness;
@@ -22,6 +24,7 @@ abstract class PlaybackDevice extends ChangeNotifier {
     int? width,
     int? height,
     bool autoRotate = true,
+    PlaybackOrientation? orientation,
     bool locked = false,
     bool controlsVisible = true,
   });
@@ -41,15 +44,22 @@ abstract class PlaybackDevice extends ChangeNotifier {
 }
 
 class NativePlaybackDevice extends PlaybackDevice {
-  NativePlaybackDevice({TargetPlatform? targetPlatform})
-    : _platform = targetPlatform ?? defaultTargetPlatform;
+  NativePlaybackDevice({
+    TargetPlatform? targetPlatform,
+    WindowsExternalPlayer? windowsExternalPlayer,
+  }) : _platform = targetPlatform ?? defaultTargetPlatform,
+       _windowsPlayer = windowsExternalPlayer ?? WindowsExternalPlayer();
+  final WindowsExternalPlayer _windowsPlayer;
   final TargetPlatform _platform;
   bool get _android => _platform == TargetPlatform.android;
   bool get _windows => _platform == TargetPlatform.windows;
   @override
   bool get supportsOrientation => _android;
   @override
-  bool get supportsExternalPlayer => _android;
+  bool get supportsExternalPlayer => _android || _windows;
+  @override
+  WindowsExternalPlayer? get windowsExternalPlayer =>
+      _windows ? _windowsPlayer : null;
   static const _channel = MethodChannel('com.asterlink.app/playback');
   static const _nativeChannel = MethodChannel('com.asterlink.app/native');
   static NativePlaybackDevice? _handlerOwner;
@@ -109,6 +119,7 @@ class NativePlaybackDevice extends PlaybackDevice {
     int? width,
     int? height,
     bool autoRotate = true,
+    PlaybackOrientation? orientation,
     bool locked = false,
     bool controlsVisible = true,
   }) async {
@@ -118,14 +129,16 @@ class NativePlaybackDevice extends PlaybackDevice {
       return;
     }
     if (!_android) return;
-    final orientation = playbackOrientation(
-      video: _video,
-      automatic: autoRotate,
-      width: width,
-      height: height,
-    );
+    final targetOrientation = _video && orientation != null
+        ? orientation
+        : playbackOrientation(
+            video: _video,
+            automatic: autoRotate,
+            width: width,
+            height: height,
+          );
     final signature =
-        '$playing/$width/$height/${orientation?.name}/$locked/$controlsVisible';
+        '$playing/$width/$height/${targetOrientation?.name}/$locked/$controlsVisible';
     if (_lastUpdate == signature) return;
     _lastUpdate = signature;
     try {
@@ -133,7 +146,7 @@ class NativePlaybackDevice extends PlaybackDevice {
         'playing': playing,
         'width': width,
         'height': height,
-        'orientation': orientation?.name,
+        'orientation': targetOrientation?.name,
         'locked': locked,
         'controlsVisible': controlsVisible,
       });
@@ -233,7 +246,8 @@ class NativePlaybackDevice extends PlaybackDevice {
     required String title,
     required Duration position,
   }) async {
-    require(_android && !_closed, '当前设备不支持选择第三方播放器');
+    require(supportsExternalPlayer && !_closed, '当前设备不支持选择第三方播放器');
+    if (_windows) return _windowsPlayer.open(url);
     try {
       return await _nativeChannel.invokeMethod<bool>('openExternalPlayer', {
             'session': _session,

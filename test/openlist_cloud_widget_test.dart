@@ -28,6 +28,10 @@ void main() {
           await tester.ensureVisible(find.text(platform.label));
           await tester.tap(find.text(platform.label));
           await tester.pumpAndSettle();
+          if (platform == CloudPlatform.wopan) {
+            await tester.tap(find.text('切换网页登录'));
+            await tester.pumpAndSettle();
+          }
           final page = tester.widget<WebLoginPage>(find.byType(WebLoginPage));
           expect(page.target, WebLoginTarget.targets[platform]);
           expect(page.target.userAgent, contains('Windows NT'));

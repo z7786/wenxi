@@ -7,6 +7,9 @@ import 'http.dart';
 import 'state_store.dart';
 import '../core/crypto_box.dart';
 import 'search_security.dart';
+import 'client_search_engine.dart';
+import '../domain/backend_endpoints.dart';
+import 'client_search_host.dart';
 
 abstract interface class ResourceDiscoveryApi {
   Future<List<ResourceSearchHit>> recommendations({
@@ -22,6 +25,10 @@ abstract interface class ResourceCatalogApi {
   });
 }
 
+abstract interface class ResourceSearchConfigurationApi {
+  Future<void> prepareSources(CancelToken cancellation);
+}
+
 abstract interface class ResourceSearchApi {
   Stream<ResourceSearchBatch> search(String keyword, CancelToken cancellation);
   Future<ResourceSearchOpenResult> open(
@@ -32,21 +39,46 @@ abstract interface class ResourceSearchApi {
 }
 
 class HttpResourceSearchApi
-    implements ResourceSearchApi, ResourceDiscoveryApi, ResourceCatalogApi {
-  HttpResourceSearchApi(this.http, {String endpoint = buildUrl, this.store})
-    : endpoint = endpoint.replaceFirst(RegExp(r'/+$'), ''),
-      security = SearchSecurityClient(
-        http,
-        endpoint.replaceFirst(RegExp(r'/+$'), ''),
+    implements
+        ResourceSearchApi,
+        ResourceDiscoveryApi,
+        ResourceCatalogApi,
+        ResourceSearchConfigurationApi {
+  HttpResourceSearchApi(
+    this.http, {
+    String endpoint = buildUrl,
+    this.store,
+    bool localSearch = false,
+    SearchBrowserEnvironment? browserEnvironment,
+  }) : endpoint = endpoint.replaceFirst(RegExp(r'/+$'), ''),
+       security = SearchSecurityClient(
+         http,
+         endpoint.replaceFirst(RegExp(r'/+$'), ''),
+       ) {
+    if (localSearch && store != null) {
+      clientSearch = ClientSearchEngine(
+        store: store!,
+        endpoint: this.endpoint,
+        fetch: _manifest,
+        environment: browserEnvironment,
       );
+    }
+  }
   static const buildUrl = String.fromEnvironment(
     'RESOURCE_SEARCH_URL',
-    defaultValue: 'https://pan.dr7786.top',
+    defaultValue: BackendEndpoints.search,
   );
   final JsonHttp http;
   final String endpoint;
   final StateStore? store;
   final SearchSecurityClient security;
+  ClientSearchEngine? clientSearch;
+  String get configurationRevision => clientSearch?.revision ?? '';
+  @override
+  Future<void> prepareSources(CancelToken token) async {
+    await clientSearch?.prepare(token);
+  }
+
   String? _clientId;
 
   Future<String> _identity() async {
@@ -105,13 +137,10 @@ class HttpResourceSearchApi
     return ResourceCatalog.fromJson(value);
   }
 
-  // Match the server's supported ceiling; the UI reveals these in batches.
-  static const resultLimit = 1000;
-
   String _url(String path, String keyword) => query('$endpoint/api/v1/$path', {
     'keyword': keyword,
     'scope': 'all',
-    'limit': resultLimit,
+    'limit': 0,
     'format': 'object',
   });
 
@@ -121,16 +150,51 @@ class HttpResourceSearchApi
     CancelToken cancellation, {
     required ResourceSearchFileSelection selection,
   }) async {
+    if (_backendDownUntil != null &&
+        DateTime.now().isBefore(_backendDownUntil!)) {
+      require(!cancellation.isCancelled, '打开已取消');
+      return _original(hit);
+    }
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
         return await _openOnce(hit, cancellation, selection: selection);
       } on SearchVerificationRequired {
         if (attempt != 0) rethrow;
-        await security.ensure(cancellation);
+        try {
+          await security.ensure(cancellation);
+        } on HttpRequestFailure catch (e) {
+          if (!cancellation.isCancelled && e.retryable) return _original(hit);
+          rethrow;
+        }
+      } on _BackendUnavailable {
+        require(!cancellation.isCancelled, '打开已取消');
+        _backendDownUntil = DateTime.now().add(const Duration(seconds: 30));
+        return _original(hit);
+      } on HttpRequestFailure catch (e) {
+        if (!cancellation.isCancelled &&
+            (e.retryable ||
+                {
+                  'connectionError',
+                  'connectionTimeout',
+                  'receiveTimeout',
+                  'sendTimeout',
+                }.contains(e.kind))) {
+          _backendDownUntil = DateTime.now().add(const Duration(seconds: 30));
+          return _original(hit);
+        }
+        rethrow;
       }
     }
     throw const AppException('请稍后重试');
   }
+
+  DateTime? _backendDownUntil;
+  ResourceSearchOpenResult _original(ResourceSearchHit hit) =>
+      ResourceSearchOpenResult(
+        hit: hit,
+        mode: 'original',
+        reason: 'backend_unavailable',
+      );
 
   Future<ResourceSearchOpenResult> _openOnce(
     ResourceSearchHit hit,
@@ -138,16 +202,21 @@ class HttpResourceSearchApi
     required ResourceSearchFileSelection selection,
   }) async {
     require(!cancellation.isCancelled, '打开已取消');
-    require(hit.openTicket.isNotEmpty, '当前搜索结果无法申请转存，请刷新搜索后重试');
     require(
       selection.fileId.isNotEmpty && selection.name.isNotEmpty,
       '请重新选择具体文件预览',
     );
     // A distinct route prevents older servers from ignoring the file selection
     // and performing a whole-share transfer before the client can reject it.
-    final url = '$endpoint/api/v1/search/open/file';
+    final native = hit.openTicket.isEmpty || _expired(hit.openTicket);
+    final url = '$endpoint/api/v1/search/${native ? 'client/' : ''}open/file';
     final body = jsonEncode({
-      'ticket': hit.openTicket,
+      if (!native) 'ticket': hit.openTicket,
+      if (native) ...{
+        'url': hit.url,
+        'title': hit.title,
+        'password': hit.password,
+      },
       'selection': selection.toJson(),
     });
     final token = CancelToken();
@@ -158,7 +227,7 @@ class HttpResourceSearchApi
         if (!finished) token.cancel();
       }),
     );
-    final timer = Timer(const Duration(seconds: 90), () {
+    final timer = Timer(const Duration(seconds: 20), () {
       timedOut = true;
       token.cancel();
     });
@@ -174,7 +243,8 @@ class HttpResourceSearchApi
           options: Options(
             contentType: 'application/json; charset=utf-8',
             responseType: ResponseType.plain,
-            receiveTimeout: const Duration(seconds: 90),
+            receiveTimeout: const Duration(seconds: 20),
+            sendTimeout: const Duration(seconds: 5),
             followRedirects: false,
             headers: {
               'Accept': 'application/json',
@@ -202,6 +272,10 @@ class HttpResourceSearchApi
         );
       }
       require(!token.isCancelled, '打开已取消');
+      if ({500, 502, 503, 504}.contains(response.status) ||
+          native && {404, 405}.contains(response.status)) {
+        throw const _BackendUnavailable();
+      }
       require(response.body.length <= 128 * 1024, '转存服务响应过大');
       if (response.status == 403 &&
           _json(response.body)['code'] == 'HUMAN_VERIFICATION_REQUIRED') {
@@ -230,10 +304,18 @@ class HttpResourceSearchApi
       return result;
     } catch (e) {
       if (timedOut) {
-        throw const AppException('转存等待超时，可以稍后重试');
+        throw const _BackendUnavailable();
       }
       if (e is DioException && !CancelToken.isCancel(e)) {
-        throw const AppException('转存连接中断，请检查网络后重试');
+        if ({
+          DioExceptionType.connectionTimeout,
+          DioExceptionType.sendTimeout,
+          DioExceptionType.receiveTimeout,
+          DioExceptionType.connectionError,
+          DioExceptionType.unknown,
+        }.contains(e.type)) {
+          throw const _BackendUnavailable();
+        }
       }
       rethrow;
     } finally {
@@ -247,6 +329,15 @@ class HttpResourceSearchApi
     String keyword,
     CancelToken cancellation,
   ) async* {
+    final local = clientSearch;
+    if (local != null) {
+      await prepareSources(cancellation);
+      require(!local.disabled, 'App 搜索暂未开放');
+      if (local.available) {
+        yield* local.search(keyword, cancellation, _serverSources);
+        return;
+      }
+    }
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
         await for (final batch in _searchOnce(keyword, cancellation)) {
@@ -258,6 +349,109 @@ class HttpResourceSearchApi
         await security.ensure(cancellation);
       }
     }
+  }
+
+  bool _expired(String ticket) {
+    try {
+      final payload = asJson(
+        jsonDecode(
+          utf8.decode(
+            base64Url.decode(base64Url.normalize(ticket.split('.')[1])),
+          ),
+        ),
+      );
+      return payload.integer('exp') <=
+          DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<Json> _manifest(CancelToken cancellation) async {
+    final scope = RequestScope();
+    final cancel = cancellation.whenCancel.asStream().listen(
+      (_) => scope.cancel(),
+    );
+    if (cancellation.isCancelled) scope.cancel();
+    try {
+      final response = await scope
+          .run(
+            () => RequestScope.cancellable(
+              http.get('$endpoint/api/v1/search/client/config'),
+            ),
+          )
+          .timeout(
+            const Duration(seconds: 4),
+            onTimeout: () {
+              scope.cancel();
+              throw const _BackendUnavailable();
+            },
+          );
+      require(
+        response.status == 200 && response.body.length < 16000000,
+        '搜索配置暂时不可用',
+      );
+      return _json(response.body);
+    } finally {
+      scope.cancel();
+      await cancel.cancel();
+    }
+  }
+
+  Stream<ResourceSearchBatch> _serverSources(
+    String keyword,
+    List<String> sources,
+    CancelToken token,
+  ) async* {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        yield* _serverSourcesOnce(keyword, sources, token);
+        return;
+      } on SearchVerificationRequired {
+        if (attempt != 0) rethrow;
+        await security.ensure(token);
+      }
+    }
+  }
+
+  Stream<ResourceSearchBatch> _serverSourcesOnce(
+    String keyword,
+    List<String> sources,
+    CancelToken token,
+  ) async* {
+    final url = query('$endpoint/api/v1/search/client/server', {
+      'keyword': keyword,
+      'sources': sources.join(','),
+    });
+    final client = http;
+    if (client is! DioJsonHttp) return;
+    final response = await client.dio.get<ResponseBody>(
+      url,
+      cancelToken: token,
+      options: Options(
+        responseType: ResponseType.stream,
+        receiveTimeout: const Duration(seconds: 35),
+        headers: {'Accept': 'text/event-stream', ...security.headers},
+      ),
+    );
+    if (response.statusCode != 200) {
+      final bytes = <int>[];
+      await for (final chunk in response.data!.stream) {
+        bytes.addAll(chunk.take(65536 - bytes.length));
+        if (bytes.length >= 65536) break;
+      }
+      _checkStatus(
+        response.statusCode ?? 0,
+        _json(utf8.decode(bytes, allowMalformed: true)),
+      );
+    }
+    await for (final value in decodeSearchEvents(response.data!.stream)) {
+      if (value['type'] == 'error') throw AppException(value.str('message'));
+      final batch = ResourceSearchBatch.fromJson(value);
+      yield batch;
+      if (batch.complete) return;
+    }
+    throw const AppException('后台搜索连接中断');
   }
 
   Stream<ResourceSearchBatch> _searchOnce(
@@ -364,16 +558,16 @@ class _StreamUnavailable implements Exception {
   const _StreamUnavailable();
 }
 
+class _BackendUnavailable implements Exception {
+  const _BackendUnavailable();
+}
+
 /// Decode UTF-8 and SSE frames across arbitrary network chunk boundaries.
 Stream<Json> decodeSearchEvents(Stream<List<int>> stream) async* {
-  var size = 0;
+  var frameSize = 0;
   final data = <String>[];
   final lines = stream
-      .map((chunk) {
-        size += chunk.length;
-        require(size <= 4 * 1024 * 1024, '搜索结果过大，请更换关键词');
-        return chunk;
-      })
+      .map<List<int>>((chunk) => chunk)
       .transform(utf8.decoder)
       .transform(const LineSplitter());
   await for (final line in lines) {
@@ -381,8 +575,11 @@ Stream<Json> decodeSearchEvents(Stream<List<int>> stream) async* {
       if (data.isNotEmpty) {
         yield asJson(jsonDecode(data.join('\n')));
         data.clear();
+        frameSize = 0;
       }
     } else if (line.startsWith('data:')) {
+      frameSize += line.length;
+      require(frameSize <= 4 * 1024 * 1024, '单批搜索响应过大');
       data.add(line.substring(5).replaceFirst(RegExp(r'^ '), ''));
     }
   }

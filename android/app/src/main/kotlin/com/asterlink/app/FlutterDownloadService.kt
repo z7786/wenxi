@@ -1,13 +1,11 @@
 package com.asterlink.app
 
-import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -30,6 +28,7 @@ class FlutterDownloadService : Service() {
     private var acquiredAt = 0L
     private var foreground = false
     private var lastNotice: DownloadNotice? = null
+    private var lastNotificationPermission = false
     val wakeLockHeld: Boolean get() = wakeLock?.isHeld == true
     private val maintenance = object : Runnable {
         override fun run() {
@@ -68,7 +67,8 @@ class FlutterDownloadService : Service() {
     }
 
     fun show(value: DownloadNotice, allowPause: Boolean = true) {
-        if (foreground && lastNotice == value && allowPause) return
+        val canNotify = NotificationPermission.granted(this)
+        if (foreground && lastNotice == value && allowPause && lastNotificationPermission == canNotify) return
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java).setAction("com.asterlink.app.OPEN_TRANSFERS")
                 .putExtra("transferTab", if (value.active == value.lan && value.lan > 0) "lan" else if (value.uploads > 0) "uploads" else "downloads"),
@@ -105,11 +105,14 @@ class FlutterDownloadService : Service() {
             renewWakeLock()
             main.removeCallbacks(maintenance)
             main.postDelayed(maintenance, 30000)
-        } else if (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+        } else if (canNotify) {
             // Notification refreshes do not attempt another background start.
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
         }
+        // Include permission in the cache: granting it must refresh unchanged
+        // progress, while denied/unchanged heartbeats avoid rebuilding notices.
         lastNotice = value
+        lastNotificationPermission = canNotify
     }
 
     private fun renewWakeLock() {
@@ -138,6 +141,7 @@ class FlutterDownloadService : Service() {
         if (foreground) ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         foreground = false
         lastNotice = null
+        lastNotificationPermission = false
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {

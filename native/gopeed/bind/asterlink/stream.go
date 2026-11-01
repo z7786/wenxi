@@ -111,6 +111,9 @@ func StartTorrentStream(value string) (string, error) {
 	if core == nil {
 		return "", errors.New("下载组件尚未初始化")
 	}
+	if input.BTUploadLimit != nil {
+		btpolicy.SetUploadLimit(*input.BTUploadLimit)
+	}
 	streamMu.Lock()
 	defer streamMu.Unlock()
 	if len(streams) != 0 {
@@ -335,6 +338,7 @@ func (s *torrentStream) close() {
 	}
 	s.requests.Wait()
 	btpolicy.Remember(s.torrent)
+	btpolicy.RememberDHT(s.client)
 	if s.client != nil {
 		s.client.Close()
 	}

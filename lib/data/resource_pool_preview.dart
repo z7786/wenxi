@@ -91,9 +91,15 @@ class ResourcePoolPreview {
       checkpoint();
       if (!result.transferred &&
           result.mode == 'original' &&
-          {'policy_disabled', 'policy_probability'}.contains(result.reason)) {
-        // A policy miss is a normal original-link preview, with no extra parse,
-        // error dialog or cleanup notification.
+          {
+            'policy_disabled',
+            'policy_probability',
+            'backend_unavailable',
+            'insufficient_space',
+            'no_account',
+          }.contains(result.reason)) {
+        // Keep the current account/public-parser session and selected file when
+        // the pool cannot store it. This creates no new share or cleanup task.
         return PoolPreviewTarget(original, file, [file], sourceParent);
       }
       require(result.transferred, result.message.ifEmpty('暂时未能生成新的分享链接'));
@@ -128,7 +134,7 @@ class ResourcePoolPreview {
       checkpoint();
       require(
         siblings.length == 1 && !siblings.single.isDirectory,
-        '新分享不是单文件分享，已停止预览，请使用原链接预览',
+        '新分享不是单文件分享，已停止预览，请重试',
       );
       final matches = siblings
           .where(
@@ -144,7 +150,7 @@ class ResourcePoolPreview {
                     candidate.hashValue == file.hashValue),
           )
           .toList();
-      require(matches.length == 1, '新分享中无法唯一定位“${file.name}”，可以使用原分享继续预览');
+      require(matches.length == 1, '新分享中无法唯一定位“${file.name}”，请重试');
       checkpoint();
       final mapped = PoolPreviewTarget(
         target,

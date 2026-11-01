@@ -11,6 +11,7 @@ import '../download/navigation_transfers.dart';
 import 'navigation_transfer_icon.dart';
 import '../domain/appearance.dart';
 import 'app_theme.dart';
+import 'liquid_glass.dart';
 
 enum _NavigationGesture { drag, longPress }
 
@@ -54,31 +55,16 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
     vsync: this,
     duration: const Duration(milliseconds: 160),
   );
+  late final _dragEmphasis = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 220),
+    reverseDuration: const Duration(milliseconds: 260),
+  );
   final _touch = ValueNotifier<Offset?>(null);
-  ui.FragmentShader? _shader;
   double? _dragIndex;
   _NavigationGesture? _gesture;
   int? _pressedIndex, _pointer;
   bool _cancelled = false, _reduceMotion = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadLens();
-  }
-
-  Future<void> _loadLens() async {
-    if (!ui.ImageFilter.isShaderFilterSupported) return;
-    try {
-      final program = await ui.FragmentProgram.fromAsset(
-        'assets/shaders/navigation_glass.frag',
-      );
-      if (!mounted) return;
-      setState(() => _shader = program.fragmentShader());
-    } catch (_) {
-      // Unsupported renderers retain the same navigation with regular blur.
-    }
-  }
 
   @override
   void didChangeDependencies() {
@@ -88,6 +74,7 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
       _position.value =
           _dragIndex ?? (_pressedIndex ?? widget.selectedIndex).toDouble();
       _press.value = _pressedIndex != null || _dragIndex != null ? 1 : 0;
+      _dragEmphasis.value = 0;
     }
   }
 
@@ -129,9 +116,11 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
     if (_reduceMotion) {
       _press.value = 0;
       _glow.value = 0;
+      _dragEmphasis.value = 0;
     } else {
       _press.reverse();
       _glow.reverse();
+      _dragEmphasis.reverse();
     }
     _move((target ?? widget.selectedIndex).toDouble());
   }
@@ -151,10 +140,10 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
 
   @override
   void dispose() {
-    _shader?.dispose();
     _position.dispose();
     _press.dispose();
     _glow.dispose();
+    _dragEmphasis.dispose();
     _touch.dispose();
     super.dispose();
   }
@@ -185,19 +174,6 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
         (MediaQuery.textScalerOf(context).scale(12) - 12).clamp(0.0, 24.0);
     final preview =
         _dragIndex?.round() ?? _pressedIndex ?? widget.selectedIndex;
-    final blur = ui.ImageFilter.blur(
-      sigmaX: appearance.blurSigma,
-      sigmaY: appearance.blurSigma,
-    );
-    final filter =
-        _shader == null ||
-            highContrast ||
-            appearance.glassStyle != GlassStyle.clear
-        ? blur
-        : ui.ImageFilter.compose(
-            outer: ui.ImageFilter.shader(_shader!),
-            inner: blur,
-          );
     return SafeArea(
       top: false,
       minimum: const EdgeInsets.fromLTRB(16, 12, 16, 12),
@@ -237,6 +213,7 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                 if (_cancelled || _pointer == null) return;
                 _gesture = gesture;
                 track(point);
+                if (!_reduceMotion && !solid) _dragEmphasis.forward();
               }
 
               void finishTracking(_NavigationGesture gesture) {
@@ -354,45 +331,27 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                           clipBehavior: Clip.none,
                           children: [
                             Positioned.fill(
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(height),
-                                child: BackdropFilter(
-                                  enabled: !solid,
-                                  filter: filter,
+                              child: AnimatedBuilder(
+                                animation: _press,
+                                builder: (context, _) => LiquidGlassSurface(
+                                  borderRadius: BorderRadius.circular(height),
+                                  opacity: solid ? 1 : appearance.glassOpacity,
+                                  refractionHeight: 24,
+                                  refractionAmount: 24,
+                                  highlight: 1 + _press.value * .2,
+                                  shadow: 0,
                                   child: DecoratedBox(
                                     key: const Key('floating-navigation'),
                                     decoration: BoxDecoration(
                                       borderRadius: BorderRadius.circular(
                                         height,
                                       ),
-                                      color: solid ? glassColor : null,
-                                      border: Border.all(
-                                        color: colors.outlineVariant.withValues(
-                                          alpha: highContrast
-                                              ? 1
-                                              : dark
-                                              ? .48
-                                              : .65,
-                                        ),
-                                        width: .8,
-                                      ),
-                                      // Keep the tint in each gradient stop:
-                                      // a shader replaces BoxDecoration.color.
-                                      gradient: solid
-                                          ? null
-                                          : LinearGradient(
-                                              begin: Alignment.topLeft,
-                                              end: Alignment.bottomRight,
-                                              colors: [
-                                                Color.alphaBlend(
-                                                  Colors.white.withValues(
-                                                    alpha: dark ? .025 : .16,
-                                                  ),
-                                                  glassColor,
-                                                ),
-                                                glassColor,
-                                              ],
-                                            ),
+                                      border: highContrast
+                                          ? Border.all(
+                                              color: colors.outlineVariant,
+                                              width: .8,
+                                            )
+                                          : null,
                                     ),
                                   ),
                                 ),
@@ -413,69 +372,6 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                                   ),
                                 ),
                               ),
-                            ),
-                            AnimatedBuilder(
-                              animation: Listenable.merge([_position, _press]),
-                              builder: (context, _) {
-                                final position = _position.value.clamp(
-                                  -.035,
-                                  count - 1 + .035,
-                                );
-                                final physical = rtl
-                                    ? count - 1 - position
-                                    : position;
-                                final stretch = _reduceMotion
-                                    ? 0.0
-                                    : (_position.velocity.abs() * .003).clamp(
-                                        0.0,
-                                        .055,
-                                      );
-                                final pressed = _reduceMotion
-                                    ? 0.0
-                                    : _press.value * .035;
-                                return Positioned(
-                                  left: 4 + physical * tabWidth,
-                                  top: 4,
-                                  bottom: 4,
-                                  width: tabWidth,
-                                  child: IgnorePointer(
-                                    child: Transform(
-                                      key: const Key(
-                                        'navigation-lens-transform',
-                                      ),
-                                      alignment: Alignment.center,
-                                      transform: Matrix4.diagonal3Values(
-                                        1 + pressed + stretch,
-                                        1 + pressed - stretch * .4,
-                                        1,
-                                      ),
-                                      child: DecoratedBox(
-                                        key: const Key('navigation-lens'),
-                                        decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(
-                                            height,
-                                          ),
-                                          color: solid
-                                              ? appearance.lensColor.withValues(
-                                                  alpha: 1,
-                                                )
-                                              : appearance.lensColor,
-                                          border: Border.all(
-                                            color: active.withValues(
-                                              alpha: highContrast
-                                                  ? .5
-                                                  : dark
-                                                  ? .18
-                                                  : .09,
-                                            ),
-                                            width: .8,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                );
-                              },
                             ),
                             Padding(
                               padding: const EdgeInsets.all(4),
@@ -535,6 +431,98 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                                     ),
                                 ],
                               ),
+                            ),
+                            AnimatedBuilder(
+                              animation: Listenable.merge([
+                                _position,
+                                _press,
+                                _dragEmphasis,
+                              ]),
+                              builder: (context, _) {
+                                // Paint the moving lens after the tabs so the
+                                // backdrop includes their actual icons/labels.
+                                // The optical layer never owns pointer events.
+                                final position = _position.value.clamp(
+                                  -.035,
+                                  count - 1 + .035,
+                                );
+                                final physical = rtl
+                                    ? count - 1 - position
+                                    : position;
+                                final stretch = _reduceMotion || solid
+                                    ? 0.0
+                                    : (_position.velocity.abs() * .003).clamp(
+                                        0.0,
+                                        .055,
+                                      );
+                                final pressed = _reduceMotion || solid
+                                    ? 0.0
+                                    : _press.value * .035;
+                                final drag = _reduceMotion || solid
+                                    ? 0.0
+                                    : Curves.easeOutCubic.transform(
+                                        _dragEmphasis.value,
+                                      );
+                                final lensScale = 1 + drag * (78 / 56 - 1);
+                                final progress = solid ? 0.0 : _press.value;
+                                return Positioned(
+                                  left: 4 + physical * tabWidth,
+                                  top: 4,
+                                  bottom: 4,
+                                  width: tabWidth,
+                                  child: IgnorePointer(
+                                    child: Transform(
+                                      key: const Key(
+                                        'navigation-lens-transform',
+                                      ),
+                                      alignment: Alignment.center,
+                                      transform: Matrix4.diagonal3Values(
+                                        lensScale + pressed + stretch,
+                                        lensScale + pressed - stretch * .4,
+                                        1,
+                                      ),
+                                      child: LiquidGlassSurface(
+                                        borderRadius: BorderRadius.circular(
+                                          height,
+                                        ),
+                                        tint: solid
+                                            ? glassColor
+                                            : appearance.lensColor,
+                                        opacity: solid
+                                            ? 1
+                                            : .10 * (1 - progress) +
+                                                  .03 * progress,
+                                        blurSigma: 0,
+                                        refractionHeight: 10 * progress,
+                                        refractionAmount: 14 * progress,
+                                        dispersion: .20 * progress,
+                                        highlight: progress,
+                                        shadow: progress * .65,
+                                        child: DecoratedBox(
+                                          key: const Key('navigation-lens'),
+                                          decoration: BoxDecoration(
+                                            borderRadius: BorderRadius.circular(
+                                              height,
+                                            ),
+                                            color: solid
+                                                ? appearance.lensColor
+                                                      .withValues(alpha: 1)
+                                                : null,
+                                            border: highContrast
+                                                ? Border.all(
+                                                    color: active.withValues(
+                                                      alpha: .5,
+                                                    ),
+                                                    width: .8,
+                                                  )
+                                                : null,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
                             ),
                           ],
                         ),

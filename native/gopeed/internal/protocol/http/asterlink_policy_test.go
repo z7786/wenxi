@@ -21,10 +21,10 @@ func TestSmallFileConnectionBudget(t *testing.T) {
 	}
 }
 
-func TestBaiduSingleConnectionBudget(t *testing.T) {
+func TestBaiduAccountConnectionBudget(t *testing.T) {
 	for _, configured := range []int{1, 64, 512} {
-		if got := effectiveConnections(2*1024*1024*1024, configured, "baidu"); got != 1 {
-			t.Fatalf("configured=%d got=%d want=1", configured, got)
+		if got := effectiveConnections(2*1024*1024*1024, configured, "baidu"); got != configured {
+			t.Fatalf("configured=%d got=%d", configured, got)
 		}
 	}
 }
@@ -34,8 +34,8 @@ func TestBaiduPreviewConnectionBudget(t *testing.T) {
 		size             int64
 		configured, want int
 	}{
-		{0, 512, 1}, {4096, 512, 1}, {1024 * 1024, 512, 1},
-		{2 * 1024 * 1024 * 1024, 512, 1}, {1024 * 1024, 1, 1},
+		{0, 512, 1}, {4096, 512, 1}, {1024 * 1024, 512, 4},
+		{2 * 1024 * 1024 * 1024, 512, 512}, {1024 * 1024, 1, 1},
 	} {
 		if got := effectiveConnections(c.size, c.configured, "baidu_preview"); got != c.want {
 			t.Fatalf("%+v got=%d", c, got)

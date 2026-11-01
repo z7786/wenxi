@@ -40,7 +40,11 @@ void main() {
               body: Builder(
                 builder: (context) => TextButton(
                   onPressed: () async {
-                    if (await confirmBaiduDownload(context, services, platform)) {
+                    if (await confirmBaiduDownload(
+                      context,
+                      services,
+                      platform,
+                    )) {
                       confirmed++;
                     }
                   },
@@ -59,7 +63,13 @@ void main() {
         await tester.tap(find.text('下载文件'));
         await tester.pumpAndSettle();
         expect(confirmed, 0);
-        expect(find.textContaining('300 MB 以下不限速'), findsOneWidget);
+        expect(
+          find.text(
+            '百度网盘风控严重，下载存在一定风险可能导致账号被限制，请自行权衡，另外尽量不要一次性下载太多文件易导致下载失败。\n\n'
+            '下载单个文件大于 1 GB 时会限速。',
+          ),
+          findsOneWidget,
+        );
         await tester.tap(find.text('不再显示'));
         await tester.pumpAndSettle();
         expect(confirmed, 1);

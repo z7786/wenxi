@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/download/download_manager.dart';
@@ -248,16 +249,39 @@ void main() {
     );
 
     test('The selected volume still rejects insufficient capacity', () async {
-      files.targetFree = 0;
-      await manager.changeDestination(selected.path);
-      final id = await manager.enqueue(_spec);
-      await settle(id, DownloadStatus.failed);
-      expect(manager.task(id)!.error, contains('空间不足'));
-      expect(native.begins, isEmpty);
-      expect(
-        files.checked.every((path) => files.volume(path).id == 'target'),
-        isTrue,
-      );
+      final log = DiagnosticLog.open(null);
+      final previousLog = DiagnosticLog.active;
+      DiagnosticLog.active = log;
+      try {
+        files.targetFree = 0;
+        await manager.changeDestination(selected.path);
+        final id = await manager.enqueue(_spec);
+        await settle(id, DownloadStatus.failed);
+        expect(manager.task(id)!.error, contains('空间不足'));
+        expect(native.begins, isEmpty);
+        expect(
+          files.checked.every((path) => files.volume(path).id == 'target'),
+          isTrue,
+        );
+        final failure = log.entries(errorsOnly: true).single.data;
+        final fields = asJson(failure['fields']);
+        expect(fields.integer('freeBytes'), 0);
+        expect(fields.integer('requiredBytes'), _spec.expectedSize * 2);
+        expect(fields.integer('reservedBytes'), 0);
+        expect(fields.integer('marginBytes'), 32 * 1024 * 1024);
+        expect(fields.str('spaceRole'), 'cache_and_target');
+        if (Platform.isWindows) {
+          expect(
+            fields.str('disk'),
+            p.rootPrefix(selected.path).substring(0, 2),
+          );
+          expect(failure.toString(), isNot(contains(root.path)));
+        }
+      } finally {
+        DiagnosticLog.active = previousLog;
+        log.close();
+        log.dispose();
+      }
     });
   });
 }

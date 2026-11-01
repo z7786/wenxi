@@ -16,13 +16,20 @@ import 'support.dart';
 import 'torrent_test.dart' show TorrentTestHttp, testTorrent, testTorrentJson;
 
 class _MetadataEngine extends GopeedEngine {
-  _MetadataEngine(AppServices s)
-    : super(FakeNative(), s.store, s.vault, s.dataDirectory, s.cacheDirectory);
+  _MetadataEngine(this.services)
+    : super(
+        FakeNative(),
+        services.store,
+        services.vault,
+        services.dataDirectory,
+        services.cacheDirectory,
+      );
   @override
   Future<Json> torrentCall(String method, Json args) async =>
       method == 'torrentMetadata'
-      ? {'status': 'ready', 'info': testTorrentJson}
+      ? {'status': 'ready', 'info': services.metadata}
       : {};
+  final _UiServices services;
   @override
   Future<void> close() async {}
 }
@@ -45,12 +52,14 @@ class _SelectionQueue extends DownloadManager {
     List<int> selected,
   ) async {
     selection = selected;
-    return ['selected'];
+    return [for (final index in selected) 'selected-$index'];
   }
 }
 
 class _UiServices extends Fake implements AppServices {
-  _UiServices(this.dataDirectory);
+  _UiServices(this.dataDirectory, {Json? metadata})
+    : metadata = metadata ?? testTorrentJson;
+  final Json metadata;
   @override
   final Directory dataDirectory;
   @override
@@ -97,10 +106,12 @@ void main() {
       systemFont = true;
     }
   });
-  for (final (name, size, dark, scale) in [
-    ('phone-bt', const Size(430, 960), false, 1.0),
-    ('phone-bt-dark', const Size(430, 960), true, 1.0),
-    ('landscape-bt-large-text', const Size(900, 430), false, 1.3),
+  for (final (name, size, dark, scale, count) in [
+    ('phone-bt', const Size(430, 960), false, 1.0, 2),
+    ('phone-bt-dark', const Size(430, 960), true, 1.0, 2),
+    ('landscape-bt-large-text', const Size(900, 430), false, 1.3, 2),
+    ('phone-bt-many-files', const Size(430, 960), false, 1.0, 1001),
+    ('phone-bt-max-files', const Size(430, 960), true, 1.3, maxTorrentFiles),
   ]) {
     testWidgets('$name file selection works without layout overflow', (
       tester,
@@ -115,7 +126,18 @@ void main() {
       late AppServices services;
       await tester.runAsync(() async {
         root = await Directory.systemTemp.createTemp('aster-bt-ui-');
-        services = _UiServices(root);
+        services = _UiServices(
+          root,
+          metadata: count == 2
+              ? null
+              : {
+                  ...testTorrentJson,
+                  'files': [
+                    for (var i = 0; i < count; i++)
+                      {'index': i, 'path': '合集/$i.mp4', 'size': 4},
+                  ],
+                },
+        );
       });
       try {
         await tester.pumpWidget(
@@ -145,8 +167,8 @@ void main() {
         await tester.pump();
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
-        expect(find.text('下载选中 2 个文件'), findsOneWidget);
-        if (systemFont) {
+        expect(find.text('下载选中 $count 个文件'), findsOneWidget);
+        if (systemFont && count == 2) {
           await expectLater(
             find.byKey(const Key('capture')),
             matchesGoldenFile('goldens/$name.png'),
@@ -160,16 +182,69 @@ void main() {
               .onPressed,
           isNull,
         );
+        for (final index in [0, 1]) {
+          final row = find.byKey(ValueKey('torrent-file-$index'));
+          await tester.ensureVisible(row);
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.descendant(of: row, matching: find.byType(Checkbox)),
+          );
+          await tester.pump();
+        }
+        expect(find.text('下载选中 2 个文件'), findsOneWidget);
+        if (count > 2) {
+          await tester.drag(find.byType(ListView), const Offset(0, -650));
+          await tester.pumpAndSettle();
+          expect(find.text('下载选中 2 个文件'), findsOneWidget);
+          // Only visible rows are built; selecting all must include the rest.
+          expect(
+            find.byType(CheckboxListTile).evaluate().length,
+            lessThan(count),
+          );
+          tester
+              .state<ScrollableState>(find.byType(Scrollable))
+              .position
+              .jumpTo(0);
+          await tester.pumpAndSettle();
+        }
+        for (final index in [0, 1]) {
+          expect(
+            tester
+                .widget<CheckboxListTile>(
+                  find.byKey(ValueKey('torrent-file-$index')),
+                )
+                .value,
+            isTrue,
+          );
+        }
         await tester.ensureVisible(
-          find.byKey(const ValueKey('torrent-file-1')),
+          find.byKey(const ValueKey('torrent-file-0')),
         );
         await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const ValueKey('torrent-file-1')));
+        await tester.tap(find.byKey(const ValueKey('torrent-file-0')));
         await tester.pump();
         expect(find.text('下载选中 1 个文件'), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('torrent-file-0')));
+        await tester.pump();
+        expect(find.text('下载选中 2 个文件'), findsOneWidget);
+        await tester.tap(find.text('清空选择'));
+        await tester.pump();
+        expect(find.text('已选 0 个'), findsOneWidget);
+        expect(
+          tester
+              .widget<TextButton>(find.widgetWithText(TextButton, '全选'))
+              .onPressed,
+          isNotNull,
+        );
+        await tester.tap(find.text('全选'));
+        await tester.pump();
+        expect(find.text('下载选中 $count 个文件'), findsOneWidget);
         await tester.tap(find.byKey(const Key('torrent-download')));
         await tester.pumpAndSettle();
-        expect((services.downloads as _SelectionQueue).selection, [1]);
+        expect(
+          (services.downloads as _SelectionQueue).selection,
+          List<int>.generate(count, (i) => i),
+        );
         expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox());

@@ -1,9 +1,13 @@
-param([string]$Go = 'go')
+param(
+    [string]$Go = 'go',
+    [ValidateSet('x64', 'arm64')][string]$Architecture = 'x64'
+)
 $ErrorActionPreference = 'Stop'
 $projectPath = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'build-common.ps1')
 $sourcePath = Join-Path $projectPath 'native\gopeed'
 $binaryPath = Join-Path $projectPath 'native\bin'
+if ($Architecture -eq 'arm64') { $binaryPath = Join-Path $binaryPath 'arm64' }
 New-Item -ItemType Directory -Path $binaryPath -Force | Out-Null
 $priorGoos = $env:GOOS
 $priorArch = $env:GOARCH
@@ -12,7 +16,7 @@ $priorProxy = $env:GOPROXY
 $priorToolchain = $env:GOTOOLCHAIN
 try {
     $env:GOOS = 'windows'
-    $env:GOARCH = 'amd64'
+    $env:GOARCH = if ($Architecture -eq 'arm64') { 'arm64' } else { 'amd64' }
     $env:CGO_ENABLED = '0'
     if (-not $env:GOPROXY) { $env:GOPROXY = 'https://goproxy.cn,https://goproxy.io' }
     $env:GOTOOLCHAIN = 'go1.24.7'

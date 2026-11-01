@@ -1,15 +1,19 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:html/parser.dart' as html;
 import '../../core/json.dart';
 import '../../domain/auth.dart';
+import '../../domain/ctfile_captcha.dart';
 import '../../domain/links.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
 import '../http.dart';
+import '../login_cookies.dart';
 import '../uploads/upload_io.dart';
 import 'token_session.dart' show checkedCloudUrl;
 import 'ctfile_web.dart';
+
+typedef CtfileCaptchaPrompt =
+    Future<CtfileCaptchaProof?> Function(CtfileCaptchaChallenge);
 
 /// Official REST API: https://openapi.ctfile.com/ . Public shares use the
 /// website API, which also reports guest restrictions and download wait times.
@@ -63,46 +67,141 @@ class CtfileConnector extends CloudConnector {
     );
   }
 
-  Future<LoginResult> password(String email, String password) async {
+  Future<LoginResult> password(
+    String email,
+    String password, {
+    CtfileCaptchaPrompt? verifyCaptcha,
+    void Function(String)? onStatus,
+  }) async {
     require(email.contains('@') && password.isNotEmpty, '请输入注册邮箱和密码');
-    final response = await http.postJson(
-      'https://rest.ctfile.com/p8/public/login/login',
-      {
-        'email': email.trim(),
-        'password': password,
-        'ref': '/',
-        'country': 'CN',
-      },
-      headers,
+    final uri = Uri.parse(
+      '${CtfileCaptchaChallenge.restOrigin}/p8/public/login/login?lang=zh-hans',
     );
-    final data = _checked(response);
-    final cookie = _cookieHeader(response.headers);
-    final tokenValue = data.str('token').trim();
-    if (cookie.isEmpty && tokenValue.isNotEmpty) {
-      final token = LoginCredentials.normalize(platform, tokenValue);
-      return authenticate(Credential(platform.label, {'primary': token}));
+    final cookies = LoginCookieJar({'ctfile.com', 'rest.ctfile.com'});
+    const loginHeaders = {...headers, 'Accept-Language': 'zh-CN'};
+    CtfileCaptchaProof? proof;
+    var captchaType = 'image';
+    Future<void> captcha(String message) async {
+      require(verifyCaptcha != null, message);
+      onStatus?.call('请完成城通安全验证');
+      final challenge = CtfileCaptchaChallenge(
+        captchaType,
+        message: message,
+        imageHeaders: {...loginHeaders, 'Cookie': cookies.header(uri)},
+      );
+      proof = await RequestScope.cancellable(verifyCaptcha!(challenge));
+      RequestScope.checkpoint();
+      require(proof != null, '已取消登录');
+      require(proof!.belongsTo(challenge), '城通验证码已变化，请重新验证');
     }
-    require(cookie.isNotEmpty, '城通登录服务未返回登录信息');
-    return authenticate(
-      Credential(platform.label, {'primary': cookie, 'authType': 'webCookie'}),
-    );
+
+    try {
+      if (verifyCaptcha != null) {
+        Json config = {};
+        try {
+          final response = await http.get(
+            '${CtfileCaptchaChallenge.restOrigin}/p8/public/captcha/type?lang=zh-hans',
+            loginHeaders,
+          );
+          cookies.absorb(uri, response);
+          config = _checked(response);
+        } on AppException {
+          // A preflight unavailable on older servers can defer to login's
+          // explicit captcha response. Cancellation still stops the attempt.
+          RequestScope.checkpoint();
+        }
+        captchaType = config.str('captcha_type').ifEmpty(captchaType);
+        if (config.boolean('always_required')) {
+          await captcha('请完成城通安全验证');
+        }
+      }
+      for (var attempt = 0; attempt < 3; attempt++) {
+        RequestScope.checkpoint();
+        onStatus?.call('正在验证城通账号…');
+        final response = await http.postJson(
+          uri.toString(),
+          {
+            'email': email.trim(),
+            'password': password,
+            'ref': '/',
+            'country': 'CN',
+            if (proof != null) ...proof!.fields,
+          },
+          {...loginHeaders, 'Cookie': cookies.header(uri)},
+        );
+        RequestScope.checkpoint();
+        cookies.absorb(uri, response);
+        final data = response.json;
+        if (!response.successful || data.integer('code') != 200) {
+          final error = data.str('error_code');
+          final needsCaptcha =
+              const {
+                'LOGIN_CAPTCHA_REQUIRED',
+                'LOGIN_CAPTCHA_WRONG',
+                'LOGIN_CAPTCHA_TIMEOUT',
+              }.contains(error) ||
+              (error.isEmpty || error == 'LOGIN_FAILED') &&
+                  data.boolean('require_captcha');
+          final message = _passwordError(data, response.status);
+          if (needsCaptcha && attempt < 2) {
+            captchaType = data.str('captcha_type').ifEmpty(captchaType);
+            await captcha(message);
+            continue;
+          }
+          throw AppException(message);
+        }
+        onStatus?.call('正在读取城通网盘账号…');
+        final cookie = cookies.header(
+          Uri.parse('${CtfileWeb.base}/user/auth/exchange-token'),
+        );
+        if (LoginCredentials.cookiePairs(
+          cookie,
+        ).containsKey('ctfile_session')) {
+          return await authenticate(
+            Credential(platform.label, {
+              'primary': cookie,
+              'authType': 'webCookie',
+            }),
+          );
+        }
+        // Optional tracking cookies do not turn an OpenAPI session into a
+        // website login. Only ctfile_session selects the v4 exchange route.
+        final tokenValue = data.str('token').trim();
+        require(tokenValue.isNotEmpty, '城通登录服务未返回登录信息');
+        final token = LoginCredentials.normalize(platform, tokenValue);
+        return await authenticate(
+          Credential(platform.label, {'primary': token}),
+        );
+      }
+      throw const AppException('城通安全验证未完成，请重新登录');
+    } finally {
+      cookies.clear();
+    }
   }
 
-  String _cookieHeader(Map<String, List<String>> responseHeaders) {
-    final values = responseHeaders.entries
-        .where((entry) => entry.key.toLowerCase() == 'set-cookie')
-        .expand((entry) => entry.value);
-    final pairs = <String, String>{};
-    for (final raw in values) {
-      try {
-        final cookie = Cookie.fromSetCookieValue(raw);
-        if (cookie.name.isNotEmpty && cookie.value.isNotEmpty) {
-          pairs[cookie.name] = cookie.value;
-        }
-      } catch (_) {}
-    }
-    return pairs.entries.map((e) => '${e.key}=${e.value}').join('; ');
-  }
+  String _passwordError(Json data, int status) =>
+      switch (data.str('error_code')) {
+        'LOGIN_CAPTCHA_REQUIRED' => '城通需要安全验证，请完成验证后继续登录',
+        'LOGIN_CAPTCHA_WRONG' => '城通验证码错误，请重新验证',
+        'LOGIN_CAPTCHA_TIMEOUT' => '城通验证码已过期，请重新验证',
+        'LOGIN_PASSWORD_WRONG' => '城通邮箱或密码错误，请检查后重试',
+        'LOGIN_ACCOUNT_NOT_EXIST' => '城通账号不存在或异常，请检查注册邮箱',
+        'LOGIN_ACCOUNT_LOCKED' => '城通账号存在安全限制，请在官网确认账号状态',
+        'LOGIN_ACCOUNT_CLOSED' => '城通账号已被关闭，请联系城通客服',
+        'LOGIN_PASSWORD_LENGTH' => '城通密码长度应为 6 至 30 个字符',
+        'LOGIN_REQUIRE_QRSCAN' => '城通要求使用官方客户端扫码登录，请登录官网后导入 Session Token',
+        'LOGIN_NO_PASSWORD' ||
+        'LOGIN_PASSWORD_NOT_SET' ||
+        'LOGIN_PASSWORD_SETUP_REQUIRED' => '城通账号尚未设置登录密码，请先在官网设置密码',
+        'RATE_LIMIT' => '城通登录请求过于频繁，请稍后重试',
+        _ =>
+          data.boolean('require_captcha')
+              ? '城通需要安全验证，请完成验证后继续登录'
+              : data.str('message').isNotEmpty &&
+                    data.str('message') != 'Login failed'
+              ? data.str('message')
+              : '城通登录失败，请稍后重试（HTTP $status）',
+      };
 
   Future<LoginResult> authenticate(Credential c) async {
     if (CtfileWeb.accepts(c)) return _web.authenticate(c);

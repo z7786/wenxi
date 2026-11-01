@@ -175,9 +175,7 @@ void main() {
         CloudPlatform.values
             .where(
               (platform) =>
-                  platform.requiresAccount &&
-                  platform != CloudPlatform.ctfile &&
-                  platform != CloudPlatform.github,
+                  platform.requiresAccount && platform != CloudPlatform.github,
             )
             .toSet(),
       );

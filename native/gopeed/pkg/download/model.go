@@ -35,8 +35,8 @@ type Task struct {
 	timer          *util.Timer
 	statusLock     *sync.Mutex
 	lock           *sync.Mutex
-	speedArr       []int64
-	uploadSpeedArr []int64
+	downloadRate   transferRate
+	uploadRate     transferRate
 	runVersion     *atomic.Uint64
 	resolution     *resolutionControl
 	lastCheckpoint time.Time
@@ -99,33 +99,73 @@ func (t *Task) MarshalJSON() ([]byte, error) {
 func (t *Task) updateStatus(status base.Status) {
 	t.UpdatedAt = time.Now()
 	t.Status = status
+	if t.Progress != nil && status != base.DownloadStatusRunning {
+		t.Progress.Speed = 0
+	}
 }
 
 func (t *Task) clone() *Task {
 	return util.DeepClone(t)
 }
 
-func (t *Task) updateSpeed(downloaded int64, usedTime float64) int64 {
-	return calcSpeed(&t.speedArr, downloaded, usedTime)
+type rateSample struct {
+	bytes   float64
+	elapsed time.Duration
 }
 
-func (t *Task) updateUploadSpeed(downloaded int64, usedTime float64) int64 {
-	return calcSpeed(&t.uploadSpeedArr, downloaded, usedTime)
+// Count only bytes received since the baseline, over actual monotonic time.
+// Checkpoint writes and listeners can delay refreshes; the configured sleep
+// interval is not the duration covered by a progress delta.
+type transferRate struct {
+	lastAt    time.Time
+	lastBytes int64
+	samples   []rateSample
 }
 
-func calcSpeed(speedArr *[]int64, downloaded int64, usedTime float64) int64 {
-	*speedArr = append(*speedArr, downloaded)
-	// Record last 5 seconds of download speed to calculate the average speed
-	if len(*speedArr) > int(5.0/usedTime) {
-		*speedArr = (*speedArr)[1:]
+func (t *Task) receivedBytes(progress int64) int64 {
+	if counter, ok := t.fetcher.(interface{ DownloadedBytes() int64 }); ok {
+		return counter.DownloadedBytes()
 	}
+	return progress
+}
 
-	var total int64
-	for _, v := range *speedArr {
-		total += v
+func (r *transferRate) reset(total int64, now time.Time) {
+	r.lastAt, r.lastBytes = now, total
+	r.samples = nil
+}
+
+func (r *transferRate) update(total int64, now time.Time) int64 {
+	if r.lastAt.IsZero() || total < r.lastBytes {
+		r.reset(total, now)
+		return 0
 	}
-
-	return int64(float64(total) / float64(len(*speedArr)) / usedTime)
+	elapsed := now.Sub(r.lastAt)
+	if elapsed <= 0 {
+		return 0
+	}
+	r.samples = append(r.samples, rateSample{float64(total - r.lastBytes), elapsed})
+	r.lastAt, r.lastBytes = now, total
+	var duration time.Duration
+	var bytes float64
+	for _, sample := range r.samples {
+		duration += sample.elapsed
+		bytes += sample.bytes
+	}
+	// Trim the oldest sample proportionally when intervals straddle the window.
+	const window = 5 * time.Second
+	for duration > window && len(r.samples) > 0 {
+		first := &r.samples[0]
+		trim := min(duration-window, first.elapsed)
+		removed := first.bytes * float64(trim) / float64(first.elapsed)
+		bytes -= removed
+		duration -= trim
+		first.bytes -= removed
+		first.elapsed -= trim
+		if first.elapsed == 0 {
+			r.samples = r.samples[1:]
+		}
+	}
+	return max(0, int64(bytes/duration.Seconds()))
 }
 
 type TaskFilter struct {

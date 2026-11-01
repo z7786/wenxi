@@ -1,6 +1,7 @@
 import '../core/json.dart';
 import 'links.dart';
 import 'models.dart';
+import 'ed2k.dart';
 
 class ResourceSearchLink {
   const ResourceSearchLink({
@@ -43,10 +44,13 @@ class ResourceSearchHit {
   bool get canParse =>
       link?.kind == LinkKind.magnet ||
       link?.kind == LinkKind.torrent ||
+      link?.kind == LinkKind.ed2k ||
       link?.kind == LinkKind.cloudShare &&
           platform?.supportsShareParsing == true;
   String get identity => link?.kind == LinkKind.magnet
       ? 'magnet:${Uri.parse(url).queryParameters['xt']?.toLowerCase() ?? url}'
+      : link?.kind == LinkKind.ed2k
+      ? 'ed2k:${Ed2kLink.parse(url).hash}:${Ed2kLink.parse(url).size}'
       : link?.shareId != null
       ? '${platform?.key ?? link?.unsupportedPlatform?.name ?? Uri.parse(url).host}:${link!.shareId}'
       : url;
@@ -80,7 +84,11 @@ class ResourceSearchHit {
             .trim();
     require(rawUrl.isNotEmpty && rawUrl.length <= 8192, '资源链接无效');
     final magnet = rawUrl.toLowerCase().startsWith('magnet:?');
-    final url = magnet ? rawUrl : LinkParser.normalize(rawUrl);
+    final url = magnet
+        ? rawUrl
+        : rawUrl.toLowerCase().startsWith('ed2k://')
+        ? Ed2kLink.parse(rawUrl).url
+        : LinkParser.normalize(rawUrl);
     final parsed = LinkParser.parse(url).firstOrNull;
     require(!magnet || parsed?.kind == LinkKind.magnet, '磁力链接无效');
     final rawPassword = value.str('password').trim();
@@ -100,6 +108,8 @@ class ResourceSearchHit {
       if (candidate.isEmpty) continue;
       final normalized = candidate.toLowerCase().startsWith('magnet:?')
           ? candidate
+          : candidate.toLowerCase().startsWith('ed2k://')
+          ? Ed2kLink.parse(candidate).url
           : LinkParser.normalize(candidate);
       final parsedCandidate = LinkParser.parse(normalized).firstOrNull;
       if (parsedCandidate == null) continue;
@@ -113,6 +123,8 @@ class ResourceSearchHit {
           url: normalized,
           cloudName: (raw['cloud_name']?.toString().trim().isNotEmpty == true)
               ? raw['cloud_name'].toString().trim()
+              : parsedCandidate.kind == LinkKind.ed2k
+              ? 'ED2K'
               : parsedCandidate.cloudLabel ?? '其他网盘',
           password: safePassword,
           openTicket: raw['open_ticket']?.toString().trim() ?? '',
@@ -123,7 +135,9 @@ class ResourceSearchHit {
       parsedLinks.add(
         ResourceSearchLink(
           url: url,
-          cloudName: parsed?.cloudLabel ?? '其他网盘',
+          cloudName: parsed?.kind == LinkKind.ed2k
+              ? 'ED2K'
+              : parsed?.cloudLabel ?? '其他网盘',
           password: password,
           openTicket: value.str('open_ticket'),
         ),
@@ -136,6 +150,8 @@ class ResourceSearchHit {
           ? '磁力链接'
           : parsed?.kind == LinkKind.torrent
           ? 'BT 种子'
+          : parsed?.kind == LinkKind.ed2k
+          ? 'ED2K'
           : parsed?.cloudLabel ?? bounded('cloud_name', 64, '其他网盘'),
       link: link,
       password: password,
@@ -370,7 +386,7 @@ class ResourceSearchBatch {
       throw AppException(value.str('message').ifEmpty('搜索暂时不可用，请稍后重试'));
     }
     final raw = value['results'];
-    require(raw is List && raw.length <= 1000, '搜索结果格式无效');
+    require(raw is List, '搜索结果格式无效');
     final items = <ResourceSearchHit>[];
     for (final item in raw as List) {
       try {

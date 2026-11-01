@@ -3,17 +3,17 @@ package http
 import fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
 
 func connectionLimit(extra *fhttp.OptsExtra) int {
-	if extra.ConnectionProfile == "baidu_public" {
+	if extra.ConnectionProfile == "baidu_public" || extra.ConnectionProfile == "baidu" || extra.ConnectionProfile == "baidu_preview" {
 		return max(1, min(512, extra.Connections))
 	}
 	return fhttp.BaiduConnectionLimit(extra.ConnectionProfile)
 }
 
-// Called while paused. Split only unread tails so old single-connection public
+// Called while paused. Split only unread tails so old single-connection Baidu
 // downloads can use their new setting without discarding checkpointed bytes.
 func (f *Fetcher) expandPublicConnections() {
 	extra := f.meta.Opts.Extra.(*fhttp.OptsExtra)
-	if extra.ConnectionProfile != "baidu_public" || !f.meta.Res.Range {
+	if (extra.ConnectionProfile != "baidu_public" && extra.ConnectionProfile != "baidu" && extra.ConnectionProfile != "baidu_preview" && extra.ConnectionProfile != "baidu_direct") || !f.meta.Res.Range {
 		return
 	}
 	target := effectiveConnections(f.meta.Res.Size, extra.Connections, extra.ConnectionProfile)

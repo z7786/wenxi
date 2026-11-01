@@ -120,6 +120,9 @@ extension _LanServer on LanService {
       } else if (request.method == 'GET' && request.uri.path == '/v1/shares') {
         _authorize(request, remote);
         _reply(response, {
+          // Echo only on an authenticated request; callers use this source IP
+          // for file invitations instead of guessing from Socket.address.
+          'senderAddress': remote,
           'shares': shares
               .where((s) => !s.draining)
               .map((s) => s.summary)

@@ -79,14 +79,26 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 # launch the complete release folder without a separate Visual C++ installer.
 set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
 include(InstallRequiredSystemLibraries)
+if(FLUTTER_TARGET_PLATFORM STREQUAL "windows-arm64")
+  # Microsoft's ARM64 redist also carries this x64 emulation DLL. Native
+  # ARM64 exception handling uses vcruntime140.dll and does not import it.
+  list(FILTER CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS EXCLUDE REGEX "/vcruntime140_1\\.dll$")
+endif()
 install(PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
 
 set(ASTERLINK_GOPEED "${CMAKE_CURRENT_SOURCE_DIR}/../native/bin/asterlink_gopeed.exe")
+if(FLUTTER_TARGET_PLATFORM STREQUAL "windows-arm64")
+  set(ASTERLINK_GOPEED "${CMAKE_CURRENT_SOURCE_DIR}/../native/bin/arm64/asterlink_gopeed.exe")
+endif()
 if(NOT EXISTS "${ASTERLINK_GOPEED}")
   message(FATAL_ERROR "Run tool/build-native-windows.ps1 before building Windows.")
 endif()
 install(FILES "${ASTERLINK_GOPEED}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
+if(FLUTTER_TARGET_PLATFORM STREQUAL "windows-arm64")
+  install(DIRECTORY "${CMAKE_BINARY_DIR}/ANGLE/licenses/"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/licenses" COMPONENT Runtime)
+endif()
 
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)

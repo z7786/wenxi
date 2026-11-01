@@ -72,6 +72,15 @@ class RequestScope {
   }
 }
 
+// dart:io emits these for a truncated response/header. Other HttpExceptions
+// (invalid protocol, headers or redirects) are not transient network failures.
+bool isInterruptedHttpConnection(Object? error) =>
+    error is HttpException &&
+    const {
+      'Connection closed while receiving data',
+      'Connection closed before full header was received',
+    }.contains(error.message);
+
 class HttpRequestFailure extends AppException {
   const HttpRequestFailure(
     super.message, {
@@ -85,6 +94,13 @@ class HttpRequestFailure extends AppException {
   final String kind, retryAfter;
   final bool retryable, requestNotSent;
   final int? status;
+
+  factory HttpRequestFailure.httpConnection(HttpException error) =>
+      HttpRequestFailure(
+        '网络连接失败，请检查网络后重试',
+        kind: 'httpConnection',
+        retryable: isInterruptedHttpConnection(error),
+      );
 
   factory HttpRequestFailure.network(DioException error) => HttpRequestFailure(
     error.error is WindowsProxyException
@@ -108,6 +124,7 @@ class HttpRequestFailure extends AppException {
       DioExceptionType.connectionError => true,
       DioExceptionType.unknown =>
         error.error is SocketException ||
+            isInterruptedHttpConnection(error.error) ||
             error.error is HandshakeException &&
                 (error.error as HandshakeException).message ==
                     'Connection terminated during handshake',
@@ -343,6 +360,9 @@ class DioJsonHttp extends JsonHttp {
     } on DioException catch (error) {
       RequestScope.checkpoint();
       throw HttpRequestFailure.network(error);
+    } on HttpException catch (error) {
+      RequestScope.checkpoint();
+      throw HttpRequestFailure.httpConnection(error);
     } finally {
       finished = true;
       cancel.cancel();

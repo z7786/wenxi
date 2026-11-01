@@ -21,19 +21,8 @@ enum CloudSearchCategory {
     final documentFile =
         kind == FileKind.text ||
         kind == FileKind.pdf ||
-        const {
-          'doc',
-          'docx',
-          'xls',
-          'xlsx',
-          'ppt',
-          'pptx',
-          'odt',
-          'ods',
-          'odp',
-          'rtf',
-          'epub',
-        }.contains(file.name.split('.').last.toLowerCase());
+        isOfficeDocument(file.name) ||
+        file.name.split('.').last.toLowerCase() == 'epub';
     return switch (this) {
       all => true,
       folder => false,

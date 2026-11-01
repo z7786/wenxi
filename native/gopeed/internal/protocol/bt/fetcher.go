@@ -44,6 +44,10 @@ type Fetcher struct {
 	data    *fetcherData
 
 	torrentReady    atomic.Bool
+	released        atomic.Bool
+	sessionReused   bool
+	transferStorage atomic.Pointer[fileTorrentImpl]
+	transferBase    atomic.Int64
 	torrentUpload   atomic.Bool
 	torrentDropCtx  context.Context
 	torrentDropFunc func()
@@ -69,6 +73,10 @@ func (f *Fetcher) initClient() (err error) {
 	defer lock.Unlock()
 
 	if client != nil {
+		if warm != nil {
+			warm.claimed = true
+			warm.timer.Stop()
+		}
 		return
 	}
 	if closeCtx == nil {
@@ -85,8 +93,9 @@ func (f *Fetcher) initClient() (err error) {
 	cfg.ListenPort = f.config.ListenPort
 	cfg.HTTPProxy = f.ctl.GetProxy(f.meta.Req.Proxy)
 	cfg.DefaultStorage = newFileOpts(newFileClientOpts{
-		ClientBaseDir:   cfg.DataDir,
-		PieceCompletion: storage.NewMapPieceCompletion(),
+		ClientBaseDir:     cfg.DataDir,
+		PieceCompletion:   storage.NewMapPieceCompletion(),
+		IsolateCompletion: asterlinkBaseDir != "",
 		HandleFileTorrent: func(infoHash metainfo.Hash, ft *fileTorrentImpl) {
 			if dir, ok := torrentDirMap[infoHash.String()]; ok {
 				ft.setTorrentDir(dir)
@@ -159,6 +168,12 @@ func (f *Fetcher) Start() (err error) {
 		}
 		f.data.Progress = make(fetcher.Progress, len(f.meta.Opts.SelectFiles))
 	}
+	if ft, ok := ftMap[f.meta.Res.Hash]; ok {
+		// Shared torrent storage can contain writes from a previous task/run.
+		// Establish this run's baseline before enabling any selected downloads.
+		f.transferBase.Store(f.receivedFrom(ft))
+		f.transferStorage.Store(ft)
+	}
 	if len(f.meta.Opts.SelectFiles) == len(files) {
 		f.torrent.DownloadAll()
 	} else {
@@ -167,6 +182,8 @@ func (f *Fetcher) Start() (err error) {
 			file.Download()
 		}
 	}
+	f.torrent.AllowDataUpload()
+	f.torrent.AllowDataDownload()
 	return
 }
 
@@ -182,6 +199,9 @@ func (f *Fetcher) Pause() (err error) {
 }
 
 func (f *Fetcher) Close() (err error) {
+	if !f.released.Load() && f.torrentReady.Load() && f.parkCompleted() {
+		f.released.Store(true)
+	}
 	f.torrentReady.Store(false)
 	f.safeDrop()
 	f.torrentDropFunc()
@@ -196,6 +216,9 @@ func (f *Fetcher) Close() (err error) {
 }
 
 func (f *Fetcher) safeDrop() {
+	if f.released.Swap(true) {
+		return
+	}
 	defer func() {
 		// ignore panic
 		_ = recover()
@@ -379,12 +402,41 @@ func (f *Fetcher) UploadedBytes() int64 {
 	return f.data.SeedBytes
 }
 
+// Verified/cached pieces increase file progress without using the network.
+// The live transfer rate must use received payload bytes instead.
+func (f *Fetcher) DownloadedBytes() int64 {
+	if ft := f.transferStorage.Load(); ft != nil {
+		return max(0, f.receivedFrom(ft)-f.transferBase.Load())
+	}
+	return 0
+}
+
+func (f *Fetcher) receivedFrom(ft *fileTorrentImpl) int64 {
+	var total int64
+	for _, selected := range f.meta.Opts.SelectFiles {
+		if selected >= 0 && selected < len(ft.received) {
+			total += ft.received[selected].Load()
+		}
+	}
+	return total
+}
+
 func (f *Fetcher) WaitUpload() (err error) {
 	<-f.uploadDoneCh
 	return nil
 }
 
 func (f *Fetcher) addTorrent(req *base.Request, fromUpload bool) (err error) {
+	defer func() {
+		if err != nil {
+			lock.Lock()
+			if warm != nil && warm.claimed {
+				warm.claimed = false
+				warm.timer.Reset(warmSessionLifetime)
+			}
+			lock.Unlock()
+		}
+	}()
 	if err = base.ParseReqExtra[bt.ReqExtra](req); err != nil {
 		return
 	}
@@ -434,7 +486,13 @@ func (f *Fetcher) addTorrent(req *base.Request, fromUpload bool) (err error) {
 		if info.Private != nil && *info.Private {
 			privateTorrent = true
 		}
-		f.torrent, err = client.AddTorrent(metaInfo)
+		if dir := req.Labels[sessionPathLabel]; dir != "" {
+			torrentDirMap[metaInfo.HashInfoBytes().String()] = dir
+		}
+		f.torrent, f.sessionReused = takeWarm(req, metaInfo)
+		if !f.sessionReused {
+			f.torrent, err = client.AddTorrent(metaInfo)
+		}
 	}
 	if err != nil {
 		return
@@ -467,7 +525,12 @@ func (f *Fetcher) addTorrent(req *base.Request, fromUpload bool) (err error) {
 	}
 	btpolicy.Restore(f.torrent)
 	<-f.torrent.GotInfo()
+	if req.Labels[sessionPathLabel] != "" {
+		t := f.torrent
+		t.SetOnWriteChunkError(func(err error) { sessionWriteError(t, err) })
+	}
 	btpolicy.AddPublicTrackers(f.torrent)
+	f.released.Store(false)
 	f.torrentReady.Store(true)
 
 	go f.doUpload(fromUpload)
@@ -498,11 +561,17 @@ type fetcherData struct {
 func closeClient() error {
 	lock.Lock()
 	defer lock.Unlock()
+	return closeClientLocked()
+}
+
+func closeClientLocked() error {
+	dropWarmLocked()
 
 	if closeFunc != nil {
 		closeFunc()
 	}
 	if client != nil {
+		btpolicy.RememberDHT(client)
 		errs := client.Close()
 		client = nil
 		closeCtx = nil
@@ -592,6 +661,18 @@ func (fm *FetcherManager) Restore() (v any, f func(meta *fetcher.FetcherMeta, v 
 
 func (fm *FetcherManager) Close() error {
 	return closeClient()
+}
+
+func RememberDiscovery() {
+	lock.Lock()
+	defer lock.Unlock()
+	if client == nil {
+		return
+	}
+	for _, t := range client.Torrents() {
+		btpolicy.Remember(t)
+	}
+	btpolicy.RememberDHT(client)
 }
 
 // parse version to bep20 format, fixed length 4, if not enough, fill 0

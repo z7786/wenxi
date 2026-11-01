@@ -282,6 +282,56 @@ void main() {
     });
   }
 
+  for (final name in ['合同.pdf', '方案.docx']) {
+    testWidgets('online document preview asks before sharing $name', (
+      tester,
+    ) async {
+      final transfer = _ImageTransfer(Uint8List.fromList([1]));
+      final services = await servicesFor(transfer, 1);
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PreviewPage(
+              services,
+              const BrowseSession(
+                platform: CloudPlatform.quark,
+                mode: BrowseMode.personal,
+                title: 'preview test',
+                rootId: 'root',
+              ),
+              CloudFile(id: 'document', name: name, size: 1),
+            ),
+          ),
+        );
+        for (
+          var i = 0;
+          i < 100 &&
+              find
+                  .byKey(const Key('online-preview-confirm'))
+                  .evaluate()
+                  .isEmpty;
+          i++
+        ) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 20)),
+          );
+          await tester.pump();
+        }
+
+        expect(find.text('在线预览提示'), findsOneWidget);
+        expect(find.textContaining('临时下载链接和文件内容会发送给第三方'), findsOneWidget);
+        expect(find.byKey(const Key('online-preview-confirm')), findsOneWidget);
+        expect(find.byKey(const Key('online-preview-webview')), findsNothing);
+        expect(transfer.requests, isEmpty);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await services.close();
+      }
+    });
+  }
+
   testWidgets('pool preview loads text using the new share and new file ID', (
     tester,
   ) async {

@@ -2,6 +2,9 @@
 ; Keep AppId and SetupMutex stable across releases so upgrades share one entry.
 #define AppName "文析助手"
 #define AppExe "asterlink.exe"
+#ifndef AppArchitecture
+  #define AppArchitecture "x64"
+#endif
 #ifndef RuntimeDir
   #error RuntimeDir must point to the complete Windows release directory.
 #endif
@@ -40,8 +43,13 @@ AlwaysShowDirOnReadyPage=yes
 UsePreviousAppDir=yes
 UsePreviousTasks=yes
 PrivilegesRequired=lowest
+#if AppArchitecture == "arm64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 MinVersion=10.0
 WizardStyle=modern dynamic
 SetupIconFile=..\runner\resources\app_icon.ico
@@ -57,7 +65,7 @@ Compression=lzma2/max
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
 OutputDir={#InstallerOutputDir}
-OutputBaseFilename={#AppName}-{#AppVersion}-Windows-x64-Setup
+OutputBaseFilename={#AppName}-{#AppVersion}-Windows-{#AppArchitecture}-Setup
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "languages\ChineseSimplified.isl"

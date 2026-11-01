@@ -104,6 +104,7 @@ void main() {
         expect(input.str('fileId'), '42');
         expect(input.str('accessKey'), 'fixture-access');
         expect(input['device']['downloadVersion'], '13.15.4');
+        expect(input['device']['directDelivery'], 1);
         return reply(call, good);
       });
       final client = service(http);
@@ -116,6 +117,48 @@ void main() {
       expect(http.redirects, everyElement(isFalse));
       expect(http.calls.map((c) => c.json.str('nonce')).toSet(), hasLength(2));
       expect(http.calls.map((c) => c.json.str('key')).toSet(), hasLength(2));
+    },
+  );
+
+  test(
+    'Direct delivery receives dynamic headers and rejects credential injection',
+    () async {
+      const direct = {
+        'ok': true,
+        'url': 'https://fixture.baidupcs.com/file',
+        'profile': 'baidu_direct',
+        'downloadVersion': '13.15.4',
+        'headers': {
+          'Host': 'fixture_route.baidu-int.com',
+          'User-Agent': 'netdisk',
+          'Accept-Encoding': 'identity',
+        },
+      };
+      final link = await resolve(
+        service(FakeHttp((call) => reply(call, direct))),
+      );
+      expect(link.profile, 'baidu_direct');
+      expect(link.preview, isFalse);
+      expect(link.headers['host'], 'fixture_route.baidu-int.com');
+      expect(link.headers.containsKey('cookie'), isFalse);
+      for (final headers in [
+        {...(direct['headers'] as Map), 'Cookie': 'BDUSS=private'},
+        {...(direct['headers'] as Map), 'Host': 'evil.invalid'},
+        {
+          ...(direct['headers'] as Map),
+          'Host': 'fixture.baidu-int.com\r\nCookie:private',
+        },
+        {...(direct['headers'] as Map), 'User-Agent': 'unexpected'},
+      ]) {
+        await expectLater(
+          resolve(
+            service(
+              FakeHttp((call) => reply(call, {...direct, 'headers': headers})),
+            ),
+          ),
+          throwsA(isA<AppException>()),
+        );
+      }
     },
   );
 

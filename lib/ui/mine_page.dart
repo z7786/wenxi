@@ -53,11 +53,12 @@ class MinePage extends StatelessWidget {
   Future<void> _threads(BuildContext context, String key) async {
     final profile = AppSettings.profiles[key]!;
     final current = services.settings.threadOverrides[key];
-    final maximum = key == 'aliyun' ? 8 : 512;
+    final limited = key == 'aliyun' || key == 'baidu_direct';
+    final maximum = limited ? 8 : 512;
     final choice = await showDialog<int>(
       context: context,
       builder: (context) => SimpleDialog(
-        title: Text('${profile.$1}${key == 'aliyun' ? '连接上限' : '连接数'}'),
+        title: Text('${profile.$1}${limited ? '连接上限' : '连接数'}'),
         children: [
           SimpleDialogOption(
             onPressed: () => Navigator.pop(context, -1),
@@ -78,10 +79,15 @@ class MinePage extends StatelessWidget {
               padding: EdgeInsets.fromLTRB(24, 8, 24, 12),
               child: Text('根据连接情况自动调整，最高不超过所设上限。'),
             ),
+          if (key == 'baidu_direct')
+            const Padding(
+              padding: EdgeInsets.fromLTRB(24, 8, 24, 12),
+              child: Text('默认 3 个连接，最多 8 个；较高并发未必更快。'),
+            ),
           if (key == 'baidu_public')
             const Padding(
               padding: EdgeInsets.fromLTRB(24, 8, 24, 12),
-              child: Text('此设置用于公益解析。使用自己的百度账号下载时固定为 1 个连接。'),
+              child: Text('此设置用于公益解析。账号下载连接数请分别在“百度网盘”和“百度网盘 · 账号直链”中设置。'),
             ),
         ],
       ),
@@ -412,8 +418,8 @@ class MinePage extends StatelessWidget {
               contentPadding: const EdgeInsets.only(left: 62, right: 18),
               title: Text(entry.value.$1, style: const TextStyle(fontSize: 13)),
               trailing: Text(
-                entry.key == 'aliyun'
-                    ? '最多 ${settings.connectionsFor(null, 'aliyun')}'
+                entry.key == 'aliyun' || entry.key == 'baidu_direct'
+                    ? '最多 ${settings.connectionsFor(null, entry.key)}'
                     : settings.threadOverrides[entry.key] == null
                     ? '预设 ${entry.value.$2}'
                     : settings.threadOverrides[entry.key] == 0
@@ -555,6 +561,31 @@ class MinePage extends StatelessWidget {
         value: settings.speedLimit == 0
             ? '不限速'
             : '${formatBytes(settings.speedLimit)}/s',
+      ),
+      _tile(
+        context,
+        CupertinoIcons.arrow_up_circle,
+        'BT 上传限速',
+        '给网络留出余量，保留分片交换；恢复下载时应用',
+        () async {
+          final text = await askText(
+            context,
+            'BT 上传限速（KB/s）',
+            initial: '${settings.btUploadLimit ~/ 1024}',
+            hint: '0 表示不限速',
+            numeric: true,
+          );
+          if (text == null || !context.mounted) return;
+          final value = int.tryParse(text);
+          if (value == null || value < 0 || value > 10000000) {
+            message(context, '请输入有效的速度');
+            return;
+          }
+          await services.updateSettings({'btUploadLimit': value * 1024});
+        },
+        value: settings.btUploadLimit == 0
+            ? '不限速'
+            : '${formatBytes(settings.btUploadLimit)}/s',
       ),
       _tile(
         context,
