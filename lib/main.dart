@@ -52,12 +52,16 @@ Future<void> main() async {
     LicenseRegistry.addLicense(() async* {
       for (final entry in {
         'Gopeed': 'Gopeed-LICENSE.txt',
+        'Kelpie / goed2k ED2K': 'Kelpie-LICENSE.txt',
+        'Kelpie / goed2k notices': 'Kelpie-NOTICE.txt',
+        'ED2K UPnP (BSD)': 'Kelpie-UPnP-BSD.txt',
         'QuickJS-NG': 'QuickJS-NG-LICENSE.txt',
         'Android NDK / LLVM': 'android-ndk-NOTICE.txt',
         'media_kit native build': 'media-native-build-LICENSE.txt',
         'Noto Sans SC': 'NotoSansCJK-OFL.txt',
         'LanzouAPI': 'LanzouAPI-LICENSE.txt',
         '115driver m115 protocol': '115driver.txt',
+        'AndroidLiquidGlass / Backdrop': 'AndroidLiquidGlass-LICENSE.txt',
       }.entries) {
         yield LicenseEntryWithLineBreaks([
           entry.key,
@@ -295,6 +299,7 @@ class _MainShellState extends State<MainShell>
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      DiagnosticLog.event('app.main_frame');
       final state = WidgetsBinding.instance.lifecycleState;
       widget.services.clipboard.setForeground(
         state == null || state == AppLifecycleState.resumed,
@@ -306,7 +311,7 @@ class _MainShellState extends State<MainShell>
         state == null || state == AppLifecycleState.resumed,
       );
       if (state == null || state == AppLifecycleState.resumed) {
-        widget.services.refreshPublicDownloadPassword();
+        widget.services.refreshEntryData();
       }
       _externalAvailable();
       if (widget.services.lanNavigation.value > 0) _showLan();
@@ -334,7 +339,7 @@ class _MainShellState extends State<MainShell>
       state == AppLifecycleState.resumed,
     );
     if (state == AppLifecycleState.resumed) {
-      widget.services.refreshPublicDownloadPassword();
+      widget.services.refreshEntryData();
       _externalAvailable();
     }
   }
@@ -435,7 +440,7 @@ class _MainShellState extends State<MainShell>
     widget.services.clipboard.setForeground(true);
     widget.services.control.setForeground(true);
     widget.services.announcements.setForeground(true);
-    widget.services.refreshPublicDownloadPassword();
+    widget.services.refreshEntryData();
   }
 
   @override

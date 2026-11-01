@@ -10,6 +10,7 @@ import '../data/resource_link_checks.dart';
 import '../domain/models.dart';
 import '../domain/resource_search.dart';
 import 'common.dart';
+import 'resource_search_bar.dart';
 import 'resource_preferences.dart';
 
 class ResourceSearchPage extends StatefulWidget {
@@ -41,6 +42,10 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   final scroll = ScrollController();
   final _viewportKey = GlobalKey();
   final _rows = <String, BuildContext>{};
+  final _displayed = <ResourceSearchHit>[];
+  int _displayGeneration = -1;
+  String _displayFilters = '';
+  bool _waitingUpdate = false;
   bool _visibilityScheduled = false;
   String? opening;
   bool advanced = false, showTop = false;
@@ -55,6 +60,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     scroll.addListener(onScroll);
+    if (widget.active) search.resumeChecks();
     if (widget.active) unawaited(search.loadRecommendations());
   }
 
@@ -63,6 +69,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
     super.didUpdateWidget(oldWidget);
     if (widget.active && !oldWidget.active) {
       unawaited(search.loadRecommendations());
+      search.resumeChecks();
       scheduleVisibility();
     } else if (!widget.active && oldWidget.active) {
       search.stop();
@@ -74,8 +81,10 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      if (widget.active) search.resumeChecks();
       scheduleVisibility();
     } else {
+      if (widget.active) search.pauseChecks();
       search.linkChecks?.clearVisible();
     }
   }
@@ -95,6 +104,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   void scheduleVisibility() {
     if (!mounted ||
         !widget.active ||
+        search.phase != ResourceSearchPhase.idle ||
         search.linkChecks == null ||
         _visibilityScheduled) {
       return;
@@ -117,10 +127,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
       }
       final bounds = viewport.localToGlobal(Offset.zero) & viewport.size;
       final visible = <ResourceSearchHit>[];
-      for (final hit
-          in (search.phase == ResourceSearchPhase.idle
-              ? search.recommendations
-              : search.items.take(visibleLimit))) {
+      for (final hit in search.recommendations) {
         final element = _rows[resourceLinkKey(hit)];
         if (element == null || !element.mounted) continue;
         final box = element.findRenderObject();
@@ -131,7 +138,11 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
           visible.add(hit);
         }
       }
-      search.linkChecks?.setVisible(visible);
+      // Search results were checked before publication. Scrolling must not
+      // restart probes or alter the order; recommendations remain lazy.
+      if (search.phase == ResourceSearchPhase.idle) {
+        search.linkChecks?.setVisible(visible);
+      }
     });
   }
 
@@ -140,8 +151,14 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
     scheduleVisibility();
     final top = scroll.offset > 500;
     final more =
-        scroll.position.extentAfter < 240 && visibleLimit < search.items.length;
-    if (top != showTop || more) {
+        scroll.position.extentAfter < 240 &&
+        visibleLimit <
+            (search.linkChecks == null
+                ? search.items.length
+                : _displayed.length);
+    if (top != showTop ||
+        more ||
+        search.linkChecks != null && scroll.offset < 16 && _waitingUpdate) {
       setState(() {
         showTop = top;
         if (more) visibleLimit += batchSize;
@@ -165,6 +182,66 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   void resetVisible() {
     setState(() => visibleLimit = batchSize);
     if (scroll.hasClients) scroll.jumpTo(0);
+  }
+
+  List<ResourceSearchHit> displayedItems() {
+    final sorted = search.items;
+    if (search.linkChecks == null) {
+      _waitingUpdate = false;
+      return sorted;
+    }
+    final filters =
+        '${search.cloudFilter}\u0000${search.includeTerms.join('\u0000')}\u0001${search.excludeTerms.join('\u0000')}\u0001${search.cloudPriority.map((p) => p.key).join(',')}\u0001${search.preferSupported}';
+    if (_displayGeneration != search.resultGeneration ||
+        _displayFilters != filters ||
+        !scroll.hasClients ||
+        scroll.offset < 16) {
+      _displayGeneration = search.resultGeneration;
+      _displayFilters = filters;
+      _displayed
+        ..clear()
+        ..addAll(sorted);
+    } else if (sorted.length >= _displayed.length &&
+        _displayed.indexed.every(
+          (entry) => sameRow(entry.$2, sorted[entry.$1]),
+        )) {
+      // Appending after the current list is safe; inserting before it waits
+      // until the user returns to the top.
+      _displayed.addAll(sorted.skip(_displayed.length));
+    }
+    _waitingUpdate =
+        sorted.length != _displayed.length ||
+        !_displayed.indexed.every(
+          (entry) => sameRow(entry.$2, sorted[entry.$1]),
+        );
+    return List.of(_displayed);
+  }
+
+  bool sameRow(ResourceSearchHit a, ResourceSearchHit b) =>
+      a.identity == b.identity &&
+      a.title == b.title &&
+      a.description == b.description &&
+      a.category == b.category &&
+      a.cloudName == b.cloudName &&
+      a.password == b.password &&
+      a.date == b.date;
+
+  int get waitingResults {
+    if (search.linkChecks == null) return 0;
+    final displayed = _displayed.map((hit) => hit.identity).toSet();
+    return search.items
+        .where((hit) => !displayed.contains(hit.identity))
+        .length;
+  }
+
+  void showReadyResults() {
+    if (scroll.hasClients) scroll.jumpTo(0);
+    setState(() {
+      visibleLimit = batchSize;
+      _displayed
+        ..clear()
+        ..addAll(search.items);
+    });
   }
 
   void submit([String? term, bool refresh = false]) {
@@ -341,7 +418,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
               AnimatedBuilder(
                 animation: checks,
                 builder: (context, _) {
-                  final health = checks.health(hit);
+                  final health = search.health(hit)!;
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -441,7 +518,6 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   ).whenComplete(scheduleVisibility);
 
   Widget searchBox() {
-    final large = MediaQuery.textScalerOf(context).scale(14) > 23;
     final field = TextField(
       key: const Key('resource-search-input'),
       controller: input,
@@ -451,11 +527,11 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
       maxLength: 120,
       onSubmitted: (_) => submit(),
       onChanged: (_) => setState(() {}),
-      style: const TextStyle(fontSize: 16),
+      style: const TextStyle(fontSize: 15),
       decoration: InputDecoration(
         counterText: '',
         hintText: '搜索资源名称或关键词',
-        hintStyle: TextStyle(color: secondary(context), fontSize: 14),
+        hintStyle: TextStyle(color: secondary(context), fontSize: 13),
         prefixIcon: Icon(
           CupertinoIcons.search,
           size: 20,
@@ -479,12 +555,13 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
         disabledBorder: InputBorder.none,
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 12,
-          vertical: 15,
+          vertical: 12,
         ),
       ),
     );
-    final button = FilledButton(
-      key: Key(
+    final bar = ResourceSearchBar(
+      field: field,
+      buttonKey: Key(
         search.searching ? 'resource-search-stop' : 'resource-search-submit',
       ),
       onPressed: search.searching
@@ -492,45 +569,23 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
           : opening != null || input.text.trim().isEmpty
           ? null
           : () => submit(),
-      style: FilledButton.styleFrom(
-        minimumSize: const Size(64, 44),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
-      ),
-      child: Text(
-        search.searching ? '停止' : '搜索',
-        style: const TextStyle(fontWeight: FontWeight.w600),
-      ),
+      label: search.searching ? '停止' : '搜索',
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Container(
-          padding: const EdgeInsets.all(5),
-          decoration: BoxDecoration(
-            color: backgroundSurface(context),
-            borderRadius: BorderRadius.circular(32),
-            border: Border.all(
-              color: themeAccent(context).withValues(alpha: .24),
-            ),
-          ),
-          child: large
-              ? Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [field, button],
-                )
-              : Row(
-                  children: [
-                    Expanded(child: field),
-                    button,
-                  ],
-                ),
-        ),
+        bar,
         const SizedBox(height: 4),
         SizedBox(
           height: 2,
           child: search.searching
-              ? const LinearProgressIndicator(minHeight: 2)
+              ? LinearProgressIndicator(
+                  key: const Key('resource-search-progress'),
+                  minHeight: 2,
+                  value: search.checking && search.checkTotal > 0
+                      ? search.checkCompleted / search.checkTotal
+                      : null,
+                )
               : const SizedBox.shrink(),
         ),
       ],
@@ -1118,11 +1173,21 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
 
   Widget toolbar(bool wide, int count) {
     final phaseText = switch (search.phase) {
-      ResourceSearchPhase.searching => '正在搜索',
+      ResourceSearchPhase.searching =>
+        search.checkTotal > 0
+            ? '正在搜索 · 链接检测 ${search.checkCompleted}/${search.checkTotal}'
+            : '正在搜索',
+      ResourceSearchPhase.checking =>
+        '${search.checksPaused ? '检测已暂停' : '正在检测链接'} ${search.checkCompleted}/${search.checkTotal}',
       ResourceSearchPhase.stopped => '搜索已停止',
       ResourceSearchPhase.failed =>
         search.allItems.isNotEmpty ? '已保留部分结果' : '搜索未完成',
-      _ => search.fromCache ? '最近搜索' : '',
+      _ =>
+        search.fromCache
+            ? '最近搜索'
+            : search.linkChecks != null
+            ? '链接检测完成'
+            : '',
     };
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1152,11 +1217,11 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (!search.searching)
+                if (!search.searching || search.linkChecks != null)
                   IconButton(
                     key: const Key('resource-search-refresh'),
                     tooltip: '重新搜索',
-                    onPressed: opening == null
+                    onPressed: opening == null && !search.searching
                         ? () => submit(search.keyword, true)
                         : null,
                     icon: const Icon(CupertinoIcons.refresh, size: 17),
@@ -1192,8 +1257,13 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(
               phaseText,
+              maxLines: search.linkChecks != null ? 1 : null,
+              overflow: search.linkChecks != null
+                  ? TextOverflow.ellipsis
+                  : null,
               style: TextStyle(
                 fontSize: 11,
+                height: search.linkChecks != null ? 1.6 : null,
                 color: search.searching
                     ? themeAccent(context)
                     : secondary(context),
@@ -1235,6 +1305,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
     final filtered = search.cloudFilter != null || search.hasKeywordFilters;
     final failed = search.phase == ResourceSearchPhase.failed;
     final loading = search.searching;
+    final waitingChecks = loading && search.linkChecks != null;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 50),
       child: Column(
@@ -1249,7 +1320,9 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
           const SizedBox(height: 16),
           Text(
             loading
-                ? '正在查找资源'
+                ? search.checking
+                      ? '正在检测分享链接'
+                      : '正在查找资源'
                 : filtered
                 ? '没有符合筛选条件的资源'
                 : failed
@@ -1261,7 +1334,9 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
           const SizedBox(height: 10),
           Text(
             loading
-                ? '结果会陆续显示，请稍等片刻。'
+                ? waitingChecks
+                      ? '每批链接检测完成后按有效、无法检测、失效排序显示。'
+                      : '结果会陆续显示，请稍等片刻。'
                 : failed
                 ? search.error
                 : filtered
@@ -1301,8 +1376,9 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
     builder: (context, _) {
       scheduleVisibility();
       final idle = search.phase == ResourceSearchPhase.idle;
-      final items = search.items;
+      final items = displayedItems();
       final shown = math.min(visibleLimit, items.length);
+      final waiting = waitingResults;
       return Scaffold(
         backgroundColor: widget.embedded ? Colors.transparent : null,
         appBar: widget.embedded
@@ -1327,7 +1403,18 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                   const SizedBox(width: 8),
                 ],
               ),
-        floatingActionButton: showTop
+        floatingActionButton: _waitingUpdate
+            ? FloatingActionButton.extended(
+                key: const Key('resource-search-new-results'),
+                tooltip: '回到顶部查看更新后的结果',
+                onPressed: showReadyResults,
+                icon: const Icon(CupertinoIcons.arrow_up, size: 17),
+                label: Text(
+                  waiting > 0 ? '$waiting 条新结果' : '结果已更新',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              )
+            : showTop
             ? FloatingActionButton.small(
                 tooltip: '回到搜索与筛选',
                 onPressed: () => scroll.animateTo(
@@ -1449,11 +1536,9 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                                   (context, index) {
                                     final hit = items[index];
                                     final row = ResourceSearchResultRow(
-                                      key: search.linkChecks == null
-                                          ? ValueKey(
-                                              'resource-result-${hit.identity}',
-                                            )
-                                          : null,
+                                      key: ValueKey(
+                                        'resource-result-${hit.identity}',
+                                      ),
                                       hit: hit,
                                       keyword: search.keyword,
                                       wide: wide,
@@ -1462,21 +1547,18 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                                       canOpen: canOpen(hit),
                                       opening: opening == hit.identity,
                                       enabled: opening == null,
-                                      health: search.linkChecks?.health(hit),
-                                      onOpen: () => unawaited(open(hit)),
-                                      onCopy: () => unawaited(copy(hit)),
-                                      onDetails: () => unawaited(details(hit)),
+                                      health: search.health(hit),
+                                      onOpen: () => unawaited(
+                                        open(search.currentHit(hit)),
+                                      ),
+                                      onCopy: () => unawaited(
+                                        copy(search.currentHit(hit)),
+                                      ),
+                                      onDetails: () => unawaited(
+                                        details(search.currentHit(hit)),
+                                      ),
                                     );
-                                    return search.linkChecks == null
-                                        ? row
-                                        : _TrackedResourceRow(
-                                            key: ValueKey(
-                                              'resource-result-${hit.identity}',
-                                            ),
-                                            trackingKey: resourceLinkKey(hit),
-                                            onTrack: trackRow,
-                                            child: row,
-                                          );
+                                    return row;
                                   },
                                   childCount: shown,
                                   findChildIndexCallback: (key) {
@@ -1526,10 +1608,13 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                                           color: secondary(context),
                                         ),
                                       ),
-                                    if (!search.searching) ...[
+                                    if (!search.searching ||
+                                        search.linkChecks != null) ...[
                                       const SizedBox(height: 4),
                                       Text(
-                                        search.preferSupported
+                                        search.linkChecks != null
+                                            ? '有效 → 无法检测 → 失效 · 同组按网盘优先级'
+                                            : search.preferSupported
                                             ? '按网盘优先级展示 · 同一网盘优先可解析'
                                             : '按网盘优先级展示 · 同一网盘按相关性排序',
                                         style: TextStyle(
@@ -1779,7 +1864,11 @@ class ResourceSearchResultRow extends StatelessWidget {
                 size,
                 style: TextStyle(fontSize: 11, color: secondary(context)),
               ),
-            if (health != null) _ResourceHealthBadge(health!),
+            if (health != null)
+              SizedBox(
+                width: MediaQuery.textScalerOf(context).scale(10) * 7,
+                child: _ResourceHealthBadge(health!),
+              ),
             if (hit.password.isNotEmpty)
               Text(
                 '提取码 ${hit.password}',

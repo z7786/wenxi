@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/main.dart';
 import 'package:asterlink/ui/downloads_page.dart';
-import 'package:asterlink/ui/resource_search_page.dart';
+import 'package:asterlink/ui/resource_home_page.dart';
 import 'browser_test_support.dart';
 
 void main() {
@@ -62,8 +62,8 @@ void main() {
         await openHelp();
         await tester.tap(find.byKey(const Key('download-help-resources')));
         await tester.pumpAndSettle();
-        expect(find.byType(ResourceSearchPage), findsOneWidget);
-        expect(find.byKey(const Key('resource-search-input')), findsOneWidget);
+        expect(find.byType(ResourceHomePage), findsOneWidget);
+        expect(find.byType(TextField), findsWidgets);
         expect(find.byType(DownloadsPage), findsNothing);
         expect(find.byType(AlertDialog), findsNothing);
         expect(navigator.currentState!.canPop(), isFalse);

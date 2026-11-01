@@ -151,10 +151,7 @@ class PlaybackStreamProxy {
     this.warmupBytes = 256 * 1024,
     this.onFailure,
     this.readCache,
-  }) : _connections = connections.clamp(
-         PlaybackPreferences.minConnections,
-         PlaybackPreferences.maxConnections,
-       ),
+  }) : _connections = _limitConnections(source, connections),
        _maxCacheBytes = maxCacheBytes {
     assert(chunkBytes > 0 && maxCacheBytes >= chunkBytes && warmupBytes >= 0);
   }
@@ -185,11 +182,18 @@ class PlaybackStreamProxy {
 
   int _connections;
   int get connections => _connections;
-  set connections(int value) {
-    final next = value.clamp(
+  static int _limitConnections(DownloadSpec source, int value) {
+    final maximum = source.maxPlaybackConnections;
+    return value.clamp(
       PlaybackPreferences.minConnections,
-      PlaybackPreferences.maxConnections,
+      maximum != null && maximum > 0
+          ? math.min(maximum, PlaybackPreferences.maxConnections)
+          : PlaybackPreferences.maxConnections,
     );
+  }
+
+  set connections(int value) {
+    final next = _limitConnections(source, value);
     if (_connections == next) return;
     _connections = next;
     _fetchClient?.maxConnectionsPerHost = _connections;
@@ -218,6 +222,8 @@ class PlaybackStreamProxy {
   int _deliveredBytes = 0, _cursor = 0, _clock = 0;
   bool _closed = false, _paused = false, _started = false;
   bool _seekPending = false;
+  bool _interleavedReads = false;
+  int? _lastMediaFirst, _previousMediaFirst;
   final _probeWatch = Stopwatch();
   String _probeResult = 'not_started';
   String? _probeErrorType;
@@ -273,6 +279,7 @@ class PlaybackStreamProxy {
     'cacheLimitBytes': maxCacheBytes,
     'connectionLimit': connections,
     'fileBytes': _length,
+    'interleavedReads': _interleavedReads,
   };
   Uri get uri => Uri.parse('http://127.0.0.1:${_server!.port}$_path');
   int get _budget => math.min(
@@ -665,6 +672,10 @@ class PlaybackStreamProxy {
   // the bounded cache while a slower leading range or the player is waiting.
   int _window(_Reader reader) {
     if (reader.metadata) return 1;
+    // Non-interleaved MP4 stores audio far from video. A deep window for each
+    // short-lived HTTP read repeatedly speculates into the wrong track.
+    // Keep one nearby chunk ready per region within the same session budget.
+    if (_interleavedReads) return math.min(2, _budget);
     // Download-backed playback leaves preloading to its download task.
     if (readCache != null || _deliveredBytes < warmupBytes) return _budget;
     return math.max(1, maxCacheBytes ~/ chunkBytes);
@@ -692,12 +703,17 @@ class PlaybackStreamProxy {
     }
   }
 
-  void _releaseSegment(_Reader reader, int index) {
+  void _releaseSegment(_Reader reader, int index, {bool keepPartial = false}) {
     final segment = reader.pending.remove(index);
     if (segment == null) return;
+    final useful =
+        keepPartial &&
+        segment.started &&
+        (segment.demanders.contains(reader) && segment.received > 0 ||
+            _interleavedReads && index == reader.cursor + 1);
     segment.owners.remove(reader);
     segment.demanders.remove(reader);
-    if (segment.owners.isEmpty && segment.bytes == null) {
+    if (segment.owners.isEmpty && segment.bytes == null && !useful) {
       segment.cancel();
       if (identical(_segments[segment.key], segment)) {
         _segments.remove(segment.key);
@@ -705,21 +721,24 @@ class PlaybackStreamProxy {
     }
   }
 
-  void _cancelReader(_Reader reader) {
+  void _cancelReader(_Reader reader, {bool keepPartial = false}) {
     if (reader.stopped) return;
     reader.stop();
     _readers.remove(reader);
     for (final index in reader.pending.keys.toList()) {
-      _releaseSegment(reader, index);
+      // A demuxer switches between audio/video by closing and reopening HTTP
+      // ranges. Finish its partially consumed chunk within the existing byte
+      // budget so the next nearby read can reuse it instead of starting over.
+      _releaseSegment(reader, index, keepPartial: keepPartial);
     }
   }
 
   _Segment _requestSegment(_Reader reader, int index, {required bool demand}) {
     final segment = reader.pending.putIfAbsent(index, () {
       final aligned = index * chunkBytes;
-      final start = reader.metadata
-          ? math.max(reader.byteStart, aligned)
-          : aligned;
+      // A seek can start late within a large segment. Request its first byte
+      // directly instead of downloading a discarded prefix on a slow source.
+      final start = math.max(reader.byteStart, aligned);
       final end = reader.metadata
           ? math.min(
               reader.byteEnd,
@@ -727,15 +746,17 @@ class PlaybackStreamProxy {
             )
           : math.min(_length, aligned + chunkBytes) - 1;
       final key = (start, end - start + 1);
-      // Reuse complete cached ranges or an already available prefix. Do not
-      // make a small footer read wait for megabytes preceding it in a segment.
+      // Media can rejoin an in-flight covering range when switching tracks.
+      // Footer probes only share available bytes so they never wait behind a
+      // large prefix that the player does not need.
       final covering = _segments.values
           .where(
             (candidate) =>
                 !candidate.cancelled &&
                 candidate.start <= start &&
                 candidate.start + candidate.size > end &&
-                (candidate.bytes != null ||
+                (!reader.metadata ||
+                    candidate.bytes != null ||
                     candidate.availableBytes > end - candidate.start),
           )
           .firstOrNull;
@@ -1010,7 +1031,9 @@ class PlaybackStreamProxy {
   Future<void> _serve(HttpRequest request) async {
     _requestsSeen++;
     _Reader? reader;
-    var sent = false;
+    Socket? socket;
+    StreamSubscription<Uint8List>? disconnect;
+    var sent = false, complete = false;
     try {
       if (_closed || request.uri.path != _path || request.uri.hasQuery) {
         request.response.statusCode = HttpStatus.forbidden;
@@ -1053,11 +1076,28 @@ class PlaybackStreamProxy {
       final metadata =
           end - start + 1 <= 2 * chunkBytes &&
           (first == 0 || start >= _length - 2 * chunkBytes);
-      final distant = (first - _cursor).abs() > math.max(4, connections * 2);
       final seeking = _seekPending;
       _seekPending = false;
-      if (!metadata &&
-          (seeking || distant && _readers.any((r) => !r.metadata))) {
+      if (!metadata) {
+        final previous = _lastMediaFirst, beforePrevious = _previousMediaFirst;
+        if (!seeking &&
+            previous != null &&
+            beforePrevious != null &&
+            (first - previous).abs() > 4 &&
+            (first - beforePrevious).abs() <= 4) {
+          _interleavedReads = true;
+          for (final activeReader in _readers) {
+            _trimWindow(activeReader);
+          }
+        }
+        _previousMediaFirst = seeking ? null : previous;
+        _lastMediaFirst = first;
+      }
+      // Containers may alternate distant audio/video ranges during ordinary
+      // demuxing. Byte distance cannot distinguish that from a user seek:
+      // cancelling the other reader forces an endless reopen/cancel loop.
+      // Actual seeks are signalled by the backend via prepareSeek().
+      if (!metadata && seeking) {
         _supersede();
       }
       // A paused seek gets one bounded preview window, only when the native
@@ -1075,17 +1115,21 @@ class PlaybackStreamProxy {
         end,
       );
       _readers.add(current);
-      unawaited(
-        request.response.done.then<void>(
-          (_) {
-            _cancelReader(current);
-            _pump();
-          },
-          onError: (Object _) {
-            _cancelReader(current);
-            _pump();
-          },
-        ),
+      // HttpResponse.done only finishes when the outgoing body is closed.
+      // A demuxer can abandon an open-ended range while we await upstream or
+      // socket backpressure. Listen to the underlying peer close immediately
+      // so abandoned reads release their ranges and connection/cache budget.
+      request.response.persistentConnection = false;
+      final output = socket = await request.response.detachSocket();
+      void disconnected() {
+        _cancelReader(current, keepPartial: true);
+        _pump();
+      }
+
+      disconnect = output.listen(
+        (_) {},
+        onDone: disconnected,
+        onError: (Object _) => disconnected(),
       );
       for (var index = first; index <= last; index++) {
         current.check();
@@ -1106,10 +1150,8 @@ class PlaybackStreamProxy {
           current.check();
           final next = math.min(to, available);
           sent = true;
-          request.response.add(
-            Uint8List.sublistView(demanded.buffer!, cursor, next),
-          );
-          await current.wait(request.response.flush());
+          output.add(Uint8List.sublistView(demanded.buffer!, cursor, next));
+          await current.wait(output.flush());
           current.check();
           _firstPlayerByteMs ??= _streamWatch.elapsedMilliseconds;
           _servedBytes += next - cursor;
@@ -1123,6 +1165,7 @@ class PlaybackStreamProxy {
         }
         _releaseSegment(current, index);
       }
+      complete = true;
     } catch (error) {
       // Failed speculative reads or player-cancelled requests must not stop a
       // healthy video. Only an active reader awaiting upstream bytes reports.
@@ -1132,18 +1175,32 @@ class PlaybackStreamProxy {
           error is PlaybackFailure) {
         onFailure?.call(error);
       }
-      if (!sent) {
+      if (!sent && socket == null) {
         try {
           request.response.statusCode = HttpStatus.badGateway;
           request.response.contentLength = 0;
         } catch (_) {}
       }
     } finally {
-      if (reader != null) _cancelReader(reader);
+      if (reader != null) _cancelReader(reader, keepPartial: true);
       _pump();
-      try {
-        await request.response.close();
-      } catch (_) {}
+      if (socket != null) {
+        if (complete) {
+          try {
+            await socket.close();
+          } catch (_) {
+            socket.destroy();
+          }
+        } else {
+          // Cancellation must also break a blocked outgoing flush.
+          socket.destroy();
+        }
+        await disconnect?.cancel();
+      } else {
+        try {
+          await request.response.close();
+        } catch (_) {}
+      }
     }
   }
 

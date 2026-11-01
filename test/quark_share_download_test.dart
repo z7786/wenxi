@@ -8,6 +8,7 @@ import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/settings.dart';
+import 'package:asterlink/download/download_request.dart';
 import 'support.dart';
 
 HttpResult _ok(Object data) =>
@@ -23,6 +24,7 @@ class _Fixture {
   _Fixture({
     this.platform = CloudPlatform.quark,
     this.root = '0',
+    bool signedIn = true,
     bool Function(CloudPlatform, bool)? directPolicy,
   }) {
     final stamp = '${DateTime.now().millisecondsSinceEpoch}';
@@ -32,7 +34,7 @@ class _Fixture {
       'ucSessionRefreshedAt': stamp,
     }, updatedAt: 42);
     store = StateStore.memory({
-      'credentials': {platform.key: account.toJson()},
+      'credentials': {if (signedIn) platform.key: account.toJson()},
       'settings': const AppSettings().toJson(),
     });
     vault = Vault(store);
@@ -61,10 +63,12 @@ class _Fixture {
   AppException? saveError, directError;
   bool authenticatedDirectAvailable = false, failCleanup = false;
   String? transferCookie;
+  bool guestRefreshNeedsLogin = false;
   String? directFileId;
   int? probeSize;
   int directExpirations = 0;
   final tasks = <String, String>{};
+  final savedSizes = <String, int>{};
 
   ParsedLink get link => ParsedLink(
     source:
@@ -97,6 +101,9 @@ class _Fixture {
       case '/1/clouddrive/config':
         return _ok({});
       case '/1/clouddrive/share/sharepage/token':
+        if (guestRefreshNeedsLogin && (r.headers['Cookie'] ?? '').isEmpty) {
+          return jsonResponse({'status': 401, 'code': 31001}, 401);
+        }
         return _ok({
           'first_fid': root,
           'stoken': 'share-token-${++generation}',
@@ -157,6 +164,9 @@ class _Fixture {
         }
         final id = 'task-${tasks.length + 1}';
         tasks[id] = 'saved-${r.json['fid_list'][0]}-$directories';
+        savedSizes[tasks[id]!] = r.json['fid_list'][0] == rootFileId
+            ? rootFileSize
+            : 4;
         final result = _ok({'task_id': id});
         return transferCookie == null
             ? result
@@ -204,7 +214,11 @@ class _Fixture {
         }
         final fid = r.json['fids'][0] as String;
         return _ok([
-          {'fid': fid, 'size': 4, 'download_url': 'https://cdn.example/$fid'},
+          {
+            'fid': fid,
+            'size': savedSizes[fid] ?? 4,
+            'download_url': 'https://cdn.example/$fid',
+          },
         ]);
       case '/1/clouddrive/file/delete':
         if (failCleanup) return const HttpResult(503, '{}');
@@ -231,6 +245,189 @@ class _Fixture {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  for (final planned in [false, true]) {
+    test(
+      'Quark new ${planned ? 'queued' : 'direct'} download uses login after guest browsing',
+      () async {
+        final f = _Fixture(signedIn: false, directPolicy: (_, _) => false)
+          ..rootFileSize = 100 * 1024 * 1024;
+        final session = await f.repository.share(f.link);
+        final file = (await f.repository.list(session, session.rootId)).first;
+        expect(session.accountId, isEmpty);
+        expect(f.repository.sessionCredential(session), isNull);
+        await f.vault.putCredential(CloudPlatform.quark, f.account);
+        final owner = f.vault.activeAccountId(CloudPlatform.quark);
+        final plan = f.repository.planDownload(session, file);
+        final origin = DownloadOrigin.fromJson(plan.source!);
+        expect(origin.session.accountId, owner);
+        expect(origin.accountRevision, f.account.updatedAt);
+        final spec = planned
+            ? await f.repository.refresh(plan)
+            : await f.repository.prepare(session, file);
+        expect(spec.guestDownload, isFalse);
+        expect(spec.headers['Cookie'], contains('__pus=fixture-account'));
+        expect(f.calls('/share/sharepage/save'), hasLength(1));
+        expect(f.calls('/file/download'), hasLength(1));
+        expect(
+          f.calls('/file/download').single.json.containsKey('pwd_id'),
+          isFalse,
+        );
+        expect(DownloadOrigin.fromJson(spec.source!).session.accountId, owner);
+        // Existing browsing and tasks retain their bound identities.
+        expect(session.accountId, isEmpty);
+      },
+    );
+  }
+
+  test('Quark existing guest task stays guest after a later login', () async {
+    final f = _Fixture(signedIn: false, directPolicy: (_, _) => false)
+      ..rootFileSize = 100 * 1024 * 1024;
+    final session = await f.repository.share(f.link);
+    final file = (await f.repository.list(session, session.rootId)).first;
+    final oldPlan = f.repository.planDownload(session, file);
+    await f.vault.putCredential(CloudPlatform.quark, f.account);
+    await expectLater(
+      f.repository.refresh(oldPlan),
+      throwsA(
+        isA<AccountLoginRequired>().having(
+          (error) => error.message,
+          'message',
+          contains('游客不支持超过50MB'),
+        ),
+      ),
+    );
+    expect(f.calls('/share/sharepage/save'), isEmpty);
+    expect(f.calls('/file/download').single.headers['Cookie'], isEmpty);
+    expect(DownloadOrigin.fromJson(oldPlan.source!).session.accountId, isEmpty);
+  });
+
+  test(
+    'Quark signed-in guest rejection does not notify on account success',
+    () async {
+      final f = _Fixture(directPolicy: (_, _) => true)
+        ..authenticatedDirectAvailable = true;
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      var notices = 0;
+      final spec = await DownloadRequestContext(
+        id: 'fixture',
+        retries: 0,
+        onGuestDownload: () => notices++,
+      ).run(() => f.repository.prepare(session, file));
+      expect(spec.guestDownload, isFalse);
+      expect(spec.headers['Cookie'], contains('__pus=fixture-account'));
+      expect(f.calls('/file/download'), hasLength(2));
+      expect(f.calls('/file/download').first.headers['Cookie'], isEmpty);
+      expect(notices, 0);
+    },
+  );
+
+  test(
+    'Quark guest rejection followed by transfer does not show a guest notice',
+    () async {
+      final f = _Fixture(directPolicy: (_, authenticated) => !authenticated);
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      var notices = 0;
+      final spec = await DownloadRequestContext(
+        id: 'fixture-transfer',
+        retries: 0,
+        onGuestDownload: () => notices++,
+      ).run(() => f.repository.prepare(session, file));
+      expect(spec.guestDownload, isFalse);
+      expect(spec.cleanup, isNotNull);
+      expect(spec.headers['Cookie'], contains('__pus=fixture-account'));
+      expect(f.calls('/share/sharepage/save'), hasLength(1));
+      expect(notices, 0);
+    },
+  );
+
+  for (final direct in [false, true]) {
+    test(
+      'Quark guest renewal requiring login allows signed-in ${direct ? 'direct' : 'transfer'} download',
+      () async {
+        final f =
+            _Fixture(
+                directPolicy: (_, authenticated) => !authenticated || direct,
+              )
+              ..directExpirations = 1
+              ..authenticatedDirectAvailable = direct;
+        final session = await f.repository.share(f.link);
+        final file = (await f.repository.list(session, session.rootId)).first;
+        f.guestRefreshNeedsLogin = true;
+        var notices = 0;
+        final spec = await DownloadRequestContext(
+          id: 'guest-renewal',
+          retries: 0,
+          onGuestDownload: () => notices++,
+        ).run(() => f.repository.prepare(session, file));
+        expect(spec.guestDownload, isFalse);
+        expect(spec.headers['Cookie'], contains('__pus=fixture-account'));
+        expect(f.calls('/share/sharepage/save'), hasLength(direct ? 0 : 1));
+        expect(f.calls('/file/download'), hasLength(2));
+        expect(notices, 0);
+      },
+    );
+  }
+
+  test(
+    'Quark guest renewal still requests login when no account exists',
+    () async {
+      final f = _Fixture(signedIn: false)..directExpirations = 1;
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      f.guestRefreshNeedsLogin = true;
+      await expectLater(
+        f.repository.prepare(session, file),
+        throwsA(isA<AccountLoginRequired>()),
+      );
+      expect(f.calls('/share/sharepage/save'), isEmpty);
+      expect(f.calls('/file/download'), hasLength(1));
+    },
+  );
+
+  test(
+    'Quark bound account is retained when another account becomes active',
+    () async {
+      final f = _Fixture(directPolicy: (_, _) => false);
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      final owner = session.accountId;
+      final other = await f.vault.createAccount(CloudPlatform.quark);
+      await f.vault.withAccount(
+        CloudPlatform.quark,
+        other,
+        () => f.vault.putCredential(
+          CloudPlatform.quark,
+          f.account.withFields({'primary': '__pus=other; __puus=other'}),
+        ),
+      );
+      await f.vault.activate(CloudPlatform.quark, other);
+      final plan = f.repository.planDownload(session, file);
+      expect(DownloadOrigin.fromJson(plan.source!).session.accountId, owner);
+      final spec = await f.repository.prepare(session, file);
+      expect(spec.headers['Cookie'], contains('__pus=fixture-account'));
+      expect(spec.headers['Cookie'], isNot(contains('__pus=other')));
+      expect(spec.guestDownload, isFalse);
+    },
+  );
+
+  test('Quark guest size restriction uses unsupported wording', () async {
+    final f = _Fixture(signedIn: false)..rootFileSize = 100 * 1024 * 1024;
+    final session = await f.repository.share(f.link);
+    final file = (await f.repository.list(session, session.rootId)).first;
+    await expectLater(
+      f.repository.prepare(session, file),
+      throwsA(
+        isA<AccountLoginRequired>().having(
+          (error) => error.message,
+          'message',
+          '夸克游客不支持超过50MB文件下载，请登录夸克网盘再试',
+        ),
+      ),
+    );
+  });
 
   for (final failure in ['response', 'task']) {
     test(

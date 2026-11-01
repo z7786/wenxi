@@ -110,6 +110,9 @@ native/.tools/
 /docs/QUARK-AUTHENTICATED-DIRECT-DOWNLOAD.md
 /native/gopeed/internal/protocol/http/build.data
 /native/gopeed/internal/protocol/http/download.data
+/native/gopeed/pkg/download/.test_*/
+/native/gopeed/pkg/download/download*.data
+/native/gopeed/pkg/download/build.data
 /docs/*.json
 !/docs/kotlin-baseline-sha256.json
 /android/app/libs/*.aar

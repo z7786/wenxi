@@ -164,8 +164,12 @@ class DownloadOverlayBatch {
       'uploadCount': up.length,
       'downloadActive': downActive,
       'uploadActive': upActive,
-      'downloadSpeed': down.fold<int>(0, (n, t) => n + t.speed),
-      'uploadSpeed': up.fold<int>(0, (n, t) => n + t.speed),
+      'downloadSpeed': down
+          .where((t) => t.active)
+          .fold<int>(0, (n, t) => n + t.speed),
+      'uploadSpeed': up
+          .where((t) => t.active)
+          .fold<int>(0, (n, t) => n + t.speed),
       'count': tasks.length,
       'active': active,
       'completed': completed,

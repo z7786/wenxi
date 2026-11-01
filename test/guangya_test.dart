@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/providers/guangya.dart';
+import 'package:asterlink/domain/cloud_file_time.dart';
 import 'package:asterlink/domain/models.dart';
 import 'support.dart';
 import 'token_cloud_support.dart';
@@ -9,6 +10,31 @@ import 'token_cloud_support.dart';
 const p = CloudPlatform.guangya;
 
 void main() {
+  test('File times retain compact dates and Unix timestamp precision', () {
+    final instant = DateTime(2026, 10, 4, 7, 8, 9, 123, 456);
+    final times = <Object, DateTime>{
+      '20261004': DateTime(2026, 10, 4),
+      20261004: DateTime(2026, 10, 4),
+      '20261004070809': DateTime(2026, 10, 4, 7, 8, 9),
+      instant.millisecondsSinceEpoch ~/ 1000: DateTime(2026, 10, 4, 7, 8, 9),
+      '${instant.millisecondsSinceEpoch ~/ 1000}.123456': instant,
+      '${instant.millisecondsSinceEpoch}.456': instant,
+      instant.microsecondsSinceEpoch: instant,
+    };
+    for (final entry in times.entries) {
+      final file = GuangyaConnector.file({
+        'fileId': 'time-file',
+        'fileName': 'time.txt',
+        'updatedAt': entry.key,
+      }, 'root');
+      expect(
+        cloudFileDate(file.modifiedAt),
+        entry.value,
+        reason: '${entry.key}',
+      );
+    }
+  });
+
   test(
     'An empty account omits zero usage and an empty directory omits its list',
     () async {

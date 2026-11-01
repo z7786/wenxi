@@ -111,6 +111,19 @@ const _plainTextExtensions = {
   'lock',
 };
 
+const _officeExtensions = {
+  'doc',
+  'docx',
+  'xls',
+  'xlsx',
+  'ppt',
+  'pptx',
+  'odt',
+  'ods',
+  'odp',
+  'rtf',
+};
+
 String _textName(String name) {
   var value = name.replaceAll('\\', '/').split('/').last.toLowerCase();
   // These are candidates only. The preview loader rejects real archive bytes.
@@ -131,6 +144,11 @@ bool isTextFile(String name) {
       }.contains(value) ||
       _plainTextExtensions.contains(extension) ||
       _textLanguages.containsKey(extension);
+}
+
+bool isOfficeDocument(String name) {
+  final value = name.replaceAll('\\', '/').split('/').last.toLowerCase();
+  return _officeExtensions.contains(value.split('.').last);
 }
 
 String? textFileLanguage(String name) =>

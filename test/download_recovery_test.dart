@@ -276,6 +276,100 @@ void main() {
     dio.close(force: true);
   });
 
+  for (final (interruptedPath, retries, failures) in [
+    ('/video.m3u8', 1, 1),
+    ('/second.ts', 1, 1),
+    ('/second.ts', 0, 1),
+    ('/second.ts', 2, 3),
+  ]) {
+    test('HLS truncated body at $interruptedPath: retries=$retries', () async {
+      await store.put('settings', {
+        'retries': retries,
+        'downloadRetryPolicy': 1,
+      });
+      HttpOverrides.global = _LocalIo();
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final requests = <String, int>{};
+      server.listen((request) async {
+        final path = request.uri.path;
+        final count = requests.update(path, (n) => n + 1, ifAbsent: () => 1);
+        final bytes = path == '/video.m3u8'
+            ? '#EXTM3U\n#EXTINF:1,\nfirst.ts\n#EXTINF:1,\nsecond.ts\n#EXT-X-ENDLIST\n'
+                  .codeUnits
+            : path == '/first.ts'
+            ? [1, 2, 3]
+            : [4, 5, 6, 7];
+        if (path == interruptedPath && count <= failures) {
+          final socket = await request.response.detachSocket(
+            writeHeaders: false,
+          );
+          socket.write(
+            'HTTP/1.1 200 OK\r\nContent-Length: ${bytes.length}\r\n\r\n',
+          );
+          socket.add(bytes.sublist(0, bytes.length ~/ 2));
+          await socket.flush();
+          socket.destroy();
+        } else {
+          request.response.contentLength = bytes.length;
+          request.response.add(bytes);
+          await request.response.close();
+        }
+      });
+      final dio = Dio(BaseOptions(validateStatus: (_) => true));
+      final current = makeManager(_PlaylistHttp(dio), FakeNative());
+      addTearDown(() async {
+        dio.close(force: true);
+        await server.close(force: true);
+      });
+      await current.initialize();
+      final id = await current.enqueue(
+        DownloadSpec(
+          url: 'http://127.0.0.1:${server.port}/video.m3u8',
+          fileName: 'video.ts',
+        ),
+      );
+      await until(() => !current.task(id)!.active && current.activeCount == 0);
+      if (failures > retries) {
+        final failed = current.task(id)!;
+        expect(failed.status, DownloadStatus.failed);
+        expect(requests[interruptedPath], retries + 1);
+        expect(files.savedCount, 0);
+        expect(failed.hls.integer('index'), 1);
+        expect(failed.hls.integer('bytes'), 3);
+        await current.resume(id);
+        await until(
+          () => !current.task(id)!.active && current.activeCount == 0,
+        );
+      }
+      final task = current.task(id)!;
+      expect(task.status, DownloadStatus.completed, reason: task.error);
+      expect(requests[interruptedPath], failures + 1);
+      expect(requests['/first.ts'], 1);
+      expect(await File(task.savedPath!).readAsBytes(), [1, 2, 3, 4, 5, 6, 7]);
+    });
+  }
+
+  test('Pausing HLS during a retry cancels the pending request', () async {
+    final adapter = _TransientAdapter();
+    final dio = Dio(BaseOptions(validateStatus: (_) => true))
+      ..httpClientAdapter = adapter;
+    final current = makeManager(_PlaylistHttp(dio), FakeNative());
+    addTearDown(() => dio.close(force: true));
+    await current.initialize();
+    final id = await current.enqueue(
+      const DownloadSpec(
+        url: 'https://fixture.invalid/video.m3u8',
+        fileName: 'video.ts',
+      ),
+    );
+    await until(() => current.task(id)!.phase.contains('秒后重试'));
+    await current.pause(id).timeout(const Duration(seconds: 1));
+    await Future<void>.delayed(const Duration(milliseconds: 2200));
+    expect(current.task(id)!.status, DownloadStatus.paused);
+    expect(adapter.attempts, 1);
+    expect(files.savedCount, 0);
+  });
+
   for (final (interrupted, retries) in [(true, 1), (true, 0), (false, 1)]) {
     test(
       'Download TLS recovery: interrupted=$interrupted retries=$retries',

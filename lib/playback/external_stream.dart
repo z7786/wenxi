@@ -4,14 +4,33 @@ import 'dart:io';
 import 'dart:typed_data';
 import '../core/json.dart';
 import '../domain/models.dart';
+import '../lan/lan_files.dart';
+import 'cast/dlna.dart' show castMimeType;
 
 /// A separate, session-owned transport: pausing the internal decoder must not
 /// pause the player the user has just opened. Credentials stay on this side of
-/// the loopback server, including requests for HLS playlists, keys and segments.
+/// the local server, including requests for HLS playlists, keys and segments.
+/// Third-party players use loopback; TV sessions bind a selected LAN interface.
 class ExternalPlaybackStream {
-  ExternalPlaybackStream(this.source);
+  ExternalPlaybackStream(this.source) : lanAddress = null, _files = null;
+  ExternalPlaybackStream.lan(
+    this.source, {
+    required InternetAddress this.lanAddress,
+    LanFiles? files,
+  }) : _files = files ?? LanFiles();
 
   final DownloadSpec source;
+  final InternetAddress? lanAddress;
+  final LanFiles? _files;
+  LanLocalFile? _localFile;
+  String get _host => lanAddress?.address ?? '127.0.0.1';
+  String get mimeType => castMimeType(
+    Uri.tryParse(source.url)?.path.toLowerCase().endsWith('.m3u8') == true
+        ? source.url
+        : source.fileName,
+  );
+  int requestsServed = 0;
+  String lastError = '';
   final _token = newId();
   final _resources = <String, Uri>{};
   final _paths = <Uri, String>{};
@@ -33,24 +52,53 @@ class ExternalPlaybackStream {
     final uri = Uri.tryParse(source.url);
     require(source.url.isNotEmpty && uri != null, '视频地址无效，请重新打开视频');
     if (!{'http', 'https'}.contains(uri!.scheme)) {
-      _url = source.url;
-      return;
+      if (lanAddress == null) {
+        _url = source.url;
+        return;
+      }
+      require(
+        !{
+          '.m3u8',
+          '.mpd',
+        }.any((extension) => source.fileName.toLowerCase().endsWith(extension)),
+        '本地播放列表暂不支持投屏，请选择 MP4 等单个视频文件',
+      );
+      final location = uri.scheme == 'file'
+          ? File.fromUri(uri).path
+          : source.url;
+      final selection = await _files!.scan([location]);
+      require(selection.files.length == 1, '请选择单个视频文件投屏');
+      _localFile = selection.files.single;
     }
-    require(uri.host.isNotEmpty && uri.userInfo.isEmpty, '视频地址无效');
+    require(
+      _localFile != null || uri.host.isNotEmpty && uri.userInfo.isEmpty,
+      '视频地址无效',
+    );
     // DASH templates cannot be rewritten as an HLS resource list. Public or
     // signed MPD URLs can be opened directly without leaking account headers.
     if (uri.path.toLowerCase().endsWith('.mpd')) {
+      require(lanAddress == null, '此 DASH 视频暂不支持电视投屏，请更换 MP4 或 HLS 资源');
       require(source.headers.isEmpty, '此 DASH 视频需要专用授权，请使用内置播放器');
       _url = source.url;
       return;
     }
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final server = await HttpServer.bind(
+      lanAddress ?? InternetAddress.loopbackIPv4,
+      0,
+    );
     if (_closed) {
       await server.close(force: true);
       throw const AppException('第三方播放已取消');
     }
     _server = server;
-    _url = _register(uri).toString();
+    _url = _localFile == null
+        ? _register(uri).toString()
+        : Uri(
+            scheme: 'http',
+            host: _host,
+            port: server.port,
+            path: '/$_token/local/video',
+          ).toString();
     server.listen((request) {
       final task = _serve(request);
       _handlers.add(task);
@@ -74,12 +122,7 @@ class ExternalPlaybackStream {
       _resources[path] = upstream;
       return path;
     }();
-    return Uri(
-      scheme: 'http',
-      host: '127.0.0.1',
-      port: _server!.port,
-      path: path,
-    );
+    return Uri(scheme: 'http', host: _host, port: _server!.port, path: path);
   }
 
   static bool _sameOrigin(Uri a, Uri b) =>
@@ -216,7 +259,9 @@ class ExternalPlaybackStream {
     StreamIterator<List<int>>? body;
     try {
       final upstream = _resources[request.uri.path];
-      if (_closed || upstream == null || request.uri.hasQuery) {
+      final local =
+          _localFile != null && request.uri.path == '/$_token/local/video';
+      if (_closed || upstream == null && !local || request.uri.hasQuery) {
         request.response.statusCode = HttpStatus.notFound;
         return;
       }
@@ -229,7 +274,19 @@ class ExternalPlaybackStream {
         request.response.headers.set(HttpHeaders.retryAfterHeader, '1');
         return;
       }
-      var fetched = await _fetch(request, upstream);
+      requestsServed++;
+      if (lanAddress != null) {
+        request.response.headers.set('transferMode.dlna.org', 'Streaming');
+        request.response.headers.set(
+          'contentFeatures.dlna.org',
+          'DLNA.ORG_OP=01;DLNA.ORG_CI=0',
+        );
+      }
+      if (local) {
+        await _serveLocal(request, _localFile!);
+        return;
+      }
+      var fetched = await _fetch(request, upstream!);
       outgoing = fetched.$3;
       if (fetched.$1.statusCode == HttpStatus.partialContent &&
           _playlist(fetched.$2, fetched.$1)) {
@@ -240,6 +297,17 @@ class ExternalPlaybackStream {
       }
       final (response, resolved, _) = fetched;
       final ok = response.statusCode >= 200 && response.statusCode < 300;
+      if (lanAddress != null) {
+        if ({401, 403}.contains(response.statusCode)) {
+          lastError = '视频链接已失效或网盘拒绝访问，请刷新链接后重试投屏';
+        } else if (response.statusCode == 404) {
+          lastError = '视频资源不存在，请刷新链接或更换资源';
+        } else if (response.statusCode >= 500) {
+          lastError = '视频源暂时无法访问，请稍后重试';
+        } else if (ok) {
+          lastError = '';
+        }
+      }
       var playlist = ok && _playlist(resolved, response);
       request.response.statusCode = response.statusCode;
       for (final name in [
@@ -254,6 +322,14 @@ class ExternalPlaybackStream {
         if (value != null) request.response.headers.set(name, value);
       }
       request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+      if (lanAddress != null &&
+          upstream == Uri.parse(source.url) &&
+          !playlist &&
+          (response.headers.contentType == null ||
+              response.headers.contentType?.mimeType ==
+                  'application/octet-stream')) {
+        request.response.headers.set(HttpHeaders.contentTypeHeader, mimeType);
+      }
       if (request.method == 'HEAD') {
         if (!playlist) request.response.contentLength = response.contentLength;
         await response.listen((_) {}).cancel();
@@ -304,6 +380,7 @@ class ExternalPlaybackStream {
         }
       }
     } catch (_) {
+      if (lanAddress != null) lastError = '视频中转连接失败，请检查网络或刷新视频链接';
       try {
         request.response.statusCode = HttpStatus.badGateway;
       } catch (_) {}
@@ -316,6 +393,58 @@ class ExternalPlaybackStream {
       try {
         await request.response.close();
       } catch (_) {}
+    }
+  }
+
+  Future<void> _serveLocal(HttpRequest request, LanLocalFile file) async {
+    await _files!.check(file);
+    var start = 0, end = file.size;
+    final range = request.headers.value(HttpHeaders.rangeHeader);
+    if (range != null) {
+      final match = RegExp(r'^bytes=(\d*)-(\d*)$').firstMatch(range.trim());
+      bool valid =
+          match != null && (match[1]!.isNotEmpty || match[2]!.isNotEmpty);
+      if (valid) {
+        if (match[1]!.isEmpty) {
+          final suffix = int.tryParse(match[2]!);
+          valid = suffix != null && suffix > 0;
+          if (valid) start = (file.size - suffix).clamp(0, file.size);
+        } else {
+          final parsedStart = int.tryParse(match[1]!);
+          final parsedEnd = match[2]!.isEmpty
+              ? file.size - 1
+              : int.tryParse(match[2]!);
+          valid =
+              parsedStart != null &&
+              parsedEnd != null &&
+              parsedEnd >= parsedStart;
+          if (valid) {
+            start = parsedStart;
+            end = (parsedEnd + 1).clamp(0, file.size);
+          }
+        }
+      }
+      if (!valid || start >= file.size || start >= end) {
+        request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+        request.response.headers.set(
+          HttpHeaders.contentRangeHeader,
+          'bytes */${file.size}',
+        );
+        return;
+      }
+      request.response.statusCode = HttpStatus.partialContent;
+      request.response.headers.set(
+        HttpHeaders.contentRangeHeader,
+        'bytes $start-${end - 1}/${file.size}',
+      );
+    }
+    request.response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+    request.response.headers.set(HttpHeaders.contentTypeHeader, mimeType);
+    request.response.contentLength = end - start;
+    if (request.method != 'HEAD') {
+      await request.response.addStream(
+        _files.read(file, start, end).timeout(const Duration(seconds: 60)),
+      );
     }
   }
 

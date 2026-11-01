@@ -209,6 +209,13 @@ void main() {
       tester,
     ) async {
       final http = FakeHttp((r) {
+        if (r.uri.path.endsWith('/captcha/type')) {
+          return jsonResponse({
+            'code': 200,
+            'captcha_type': 'image',
+            'always_required': false,
+          });
+        }
         if (r.uri.path.endsWith('/login')) {
           expect(r.json['email'], 'test@example.com');
           return jsonResponse({'code': 200, 'token': 'fixture-session-token'});
@@ -228,7 +235,7 @@ void main() {
         http,
         size: size,
       );
-      expect(find.byKey(const ValueKey('native-login-web')), findsNothing);
+      expect(find.byKey(const ValueKey('native-login-web')), findsOneWidget);
       final manual = find.byKey(const ValueKey('native-login-manual'));
       await tester.ensureVisible(manual);
       await tester.tap(manual);

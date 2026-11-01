@@ -71,6 +71,7 @@ class PlaybackBufferPolicy {
     required double bufferedSeconds,
     required bool buffering,
     required bool playing,
+    double requiredBytesPerSecond = 0,
   }) {
     final previous = _sampleAt;
     final delta = receivedBytes - _received;
@@ -94,10 +95,13 @@ class PlaybackBufferPolicy {
     } else if (previous != null &&
         elapsed > previous &&
         (_holdUntil == null || elapsed >= _holdUntil!)) {
-      // Grow before the cache is nearly empty. A flat receive rate is normal
-      // for a rate-limited drive, not evidence of congestion. Once buffered,
-      // native backpressure stops reads without discarding useful connections.
+      // Low buffered time during startup/seeking is normal. Add connections
+      // only if measured throughput cannot comfortably supply the media rate;
+      // otherwise extra requests compete for the same bandwidth. Unknown
+      // duration/size retains the existing early growth behavior.
       if ((buffering || bufferedSeconds < 30) &&
+          (requiredBytesPerSecond <= 0 ||
+              bytesPerSecond < requiredBytesPerSecond * 1.5) &&
           activeRequests >= connections &&
           delta > 0) {
         connections = math.min(limit, connections + 2);

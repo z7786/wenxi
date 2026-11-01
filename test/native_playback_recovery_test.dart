@@ -179,27 +179,31 @@ void main() {
           try {
             await HttpOverrides.runWithHttpOverrides(() async {
               await backend.open(origin.source(), Duration.zero);
+              // This short fixture must begin before its held tail arrives;
+              // the production startup reserve exceeds the fixture duration.
+              final native = backend.player.platform as NativePlayer;
+              await native.setProperty('cache-pause-initial', 'no');
+              await native.setProperty('cache-pause-wait', '1');
               await backend.play();
               await until(
                 () => (backend.diagnosticFields['rebufferCount'] as int) > 0,
               );
               await until(
-                () => backend.diagnosticFields['resumeBufferSeconds'] == 6,
+                () => backend.diagnosticFields['resumeBufferSeconds'] == 8,
               );
-              final native = backend.player.platform as NativePlayer;
               expect(
                 double.parse(await native.getProperty('cache-pause-wait')),
-                6,
+                8,
               );
               expect(backend.state.buffering, isTrue);
               expect(backend.failure, isNull);
               await backend.setRate(2);
               await until(
-                () => backend.diagnosticFields['resumeBufferSeconds'] == 12,
+                () => backend.diagnosticFields['resumeBufferSeconds'] == 16,
               );
               expect(
                 double.parse(await native.getProperty('cache-pause-wait')),
-                12,
+                16,
               );
               origin.tail!.complete();
               await until(() => backend.state.completed);

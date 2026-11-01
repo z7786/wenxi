@@ -31,6 +31,10 @@ class ReadRetryScope {
   Future<T> run<T>(Future<T> Function() action) =>
       runZoned(action, zoneValues: {_key: this});
 
+  /// A route with its own fallback should try once before changing routes.
+  static Future<T> withoutRetries<T>(Future<T> Function() action) =>
+      runZoned(action, zoneValues: {_key: null});
+
   Future<HttpResult> execute(Future<HttpResult> Function() request) async {
     while (true) {
       checkpoint();

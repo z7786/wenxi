@@ -18,6 +18,14 @@ import 'playback_failure.dart';
 import 'playback_selection.dart';
 import 'subtitle_matching.dart';
 import 'external_stream.dart';
+import 'cast/cast_session.dart';
+import 'cast/dlna.dart';
+import 'cast/cast_platform.dart';
+
+part 'playback_cast.dart';
+
+CastSession _managedCastSession(CastDevice device, DownloadSpec source) =>
+    CastSession(device, source, managePlatform: false);
 
 typedef PreparePlayback =
     Future<DownloadSpec> Function(PlaybackEntry entry, RequestScope scope);
@@ -52,6 +60,7 @@ class _Session {
   final metadataReady = Completer<void>();
   final subtitleGate = AsyncGate();
   VideoGeometry? geometry;
+  PlayerState? castBookmark;
   Future<void>? closing;
   Timer? recoveryTimer;
   Duration recoveryPosition = Duration.zero;
@@ -87,8 +96,11 @@ class PlaybackController extends ChangeNotifier {
     this.checkAhead,
     this.sourceAccepted,
     this.externalStreamFactory = ExternalPlaybackStream.new,
+    this.castSessionFactory = _managedCastSession,
+    CastPlatform? castPlatform,
     DateTime Function()? now,
   }) : entries = List.unmodifiable(entries),
+       castPlatform = castPlatform ?? CastPlatform(),
        preferences = history.preferences,
        index = initialIndex {
     require(
@@ -135,6 +147,20 @@ class PlaybackController extends ChangeNotifier {
   backendFactory;
   final ExternalPlaybackStream Function(DownloadSpec source)
   externalStreamFactory;
+  final CastSession Function(CastDevice device, DownloadSpec source)
+  castSessionFactory;
+  final CastPlatform castPlatform;
+  CastSession? _cast;
+  CastDevice? _castTarget;
+  bool _castPlatformUsed = false;
+  Future<void>? _castClosing;
+  DownloadSpec? _castSource;
+  RequestScope? _castScope;
+  int _castRevision = 0;
+  bool connectingCast = false;
+  final _castTasks = <Future<void>>{};
+  CastSession? get castSession => _cast;
+  bool get casting => _cast != null;
   final VoidCallback? checkSource;
   final VoidCallback? checkDownload;
   final sourceProgress = OperationProgress();
@@ -175,7 +201,8 @@ class PlaybackController extends ChangeNotifier {
   bool get playingExternally => _externalStream != null;
   PlaybackEntry get current => entries[index];
   PlaybackBackend? get backend => _session?.backend;
-  PlayerState get state => backend?.state ?? const PlayerState();
+  PlayerState get state =>
+      _cast?.state ?? backend?.state ?? const PlayerState();
   int get playlistPosition => _playlistPositions[index];
   int playlistPositionOf(int entryIndex) => _playlistPositions[entryIndex];
   int? get previousIndex =>
@@ -183,7 +210,10 @@ class PlaybackController extends ChangeNotifier {
   int? get nextIndex => canNext ? playlistIndices[playlistPosition + 1] : null;
   bool get canPrevious => playlistPosition > 0;
   bool get canNext => playlistPosition + 1 < entries.length;
-  bool get ready => !loading && error.isEmpty && backend != null;
+  bool get ready =>
+      !loading &&
+      !connectingCast &&
+      (casting ? _cast!.connected : error.isEmpty && backend != null);
   bool get hasVideo => current.video;
   int get connections => preferences.connectionsFor(current.platform);
   bool get usingSoftwareDecoder =>
@@ -288,6 +318,11 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _stopForSleep() async {
     if (closed) return;
     notice = '定时停止已生效，播放进度已保留';
+    if (casting || connectingCast || _castTarget != null) {
+      await disconnectCast();
+      _changed();
+      return;
+    }
     await pause();
     // A timer can expire while the native play command is still completing.
     // The opening path also checks _playWhenReady after that command returns.
@@ -372,6 +407,8 @@ class PlaybackController extends ChangeNotifier {
     required bool refreshSource,
     required bool automaticRecovery,
   }) async {
+    final continueCast = _castTarget ?? _cast?.device;
+    if (_cast != null) _session?.castBookmark = _cast!.state;
     final loadWatch = Stopwatch()..start();
     DiagnosticLog.event(
       'player.load',
@@ -413,6 +450,7 @@ class PlaybackController extends ChangeNotifier {
     resumedFrom = Duration.zero;
     _changed();
     await _stopExternalPlayback();
+    await _stopCast(keepPlatform: continueCast != null);
     await _retire(old);
     await retiredSelection?.release();
     await _preferenceGate.run(() async {});
@@ -519,7 +557,9 @@ class PlaybackController extends ChangeNotifier {
           stage = 'play';
           sleepTimer.checkDeadline();
           session.playRequested = _playWhenReady && !sleepTimer.stopped;
-          if (!_background && session.playRequested) await backend.play();
+          if (_castTarget == null && !_background && session.playRequested) {
+            await backend.play();
+          }
           if (!_current(session)) return;
           if (!_playWhenReady || sleepTimer.stopped) await backend.pause();
           if (!_current(session)) return;
@@ -547,6 +587,23 @@ class PlaybackController extends ChangeNotifier {
           );
           _onState(session);
           _autoSubtitle(session);
+          if (continueCast != null) {
+            // An earlier handoff can still be resolving a refreshed source.
+            // Join its cancelled task before claiming the next TV session.
+            await _settleCastTasks();
+            if (identical(_castTarget, continueCast) &&
+                _current(session) &&
+                !sleepTimer.stopped) {
+              try {
+                await castTo(continueCast);
+              } catch (e) {
+                if (_current(session)) {
+                  notice = e is AppException ? e.message : '下一集投屏失败，请重新连接电视';
+                  _changed();
+                }
+              }
+            }
+          }
           return;
         } catch (e, stack) {
           if (!_current(session)) return;
@@ -629,6 +686,13 @@ class PlaybackController extends ChangeNotifier {
         }
       }
       if (unowned != null) await _releaseSafely(unowned);
+      if (generation == _generation &&
+          error.isNotEmpty &&
+          !casting &&
+          !connectingCast) {
+        _castTarget = null;
+        await _releaseCastPlatform();
+      }
     }
   }
 
@@ -964,6 +1028,10 @@ class PlaybackController extends ChangeNotifier {
   void _onState(_Session session) {
     if (!_current(session)) return;
     _rememberGeometry(session);
+    if (casting || connectingCast) {
+      _changed();
+      return;
+    }
     if (session.errorRevision != session.backend.errorRevision) {
       session.errorRevision = session.backend.errorRevision;
       if (!session.initializing) {
@@ -1085,7 +1153,9 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> _save(_Session session, {bool? completed}) async {
-    final state = session.backend.state;
+    final state = identical(_session, session) && casting
+        ? _cast!.state
+        : session.castBookmark ?? session.backend.state;
     final finished =
         completed ?? (state.completed || session.completionHandled);
     if (!session.opened ||
@@ -1172,6 +1242,12 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> play() async {
     if (closed) return;
+    if (casting) {
+      sleepTimer.acknowledgePlay();
+      _playWhenReady = true;
+      await _cast!.play();
+      return;
+    }
     sleepTimer.acknowledgePlay();
     final sleepRevision = sleepTimer.stopRevision;
     _externalRevision++;
@@ -1195,6 +1271,12 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> pause() async {
+    if (casting && _cast!.connected) {
+      _playWhenReady = false;
+      await _cast!.pause();
+      await saveProgress();
+      return;
+    }
     _playWhenReady = false;
     _discardPrepared();
     _session?.aheadAttempted = false;
@@ -1207,6 +1289,11 @@ class PlaybackController extends ChangeNotifier {
   Future<void> toggle() => state.playing ? pause() : play();
   Future<void> seek(Duration position) async {
     final target = clampPlaybackPosition(position, state.duration);
+    if (casting) {
+      await _cast!.seek(target);
+      await saveProgress();
+      return;
+    }
     if (state.duration - target > const Duration(seconds: 45)) {
       _discardPrepared();
       _session?.aheadAttempted = false;
@@ -1269,6 +1356,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> setRate(double value) async {
+    require(!casting, '电视投屏使用正常速度，倍速请在电视端调整');
     await updatePreferences(preferences.copyWith(rate: value));
     await _command((backend) => backend.setRate(effectiveRate));
   }
@@ -1307,7 +1395,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> beginBoost() async {
-    if (boosting || !ready) return;
+    if (boosting || !ready || casting) return;
     boosting = true;
     _changed();
     await _command((backend) => backend.setRate(effectiveRate));
@@ -1321,6 +1409,10 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> setVolume(double value, {bool save = true}) async {
+    if (casting) {
+      await _cast!.setVolume(value);
+      return;
+    }
     preferences = preferences.copyWith(volume: value);
     _changed();
     await _command((backend) => backend.setVolume(preferences.volume));
@@ -1466,6 +1558,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> background({required bool pictureInPicture}) async {
     _background = !pictureInPicture;
     await saveProgress();
+    if (casting || connectingCast || _castTarget != null) return;
     if (pictureInPicture) return;
     _discardPrepared();
     await pause();
@@ -1481,6 +1574,7 @@ class PlaybackController extends ChangeNotifier {
   ) async {
     require(!closed && !loading && hasVideo, '请等待视频地址准备完成');
     require(!openingExternalPlayer, '正在选择第三方播放器');
+    require(!casting && !connectingCast, '请先断开电视投屏');
     checkSource?.call();
     openingExternalPlayer = true;
     final revision = ++_externalRevision, generation = _generation;
@@ -1572,16 +1666,19 @@ class PlaybackController extends ChangeNotifier {
     _discardPrepared();
     _saveTimer?.cancel();
     final session = _session;
+    if (_cast != null) session?.castBookmark = _cast!.state;
     _session = null;
     final selection = _selection;
     _selection = null;
     await _stopExternalPlayback();
+    await _stopCast();
     await _retire(session);
     await selection?.release();
     // Late source resolutions still own cleanup leases, even after the route is gone.
     await Future.wait(_inflightLoads.toList());
     await Future.wait(_subtitleLoads.toList());
     await Future.wait(_aheadTasks.toList());
+    await _settleCastTasks();
     await sleepTimer.settle();
     await _preferenceGate.run(() async {});
     await history.store.flush();

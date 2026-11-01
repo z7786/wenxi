@@ -21,12 +21,12 @@ const aliyunConnections = 8
 var guangyaHosts = newAdaptiveHostLimiter(4, 2*time.Minute)
 
 // Baidu's preview CDN accepts bounded reads but can reject a whole-file Range
-// with 403/31326. Read consecutive windows on the existing single connection;
+// with 403/31326. Read consecutive bounded windows on each connection;
 // checkpoint chunks continue to describe file ownership, not HTTP requests.
 const baiduPreviewRequestSize int64 = 8 * 1024 * 1024
 
 func effectiveConnections(size int64, configured int, profile string) int {
-	if size <= 0 || profile == "baidu" {
+	if size <= 0 {
 		return 1
 	}
 	if limit := fhttp.BaiduConnectionLimit(profile); limit > 0 {

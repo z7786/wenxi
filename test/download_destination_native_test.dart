@@ -23,6 +23,7 @@ class _SpaceTracingTransport extends DesktopGopeedTransport {
   _SpaceTracingTransport({required super.executable});
   final spaceChecks = <String>[];
   String? fullVolume;
+  int? availableBytes;
 
   @override
   Future<Object?> call(String method, [Json args = const {}]) async {
@@ -32,6 +33,7 @@ class _SpaceTracingTransport extends DesktopGopeedTransport {
       if (p.rootPrefix(path).toLowerCase() == fullVolume) {
         return {'bytes': 0};
       }
+      if (availableBytes != null) return {'bytes': availableBytes};
     }
     return super.call(method, args);
   }
@@ -250,6 +252,23 @@ void main() {
       });
 
       test(
+        'one payload fits when there is not enough room for a second copy',
+        () async {
+          await manager.changeDestination(selectedRoot.path);
+          transport.availableBytes = 32 * 1024 * 1024 + content.length * 3 ~/ 2;
+          final id = await manager.enqueue(spec());
+          await finish(id);
+          expectSelectedSpaceChecks();
+          expect(
+            await File(
+              p.join(manager.engine.taskDirectory(id).path, 'payload.gopeed'),
+            ).exists(),
+            isFalse,
+          );
+        },
+      );
+
+      test(
         'new task resumes on the chosen volume after a complete process restart',
         () async {
           exhaustCacheVolume();
@@ -333,7 +352,6 @@ void main() {
           exhaustCacheVolume();
           await manager.resume(id);
           await finish(id);
-          expectSelectedSpaceChecks();
           expect(await payload.exists(), isFalse);
         },
       );

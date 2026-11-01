@@ -219,6 +219,44 @@ void main() {
   );
 
   test(
+    'Chinese playlist names use pinyin, natural digits and stable homophones',
+    () {
+      final names = [
+        '资料.mp4',
+        '同01.mp4',
+        '阿里10.mp4',
+        '童1.mp4',
+        '阿里2.mp4',
+        '工作.mp4',
+        '重庆.mp4',
+      ];
+      final entries = names.map((name) => entry(name, 'a')).toList();
+      expect(orderedPlaybackIndices(entries, PlaybackPlaylistOrder.source), [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+      ]);
+      expect(orderedPlaybackIndices(entries, PlaybackPlaylistOrder.ascending), [
+        4,
+        2,
+        6,
+        5,
+        1,
+        3,
+        0,
+      ]);
+      expect(
+        orderedPlaybackIndices(entries, PlaybackPlaylistOrder.descending),
+        [0, 1, 3, 5, 6, 2, 4],
+      );
+    },
+  );
+
+  test(
     'switching folders applies their rate, intro and subtitles without overwriting each other',
     () async {
       final f = PlaybackFixture(

@@ -10,6 +10,10 @@ Gopeed 1.8.1（GopeedLab 及贡献者），GPL-3.0。完整许可位于 assets/l
 
 上游：https://github.com/GopeedLab/gopeed/tree/v1.8.1
 
+## ED2K
+
+Kelpie（XiaoYouChR 及贡献者），MIT，固定 commit `c3c475a917036900d6c6b4c5597f6b896e9ec2d6`，来源：https://github.com/XiaoYouChR/Kelpie 。部分来自 goed2k（monkeyWie，MIT），UPnP 部分来自 Syncthing / Taipei-Torrent，BSD 许可。完整许可和声明见 `Kelpie-LICENSE.txt`、`Kelpie-NOTICE.txt` 和 `Kelpie-UPnP-BSD.txt`；对应生产源码和嵌入补丁保留在 `native/gopeed/internal/ed2kcore/`。内核与原 Gopeed 一起编译，未新增取链接口或外部程序。
+
 分发包含此内核的组合构建时，需保留适用的 GPL 许可与对应源码。签名密钥不属于分发源码。构建产物不进入 Git 历史，但重建所需的内核源码、依赖与修改记录随源码提供。
 
 ## LanzouAPI
@@ -38,6 +42,8 @@ HTML DOM 解析使用 html 0.15.7 与 csslib 1.0.2，BSD 许可由 Flutter 构�
 
 上游：https://github.com/OpenListTeam/OpenList/tree/893457cd50d954b4a1a81727273b073193b1997d
 
+阿里开放平台播放于 2026-10-29 参照已下载的 AinanPlayer 豆源脚本中公开的授权/取链流程，以 Dart 独立适配 OpenList OAuth 服务和阿里官方开放接口，并核对 OpenList 文档；未打包或执行该第三方脚本，也未引入私有应用密钥。账号隔离、有限重试、取消、独立临时目录与清理适配见 docs/ALIYUN-OPEN-PLAYBACK.md，第三方授权服务的数据处理见 docs/PRIVACY.md。
+
 协议结构和加密参数同时参考以下 Apache-2.0 SDK，原许可随资源保留。本工程没有打包这些 Go SDK 的二进制，也没有调用第三方代理服务。
 
 - foxxorcat/weiyun-sdk-go v0.1.4：https://github.com/foxxorcat/weiyun-sdk-go/tree/v0.1.4；许可 assets/licenses/weiyun-sdk-go-LICENSE.txt。
@@ -51,6 +57,12 @@ HTML DOM 解析使用 html 0.15.7 与 csslib 1.0.2，BSD 许可由 Flutter 构�
 Android 构建内置友盟+移动统计 SDK，通过 Gradle 获取，版本记录在 android/gradle/libs.versions.toml。该 SDK 适用供应商条款，不在项目 AGPL 许可的重新授权范围内。它与 GPL/AGPL 组件的组合分发兼容性需要单独确认；本说明未为上游代码添加许可例外。数据处理与当前默认行为见 docs/PRIVACY.md，供应商政策：https://www.umeng.com/page/policy。
 
 ## Flutter 与 Dart 包
+
+液态玻璃的圆角距离、边缘法线与透镜折射算法参考 Kyant0/AndroidLiquidGlass（Backdrop），提交 `65ab177e90e5c1d8c62e70cf7755841982da65f6`，Apache-2.0，Copyright 2025 Kyant。完整许可保留于 assets/licenses/AndroidLiquidGlass-LICENSE.txt。着色器移植为 Flutter GLSL，增加 Impeller/GLES 坐标适配、预乘透明度与三次采样的有限色散；按钮和导航沿用应用现有功能及主题。未打包上游示例 APK、壁纸或 Compose 运行库。
+
+上游：https://github.com/Kyant0/AndroidLiquidGlass/tree/65ab177e90e5c1d8c62e70cf7755841982da65f6
+
+中文文件名称的拼音排序使用 pinyin 3.3.0（https://pub.dev/packages/pinyin/versions/3.3.0，源码 https://github.com/sun-jiao/dart-pinyin），BSD-2-Clause，Copyright (c) 2018, Sky24n。使用内置字库离线转换，支持常见多音字词组和简繁体；保留原始文件名，仅生成排序键。原许可由 Flutter 构建工具收录。
 
 消息公告使用 flutter_markdown_plus 1.0.12（https://github.com/foresightmobile/flutter_markdown_plus）和 markdown 7.3.1（https://github.com/dart-lang/tools/tree/main/pkgs/markdown），BSD 许可随 Flutter 构建收录。独立的公告编辑器内嵌 markdown-it 15.0.2（https://github.com/markdown-it/markdown-it），MIT 许可保留在 HTML 源码中。
 
@@ -73,6 +85,8 @@ Windows 使用 media-kit/libmpv-win32-video-cmake 的 20241021 构建（mpv 0.39
 Windows mpv 构建源码：https://github.com/media-kit/libmpv-win32-video-cmake
 ANGLE 构建源码：https://github.com/alexmercerind/flutter-windows-ANGLE-OpenGL-ES/tree/v1.0.1
 
+Windows ARM64 构建使用 shinchiro/mpv-winbuild-cmake 的 20261021 ARM64 libmpv，以及 Electron 32.3.3 发布包中的 ARM64 ANGLE、Direct3D 编译器、Vulkan loader 和 SwiftShader；不运行或嵌入 Electron。来源、固定校验值和许可见 Windows-ARM64-media-NOTICES.txt；完整 Electron/Chromium 组件许可随 Windows 安装目录的 licenses 文件夹分发。Android 与 Windows x64 的媒体库版本保持原有固定版本。
+
 ## Android NDK / Jetpack
 
 设备互联的 Android 离线扫码使用 ZXing Android Embedded 4.3.0（https://github.com/journeyapps/zxing-android-embedded）及 ZXing Core 3.4.1（https://github.com/zxing/zxing），均为 Apache-2.0；完整许可位于 assets/licenses/ZXing-LICENSE.txt。
@@ -92,6 +106,8 @@ Gopeed AAR 附带 NDK 28.2.13676358 的 libc++_shared.so。LLVM 及附带组件�
 代码高亮使用 re_highlight 0.0.3（Reqable，MIT），源码：https://github.com/reqable/re-highlight；完整许可见 re_highlight-LICENSE.txt。中文 GBK 解码使用未修改的 enough_convert 1.7.1（MPL-2.0），对应源码：https://pub.dev/packages/enough_convert/versions/1.7.1；完整许可见 enough_convert-LICENSE.txt。脚本仅作为文本显示，不执行。
 
 ## 远程来源脚本运行时
+
+后台下发搜索模块中的 JMESPath 使用 jmespath.js 0.16.0（https://github.com/jmespath/jmespath.js），Apache License 2.0。仅调整模块导出以适配受限的 ES 模块运行时；完整许可见 JMESPath-LICENSE.txt。
 
 远程来源接入包使用 QuickJS-NG 0.14.0，官方固定版本为 https://github.com/quickjs-ng/quickjs/tree/v0.14.0，采用 MIT 许可。原始源码保留在 vendor_plugins/asterlink_js/src/quickjs，未修改上游引擎文件；来源与 SHA-256 清单见该插件的 UPSTREAM.md 和 UPSTREAM-SHA256.json。完整许可见 QuickJS-NG-LICENSE.txt。
 

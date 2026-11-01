@@ -6,6 +6,51 @@ import 'package:asterlink/domain/xunlei_web_login.dart';
 
 void main() {
   test(
+    'Ctfile detects the website session and prefers account API cookies',
+    () {
+      final target = WebLoginTarget.targets[CloudPlatform.ctfile]!;
+      expect(target.url, 'https://my.ctfile.com/login');
+      expect(target.localStorageKey, isNull);
+      final urls = target.cookieUrls(
+        'https://my.ctfile.com/login?ticket=private',
+      );
+      expect(urls.first, 'https://api.ctfile.com/v4/user/auth/exchange-token');
+      expect(urls.join(), isNot(contains('private')));
+      expect(
+        target.cookieUrls('https://my.ctfile.com.attacker.invalid/'),
+        isNot(contains('https://my.ctfile.com.attacker.invalid/')),
+      );
+      for (final cookies in [
+        <String>[],
+        ['tracking=optional'],
+        ['ctfile_session=; ct_uid=12'],
+      ]) {
+        expect(
+          LoginCredentials.fromBrowser(CloudPlatform.ctfile, cookies: cookies),
+          isEmpty,
+        );
+      }
+      final raw = LoginCredentials.fromBrowser(
+        CloudPlatform.ctfile,
+        cookies: [
+          'ctfile_session=current-web-session; ct_uid=12',
+          'ctfile_session=stale-page-session',
+        ],
+      );
+      final credential = LoginCredentials.candidate(
+        CloudPlatform.ctfile,
+        raw,
+        Credential('old', {'primary': 'old-session-token', 'userId': '99'}),
+      );
+      expect(
+        credential.primary,
+        contains('ctfile_session=current-web-session'),
+      );
+      expect(credential.primary, isNot(contains('stale')));
+      expect(credential.field('userId'), isEmpty);
+    },
+  );
+  test(
     'Xunlei captures web tokens without inheriting another login password',
     () {
       const data = {

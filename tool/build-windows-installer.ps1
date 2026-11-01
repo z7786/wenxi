@@ -3,6 +3,7 @@ param(
     [string]$RuntimeDir,
     [string]$OutputDir,
     [string]$Iscc,
+    [ValidateSet('x64', 'arm64')][string]$Architecture = 'x64',
     [switch]$Force
 )
 
@@ -11,8 +12,11 @@ Set-StrictMode -Version Latest
 $projectPath = Split-Path -Parent $PSScriptRoot
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
-if (-not $RuntimeDir) { $RuntimeDir = Join-Path $projectPath 'build\windows\x64\runner\Release' }
-if (-not $OutputDir) { $OutputDir = Join-Path $projectPath 'build\windows\installer' }
+if (-not $RuntimeDir) { $RuntimeDir = Join-Path $projectPath ("build\windows\$Architecture\runner\Release") }
+if (-not $OutputDir) {
+    $OutputDir = Join-Path $projectPath 'build\windows\installer'
+    if ($Architecture -eq 'arm64') { $OutputDir = Join-Path $OutputDir 'arm64' }
+}
 $runtimePath = (Resolve-Path -LiteralPath $RuntimeDir).ProviderPath.TrimEnd('\')
 $outputPath = [IO.Path]::GetFullPath($OutputDir).TrimEnd('\')
 if ($outputPath.Equals($runtimePath, [StringComparison]::OrdinalIgnoreCase) -or
@@ -29,7 +33,7 @@ $fullVersion = $appVersion + '+' + $buildNumber
 $numericVersion = $appVersion + '.' + $buildNumber
 # Construct the localized name without depending on Windows PowerShell's script encoding.
 $appName = -join ([char[]](0x6587, 0x6790, 0x52A9, 0x624B))
-$baseName = $appName + '-' + $appVersion + '-Windows-x64-Setup'
+$baseName = $appName + '-' + $appVersion + '-Windows-' + $Architecture + '-Setup'
 $installerPath = Join-Path $outputPath ($baseName + '.exe')
 if ((Test-Path -LiteralPath $installerPath) -and -not $Force) {
     throw 'An installer with this version already exists. Use -Force to replace that build deliberately.'
@@ -37,11 +41,12 @@ if ((Test-Path -LiteralPath $installerPath) -and -not $Force) {
 
 $requiredFiles = @(
     'asterlink.exe', 'asterlink_gopeed.exe', 'asterlink_js.dll', 'flutter_windows.dll', 'libmpv-2.dll',
-    'WebView2Loader.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll',
+    'WebView2Loader.dll', 'msvcp140.dll', 'vcruntime140.dll',
     'data\app.so', 'data\icudtl.dat', 'data\flutter_assets\AssetManifest.bin',
     'data\flutter_assets\assets\licenses\THIRD_PARTY_NOTICES.md',
     'data\flutter_assets\assets\licenses\QuickJS-NG-LICENSE.txt'
 )
+if ($Architecture -eq 'x64') { $requiredFiles += 'vcruntime140_1.dll' }
 foreach ($relativePath in $requiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $runtimePath $relativePath) -PathType Leaf)) {
         throw "Incomplete Windows runtime: missing $relativePath"
@@ -56,6 +61,8 @@ if (@($entries | Where-Object { $_.Attributes -band [IO.FileAttributes]::Reparse
     throw 'The runtime must not contain links or junctions.'
 }
 $runtimeFiles = @($entries | Where-Object { -not $_.PSIsContainer })
+. (Join-Path $PSScriptRoot 'windows-architecture.ps1')
+Assert-AsterLinkWindowsArchitecture -RuntimePath $runtimePath -Architecture $Architecture
 foreach ($file in $runtimeFiles) {
     $relativeFilePath = $file.FullName.Substring($runtimePath.Length + 1)
     if ($file.Name -match '(?i)(\.(jks|keystore|p12|pfx|pem|pdb|log)$|^unins\d+\.|^state-v\d|^\.env)' -or
@@ -134,6 +141,7 @@ $arguments = @(
     ('/DAppVersion=' + $appVersion),
     ('/DAppFullVersion=' + $fullVersion),
     ('/DAppFileVersion=' + $numericVersion),
+    ('/DAppArchitecture=' + $Architecture),
     ('/DInstallerOutputDir=' + $outputPath),
     ('/DWebView2Setup=' + $webViewPath),
     (Join-Path $projectPath 'windows\installer\asterlink.iss')
@@ -162,7 +170,7 @@ $installerFile = Get-Item -LiteralPath $installerPath
 $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = [ordered]@{
     appVersion = $fullVersion
-    architecture = 'x64'
+    architecture = $Architecture
     installer = [ordered]@{file=$installerFile.Name; bytes=$installerFile.Length; sha256=$installerHash}
     payloadFileCount = $payload.Count
     payloadBytes = ($payload | Measure-Object -Property bytes -Sum).Sum

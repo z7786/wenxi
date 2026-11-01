@@ -108,7 +108,9 @@ class GitHubAcceleration {
   }
 
   DownloadSpec apply(DownloadSpec spec) {
-    if (spec.networkPolicy != null || spec.isTorrent) return spec;
+    if (spec.networkPolicy != null || spec.isTorrent || spec.isEd2k) {
+      return spec;
+    }
     final url = urlFor(spec.url, spec.headers);
     return url == spec.url ? spec : spec.copyWith(url: url);
   }

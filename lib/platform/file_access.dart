@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import 'android_download_file.dart';
 import 'native_engine.dart';
+import 'windows_storage.dart';
 
 String safeFileName(String raw) {
   var name = raw
@@ -94,11 +95,16 @@ class StorageVolume {
 }
 
 class StoragePlan {
-  const StoragePlan(this.cache, this.target, {this.directOutput = false});
+  const StoragePlan(
+    this.cache,
+    this.target, {
+    this.directOutput = false,
+    this.copyOnSave = true,
+  });
   final StorageVolume cache, target;
-  final bool directOutput;
+  final bool directOutput, copyOnSave;
   StoragePlan forDirectOutput() =>
-      StoragePlan(cache, target, directOutput: true);
+      StoragePlan(cache, target, directOutput: true, copyOnSave: false);
   Map<String, int> requirements(int total, int downloaded, {int overhead = 0}) {
     if (directOutput) {
       final result = {target.id: (total - downloaded).clamp(0, total)};
@@ -106,7 +112,7 @@ class StoragePlan {
       return result;
     }
     final result = {cache.id: (total - downloaded).clamp(0, total) + overhead};
-    result[target.id] = (result[target.id] ?? 0) + total;
+    if (copyOnSave) result[target.id] = (result[target.id] ?? 0) + total;
     return result;
   }
 }
@@ -252,19 +258,32 @@ class PlatformFileAccess implements FileAccess {
       );
       return StoragePlan(volume('cache'), volume('target'));
     }
-    Future<StorageVolume> volume(String path) async {
+    Future<(StorageVolume, bool)> volume(String path) async {
       var directory = Directory(path).absolute;
       while (!await directory.exists() &&
           p.dirname(directory.path) != directory.path) {
         directory = directory.parent;
       }
       final resolved = await directory.resolveSymbolicLinks();
-      return StorageVolume(p.rootPrefix(resolved).toLowerCase(), resolved);
+      final windows = WindowsStorage.volume(resolved);
+      return (
+        StorageVolume(
+          windows?.id ?? p.rootPrefix(resolved).toLowerCase(),
+          resolved,
+        ),
+        windows?.supportsHardLinks ?? false,
+      );
     }
 
+    final cacheVolume = await volume(cache);
+    final targetVolume = await volume(destination ?? defaultDirectory.path);
     return StoragePlan(
-      await volume(cache),
-      await volume(destination ?? defaultDirectory.path),
+      cacheVolume.$1,
+      targetVolume.$1,
+      copyOnSave:
+          cacheVolume.$1.id != targetVolume.$1.id ||
+          !cacheVolume.$2 ||
+          !targetVolume.$2,
     );
   }
 
@@ -372,6 +391,29 @@ class PlatformFileAccess implements FileAccess {
     final safe = safeFileName(name),
         base = p.basenameWithoutExtension(safe),
         ext = p.extension(safe);
+    final plan = await storagePlan(source.parent.path, resolved);
+    if (!plan.copyOnSave) {
+      final total = await source.length();
+      for (var i = 0; i < 10000; i++) {
+        checkpoint();
+        final file = File(p.join(resolved, i == 0 ? safe : '$base ($i)$ext'));
+        try {
+          WindowsStorage.createHardLink(source.path, file.path);
+        } on FileSystemException {
+          if (!await file.exists()) rethrow;
+          continue;
+        }
+        try {
+          checkpoint();
+          onProgress?.call(total, total);
+          return file.path;
+        } catch (_) {
+          await file.delete();
+          rethrow;
+        }
+      }
+      throw const AppException('同名文件过多，请更换下载目录');
+    }
     File? target;
     for (var i = 0; i < 10000; i++) {
       checkpoint();

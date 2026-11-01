@@ -13,6 +13,7 @@ import '../http.dart';
 import '../http_retry.dart';
 import '../uploads/upload_io.dart';
 import '../state_store.dart';
+import 'aliyun_playback.dart';
 import 'aliyun_signature.dart';
 import 'token_session.dart';
 
@@ -50,6 +51,12 @@ class AliyunConnector extends CloudConnector {
   }) : sessions = TokenSessions(CloudPlatform.aliyun, store, now: now);
   final JsonHttp http;
   final TokenSessions sessions;
+  late final playbackApi = AliyunPlaybackApi(
+    http,
+    sessions,
+    renew: _renew,
+    userAgent: userAgent,
+  );
   final Future<void> Function(DownloadCleanup)? stageCleanup;
   final Duration taskDelay;
   final Duration listRequestInterval;
@@ -978,32 +985,23 @@ class AliyunConnector extends CloudConnector {
     String drive,
     CloudFile file,
   ) => OperationProgress.step(OperationStage.playbackLink, () async {
+    await playbackApi.fresh(token);
     Json data;
     try {
-      data = await _post(
-        'https://api.alipan.com/v2/file/get_video_preview_play_info',
-        {
-          'drive_id': drive,
-          'file_id': file.id,
-          'category': 'live_transcoding',
-          'url_expire_sec': 14400,
-        },
-        session: token,
-        canary: downloadCanary,
-        read: true,
-      );
-    } on AliyunApiException catch (error) {
-      if ({
-        'NotFound.FileId',
-        'ForbiddenFileInTheRecycleBin',
-      }.contains(error.code)) {
-        rethrow;
-      }
-      return _download(token, drive, file);
+      data = await playbackApi
+          .request(token, 'openFile/getVideoPreviewPlayInfo', {
+            'drive_id': drive,
+            'file_id': file.id,
+            'category': 'live_transcoding',
+            'url_expire_sec': '14400',
+          });
+    } on AliyunPlaybackApiException catch (error) {
+      if (error.fileUnavailable) rethrow;
+      return _playbackOriginal(token, drive, file);
     } on HttpRequestFailure catch (error) {
       RequestScope.checkpoint();
       if (!error.retryable) rethrow;
-      return _download(token, drive, file);
+      return _playbackOriginal(token, drive, file);
     }
     require(
       (data.str('file_id').isEmpty || data.str('file_id') == file.id) &&
@@ -1011,36 +1009,37 @@ class AliyunConnector extends CloudConnector {
       '阿里返回的视频标识不一致，请刷新列表后重试',
     );
     final candidates = <(Json, String)>[];
-    for (final task
-        in data
-            .obj('video_preview_play_info')
-            .list('live_transcoding_task_list')) {
-      if (task.str('status').toLowerCase() != 'finished') continue;
+    final preview = data.obj('video_preview_play_info');
+    final tasks = preview['quick_video_list'] is List
+        ? preview.list('quick_video_list')
+        : preview.list('live_transcoding_task_list');
+    for (final task in tasks) {
+      final status = task.str('status').toLowerCase();
+      if (status.isNotEmpty && status != 'finished') continue;
       try {
-        // Only a completed, full stream is eligible. `preview_url` may be a
-        // time-limited trial, and must not replace the user's complete video.
+        // Quick-video tasks can omit status. Both lists must provide a full
+        // `url`; `preview_url` can be a limited trial of the original video.
         final url = checkedCloudUrl(task.str('url'), '阿里视频播放地址无效');
         candidates.add((task, url));
       } on AppException {
         continue;
       }
     }
-    int pixels(Json task) {
-      final width = task.integer('template_width'),
-          height = task.integer('template_height');
-      if (width > 0 && height > 0) return width * height;
+    int width(Json task) {
+      final width = task.integer('template_width');
+      if (width > 0) return width;
       return switch (task.str('template_id').toUpperCase()) {
-        'LD' => 640 * 360,
-        'SD' => 960 * 540,
-        'HD' => 1280 * 720,
-        'FHD' => 1920 * 1080,
-        'QHD' => 2560 * 1440,
+        'LD' => 640,
+        'SD' => 960,
+        'HD' => 1280,
+        'FHD' => 1920,
+        'QHD' => 2560,
         _ => 0,
       };
     }
 
-    candidates.sort((a, b) => pixels(b.$1).compareTo(pixels(a.$1)));
-    if (candidates.isEmpty) return _download(token, drive, file);
+    candidates.sort((a, b) => width(b.$1).compareTo(width(a.$1)));
+    if (candidates.isEmpty) return _playbackOriginal(token, drive, file);
     return DownloadSpec(
       url: candidates.first.$2,
       fileName: file.name,
@@ -1050,6 +1049,96 @@ class AliyunConnector extends CloudConnector {
       profile: 'aliyun',
     );
   });
+
+  Future<DownloadSpec> _playbackOriginal(
+    TokenSession token,
+    String drive,
+    CloudFile file,
+  ) async {
+    final data = await playbackApi.request(token, 'openFile/getDownloadUrl', {
+      'drive_id': drive,
+      'file_id': file.id,
+    });
+    require(
+      (data.str('file_id').isEmpty || data.str('file_id') == file.id) &&
+          (data.str('drive_id').isEmpty || data.str('drive_id') == drive) &&
+          data.str('type') != 'folder',
+      '阿里返回的原文件标识不一致，请刷新列表后重试',
+    );
+    final size = data.integer('size');
+    require(
+      size <= 0 || file.size <= 0 || size == file.size,
+      '阿里源文件大小已变化，请刷新列表后重试',
+    );
+    return DownloadSpec(
+      url: checkedCloudUrl(data.str('url'), '阿里开放接口未返回原画播放地址'),
+      fileName: file.name,
+      expectedSize: file.size > 0 ? file.size : size,
+      checksumType: file.hashType,
+      checksumValue: file.hashValue,
+      headers: {'Referer': downloadReferer, 'User-Agent': userAgent},
+      profile: 'aliyun',
+    );
+  }
+
+  Future<String> _playbackResourceDrive(TokenSession token) async {
+    final data = await playbackApi.request(token, 'user/getDriveInfo', {});
+    require(
+      data.str('user_id').isEmpty ||
+          data.str('user_id') == token.field('userId'),
+      '阿里开放授权账号不一致，请重新登录',
+    );
+    final drive = data.str('resource_drive_id');
+    require(drive.isNotEmpty, '阿里开放接口未返回资源库，无法转存分享视频');
+    await sessions.update(token, {
+      'resourceDriveId': drive,
+      if (data.str('backup_drive_id').isNotEmpty)
+        'backupDriveId': data.str('backup_drive_id'),
+    });
+    return drive;
+  }
+
+  Future<CloudFile> _playbackFolder(
+    TokenSession token,
+    String drive,
+    String name,
+  ) async {
+    final data = await playbackApi.request(token, 'openFile/create', {
+      'drive_id': drive,
+      'parent_file_id': 'root',
+      'name': name,
+      'type': 'folder',
+      'check_name_mode': 'refuse',
+    }, read: false);
+    require(
+      data.str('file_id').isNotEmpty &&
+          data.str('type') != 'file' &&
+          !data.boolean('exist'),
+      '阿里未创建新的播放临时目录，请稍后重试',
+    );
+    return AliyunConnector.file({
+      ...data,
+      'name': data.str('name').ifEmpty(name),
+      'type': 'folder',
+    }, 'root');
+  }
+
+  Future<List<CloudFile>> _playbackFiles(
+    TokenSession token,
+    String drive,
+    String parent,
+  ) async {
+    final data = await playbackApi.request(token, 'openFile/list', {
+      'drive_id': drive,
+      'parent_file_id': parent,
+      'limit': 100,
+    });
+    require(
+      data['items'] is List && data.str('next_marker').isEmpty,
+      '阿里播放临时目录返回异常，请稍后重试',
+    );
+    return data.list('items').map((item) => file(item, parent)).toList();
+  }
 
   Future<void> _waitTask(Json data, TokenSession token) async {
     final id = data.str('async_task_id');
@@ -1493,11 +1582,19 @@ class AliyunConnector extends CloudConnector {
     TokenSession token, {
     bool forPlayback = false,
   }) async {
-    await _driveInfo(token);
-    final drive = _spaces(token).first.id, name = 'AsterLink临时转存_${newId()}';
+    String drive;
+    if (forPlayback) {
+      drive = await _playbackResourceDrive(token);
+    } else {
+      await _driveInfo(token);
+      drive = _spaces(token).first.id;
+    }
+    final name = 'AsterLink临时转存_${newId()}';
     final folder = await OperationProgress.step(
       OperationStage.createTemporary,
-      () => _mkdir(token, drive, 'root', name),
+      () => forPlayback
+          ? _playbackFolder(token, drive, name)
+          : _mkdir(token, drive, 'root', name),
     );
     final cleanup = DownloadCleanup(
       url: '',
@@ -1516,18 +1613,37 @@ class AliyunConnector extends CloudConnector {
       staged = stageCleanup != null;
       final saved = await OperationProgress.step(
         OperationStage.transfer,
-        () => _save(s, [file], drive, folder.id, token),
+        () async {
+          if (!forPlayback) return _save(s, [file], drive, folder.id, token);
+          final shareToken = await _shareToken(s);
+          final copy = await _post(
+            '/adrive/v2/file/copy',
+            {
+              'share_id': s
+                  .meta('shareId')
+                  .ifEmpty(s.sourceLink?.shareId ?? ''),
+              'file_id': file.id,
+              'auto_rename': true,
+              'to_parent_file_id': folder.id,
+              'to_drive_id': drive,
+            },
+            session: token,
+            signed: false,
+            shareToken: shareToken,
+          );
+          require(copy.str('file_id').isNotEmpty, '阿里未返回转存后的视频标识，请稍后重试');
+          await _waitTask(copy, token);
+          return [copy];
+        },
       );
       final savedId = saved.single.str('file_id');
       final copy = await OperationProgress.step(
         OperationStage.waitTransfer,
         () async {
           for (var attempt = 0; attempt < 30; attempt++) {
-            final entries = await _list(
-              folder.id,
-              session: token,
-              drive: drive,
-            );
+            final entries = forPlayback
+                ? await _playbackFiles(token, drive, folder.id)
+                : await _list(folder.id, session: token, drive: drive);
             final matches = entries
                 .where(
                   (f) =>

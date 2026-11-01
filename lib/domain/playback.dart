@@ -162,6 +162,7 @@ class PlaybackPreferences {
     // ceiling there; PlaybackBufferPolicy still ramps active requests and
     // halves them on 429/503 or timeouts.
     if (platform == CloudPlatform.quark) return 128;
+    if (platform == CloudPlatform.baidu) return 4;
     return 8;
   }
 

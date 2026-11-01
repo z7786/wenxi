@@ -1,8 +1,9 @@
 // Package btpolicy shares bounded peer discovery between metadata, downloads,
-// and streaming. Peer addresses remain in memory and expire after ten minutes.
+// and streaming. Discovery snapshots are bounded and encrypted by the caller.
 package btpolicy
 
 import (
+	"context"
 	"net/netip"
 	"sync"
 	"time"
@@ -12,13 +13,29 @@ import (
 )
 
 const PeerLimit = 80
-const peerLifetime = 10 * time.Minute
+const peerLifetime = 6 * time.Hour
 
 var publicTrackers = [][]string{
 	{"udp://tracker.opentrackr.org:1337/announce"},
 	{"udp://open.stealth.si:80/announce"},
 	{"udp://tracker.torrent.eu.org:451/announce"},
 	{"https://tracker.gbitt.info/announce"},
+	{"udp://exodus.desync.com:6969/announce"},
+	{"udp://tracker.dler.org:6969/announce"},
+	{"udp://opentracker.i2p.rocks:6969/announce"},
+	{"udp://open.demonii.com:1337/announce"},
+	{"udp://tracker.moeking.me:6969/announce"},
+	{"udp://tracker.openbittorrent.com:6969/announce"},
+	{"udp://explodie.org:6969/announce"},
+	{"udp://tracker.bittor.pw:1337/announce"},
+	{"udp://tracker1.bt.moack.co.kr:80/announce"},
+	{"udp://tracker-udp.gbitt.info:80/announce"},
+	{"https://tracker.tamersunion.org:443/announce"},
+	{"https://tracker.lilithraws.org:443/announce"},
+	{"https://tr.burnabyhighstar.com:443/announce"},
+	{"https://tracker2.ctix.cn:443/announce"},
+	{"http://tracker.openbittorrent.com:80/announce"},
+	{"http://open.acgnxtracker.com:80/announce"},
 }
 
 type peerMemo struct {
@@ -39,6 +56,8 @@ func Configure(cfg *torrent.ClientConfig) {
 	// WebTorrent is a browser transport; native peers and webseeds remain enabled.
 	cfg.DisableWebtorrent = true
 	cfg.Seed = false
+	cfg.UploadRateLimiter = uploadLimiter
+	configureDHT(cfg)
 }
 
 func Restore(t *torrent.Torrent) {
@@ -58,7 +77,47 @@ func AddPublicTrackers(t *torrent.Torrent) {
 	info := t.Info()
 	// Metadata must establish that this is public before expanding discovery.
 	if info != nil && (info.Private == nil || !*info.Private) {
-		t.AddTrackers(publicTrackers)
+		// Keep the original four fallback trackers immediately available. Probe
+		// the additional set in the background with four bounded workers.
+		t.AddTrackers(publicTrackers[:4])
+		go func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				select {
+				case <-t.Closed():
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+			jobs := make(chan string)
+			var workers sync.WaitGroup
+			for i := 0; i < 4; i++ {
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					for address := range jobs {
+						probe, done := context.WithTimeout(ctx, 5*time.Second)
+						ok := trackerAvailable(probe, address)
+						done()
+						if ok && ctx.Err() == nil {
+							t.AddTrackers([][]string{{address}})
+						}
+					}
+				}()
+			}
+			for _, tier := range publicTrackers[4:] {
+				select {
+				case jobs <- tier[0]:
+				case <-ctx.Done():
+					close(jobs)
+					workers.Wait()
+					return
+				}
+			}
+			close(jobs)
+			workers.Wait()
+		}()
 	}
 }
 
@@ -112,4 +171,10 @@ func Clear() {
 	cache.Lock()
 	cache.values = make(map[metainfo.Hash]peerMemo)
 	cache.Unlock()
+	nodeCache.Lock()
+	nodeCache.nodes, nodeCache.until = nil, time.Time{}
+	nodeCache.Unlock()
+	trackerCache.Lock()
+	trackerCache.rows = map[string]trackerHealth{}
+	trackerCache.Unlock()
 }

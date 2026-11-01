@@ -199,7 +199,7 @@ void main() {
   );
 
   test(
-    'external thread choice survives restart and never overrides account limits',
+    'external thread choice survives restart and applies to Baidu account downloads',
     () async {
       final f = await _Fixture.create();
       const spec = DownloadSpec(
@@ -229,7 +229,7 @@ void main() {
       await until(
         () => f.manager.task(accountId)!.status == DownloadStatus.completed,
       );
-      expect(f.native.begins.last['connections'], 1);
+      expect(f.native.begins.last['connections'], 64);
       await expectLater(
         f.manager.enqueue(spec, connections: 513),
         throwsA(isA<AppException>()),
@@ -240,9 +240,9 @@ void main() {
   for (final profile in ['baidu', 'baidu_preview']) {
     for (final ready in [false, true]) {
       test(
-        'Baidu resume and route changes apply $profile limit, ready=$ready',
+        'Baidu resume and route changes preserve captured $profile threads, ready=$ready',
         () async {
-          const limit = 1;
+          final limit = ready ? 64 : 512;
           final planned = _planned('baidu');
           final spec = DownloadSpec.fromJson({
             ...planned.toJson(),

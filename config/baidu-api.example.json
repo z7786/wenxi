@@ -1,5 +1,6 @@
 {
   "ASTERLINK_BAIDU_API_URL": "https://your-service.example/",
+  "ASTERLINK_BAIDU_RELAY_API_URL": "https://your-service.example/relay/",
   "ASTERLINK_BAIDU_API_PUBLIC_KEY": "RSA modulus in hexadecimal; at least 3072 bits",
   "ASTERLINK_BAIDU_API_ACCESS_KEY": "Client access code supplied by your service"
 }

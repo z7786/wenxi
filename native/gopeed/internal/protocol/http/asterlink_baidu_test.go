@@ -20,7 +20,7 @@ func TestBaiduConnectionsAndResumeIntegrity(t *testing.T) {
 	for _, profile := range []string{"baidu", "baidu_preview"} {
 		for _, resume := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/resume=%t", profile, resume), func(t *testing.T) {
-				const limit = 1
+				const limit = 4
 				data := bytes.Repeat([]byte("baidu-original-data\n"), 64*1024)
 				if profile == "baidu_preview" {
 					// Even each legacy checkpoint chunk is larger than one request window.
@@ -37,6 +37,14 @@ func TestBaiduConnectionsAndResumeIntegrity(t *testing.T) {
 					if profile == "baidu_preview" && int64(last-first+1) > baiduPreviewRequestSize {
 						w.WriteHeader(http.StatusForbidden)
 						return
+					}
+					if resume && (first != 0 || last != 0) {
+						for i := 0; i < 4; i++ {
+							begin := len(data) * i / 4
+							if first < begin+128 && last >= begin {
+								t.Errorf("request %d-%d overlaps cached bytes %d-%d", first, last, begin, begin+127)
+							}
+						}
 					}
 					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", first, last, len(data)))
 					w.Header().Set("Content-Length", fmt.Sprint(last-first+1))
@@ -58,7 +66,7 @@ func TestBaiduConnectionsAndResumeIntegrity(t *testing.T) {
 				if err := f.Resolve(&base.Request{URL: server.URL}); err != nil {
 					t.Fatal(err)
 				}
-				if err := f.Create(&base.Options{Name: "resume.bin", Path: t.TempDir(), Extra: &fhttp.OptsExtra{Connections: 64, ConnectionProfile: profile}}); err != nil {
+				if err := f.Create(&base.Options{Name: "resume.bin", Path: t.TempDir(), Extra: &fhttp.OptsExtra{Connections: limit, ConnectionProfile: profile}}); err != nil {
 					t.Fatal(err)
 				}
 				savedBytes := 0
@@ -87,8 +95,10 @@ func TestBaiduConnectionsAndResumeIntegrity(t *testing.T) {
 				if maximum.Load() != int32(limit) {
 					t.Fatalf("concurrent requests=%d, want %d", maximum.Load(), limit)
 				}
-				if received.Load() != int64(len(data)-savedBytes) {
-					t.Fatalf("downloaded %d bytes, want %d after preserving checkpoint bytes", received.Load(), len(data)-savedBytes)
+				// Tail helpers may cancel an in-flight bounded request after
+				// shrinking its chunk. Request sizes include those prefetched bytes.
+				if received.Load() < int64(len(data)-savedBytes) || f.Progress().TotalDownloaded() != int64(len(data)) {
+					t.Fatalf("requested=%d progress=%d size=%d", received.Load(), f.Progress().TotalDownloaded(), len(data))
 				}
 				if _, total := f.ConnectionCounts(); total != limit {
 					t.Fatalf("reported connection limit=%d, want %d", total, limit)

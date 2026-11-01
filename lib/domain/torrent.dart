@@ -3,6 +3,7 @@ import 'file_types.dart';
 
 const torrentDataPrefix = 'data:application/x-bittorrent;base64,';
 const maxTorrentBytes = 4 * 1024 * 1024;
+const maxTorrentFiles = 10000;
 
 class TorrentFile {
   const TorrentFile(this.index, this.path, this.size);
@@ -36,7 +37,7 @@ class TorrentInfo {
       RegExp(r'^[0-9a-f]{40}$').hasMatch(j.str('hash')) &&
           j.str('data').startsWith(torrentDataPrefix) &&
           files.isNotEmpty &&
-          files.length <= 10000 &&
+          files.length <= maxTorrentFiles &&
           j.integer('pieceLength') > 0 &&
           j.integer('pieceLength') <= 64 * 1024 * 1024 &&
           j.str('data').length <= maxTorrentBytes * 4 ~/ 3 + 100,

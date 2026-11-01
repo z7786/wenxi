@@ -434,6 +434,45 @@ void main() {
   });
 
   test(
+    'Adequate throughput keeps four connections while a seek fills its cache',
+    () {
+      final policy = PlaybackBufferPolicy(connectionLimit: 16);
+      for (var second = 0; second <= 20; second += 2) {
+        policy.observe(
+          elapsed: Duration(seconds: second),
+          receivedBytes: second * 6 * 1024 * 1024,
+          failures: 0,
+          status: 206,
+          activeRequests: policy.connections,
+          bufferedSeconds: 1,
+          buffering: true,
+          playing: true,
+          requiredBytesPerSecond: 1.3 * 1024 * 1024,
+        );
+        expect(policy.connections, 4);
+      }
+    },
+  );
+
+  test('A limited high bitrate stream still grows toward the user ceiling', () {
+    final policy = PlaybackBufferPolicy(connectionLimit: 8);
+    for (var second = 0; second <= 6; second += 2) {
+      policy.observe(
+        elapsed: Duration(seconds: second),
+        receivedBytes: second * 512 * 1024,
+        failures: 0,
+        status: 206,
+        activeRequests: policy.connections,
+        bufferedSeconds: 12,
+        buffering: false,
+        playing: true,
+        requiredBytesPerSecond: 2 * 1024 * 1024,
+      );
+    }
+    expect(policy.connections, 8);
+  });
+
+  test(
     'High connection limits ramp beyond 32 and respect runtime reductions',
     () {
       final policy = PlaybackBufferPolicy(connectionLimit: 128);

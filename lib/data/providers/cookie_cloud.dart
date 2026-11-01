@@ -334,7 +334,11 @@ class CookieCloudConnector extends QuarkUcConnector {
     String? guestFailure;
     DownloadSpec? guest;
     if (guestEnabled) {
-      DownloadRequestContext.current?.onGuestDownload?.call();
+      // A signed-in attempt may still finish on the account route. Successful
+      // guest downloads are identified by guestDownload on the returned spec.
+      if (credential == null) {
+        DownloadRequestContext.current?.onGuestDownload?.call();
+      }
       try {
         guest = await _sessions.run(
           null,
@@ -344,6 +348,12 @@ class CookieCloudConnector extends QuarkUcConnector {
         );
       } on _ShareDirectUnavailable catch (error) {
         guestFailure = error.message;
+      } on AccountLoginRequired {
+        if (!quark || credential == null) rethrow;
+        RequestScope.checkpoint();
+        // Guest share-token renewal can require login even while the selected
+        // account remains valid. Continue with its independent account route.
+        guestFailure = '游客分享接口要求登录';
       } on UcOriginalContentMismatch {
         RequestScope.checkpoint();
         // A restricted guest response says nothing about the selected account's
@@ -366,7 +376,7 @@ class CookieCloudConnector extends QuarkUcConnector {
       }
       throw AccountLoginRequired(
         quark
-            ? '夸克游客不正常超过50MB文件下载，请登录夸克网盘再试'
+            ? '夸克游客不支持超过50MB文件下载，请登录夸克网盘再试'
             : '${platform.shortName}此文件不支持游客下载，请登录后重试',
       );
     }
@@ -784,6 +794,11 @@ class _CookieCloudSession {
   bool refreshAttempted = false;
 }
 
+class _CookieCloudRefreshGate {
+  final gate = AsyncGate();
+  int users = 0;
+}
+
 class _CookieCloudHttp extends JsonHttp {
   _CookieCloudHttp(
     this.transport,
@@ -808,6 +823,7 @@ class _CookieCloudHttp extends JsonHttp {
   final CredentialStore? store;
   final int Function() now;
   final _zoneKey = Object();
+  final _refreshGates = <(String, int), _CookieCloudRefreshGate>{};
   _CookieCloudSession? get current =>
       Zone.current[_zoneKey] as _CookieCloudSession?;
   static const _interval = 90 * 60 * 1000;
@@ -823,7 +839,18 @@ class _CookieCloudHttp extends JsonHttp {
       checkpoint();
       return action(nested);
     }
-    final raw = credential?.primary ?? fallback;
+    final stored = store?.credential(platform);
+    // Cookie renewal keeps the explicit login revision. A snapshot captured
+    // before another request renewed it must still use this account's latest
+    // cookie; login candidates and replacement accounts remain isolated.
+    final owner =
+        credential != null &&
+            stored != null &&
+            LoginCredentials.sameUcSession(credential, stored)
+        ? stored
+        : null;
+    final effective = owner ?? credential;
+    final raw = effective?.primary ?? fallback;
     final cookie = raw
         .trim()
         .replaceFirst(RegExp(r'^Cookie:', caseSensitive: false), '')
@@ -835,14 +862,10 @@ class _CookieCloudHttp extends JsonHttp {
       !RegExp(r'[\x00-\x1f\x7f-\x9f]').hasMatch(cookie),
       '${platform.shortName} Cookie 格式无效',
     );
-    final stored = store?.credential(platform);
-    final owner = credential != null && stored?.sameAs(credential) == true
-        ? stored
-        : null;
     final session = _CookieCloudSession(
       cookie,
       owner,
-      int.tryParse(credential?.field(refreshField) ?? '') ?? 0,
+      int.tryParse(effective?.field(refreshField) ?? '') ?? 0,
     );
     return runZoned(() => action(session), zoneValues: {_zoneKey: session});
   }
@@ -927,7 +950,37 @@ class _CookieCloudHttp extends JsonHttp {
     return updates.containsKey('__puus');
   }
 
-  Future<bool> _refresh() async {
+  Future<bool> _refresh() {
+    checkpoint();
+    final session = current!, owner = current!.owner;
+    if (!quark || owner == null) return _refreshSession();
+    final accounts = store;
+    final accountId = accounts is Vault
+        ? accounts.accountId(platform) ?? owner.label
+        : owner.label;
+    final key = (accountId, owner.updatedAt);
+    final entry = _refreshGates.putIfAbsent(key, _CookieCloudRefreshGate.new);
+    entry.users++;
+    final before = session.cookie;
+    final pending = entry.gate
+        .run(() {
+          checkpoint();
+          // Another download may have renewed the same account while we waited.
+          // Issuing another refresh can invalidate its freshly returned cookie.
+          if (session.cookie != before) return Future.value(true);
+          return _refreshSession();
+        })
+        .whenComplete(() {
+          if (--entry.users == 0 && identical(_refreshGates[key], entry)) {
+            _refreshGates.remove(key);
+          }
+        });
+    return RequestScope.cancellable(pending);
+  }
+
+  bool get quark => platform == CloudPlatform.quark;
+
+  Future<bool> _refreshSession() async {
     final session = current!;
     checkpoint();
     if (session.refreshAttempted) return false;
@@ -995,20 +1048,25 @@ class _CookieCloudHttp extends JsonHttp {
     for (var attempt = 0; attempt < 2; attempt++) {
       checkpoint();
       final owner = session!.owner;
+      final sentCookie = session.cookie;
       final result = await transport.request(
         method,
         url,
         body: body,
         headers: {
           ...headers,
-          'Cookie': session.cookie,
+          'Cookie': sentCookie,
           'User-Agent': cloud ? apiUserAgent : webUserAgent,
         },
         followRedirects: followRedirects,
         contentType: contentType,
       );
       await _accept(result, owner);
-      if (attempt == 0 && loginRequired(result) && await _refresh()) continue;
+      if (attempt == 0 &&
+          loginRequired(result) &&
+          (session.cookie != sentCookie || await _refresh())) {
+        continue;
+      }
       return result;
     }
     throw AccountLoginRequired('${platform.shortName} 登录已失效，请重新网页登录');

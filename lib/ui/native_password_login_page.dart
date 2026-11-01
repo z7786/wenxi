@@ -16,8 +16,10 @@ import '../data/providers/pikpak.dart';
 import '../data/providers/tianyi_captcha.dart';
 import '../data/providers/tianyi_login.dart';
 import '../diagnostics/app_log.dart';
+import '../domain/ctfile_captcha.dart';
 import '../domain/models.dart';
 import 'common.dart';
+import 'ctfile_verification_page.dart';
 import 'guangya_verification_page.dart';
 
 class NativePasswordLoginPage extends StatefulWidget {
@@ -148,7 +150,21 @@ class _NativePasswordLoginPageState extends State<NativePasswordLoginPage> {
         }
         if (platform == CloudPlatform.ctfile) {
           return (services.cloud.connector(platform) as CtfileConnector)
-              .password(username, password);
+              .password(
+                username,
+                password,
+                onStatus: _setStatus,
+                verifyCaptcha: (challenge) async {
+                  if (!mounted || _leaving) return null;
+                  return Navigator.push<CtfileCaptchaProof>(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          CtfileVerificationPage(services, challenge),
+                    ),
+                  );
+                },
+              );
         }
         if (platform == CloudPlatform.pan123) {
           return (services.cloud.connector(platform) as Pan123Connector)

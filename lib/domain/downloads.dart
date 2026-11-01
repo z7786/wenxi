@@ -214,6 +214,53 @@ class DownloadTask {
         entry.key: (int.tryParse('${entry.value}') ?? 64).clamp(1, 512),
     },
   );
-  DownloadTask update(Json fields) =>
-      DownloadTask.fromJson({...toJson(), ...fields});
+  DownloadTask update(Json fields) {
+    // Progress arrives several times a second. Keep the unchanged source,
+    // headers and checkpoint metadata instead of decoding the whole record.
+    if (fields.keys.every(
+      const {'downloaded', 'total', 'speed', 'phase'}.contains,
+    )) {
+      final nextDownloaded = fields.containsKey('downloaded')
+          ? fields.integer('downloaded')
+          : downloaded;
+      final nextTotal = fields.containsKey('total')
+          ? fields.integer('total')
+          : total;
+      final nextSpeed = fields.containsKey('speed')
+          ? fields.integer('speed')
+          : speed;
+      final nextPhase = fields.containsKey('phase')
+          ? fields.str('phase')
+          : phase;
+      if (nextDownloaded == downloaded &&
+          nextTotal == total &&
+          nextSpeed == speed &&
+          nextPhase == phase) {
+        return this;
+      }
+      return DownloadTask(
+        id: id,
+        spec: spec,
+        createdAt: createdAt,
+        status: status,
+        downloaded: nextDownloaded,
+        total: nextTotal,
+        speed: nextSpeed,
+        connections: connections,
+        retries: retries,
+        speedLimit: speedLimit,
+        destination: destination,
+        savedPath: savedPath,
+        error: error,
+        recoveryAction: recoveryAction,
+        phase: nextPhase,
+        identity: identity,
+        payloadReady: payloadReady,
+        directOutput: directOutput,
+        hls: hls,
+        connectionOptions: connectionOptions,
+      );
+    }
+    return DownloadTask.fromJson({...toJson(), ...fields});
+  }
 }

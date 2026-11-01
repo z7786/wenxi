@@ -395,7 +395,7 @@ class GuangyaConnector extends CloudConnector {
       if (checksum.$1 != null) break;
       checksum = cloudChecksum(type, data.str(type));
     }
-    var modified = first([
+    final modified = first([
       'updatedAt',
       'updateAt',
       'updated_at',
@@ -406,10 +406,6 @@ class GuangyaConnector extends CloudConnector {
       'createTime',
       'ctime',
     ]);
-    final seconds = int.tryParse(modified);
-    if (seconds != null && seconds > 0 && seconds < 10000000000) {
-      modified = '${seconds * 1000}';
-    }
     require(id.isNotEmpty && name.isNotEmpty, '光鸭返回的文件信息不完整');
     return CloudFile(
       id: id,
@@ -423,11 +419,7 @@ class GuangyaConnector extends CloudConnector {
       // used to list this share can be reopened when a queued download starts.
       parentId: share
           ? parent
-          : first([
-              'parentId',
-              'parentFileId',
-              'parent_id',
-            ]).ifEmpty(parent),
+          : first(['parentId', 'parentFileId', 'parent_id']).ifEmpty(parent),
       modifiedAt: personalCloudDate(modified),
       thumbnailUrl: first([
         'thumbnail',

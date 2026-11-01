@@ -89,6 +89,7 @@ void main() {
       expect(defaults.connections, 8);
       expect(defaults.segmentSizeMiB, 4);
       expect(defaults.connectionsFor(CloudPlatform.quark), 128);
+      expect(defaults.connectionsFor(CloudPlatform.baidu), 4);
       expect(
         defaults
             .copyWith(driveConnections: {CloudPlatform.uc.key: 32})
@@ -128,7 +129,7 @@ void main() {
       expect(invalid.connections, 512);
       expect(invalid.connectionsFor(CloudPlatform.uc), 1);
       expect(invalid.connectionsFor(CloudPlatform.quark), 16);
-      expect(invalid.connectionsFor(CloudPlatform.baidu), 8);
+      expect(invalid.connectionsFor(CloudPlatform.baidu), 4);
       expect(invalid.segmentSizeMiB, 16);
       expect(invalid.skipIntroSeconds, 0);
       expect(invalid.skipOutroSeconds, 600);

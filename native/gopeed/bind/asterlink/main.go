@@ -14,12 +14,16 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/btpolicy"
+	ed2kengine "github.com/GopeedLab/gopeed/internal/ed2kcore/engine"
+	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/outputfile"
 	corebt "github.com/GopeedLab/gopeed/internal/protocol/bt"
+	coreed2k "github.com/GopeedLab/gopeed/internal/protocol/ed2k"
 	corehttp "github.com/GopeedLab/gopeed/internal/protocol/http"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/download"
@@ -29,6 +33,7 @@ import (
 var apiMu sync.Mutex
 var stateMu sync.RWMutex
 var core *download.Downloader
+var ed2kRuntime *coreed2k.Runtime
 var payloadRoot string
 var taskIDs = map[string]string{}
 var states = map[string]snapshot{}
@@ -50,6 +55,7 @@ type snapshot struct {
 	Path              string                     `json:"path"`
 	ReadableRanges    [][2]int64                 `json:"readableRanges,omitempty"`
 	Aliyun            *fhttp.AliyunTransferState `json:"aliyun,omitempty"`
+	BT                *corebt.SourceState        `json:"bt,omitempty"`
 }
 type request struct {
 	ID                string               `json:"id"`
@@ -64,6 +70,7 @@ type request struct {
 	AliyunGroup       string               `json:"aliyunGroup"`
 	Retries           int                  `json:"retries"`
 	SpeedLimit        int64                `json:"speedLimit"`
+	BTUploadLimit     *int64               `json:"btUploadLimit,omitempty"`
 	TorrentData       string               `json:"torrentData"`
 	TorrentIndex      int                  `json:"torrentIndex"`
 }
@@ -98,7 +105,15 @@ func Open(storageDir, cacheDir, encodedKey string) (err error) {
 		return err
 	}
 	corebt.SetAsterLinkCache(filepath.Join(payloadRoot, "bt-storage"))
-	engine := download.NewDownloader(&download.DownloaderConfig{Storage: storage, StorageDir: storageDir, RefreshInterval: 350})
+	if err = storage.Setup([]string{"ed2k", "bt-discovery"}); err != nil {
+		storage.Close()
+		return err
+	}
+	ed2kRuntime = coreed2k.NewRuntime(filepath.Join(storageDir, "ed2k"), storage)
+	engine := download.NewDownloader(&download.DownloaderConfig{
+		Storage: storage, StorageDir: storageDir, RefreshInterval: 350,
+		FetchManagers: []fetcher.FetcherManager{new(corehttp.FetcherManager), new(corebt.FetcherManager), &coreed2k.FetcherManager{Runtime: ed2kRuntime}},
+	})
 	engine.Logger.Logger = engine.Logger.Logger.Output(io.Discard)
 	engine.ExtensionLogger.Logger = engine.ExtensionLogger.Logger.Output(io.Discard)
 	if err = engine.Setup(); err != nil {
@@ -139,6 +154,8 @@ func Open(storageDir, cacheDir, encodedKey string) (err error) {
 	}
 	engine.Listener(remember)
 	core = engine
+	btpolicy.SetUploadLimit(btpolicy.DefaultUploadLimit)
+	startDiscoverySaver(storage)
 	return nil
 }
 
@@ -152,6 +169,9 @@ func remember(event *download.Event) {
 	active, total := task.ConnectionCounts()
 	value.TotalConnections = total
 	value.Aliyun = task.AliyunTransferState()
+	if task.Status == base.DownloadStatusRunning {
+		value.BT = task.BTSourceState()
+	}
 	if task.Status == base.DownloadStatusRunning {
 		value.ActiveConnections = active
 	}
@@ -171,7 +191,9 @@ func remember(event *download.Event) {
 	}
 	if task.Progress != nil {
 		value.Downloaded = task.Progress.Downloaded
-		value.Speed = task.Progress.Speed
+		if task.Status == base.DownloadStatusRunning {
+			value.Speed = task.Progress.Speed
+		}
 	}
 	if event.Err != nil {
 		// Resolve has no internal segment retry loop. Allow the caller's bounded
@@ -188,6 +210,26 @@ func remember(event *download.Event) {
 			value.ErrorKind = "network"
 		}
 		value.Error = "Gopeed 下载失败，请重试或重新解析链接"
+		if task.Protocol == "ed2k" {
+			value.Error = "ED2K 下载失败，请重试"
+			var ed2kError *ed2kengine.Error
+			if errors.As(event.Err, &ed2kError) {
+				switch ed2kError.Code {
+				case ed2kengine.CodeDiskFull:
+					value.Error = "下载磁盘空间不足"
+				case ed2kengine.CodeOutputExists:
+					value.Error = "ED2K 断点与文件不一致，请删除任务后重新下载"
+				case ed2kengine.CodeFileError:
+					value.Error = "ED2K 文件读写或校验失败，请检查下载目录后重试"
+				case ed2kengine.CodeInvalidLink:
+					value.Error = "ED2K 文件链接无效"
+				case ed2kengine.CodeTransferBusy:
+					value.Error = "相同 ED2K 文件已有下载任务"
+				case ed2kengine.CodeStartFailed:
+					value.Error = "ED2K 内核启动失败，请重试"
+				}
+			}
+		}
 		if value.HTTPCode != 0 {
 			value.Error = fmt.Sprintf("服务器返回 %d", value.HTTPCode)
 		}
@@ -246,6 +288,9 @@ func Begin(value string) error {
 	}
 	if input.TorrentData != "" {
 		return beginTorrent(input)
+	}
+	if len(input.URL) >= 5 && strings.EqualFold(input.URL[:5], "ed2k:") {
+		return beginEd2k(input)
 	}
 	parsed, err := url.Parse(input.URL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -425,6 +470,11 @@ func removeLocked(id string) error {
 	if err := core.PauseAndSave(taskID); err != nil && !errors.Is(err, download.ErrTaskNotFound) {
 		return err
 	}
+	if task := core.GetTask(taskID); task != nil && task.Protocol == "ed2k" && task.Meta.Res != nil {
+		if err := ed2kRuntime.Forget(task.Meta.Res.Hash, task.Meta.SingleFilepath()); err != nil {
+			return err
+		}
+	}
 	if err := core.Delete(&download.TaskFilter{IDs: []string{taskID}}, false); err != nil {
 		return err
 	}
@@ -446,6 +496,7 @@ func Close() error {
 	apiMu.Lock()
 	defer apiMu.Unlock()
 	closeTorrentStreams()
+	stopDiscoverySaver()
 	defer btpolicy.Clear()
 	if core == nil {
 		return nil
@@ -455,7 +506,12 @@ func Close() error {
 			return err
 		}
 	}
+	if discoveryStorage != nil {
+		corebt.RememberDiscovery()
+		_ = discoveryStorage.Put("bt-discovery", "nodes", btpolicy.SnapshotDiscovery())
+	}
 	err := core.Close()
+	discoveryStorage = nil
 	core = nil
 	outputfile.Clear()
 	stateMu.Lock()

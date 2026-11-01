@@ -54,6 +54,10 @@ class DownloadKeepAlive(
     }
     private val pauseTimeout = Runnable {
         if (pauseCommand != null) {
+            // A Dart reply may be lost during engine recovery. Invalidate the
+            // old callback so returning to the app can retry this same stop.
+            commandGeneration++
+            commandInFlight = false
             stopService()
             report("download.pause_timeout", IllegalStateException("后台下载暂停确认超时"))
         }
@@ -157,15 +161,23 @@ class DownloadKeepAlive(
         // Persist the user's stop before Dart acknowledges asynchronous cancel.
         wanted = false
         recover = false
-        if (command == "serviceTimeout") timedOut = true
+        if (command == "serviceTimeout" || command == "downloadServiceStalled") timedOut = true
         pauseCommand = command
         commandGeneration++
         commandInFlight = false
-        if (command != "pauseAll") stopService()
-        else service?.show(DownloadNotice(1, "正在暂停下载…"), allowPause = false)
         main.removeCallbacks(pauseTimeout)
         main.postDelayed(pauseTimeout, 10000)
-        dispatchCommand()
+        try {
+            if (command != "pauseAll") stopService()
+            else service?.show(DownloadNotice(1, "正在暂停下载…"), allowPause = false)
+        } catch (error: Exception) {
+            // Notification refresh is cosmetic; it must never prevent the
+            // durable user stop from reaching the actual Dart transfer queue.
+            stopService()
+            report("download.pause_notice_failed", error)
+        } finally {
+            dispatchCommand()
+        }
     }
 
     private fun dispatchCommand() {

@@ -3,6 +3,7 @@ import 'models.dart';
 import 'github.dart';
 import 'aliyun_share.dart';
 import 'link_obfuscation.dart';
+import 'ed2k.dart';
 
 class LinkParser {
   static const _tail = r'''[^\s<>"'，。；！、【】《》「」“”‘’\u3000\u200b]+''';
@@ -17,6 +18,10 @@ class LinkParser {
   );
   static final _magnets = RegExp(
     r'magnet:\?xt=urn:btih:[A-Za-z0-9]+[^\s<>\u3000]*',
+    caseSensitive: false,
+  );
+  static final _ed2k = RegExp(
+    r'ed2k://\|file\|[^|\r\n]+\|[0-9]+\|[a-f0-9]{32}\|(?:[^|\s]*\|)*/(?:\|sources,[^|\s]+\|/)?|ed2k://%7cfile%7c[^\s<>]+',
     caseSensitive: false,
   );
   static final _code = RegExp(
@@ -70,6 +75,7 @@ class LinkParser {
       ..._urls.allMatches(text),
       ..._bare.allMatches(text),
       ..._magnets.allMatches(text),
+      ..._ed2k.allMatches(text),
     ]..sort((a, b) => a.start.compareTo(b.start));
     final candidates = <_LinkCandidate>[];
     var end = -1;
@@ -77,6 +83,21 @@ class LinkParser {
       if (match.start < end) continue;
       end = match.end;
       var raw = match[0]!.replaceFirst(_punctuation, '');
+      if (raw.toLowerCase().startsWith('ed2k://')) {
+        try {
+          final file = Ed2kLink.parse(raw);
+          candidates.add(
+            _LinkCandidate(
+              match.start,
+              match.end,
+              ParsedLink(source: raw, url: file.url, kind: LinkKind.ed2k),
+            ),
+          );
+        } on AppException {
+          continue;
+        }
+        continue;
+      }
       if (raw.toLowerCase().startsWith('magnet:')) {
         candidates.add(
           _LinkCandidate(

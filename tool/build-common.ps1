@@ -107,6 +107,16 @@ function Get-AsterLinkDartDefines {
             $baidu.ASTERLINK_BAIDU_API_ACCESS_KEY -notmatch '^[0-9a-fA-F]{64}$') {
             throw 'Invalid private Baidu API build configuration.'
         }
+        if ($baidu.ASTERLINK_BAIDU_RELAY_API_URL) {
+            $relayUri = $null
+            if (-not [Uri]::TryCreate($baidu.ASTERLINK_BAIDU_RELAY_API_URL, [UriKind]::Absolute, [ref]$relayUri) -or
+                $relayUri.Scheme -notin @('http', 'https') -or -not $relayUri.Host -or
+                $relayUri.UserInfo -or $relayUri.Query -or $relayUri.Fragment -or
+                -not $relayUri.AbsolutePath.EndsWith('/') -or
+                $baidu.ASTERLINK_BAIDU_RELAY_API_URL -match '[\s\x00-\x1f\x7f\\]') {
+                throw 'Invalid private Baidu relay API build configuration.'
+            }
+        }
         "--dart-define-from-file=$baiduConfig"
     }
     $commandConfig = Join-Path (Split-Path -Parent $PSScriptRoot) '.local/cloud-command.defines.json'

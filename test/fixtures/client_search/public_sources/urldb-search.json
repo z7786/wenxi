@@ -1,0 +1,58 @@
+{
+  "success": true,
+  "message": "操作成功",
+  "data": {
+    "data": [
+      {
+        "cover": "",
+        "created_at": "2026-10-08 07:22:20",
+        "description": "",
+        "forbidden_words": null,
+        "has_forbidden_words": false,
+        "id": 85120,
+        "key": "TBSUTz",
+        "pan_id": 3,
+        "tags": null,
+        "title": "天下霸唱35本电子书",
+        "updated_at": "2026-10-08 07:22:20",
+        "url": "https://pan.quark.cn/s/7a5cf1d74f6c",
+        "view_count": 1
+      },
+      {
+        "cover": "https://img.l9.lc/AgACAgEAAyEFAASqb3mMAAEBcdJqxQHa9luLwPViirQTSP82ouvPagACKQtrG4QhOEY-d7uORYg5EAEAAwIAA3gAAz0E",
+        "created_at": "2026-10-06 22:52:20",
+        "description": "每个技巧简单易学、普遍适用，能够有效地帮助读者改善人际交往。 本书内容出自“叨老师说话训练营”在线学习社区，不只是作者个人经验的总结，而且是一套经过大量学员实践验证的沟通方法。 通过特定训练，大量青年职场人不仅习得了这些技巧，而且成功地建立了自如交谈、有效共事的能力，扭转了曾经的社交窘迫。",
+        "forbidden_words": null,
+        "has_forbidden_words": false,
+        "id": 84327,
+        "key": "tGo4Bl",
+        "pan_id": 1,
+        "tags": [
+          {
+            "description": "",
+            "id": 1189,
+            "name": "quark"
+          },
+          {
+            "description": "",
+            "id": 22727,
+            "name": "baidu名称"
+          },
+          {
+            "description": "",
+            "id": 33580,
+            "name": "怎样训练说话的胆量"
+          }
+        ],
+        "title": "怎样训练说话的胆量 电子书",
+        "updated_at": "2026-10-06 22:52:20",
+        "url": "https://pan.baidu.com/s/1yfdcb5L1KvxCLKY9Rhysbg?pwd=h3ea",
+        "view_count": 0
+      }
+    ],
+    "page": 1,
+    "page_size": 30,
+    "total": 78
+  },
+  "code": 200
+}

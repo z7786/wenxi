@@ -1,0 +1,6 @@
+event: snapshot
+data: {"merged_by_type":{"quark":[{"url":"https://pan.quark.cn/s/f21de672b6d3","note":"《三体》有声书 刘慈欣原著 青雪制播 配乐一流 身临其境 实属精品[mp3]","keyword":"《三体》有声书 刘慈欣原著 青雪制播 配乐一流 身临其境 实属精品[mp3]","stream_key":"quark|https://pan.quark.cn/s/f21de672b6d3"},{"url":"https://pan.quark.cn/s/701b92594c54","note":"[三体][2023][全集][国产剧]","keyword":"三体","stream_key":"quark|https://pan.quark.cn/s/701b92594c54"},{"url":"https://pan.quark.cn/s/d2432f0d168e","note":"三体 （全六季） 精品广播剧","keyword":"三体 （全六季） 精品广播剧","stream_key":"quark|https://pan.quark.cn/s/d2432f0d168e"}]},"total":3}
+
+event: done
+data: {"total":3}
+

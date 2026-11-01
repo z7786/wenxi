@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -204,6 +205,7 @@ func ResolveTorrent(value string) error {
 							}
 						}
 					}
+					btpolicy.RememberDHT(client)
 					client.Close()
 				}
 			}
@@ -261,6 +263,9 @@ func closeTorrentMetadata() {
 }
 
 func beginTorrent(input request) error {
+	if input.BTUploadLimit != nil {
+		btpolicy.SetUploadLimit(*input.BTUploadLimit)
+	}
 	_, info, err := parseTorrent(input.TorrentData)
 	if err != nil {
 		return err
@@ -282,6 +287,9 @@ func beginTorrent(input request) error {
 			}
 		}
 		if task != nil && task.Protocol == "bt" && outputMatches(task, input) && task.Meta.Res != nil && task.Meta.Res.Hash == info.Hash && task.Meta.Opts != nil && filepath.Clean(task.Meta.Opts.Path) == dir && len(task.Meta.Opts.SelectFiles) == 1 && task.Meta.Opts.SelectFiles[0] == input.TorrentIndex {
+			if input.BTUploadLimit != nil {
+				task.Meta.Req.Labels["asterlinkBTUploadLimit"] = strconv.FormatInt(*input.BTUploadLimit, 10)
+			}
 			if err = bindOutput(input, torrentTaskPath(task)); err != nil {
 				return err
 			}
@@ -294,6 +302,7 @@ func beginTorrent(input request) error {
 				}
 			} else {
 				// BT rechecks piece hashes on every reopen, including evicted cache files.
+				task.Meta.Req.Labels["asterlinkBTRecheck"] = "1"
 				stateMu.Lock()
 				progress := states[input.ID]
 				progress.Status, progress.Error = "running", ""
@@ -327,7 +336,12 @@ func beginTorrent(input request) error {
 		return err
 	}
 	token := fmt.Sprintf("%s-%d", input.ID, time.Now().UnixNano())
-	req := &base.Request{URL: input.TorrentData, Labels: map[string]string{"asterlinkId": input.ID, "asterlinkGeneration": token}}
+	uploadLimit := btpolicy.DefaultUploadLimit
+	if input.BTUploadLimit != nil {
+		uploadLimit = *input.BTUploadLimit
+	}
+	req := &base.Request{URL: input.TorrentData, Labels: map[string]string{"asterlinkId": input.ID, "asterlinkGeneration": token,
+		"asterlinkBTPath": dir, "asterlinkBTUploadLimit": strconv.FormatInt(uploadLimit, 10)}}
 	if input.OutputKey != "" {
 		req.Labels[outputKeyLabel] = input.OutputKey
 	}

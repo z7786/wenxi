@@ -53,6 +53,8 @@ bool retryableDownloadError(Object error) => switch (error) {
     !e.exhausted && {408, 425, 429, 500, 502, 503, 504}.contains(e.status),
   DownloadNetworkException e => e.retryable,
   DioException e => HttpRequestFailure.network(e).retryable,
+  // Response streams forward dart:io errors without a DioException wrapper.
+  HttpException e => isInterruptedHttpConnection(e),
   SocketException() || TimeoutException() => true,
   _ => false,
 };

@@ -213,12 +213,12 @@ func (d *Downloader) Setup() error {
 						}
 
 						current := task.fetcher.Progress().TotalDownloaded()
-						tick := float64(d.cfg.RefreshInterval) / 1000
+						now := time.Now()
 						downloadDataChanged := false
 						if task.Status == base.DownloadStatusRunning {
 							downloadDataChanged = current != task.Progress.Downloaded
 							task.Progress.Used = task.timer.Used()
-							task.Progress.Speed = task.updateSpeed(current-task.Progress.Downloaded, tick)
+							task.Progress.Speed = task.downloadRate.update(task.receivedBytes(current), now)
 							task.Progress.Downloaded = current
 						}
 
@@ -227,7 +227,7 @@ func (d *Downloader) Setup() error {
 							uploader := task.fetcher.(fetcher.Uploader)
 							currentUploaded := uploader.UploadedBytes()
 							uploadDataChanged = currentUploaded != task.Progress.Uploaded
-							task.Progress.UploadSpeed = task.updateUploadSpeed(currentUploaded-task.Progress.Uploaded, tick)
+							task.Progress.UploadSpeed = task.uploadRate.update(currentUploaded, now)
 							task.Progress.Uploaded = currentUploaded
 						}
 						d.emit(EventKeyProgress, task)
@@ -830,6 +830,7 @@ func (d *Downloader) watch(task *Task) {
 				// Check if the task is deleted
 				if d.GetTask(task.ID) != nil {
 					task.Uploading = false
+					task.Progress.UploadSpeed = 0
 					d.storage.Put(bucketTask, task.ID, task.clone())
 				}
 			}()
@@ -861,12 +862,8 @@ func (d *Downloader) watch(task *Task) {
 	if task.Meta.Res.Size == 0 {
 		task.Meta.Res.Size = task.fetcher.Progress().TotalDownloaded()
 	}
-	used := task.Progress.Used / int64(time.Second)
-	if used == 0 {
-		used = 1
-	}
 	totalSize := task.Meta.Res.Size
-	task.Progress.Speed = totalSize / used
+	task.Progress.Speed = 0
 	task.Progress.Downloaded = totalSize
 	task.updateStatus(base.DownloadStatusDone)
 	d.storage.Put(bucketTask, task.ID, task.clone())
@@ -1036,6 +1033,11 @@ func (d *Downloader) doStart(task *Task) (err error) {
 		}
 		isCreate = task.Status == base.DownloadStatusReady
 		runVersion = task.runVersion.Add(1)
+		task.downloadRate.reset(task.receivedBytes(task.fetcher.Progress().TotalDownloaded()), time.Now())
+		if uploader, ok := task.fetcher.(fetcher.Uploader); ok {
+			task.uploadRate.reset(uploader.UploadedBytes(), time.Now())
+			task.Progress.UploadSpeed = 0
+		}
 		task.updateStatus(base.DownloadStatusRunning)
 
 		return
@@ -1201,8 +1203,8 @@ func initTask(task *Task) {
 	task.lock = &sync.Mutex{}
 	task.resolution = &resolutionControl{}
 	task.runVersion = &atomic.Uint64{}
-	task.speedArr = make([]int64, 0)
-	task.uploadSpeedArr = make([]int64, 0)
+	task.Progress.Speed = 0
+	task.Progress.UploadSpeed = 0
 }
 
 var defaultDownloader = NewDownloader(nil)

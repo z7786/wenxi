@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/auth.dart';
@@ -27,6 +28,8 @@ import 'player_playlist_panel.dart';
 import 'player_aspect_panel.dart';
 import 'player_sleep_panel.dart';
 import 'player_screenshot_panel.dart';
+import 'player_cast_panel.dart';
+import '../playback/cast/cast_discovery.dart';
 import 'pip_resize_handles.dart';
 import 'loading_indicator.dart';
 
@@ -39,8 +42,10 @@ class PlayerPage extends StatefulWidget {
     this.onDownload,
     this.confirmDownload,
     this.chooseSubtitle,
+    this.chooseExternalPlayer,
     this.onAuthorizeUcTv,
     this.screenshotActions = const PlayerScreenshotActions(),
+    this.castDiscoveryFactory = CastDiscovery.new,
   });
   final PlaybackController controller;
   final Directory subtitleDirectory;
@@ -48,8 +53,10 @@ class PlayerPage extends StatefulWidget {
   final Future<void> Function(DownloadSpec source)? onDownload;
   final Future<bool> Function()? confirmDownload;
   final Future<XFile?> Function()? chooseSubtitle;
+  final Future<XFile?> Function()? chooseExternalPlayer;
   final Future<bool> Function()? onAuthorizeUcTv;
   final PlayerScreenshotActions screenshotActions;
+  final CastDiscovery Function() castDiscoveryFactory;
   @override
   State<PlayerPage> createState() => _PlayerPageState();
 }
@@ -77,7 +84,7 @@ class _PlayerPageState extends State<PlayerPage>
   int _layoutRevision = 0;
   String _layoutSignature = '';
   bool _rotationPending = false;
-  PlaybackOrientation? _layoutTarget;
+  PlaybackOrientation? _layoutTarget, _orientationOverride;
   StreamSubscription<String>? _actions;
   bool visible = true,
       locked = false,
@@ -93,7 +100,7 @@ class _PlayerPageState extends State<PlayerPage>
   bool get _needsUcTv =>
       controller.sourceError is UcTvAuthorizationRequired &&
       widget.onAuthorizeUcTv != null;
-  bool _wasPlaying = false;
+  bool _wasPlaying = false, _pauseWithoutControls = false;
   int _modalDepth = 0, _seenGeneration = -1;
   String hud = '', _seenNotice = '';
   String _seenFontMessage = '';
@@ -108,6 +115,11 @@ class _PlayerPageState extends State<PlayerPage>
   RawDialogRoute<void>? _activePanel;
   Color get _chromeForeground => Colors.white;
   bool _sidePanel(Size size) => size.width >= 600 || size.width > size.height;
+  PlaybackOrientation get _screenOrientation =>
+      _orientationOverride ??
+      (MediaQuery.orientationOf(context) == Orientation.landscape
+          ? PlaybackOrientation.landscape
+          : PlaybackOrientation.portrait);
 
   @override
   void initState() {
@@ -171,16 +183,18 @@ class _PlayerPageState extends State<PlayerPage>
     if (_wasPlaying != playing) {
       _wasPlaying = playing;
       if (playing) {
+        _pauseWithoutControls = false;
         _touch(show: false);
       } else {
         _hideTimer?.cancel();
-        if (!locked) visible = true;
+        if (!locked && !_pauseWithoutControls) visible = true;
       }
     }
     if (_seenGeneration != controller.generation) {
       _seenGeneration = controller.generation;
       _seekPreview = null;
       _hoverSeekPreview = null;
+      _pauseWithoutControls = false;
       locked = false;
       visible = true;
     }
@@ -202,6 +216,10 @@ class _PlayerPageState extends State<PlayerPage>
       controller.generation,
       controller.loading,
       controller.openingExternalPlayer,
+      controller.castSession,
+      controller.connectingCast,
+      controller.castSession?.error,
+      controller.castSession?.warning,
       controller.error,
       controller.preferences,
       controller.boosting,
@@ -281,7 +299,8 @@ class _PlayerPageState extends State<PlayerPage>
       controller.generation,
       geometry,
       controller.preferences.autoRotate,
-      controller.state.playing && !controller.loading,
+      _orientationOverride,
+      controller.state.playing && !controller.loading && !controller.casting,
       locked,
       visible,
       _modalDepth > 0,
@@ -291,12 +310,14 @@ class _PlayerPageState extends State<PlayerPage>
       return Future.wait([_deviceWork, _layoutWork]).then((_) {});
     }
     _deviceState = deviceState;
-    final target = playbackOrientation(
-      video: controller.hasVideo,
-      automatic: controller.preferences.autoRotate,
-      width: geometry?.width,
-      height: geometry?.height,
-    );
+    final target = controller.hasVideo && _orientationOverride != null
+        ? _orientationOverride
+        : playbackOrientation(
+            video: controller.hasVideo,
+            automatic: controller.preferences.autoRotate,
+            width: geometry?.width,
+            height: geometry?.height,
+          );
     final signature =
         '${controller.generation}/${target?.name}/$locked/${device.inPip}';
     final newLayout = signature != _layoutSignature;
@@ -326,10 +347,14 @@ class _PlayerPageState extends State<PlayerPage>
     final revision = _layoutRevision;
     final update = device
         .update(
-          playing: controller.state.playing && !controller.loading,
+          playing:
+              controller.state.playing &&
+              !controller.loading &&
+              !controller.casting,
           width: geometry?.width,
           height: geometry?.height,
           autoRotate: controller.preferences.autoRotate,
+          orientation: _orientationOverride,
           locked: locked,
           controlsVisible: !locked && (visible || _modalDepth > 0),
         )
@@ -509,6 +534,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _setControlsVisible(bool value) {
+    if (value) _pauseWithoutControls = false;
     if (visible != value) {
       setState(() {
         visible = value;
@@ -555,10 +581,10 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _surfaceDoubleTap() {
     if (locked || !controller.ready) return;
-    _run(() async {
-      await controller.toggle();
-      if (mounted) _touch();
-    });
+    _pauseWithoutControls = true;
+    _hideTimer?.cancel();
+    _setControlsVisible(false);
+    _run(controller.toggle);
   }
 
   void _showHud(String text) {
@@ -598,6 +624,16 @@ class _PlayerPageState extends State<PlayerPage>
     await controller.pause();
     if (mounted) await Navigator.maybePop(context);
     _leaving = false;
+  }
+
+  Future<void> _toggleOrientation() async {
+    if (locked || !controller.hasVideo || !device.supportsOrientation) return;
+    final next = _screenOrientation == PlaybackOrientation.landscape
+        ? PlaybackOrientation.portrait
+        : PlaybackOrientation.landscape;
+    setState(() => _orientationOverride = next);
+    _touch();
+    await _syncDevice();
   }
 
   Future<void> _toggleFullscreen() async {
@@ -649,6 +685,10 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<void> _pip() async {
+    if (controller.casting || controller.connectingCast) {
+      _showHud('请先断开电视投屏');
+      return;
+    }
     if (_pipBusy) return;
     _pipBusy = true;
     try {
@@ -694,6 +734,7 @@ class _PlayerPageState extends State<PlayerPage>
     _clearTapSequence();
     if (locked ||
         !controller.ready ||
+        controller.casting && !controller.castSession!.seekSupported ||
         controller.state.duration <= Duration.zero) {
       return;
     }
@@ -734,7 +775,7 @@ class _PlayerPageState extends State<PlayerPage>
     _brightnessDrag = details.localPosition.dx < _viewportWidth / 2;
     _verticalInitial = _brightnessDrag
         ? device.brightness
-        : controller.preferences.volume / 100;
+        : controller.state.volume / 100;
     _verticalTarget = _verticalInitial;
     _dragY = 0;
   }
@@ -806,7 +847,7 @@ class _PlayerPageState extends State<PlayerPage>
     } else if (key == LogicalKeyboardKey.arrowUp ||
         key == LogicalKeyboardKey.arrowDown) {
       final value =
-          (controller.preferences.volume +
+          (controller.state.volume +
                   (key == LogicalKeyboardKey.arrowUp ? 5 : -5))
               .clamp(0, 100)
               .toDouble();
@@ -817,8 +858,8 @@ class _PlayerPageState extends State<PlayerPage>
     } else if (key == LogicalKeyboardKey.escape) {
       _run(_back);
     } else if (key == LogicalKeyboardKey.keyM) {
-      if (controller.preferences.volume > 0) {
-        _lastAudibleVolume = controller.preferences.volume;
+      if (controller.state.volume > 0) {
+        _lastAudibleVolume = controller.state.volume;
         _run(() => controller.setVolume(0));
       } else {
         _run(() => controller.setVolume(_lastAudibleVolume));
@@ -1324,7 +1365,12 @@ class _PlayerPageState extends State<PlayerPage>
       _panel('定时停止', (_) => PlayerSleepPanel(timer: controller.sleepTimer));
 
   Future<void> _screenshot() async {
-    if (_screenshotBusy || !controller.ready || _activePanel != null) return;
+    if (_screenshotBusy ||
+        !controller.ready ||
+        _activePanel != null ||
+        controller.casting) {
+      return;
+    }
     _screenshotBusy = true;
     _nativeSubtitleTimer?.cancel();
     _nativeSubtitleTimer = null;
@@ -1432,10 +1478,12 @@ class _PlayerPageState extends State<PlayerPage>
                         width: (box.maxWidth - (columns - 1) * 4) / columns,
                         child: InkWell(
                           borderRadius: BorderRadius.circular(10),
-                          onTap: () {
-                            next = action.$3;
-                            Navigator.pop(context);
-                          },
+                          onTap: controller.casting
+                              ? null
+                              : () {
+                                  next = action.$3;
+                                  Navigator.pop(context);
+                                },
                           child: Padding(
                             padding: const EdgeInsets.symmetric(vertical: 8),
                             child: Column(
@@ -1469,6 +1517,21 @@ class _PlayerPageState extends State<PlayerPage>
             ),
           ),
           const Divider(height: 1),
+          if (controller.hasVideo)
+            ListTile(
+              key: const Key('player-cast-settings'),
+              leading: Icon(
+                controller.casting ? Icons.cast_connected : Icons.cast,
+              ),
+              title: const Text('电视投屏'),
+              subtitle: Text(
+                controller.castSession?.device.name ?? '连接同一局域网的 DLNA 电视',
+              ),
+              onTap: () {
+                next = _castPanel;
+                Navigator.pop(context);
+              },
+            ),
           AnimatedBuilder(
             animation: controller.sleepTimer,
             builder: (context, _) => ListTile(
@@ -1491,6 +1554,7 @@ class _PlayerPageState extends State<PlayerPage>
               subtitle: const Text('保存画面，可选择包含字幕'),
               enabled:
                   controller.ready &&
+                  !controller.casting &&
                   controller.backend?.supportsScreenshot == true,
               trailing: const Icon(CupertinoIcons.chevron_right, size: 16),
               onTap: () {
@@ -1516,7 +1580,11 @@ class _PlayerPageState extends State<PlayerPage>
               leading: const Icon(CupertinoIcons.arrow_up_right_square),
               title: const Text('第三方播放器'),
               subtitle: const Text('选择手机上已安装的播放器'),
-              enabled: !controller.loading && !controller.openingExternalPlayer,
+              enabled:
+                  !controller.loading &&
+                  !controller.openingExternalPlayer &&
+                  !controller.casting &&
+                  !controller.connectingCast,
               onTap: () {
                 next = _openExternalPlayer;
                 Navigator.pop(context);
@@ -1529,11 +1597,11 @@ class _PlayerPageState extends State<PlayerPage>
               subtitle: Text(
                 controller.usingSoftwareDecoder &&
                         controller.preferences.hardwareAcceleration
-                    ? '本次初始化失败，已自动使用软件解码'
+                    ? '当前使用软件解码，设备或视频格式可能不支持硬件解码'
                     : '初始化失败时自动切换软件解码重试',
               ),
               value: controller.preferences.hardwareAcceleration,
-              onChanged: controller.loading
+              onChanged: controller.loading || controller.casting
                   ? null
                   : (value) =>
                         _run(() => controller.setHardwareAcceleration(value)),
@@ -1543,11 +1611,12 @@ class _PlayerPageState extends State<PlayerPage>
               title: const Text('自动适配视频方向'),
               subtitle: const Text('横向视频横屏，竖向视频竖屏'),
               value: controller.preferences.autoRotate,
-              onChanged: (value) => _run(
-                () => controller.updatePreferences(
+              onChanged: (value) => _run(() async {
+                setState(() => _orientationOverride = null);
+                await controller.updatePreferences(
                   controller.preferences.copyWith(autoRotate: value),
-                ),
-              ),
+                );
+              }),
             ),
           SwitchListTile(
             title: const Text('记住播放进度'),
@@ -1714,7 +1783,7 @@ class _PlayerPageState extends State<PlayerPage>
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 0, 20, 16),
                 child: Text(
-                  '跳过片尾配合自动下一集生效；短视频不会套用超过自身长度的跳过设置。',
+                  '使用当前进度：片头取当前时间，片尾取到结束的剩余时长，最多 600 秒。跳过片尾配合自动下一集生效；短视频不会套用超过自身长度的跳过设置。',
                   style: TextStyle(color: Colors.white54, fontSize: 12),
                 ),
               ),
@@ -1758,34 +1827,136 @@ class _PlayerPageState extends State<PlayerPage>
     if (mounted && !_leaving && !device.inPip && next != null) await next!();
   }
 
+  Widget _castCover() => IgnorePointer(
+    child: ColoredBox(
+      color: Colors.black,
+      child: LayoutBuilder(
+        builder: (context, box) => Center(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: 480,
+              maxHeight: math.max(60, box.maxHeight - 180),
+            ),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.cast_connected,
+                    size: 40,
+                    color: Colors.white70,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    controller.connectingCast
+                        ? '正在连接电视…'
+                        : '正在投屏到 ${controller.castSession!.device.name}',
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    controller.castSession!.error.ifEmpty(
+                      '点击右上角投屏按钮管理连接\n下方可控制电视播放与进度',
+                    ),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Future<void> _castPanel() => _panel(
+    '电视投屏',
+    (_) => PlayerCastPanel(
+      key: const Key('player-cast-panel'),
+      controller: controller,
+      discoveryFactory: widget.castDiscoveryFactory,
+      onResumeLocal: () {
+        Navigator.of(context).pop();
+        _run(() => controller.disconnectCast(resumeLocally: true));
+      },
+    ),
+  );
+
+  Future<void> _captureSkipTime({required bool intro}) async {
+    final state = controller.state;
+    if (!controller.ready ||
+        state.duration <= Duration.zero ||
+        state.position < Duration.zero) {
+      return;
+    }
+    final position = clampPlaybackPosition(state.position, state.duration);
+    final seconds = (intro ? position : state.duration - position).inSeconds;
+    if (seconds > 600) {
+      _showHud('${intro ? '片头' : '片尾'}最多支持 600 秒，请调整播放位置后再捕获');
+      return;
+    }
+    await controller.updatePreferences(
+      controller.preferences.copyWith(
+        skipIntroSeconds: intro ? seconds : null,
+        skipOutroSeconds: intro ? null : seconds,
+      ),
+    );
+  }
+
   Widget _skipSetting({required bool intro}) {
     final seconds = intro
         ? controller.preferences.skipIntroSeconds
         : controller.preferences.skipOutroSeconds;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('${intro ? '片头' : '片尾'} $seconds 秒'),
-          Expanded(
-            child: Slider(
-              key: Key(intro ? 'player-skip-intro' : 'player-skip-outro'),
-              value: seconds.toDouble(),
-              max: 600,
-              divisions: 120,
-              label: '$seconds 秒',
-              onChanged: (value) => _run(
-                () => controller.updatePreferences(
-                  controller.preferences.copyWith(
-                    skipIntroSeconds: intro ? value.round() : null,
-                    skipOutroSeconds: intro ? null : value.round(),
-                  ),
-                  save: false,
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            children: [
+              Text('${intro ? '片头' : '片尾'} $seconds 秒'),
+              TextButton.icon(
+                key: Key(
+                  intro
+                      ? 'player-capture-skip-intro'
+                      : 'player-capture-skip-outro',
                 ),
+                onPressed:
+                    controller.ready &&
+                        controller.state.duration > Duration.zero &&
+                        controller.state.position >= Duration.zero
+                    ? () => _run(() => _captureSkipTime(intro: intro))
+                    : null,
+                icon: const Icon(CupertinoIcons.time, size: 16),
+                label: const Text('使用当前进度'),
               ),
-              onChangeEnd: (_) => _run(
-                () => controller.updatePreferences(controller.preferences),
+            ],
+          ),
+          Slider(
+            key: Key(intro ? 'player-skip-intro' : 'player-skip-outro'),
+            value: seconds.toDouble(),
+            max: 600,
+            divisions: 120,
+            label: '$seconds 秒',
+            onChanged: (value) => _run(
+              () => controller.updatePreferences(
+                controller.preferences.copyWith(
+                  skipIntroSeconds: intro ? value.round() : null,
+                  skipOutroSeconds: intro ? null : value.round(),
+                ),
+                save: false,
               ),
+            ),
+            onChangeEnd: (_) => _run(
+              () => controller.updatePreferences(controller.preferences),
             ),
           ),
         ],
@@ -1816,19 +1987,79 @@ class _PlayerPageState extends State<PlayerPage>
     try {
       await controller.openExternalPlayer((url, title, position) async {
         if (!mounted || _leaving) return false;
+        final windows = device.windowsExternalPlayer;
+        String? executable;
+        if (windows != null) {
+          executable = await _chooseWindowsPlayer();
+          if (executable == null || !mounted || _leaving) return false;
+          windows.executable = executable;
+        }
         // Disable Android's automatic PiP before another app takes the screen.
         await _syncDevice();
         if (!mounted || _leaving) return false;
-        return device.openExternalPlayer(
+        final opened = await device.openExternalPlayer(
           url: url,
           title: title,
           position: position,
         );
+        if (opened && executable != null) {
+          try {
+            await controller.history.store.put(
+              'windowsExternalPlayer',
+              executable,
+            );
+          } catch (_) {
+            // A launched player already owns the stream. A failed preference
+            // write must not close that stream or restart internal audio.
+            DiagnosticLog.event('player.external_preference_save_failed');
+          }
+        }
+        return opened;
       });
     } finally {
       _modalDepth--;
       if (mounted) _touch();
     }
+  }
+
+  Future<String?> _chooseWindowsPlayer() async {
+    final saved = controller.history.store.data.str('windowsExternalPlayer');
+    if (saved.isNotEmpty) {
+      final selected = await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('选择外部播放器'),
+          content: const Text('在线播放时请保留此播放页面。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'choose'),
+              child: const Text('选择其他播放器'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, 'saved'),
+              child: Text(p.basename(saved)),
+            ),
+          ],
+        ),
+      );
+      if (selected == null || !mounted || _leaving) return null;
+      if (selected == 'saved') return saved;
+    }
+    final selected =
+        await (widget.chooseExternalPlayer?.call() ??
+            openFile(
+              acceptedTypeGroups: const [
+                XTypeGroup(label: '播放器程序', extensions: ['exe']),
+              ],
+              initialDirectory: saved.isNotEmpty ? p.dirname(saved) : null,
+              confirmButtonText: '选择播放器',
+            ));
+    if (!mounted || _leaving) return null;
+    return selected?.path;
   }
 
   Widget _icon(
@@ -2118,7 +2349,8 @@ class _PlayerPageState extends State<PlayerPage>
                             ),
                           ),
                         ),
-                      if (backend?.rendersSubtitlesNatively != true &&
+                      if (!controller.casting &&
+                          backend?.rendersSubtitlesNatively != true &&
                           captions.isNotEmpty &&
                           controller.preferences.subtitles &&
                           !controller.loading &&
@@ -2168,7 +2400,8 @@ class _PlayerPageState extends State<PlayerPage>
                               _clearTapSequence();
                               if (locked) {
                                 _showLock();
-                              } else if (controller.ready) {
+                              } else if (controller.ready &&
+                                  !controller.casting) {
                                 _run(controller.beginBoost);
                                 _showHud(
                                   '${math.max(2.0, controller.preferences.rate)} 倍速播放中',
@@ -2188,7 +2421,9 @@ class _PlayerPageState extends State<PlayerPage>
                             onLongPressCancel: () => _run(controller.endBoost),
                           ),
                         ),
-                      if ((controller.loading ||
+                      if (controller.casting) _castCover(),
+                      if (!controller.casting &&
+                          (controller.loading ||
                               state.buffering ||
                               _rotationPending) &&
                           controller.error.isEmpty)
@@ -2200,7 +2435,10 @@ class _PlayerPageState extends State<PlayerPage>
                             ),
                           ),
                         ),
-                      if (controller.error.isNotEmpty && !pip) _errorPanel(),
+                      if (!controller.casting &&
+                          controller.error.isNotEmpty &&
+                          !pip)
+                        _errorPanel(),
                       if (desktopPip) _desktopPipControls(),
                       if (desktopPip)
                         Positioned.fill(
@@ -2348,6 +2586,7 @@ class _PlayerPageState extends State<PlayerPage>
             CupertinoIcons.camera,
             controller.ready &&
                     controller.backend?.supportsScreenshot == true &&
+                    !controller.casting &&
                     !_screenshotBusy
                 ? () => _run(_screenshot)
                 : null,
@@ -2400,13 +2639,22 @@ class _PlayerPageState extends State<PlayerPage>
                     CupertinoIcons.arrow_down_to_line,
                     _adding ? null : () => _run(_download),
                   ),
-                if (device.supportsPip)
+                if (controller.hasVideo)
+                  _icon(
+                    '电视投屏',
+                    controller.casting ? Icons.cast_connected : Icons.cast,
+                    () => _run(_castPanel),
+                    key: const Key('player-cast'),
+                  ),
+                if (device.supportsPip && !controller.casting)
                   _icon(
                     '画中画',
                     CupertinoIcons.rectangle_on_rectangle,
                     () => _run(_pip),
                   ),
-                if (controller.hasVideo && device.supportsExternalPlayer)
+                if (controller.hasVideo &&
+                    device.supportsExternalPlayer &&
+                    !controller.casting)
                   _icon(
                     '第三方播放器',
                     CupertinoIcons.arrow_up_right_square,
@@ -2534,7 +2782,10 @@ class _PlayerPageState extends State<PlayerPage>
       state.duration,
     );
     final maximum = math.max(1, state.duration.inMilliseconds).toDouble();
-    final canSeek = controller.ready && state.duration > Duration.zero;
+    final canSeek =
+        controller.ready &&
+        state.duration > Duration.zero &&
+        (!controller.casting || controller.castSession!.seekSupported);
     return Align(
       alignment: Alignment.bottomCenter,
       child: Container(
@@ -2723,14 +2974,18 @@ class _PlayerPageState extends State<PlayerPage>
                       ),
                       TextButton(
                         key: const Key('player-speed'),
-                        onPressed: () => _run(_rates),
+                        onPressed: controller.casting
+                            ? null
+                            : () => _run(_rates),
                         style: TextButton.styleFrom(
                           foregroundColor: Colors.white,
                           minimumSize: const Size(56, 44),
                           padding: const EdgeInsets.symmetric(horizontal: 10),
                         ),
                         child: Text(
-                          controller.preferences.rate == 1
+                          controller.casting
+                              ? '电视播放'
+                              : controller.preferences.rate == 1
                               ? '倍速'
                               : '${controller.preferences.rate}×',
                           style: const TextStyle(fontSize: 13),
@@ -2757,6 +3012,16 @@ class _PlayerPageState extends State<PlayerPage>
                             '\u9009\u96c6',
                             style: TextStyle(fontSize: 13),
                           ),
+                        ),
+                      if (controller.hasVideo && device.supportsOrientation)
+                        _icon(
+                          _screenOrientation == PlaybackOrientation.landscape
+                              ? '切换竖屏'
+                              : '切换横屏',
+                          Icons.screen_rotation,
+                          () => _run(_toggleOrientation),
+                          size: 22,
+                          key: const Key('player-orientation'),
                         ),
                       _icon(
                         fullscreen ? '退出全屏' : '全屏',

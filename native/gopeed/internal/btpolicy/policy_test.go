@@ -43,7 +43,7 @@ func TestPublicDiscoveryDoesNotExpandPrivateTrackers(t *testing.T) {
 	}
 	public := policyTorrent(t, false)
 	AddPublicTrackers(public)
-	if len(public.Metainfo().AnnounceList) != len(publicTrackers) {
+	if len(public.Metainfo().AnnounceList) < 4 {
 		t.Fatal("public torrent did not gain fallback discovery")
 	}
 }

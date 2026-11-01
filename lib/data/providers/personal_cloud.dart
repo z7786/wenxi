@@ -8,7 +8,10 @@ String personalCloudDate(String value) {
   final date = cloudFileDate(raw);
   if (date == null) return value;
   if (raw.length == 8) return formatCloudFileTime(raw);
-  return date.toIso8601String().replaceFirst('T', ' ').split('.').first;
+  return date
+      .toIso8601String()
+      .replaceFirst('T', ' ')
+      .replaceFirst(RegExp(r'\.000$'), '');
 }
 
 abstract class PersonalCloudConnector extends CloudConnector {

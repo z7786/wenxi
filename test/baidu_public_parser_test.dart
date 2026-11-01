@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/http.dart';
+import 'package:asterlink/data/parser_rules/hub.dart';
 import 'package:asterlink/data/providers/baidu.dart';
 import 'package:asterlink/data/providers/baidu_public_parser.dart';
 import 'package:asterlink/data/state_store.dart';
@@ -13,6 +15,30 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/settings.dart';
 import 'baidu_public_parser_support.dart';
 import 'support.dart';
+
+// Protocol fixtures supply an approved password through the current flow;
+// password capture and grant validation are covered by parser widget tests.
+class _GrantedHub extends ParserRuleHub {
+  _GrantedHub(Vault store)
+    : super(
+        store: store,
+        directory: Directory('baidu-protocol-fixture'),
+        url: '',
+        apiKey: '',
+        publicKey: '',
+        backupUrl: '',
+      );
+
+  @override
+  ParserSharedPassword? grantedPassword(String id, String? token) =>
+      id == 'mf_dg22'
+      ? ParserSharedPassword(
+          BaiduPublicFixture.password,
+          -1,
+          DateTime.utc(2099),
+        )
+      : null;
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -29,6 +55,10 @@ void main() {
     connector = BaiduConnector(
       http,
       store: Vault(StateStore.memory(fixture.authenticatedState)),
+      publicParser: BaiduPublicParser(
+        http,
+        hub: _GrantedHub(Vault(StateStore.memory())),
+      ),
     );
   });
 
@@ -82,6 +112,10 @@ void main() {
     connector = BaiduConnector(
       http,
       store: Vault(StateStore.memory(fixture.authenticatedState)),
+      publicParser: BaiduPublicParser(
+        http,
+        hub: _GrantedHub(Vault(StateStore.memory())),
+      ),
     );
     final session = await open();
     final file = (await connector.list(
@@ -110,6 +144,10 @@ void main() {
       final restarted = BaiduConnector(
         http,
         store: Vault(StateStore.memory(fixture.authenticatedState)),
+        publicParser: BaiduPublicParser(
+          http,
+          hub: _GrantedHub(Vault(StateStore.memory())),
+        ),
       );
       await restarted.download(
         BrowseSession.fromJson(savedSession),
@@ -135,6 +173,7 @@ void main() {
       final parser = BaiduPublicParser(
         http,
         store: Vault(StateStore.memory(fixture.authenticatedState)),
+        hub: _GrantedHub(Vault(StateStore.memory())),
         clock: () => now,
       );
       fixture.dlink = 'https://d.pcs.baidu.com/file/old';
@@ -256,7 +295,7 @@ void main() {
     'file:///C:/Windows/win.ini',
     'http://127.0.0.1/file',
     'https://baidupcs.com.attacker.invalid/file',
-    'https://user:password@download.baidupcs.com/file',
+    'https://u:p@download.baidupcs.com/file',
   ]) {
     test('untrusted or local parser download URL is rejected: $url', () async {
       fixture.urls = [url];
@@ -305,9 +344,16 @@ void main() {
   test(
     'HTML or malformed file-list responses produce a clear parser error',
     () async {
+      final invalid = FakeHttp(
+        (_) => const HttpResult(200, '<html>unavailable</html>'),
+      );
       connector = BaiduConnector(
-        FakeHttp((_) => const HttpResult(200, '<html>unavailable</html>')),
+        invalid,
         store: Vault(StateStore.memory(fixture.authenticatedState)),
+        publicParser: BaiduPublicParser(
+          invalid,
+          hub: _GrantedHub(Vault(StateStore.memory())),
+        ),
       );
       await expectLater(
         open(),
@@ -337,7 +383,30 @@ void main() {
   );
 
   test(
-    'default anonymous share downloads and expired links keep the public route',
+    'repository defaults to account parsing rather than public parsing',
+    () async {
+      final state = StateStore.memory({
+        ...fixture.authenticatedState,
+        'credentials': {'Baidu': credential.toJson()},
+      });
+      final repository = CloudRepository(
+        http,
+        Vault(state),
+        CleanupOutbox(state, http),
+      );
+      final session = await repository.share(fixture.link);
+      expect(BaiduShareRoute.fromSession(session), BaiduShareRoute.account);
+      expect(
+        http.calls.every((call) => call.uri.host == 'pan.baidu.com'),
+        isTrue,
+      );
+      await repository.publicPasswords.close();
+      state.dispose();
+    },
+  );
+
+  test(
+    'explicit anonymous public share downloads and expired links keep the public route',
     () async {
       final state = StateStore.memory(),
           vault = Vault(StateStore.memory(fixture.authenticatedState));
@@ -345,9 +414,13 @@ void main() {
         http,
         vault,
         CleanupOutbox(state, http),
+        parserHub: _GrantedHub(vault),
         preparationRetries: () => 0,
       );
-      final session = await repository.share(fixture.link);
+      final session = await repository.share(
+        fixture.link,
+        baiduRoute: BaiduShareRoute.publicParser,
+      );
       expect(
         BaiduShareRoute.fromSession(session),
         BaiduShareRoute.publicParser,

@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/data/http.dart' show RequestScope;
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/torrent.dart';
 import 'package:asterlink/download/torrent_session.dart';
@@ -107,6 +108,73 @@ void main() {
     await services.close();
     await root.delete(recursive: true);
   });
+  for (final count in [1001, maxTorrentFiles]) {
+    test('All $count BT files can be queued from one selection', () async {
+      final release = await services.downloads.prioritizeTorrentPlayback();
+      final info = TorrentInfo(
+        _hash,
+        '大合集',
+        _data,
+        List.generate(count, (i) => TorrentFile(i, '大合集/$i.mp4', 4)),
+        pieceLength: 16384,
+      );
+      try {
+        final ids = await services.downloads.enqueueTorrent(
+          info,
+          List.generate(count, (i) => count - 1 - i),
+        );
+        expect(ids.toSet(), hasLength(count));
+        expect(services.downloads.tasks, hasLength(count));
+        expect(
+          ids.map(
+            (id) => services.downloads.task(id)!.spec.torrent!.integer('index'),
+          ),
+          List.generate(count, (i) => i),
+        );
+        expect(services.store.data.list('tasks'), hasLength(count));
+        expect(services.store.data.obj('torrents').keys, [_hash]);
+        expect(native.begins, isEmpty);
+        expect(http.probes, 0);
+        await services.downloads.pauseAll();
+      } finally {
+        release();
+      }
+    });
+  }
+
+  test(
+    'Cancelling a large BT selection does not leave partial queue entries',
+    () async {
+      final scope = RequestScope();
+      var checkpoints = 0;
+      final info = TorrentInfo(
+        _hash,
+        '大合集',
+        _data,
+        List.generate(1001, (i) => TorrentFile(i, '大合集/$i.mp4', 4)),
+        pieceLength: 16384,
+      );
+      await expectLater(
+        scope.run(
+          () => RequestScope.guarded(
+            () => services.downloads.enqueueTorrent(
+              info,
+              List.generate(1001, (i) => i),
+            ),
+            () {
+              if (++checkpoints == 3) scope.cancel();
+            },
+          ),
+        ),
+        throwsA(isA<AppException>()),
+      );
+      expect(checkpoints, greaterThanOrEqualTo(3));
+      expect(services.downloads.tasks, isEmpty);
+      expect(services.store.data.list('tasks'), isEmpty);
+      expect(services.store.data.obj('torrents'), isEmpty);
+      expect(native.begins, isEmpty);
+    },
+  );
 
   test(
     'Selected BT files keep one shared metadata record and export serially without HTTP probes',

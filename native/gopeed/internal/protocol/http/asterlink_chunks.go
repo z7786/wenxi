@@ -1,5 +1,7 @@
 package http
 
+import "time"
+
 func (c *connection) remaining() int64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -33,6 +35,7 @@ func (f *Fetcher) writeChunk(c *connection, data []byte) (finished bool, err err
 		}
 		part.Downloaded += int64(n)
 		c.Downloaded += int64(n)
+		c.tail.progress(int64(n), time.Now())
 	}
 	return f.meta.Res.Range && part.remain() <= 0, err
 }

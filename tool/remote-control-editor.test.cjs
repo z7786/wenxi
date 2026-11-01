@@ -200,7 +200,7 @@ test('only known cloud names and object sections are accepted', () => {
 test('HTTPS validation rejects repaired URLs, credentials, controls and invalid ports', () => {
   for (const url of [
     'http://example.com/a', 'javascript:alert(1)', 'file:///C:/test',
-    'https://user:password@example.com/', 'https:///a', 'https:example.com',
+    'https://u:p@example.com/', 'https:///a', 'https:example.com',
     'https://example.com/a\nb', 'https://example.com:99999/',
     'https://example.com:0/', 'https://example.com\\@other.test/',
     'https://exa mple.com/', 'https://example.com/\u0000',
@@ -459,7 +459,7 @@ const reply = (body,status=200,url='https://example.test/config.json',headers={}
 test('live checks read HTTPS without credentials, preserve UTF-8 and may inspect invalid sections', async () => {
   let options;
   const config = {schema:1,revision:33,about:{description:'中文介绍'},help:{enabled:true,url:'http://invalid'}};
-  const result = await C.fetchPublished(C.DEFAULT_URL,{fetcher:async (url,opts) => { options = opts; return reply(JSON.stringify(config)); }});
+  const result = await C.fetchPublished('https://example.test/config.json',{fetcher:async (url,opts) => { options = opts; return reply(JSON.stringify(config)); }});
   assert.equal(result.revision,33);
   assert.equal(result.about.description,'中文介绍');
   issue(result,'help.url');
@@ -476,7 +476,7 @@ test('live checks fail explicitly on unsafe endpoints, status errors, timeouts a
   assert.equal(calls,0);
   await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply('{}',500)}),/完整/);
   await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply('{}',200,'http://example.test/config')}),/HTTPS/);
-  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply('<html>failed</html>')}),/JSON/);
+  await assert.rejects(C.fetchPublished('https://example.test/config.json',{fetcher:async () => reply('<html>failed</html>')}),/JSON/);
   let aborted = false;
   await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{timeoutMs:15,fetcher:(_,opts) => { opts.signal.addEventListener('abort',() => { aborted = true; }); return new Promise(() => {}); }}),/超时/);
   assert.equal(aborted,true);
@@ -487,6 +487,6 @@ test('live checks bound declared and streamed body sizes and cancel incomplete s
   await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply('{}',200,undefined,{'content-length':String(C.MAX_BYTES+1)})}),/256 KiB/);
   let cancelled = false;
   const body = new ReadableStream({start(controller) { controller.enqueue(new Uint8Array(C.MAX_BYTES+1)); },cancel() { cancelled = true; }});
-  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply(body)}),/256 KiB/);
+  await assert.rejects(C.fetchPublished('https://example.test/config.json',{fetcher:async () => reply(body)}),/256 KiB/);
   assert.equal(cancelled,true);
 });

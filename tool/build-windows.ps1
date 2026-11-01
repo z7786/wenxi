@@ -2,6 +2,8 @@
 param(
     [string]$Flutter = 'flutter',
     [string]$Go = 'go',
+    [ValidateSet('x64', 'arm64')][string]$Architecture = 'x64',
+    [string]$SevenZip,
     [string]$BuildConfig,
     [string]$ConfigUrl,
     [switch]$Offline
@@ -31,12 +33,20 @@ try {
     $env:PATH = (Split-Path -Parent $nugetPath) + [IO.Path]::PathSeparator + $env:PATH
     $env:NUGET_PACKAGES = Join-Path $projectPath '.local\nuget\packages'
     $env:NUGET_HTTP_CACHE_PATH = Join-Path $projectPath '.local\nuget\http-cache'
-    & (Join-Path $PSScriptRoot 'prepare-windows-media.ps1')
-    & (Join-Path $PSScriptRoot 'build-native-windows.ps1') -Go $Go
+    $windowsArguments = @('build', 'windows', '--release', '--no-pub')
+    if ($Architecture -eq 'arm64' -and $env:PROCESSOR_ARCHITECTURE -ne 'ARM64') {
+        $helpOutput = @(& $Flutter build windows --help 2>&1)
+        if ($LASTEXITCODE -ne 0 -or ($helpOutput -join "`n") -notmatch '--target-platform') {
+            throw 'Windows ARM64 cross-builds require an SDK with --target-platform support. See docs/WINDOWS-ARM64-BUILD.md.'
+        }
+        $windowsArguments += '--target-platform=windows-arm64'
+    }
+    & (Join-Path $PSScriptRoot 'prepare-windows-media.ps1') -Architecture $Architecture -SevenZip $SevenZip
+    & (Join-Path $PSScriptRoot 'build-native-windows.ps1') -Go $Go -Architecture $Architecture
     Push-Location -LiteralPath $projectPath
     try {
         Invoke-AsterLinkTool -Command $Flutter -Arguments @('pub', 'get') -Failure 'Flutter dependencies failed'
-        Invoke-AsterLinkTool -Command $Flutter -Arguments (@('build', 'windows', '--release', '--no-pub') + $dartDefines) -Failure 'Windows build failed; check the Visual Studio C++ toolchain'
+        Invoke-AsterLinkTool -Command $Flutter -Arguments ($windowsArguments + $dartDefines) -Failure 'Windows build failed; check the Visual Studio C++ toolchain'
     } finally { Pop-Location }
 } finally {
     $env:PUB_HOSTED_URL = $savedPub

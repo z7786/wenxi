@@ -68,7 +68,14 @@ class _Http extends TransferHttp {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  for (final outcome in ['fresh', 'failed', 'changed', 'ordinary']) {
+  for (final outcome in [
+    'fresh',
+    'failed',
+    'changed',
+    'ordinary',
+    'direct',
+    'direct-refresh',
+  ]) {
     test(
       'slow recovery preserves checkpoint when refresh is $outcome',
       () async {
@@ -77,7 +84,11 @@ void main() {
         // The manager and native fixture share the same monotonic timeline.
         final transferClock = native.clock;
         final store = StateStore.memory({
-          'settings': {'concurrent': 1},
+          'settings': {
+            'concurrent': 1,
+            if (outcome == 'direct-refresh')
+              'downloadThreadOverrides': {'baidu_direct': 5},
+          },
         });
         final http = _Http(outcome == 'changed');
         final engine = GopeedEngine(
@@ -103,7 +114,11 @@ void main() {
             return DownloadSpec.fromJson({
               ...previous.toJson(),
               'url': 'https://fixture.baidupcs.com/fresh',
-              'profile': outcome == 'ordinary' ? 'baidu' : 'baidu_preview',
+              'profile': switch (outcome) {
+                'ordinary' => 'baidu',
+                'direct' || 'direct-refresh' => 'baidu_direct',
+                _ => 'baidu_preview',
+              },
             });
           },
         );
@@ -135,7 +150,9 @@ void main() {
             fileName: 'fixture.bin',
             expectedSize: _total,
             source: origin.toJson(),
-            profile: 'baidu_preview',
+            profile: outcome == 'direct-refresh'
+                ? 'baidu_direct'
+                : 'baidu_preview',
           ),
         );
         await until(() => native.begins.length == 3);
@@ -152,14 +169,25 @@ void main() {
         expect(native.offsets[1], greaterThan(native.offsets[0]));
         expect(native.offsets[2], greaterThan(native.offsets[1]));
         expect(
-          native.begins.every((b) => b.integer('connections') == 1),
-          isTrue,
+          native.begins.map((b) => b.integer('connections')),
+          outcome == 'direct-refresh'
+              ? [5, 5, 5]
+              : outcome == 'direct'
+              ? [8, 8, 3]
+              : [8, 8, 8],
         );
         expect(native.begins[1].str('url'), endsWith('/original'));
         expect(
           native.begins[2].str('url'),
-          endsWith(outcome == 'fresh' ? '/fresh' : '/original'),
+          endsWith(
+            ['fresh', 'direct', 'direct-refresh'].contains(outcome)
+                ? '/fresh'
+                : '/original',
+          ),
         );
+        if (outcome.startsWith('direct')) {
+          expect(manager.task(id)!.spec.profile, 'baidu_direct');
+        }
         expect(manager.task(id)!.status, DownloadStatus.running);
         await manager.pause(id);
         expect(manager.task(id)!.status, DownloadStatus.paused);

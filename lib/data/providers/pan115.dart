@@ -355,6 +355,11 @@ class Pan115Connector extends PersonalCloudConnector {
       info.obj('url').str('url'),
       '115 未返回可用下载地址，请检查官方网页中的下载权限',
     );
+    // Signed 115 URLs use c for simultaneous connections (0 = unrestricted).
+    // Exceeding it returns 403 even while the ticket remains valid.
+    final connectionLimit = int.tryParse(
+      Uri.parse(url).queryParameters['c'] ?? '',
+    );
     final cookies = <String, String>{};
     // Download authorization cookies are separate from the account Cookie.
     // Never forward UID/CID/SEID to a storage CDN.
@@ -378,6 +383,9 @@ class Pan115Connector extends PersonalCloudConnector {
       expectedSize: file.size,
       checksumType: file.hashType,
       checksumValue: file.hashValue,
+      maxPlaybackConnections: connectionLimit != null && connectionLimit > 0
+          ? connectionLimit
+          : null,
       headers: {
         'User-Agent': share ? shareUa : ua,
         'Referer': 'https://115.com/',

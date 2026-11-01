@@ -273,6 +273,8 @@ void main() {
       BaiduPublicFixture.url,
     );
     await tester.pumpAndSettle();
+    await tester.tap(find.text('公益解析').first);
+    await tester.pumpAndSettle();
   }
 
   Future<void> finish(WidgetTester tester) async {

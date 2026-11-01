@@ -407,7 +407,7 @@ void main() {
               (error) => error.message,
               'message',
               platform == CloudPlatform.quark
-                  ? '夸克游客不正常超过50MB文件下载，请登录夸克网盘再试'
+                  ? '夸克游客不支持超过50MB文件下载，请登录夸克网盘再试'
                   : '${platform.shortName}此文件不支持游客下载，请登录后重试',
             ),
           ),

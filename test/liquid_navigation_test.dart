@@ -151,6 +151,33 @@ void main() {
     expect(find.text('page-1'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('drag lens grows like the reference and rests without a ticker', (
+    tester,
+  ) async {
+    await render(tester, reduceMotion: false);
+    final first = tester.getCenter(find.byKey(const ValueKey('navigation-0')));
+    final last = tester.getCenter(find.byKey(const ValueKey('navigation-3')));
+    final gesture = await tester.startGesture(first);
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
+    await gesture.moveTo(last);
+    await tester.pump(const Duration(milliseconds: 240));
+    final pressed = tester.widget<Transform>(
+      find.byKey(const Key('navigation-lens-transform')),
+    );
+    expect(pressed.transform.storage[0], greaterThan(1.35));
+    expect(pressed.transform.storage[5], greaterThan(1.35));
+    expect(find.text('page-0'), findsOneWidget);
+    await gesture.up();
+    await tester.pumpAndSettle();
+    final released = tester.widget<Transform>(
+      find.byKey(const Key('navigation-lens-transform')),
+    );
+    expect(released.transform.storage[0], closeTo(1, .001));
+    expect(find.text('page-3'), findsOneWidget);
+    expect(tester.binding.hasScheduledFrame, isFalse);
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('animated selection settles on the requested tab', (
     tester,
   ) async {

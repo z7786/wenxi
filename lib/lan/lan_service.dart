@@ -289,6 +289,8 @@ class LanService extends ChangeNotifier {
     String method = 'GET',
     Json? body,
     String? session,
+    HttpClient? client,
+    bool invalidateSession = true,
   }) async {
     require(!_disposed, '设备互联已关闭');
     RequestScope.checkpoint();
@@ -302,7 +304,7 @@ class LanService extends ChangeNotifier {
       }),
     );
     try {
-      request = await _http
+      request = await (client ?? _http)
           .openUrl(method, uri)
           .timeout(const Duration(seconds: 6));
       RequestScope.checkpoint();
@@ -325,7 +327,8 @@ class LanService extends ChangeNotifier {
       }
       final data = asJson(jsonDecode(utf8.decode(bytes.takeBytes())));
       if ((response.statusCode == 401 || response.statusCode == 403) &&
-          session != null) {
+          session != null &&
+          invalidateSession) {
         _peerSessions.removeWhere((key, value) => value.token == session);
         _changed();
       }
@@ -476,11 +479,17 @@ class LanService extends ChangeNotifier {
     }
   }
 
-  Future<void> _sendInbox(LanPeer peer, String kind, String value) async {
+  Future<void> _sendInbox(
+    LanPeer peer,
+    String kind,
+    String value, {
+    HttpClient? client,
+  }) async {
     final result = await _json(
       peer.base.replace(path: '/v1/inbox'),
       method: 'POST',
       session: _session(peer),
+      client: client,
       body: {'id': lanId(), 'kind': kind, 'value': value},
     );
     require(result.boolean('delivered'), '对方未确认收到消息，请稍后重试');
@@ -488,16 +497,24 @@ class LanService extends ChangeNotifier {
 
   Future<void> sendShare(LanPeer peer, LanShare share) async {
     require(
-      running && !share.stopped && !share.expired(clock()),
+      running &&
+          identical(_shares[share.manifest.token], share) &&
+          !share.stopped &&
+          !share.draining &&
+          !share.expired(clock()),
       '分享已结束，请重新选择文件',
     );
-    final socket = await Socket.connect(
-      peer.address,
-      peer.port,
-      timeout: const Duration(seconds: 5),
+    final session = _session(peer);
+    final address = await _shareAddress(peer, session);
+    RequestScope.checkpoint();
+    require(
+      running &&
+          identical(_shares[share.manifest.token], share) &&
+          !share.stopped &&
+          !share.draining &&
+          !share.expired(clock()),
+      '分享已结束，请重新选择文件',
     );
-    final address = socket.address.address;
-    socket.destroy();
     final url = Uri(
       scheme: 'http',
       host: address,
@@ -505,7 +522,64 @@ class LanService extends ChangeNotifier {
       path: '/s/${share.manifest.token}',
     );
     lanAddress(url.toString());
-    await _sendInbox(peer, 'share', url.toString());
+    // Keep the invitation's source IP equal to the address confirmed by the
+    // receiver, even when the device has several interfaces or routes.
+    final client = _shareClient(address);
+    try {
+      await _sendInbox(peer, 'share', url.toString(), client: client);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  HttpClient _shareClient(String address) => HttpClient()
+    ..connectionTimeout = const Duration(seconds: 5)
+    ..autoUncompress = false
+    ..connectionFactory = ((uri, _, _) =>
+        Socket.startConnect(uri.host, uri.port, sourceAddress: address))
+    ..findProxy = (_) => 'DIRECT';
+
+  Future<String> _shareAddress(LanPeer peer, String session) async {
+    final endpoint = peer.base.replace(path: '/v1/shares');
+    final info = await _json(endpoint, session: session);
+    await _updateAddresses();
+    RequestScope.checkpoint();
+    require(running && addresses.isNotEmpty, '网络地址已变化，请刷新设备地址并重新连接');
+    final observed = info.str('senderAddress');
+    if (observed.isNotEmpty) {
+      require(isLanAddress(observed), '对方返回的发送地址无效');
+      if (!addresses.contains(observed)) {
+        if (_peerSessions[peer.id]?.token == session) {
+          _peerSessions.remove(peer.id);
+          _changed();
+        }
+        throw const AppException('网络地址已变化，请刷新设备地址并重新连接');
+      }
+      return observed;
+    }
+
+    // Older receivers do not echo the observed address. An authenticated
+    // probe bound to a local IP succeeds only if it matches the paired source.
+    // A rejected candidate must not invalidate the otherwise valid session.
+    for (final address in addresses.toList()) {
+      final client = _shareClient(address);
+      try {
+        await _json(
+          endpoint,
+          session: session,
+          client: client,
+          invalidateSession: false,
+        );
+        return address;
+      } on _LanRequestError catch (error) {
+        if (error.status != 401 && error.status != 403) rethrow;
+      } on AppException {
+        RequestScope.checkpoint();
+      } finally {
+        client.close(force: true);
+      }
+    }
+    throw const AppException('无法确认发送设备地址，请刷新设备地址并重新连接');
   }
 
   Future<void> markRead(LanInboxItem item, {bool remove = false}) =>

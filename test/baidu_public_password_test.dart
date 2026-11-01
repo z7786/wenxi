@@ -823,149 +823,25 @@ void main() {
     },
   );
 
-  for (final status in [200, 400]) {
+  for (final cache in ['empty', 'guest', 'authenticated']) {
     test(
-      'parser password code 20016 at HTTP $status refreshes and retries once',
+      'public parsing requires an explicit grant with $cache cache',
       () async {
-        final old = await passwords.authenticated();
-        next = '站点新密码';
-        final fixture = BaiduPublicFixture();
-        final http = FakeHttp(
-          (request) => request.json['parse_password'] == old.value
-              ? jsonResponse({
-                  'code': 20016,
-                  'message': '请检查 解析 密码是否正确',
-                }, status)
-              : fixture.respond(request),
-        );
+        if (cache == 'guest') await passwords.get();
+        if (cache == 'authenticated') await passwords.authenticated();
+        final readsBefore = fetches;
+        final http = FakeHttp(BaiduPublicFixture().respond);
         final parser = BaiduPublicParser(http, passwords: passwords);
-        final session = await parser.openShare(fixture.link);
-        expect(session.platform, CloudPlatform.baidu);
-        expect(http.calls.map((call) => call.json.str('parse_password')), [
-          old.value,
-          next,
-        ]);
-        expect(fetches, 2);
+        for (var attempt = 0; attempt < 2; attempt++) {
+          await expectLater(
+            parser.openShare(BaiduPublicFixture().link),
+            throwsA(isA<ParserPasswordRequired>()),
+          );
+        }
+        expect(http.calls, isEmpty);
+        expect(fetches, readsBefore);
+        expect(backupFetches, 0);
       },
     );
   }
-
-  test('download-link requests refresh an expired password as well', () async {
-    final fixture = BaiduPublicFixture();
-    var reject = false;
-    final http = FakeHttp(
-      (request) => reject && request.json['parse_password'] != '下载新密码'
-          ? jsonResponse({'code': 20016}, 400)
-          : fixture.respond(request),
-    );
-    final parser = BaiduPublicParser(http, passwords: passwords);
-    final session = await parser.openShare(fixture.link);
-    final file = (await parser.list(session, '/')).first;
-    reject = true;
-    next = '下载新密码';
-    final spec = await parser.download(session, file);
-    expect(spec.fileName, BaiduPublicFixture.name);
-    expect(fetches, 2);
-    expect(http.calls, hasLength(3));
-    expect(http.calls.last.json['parse_password'], next);
-  });
-
-  test(
-    'unchanged rejected sources stop without resubmitting and back off',
-    () async {
-      final http = FakeHttp((_) => jsonResponse({'code': 20016}, 400));
-      final parser = BaiduPublicParser(http, passwords: passwords);
-      await expectLater(
-        parser.openShare(BaiduPublicFixture().link),
-        throwsA(
-          isA<AppException>().having(
-            (e) => e.message,
-            'bounded failure',
-            contains('密码'),
-          ),
-        ),
-      );
-      expect(fetches, 2);
-      expect(http.calls, hasLength(1));
-      await expectLater(
-        parser.openShare(BaiduPublicFixture().link),
-        throwsA(isA<AppException>()),
-      );
-      expect(fetches, 2);
-      expect(http.calls, hasLength(1));
-    },
-  );
-
-  test(
-    'authenticated parser refreshes UC but never uses a Gitee backup',
-    () async {
-      await passwords.authenticated();
-      next = '主源新密码';
-      backupValue = '备用最终密码';
-      final fixture = BaiduPublicFixture();
-      final http = FakeHttp(
-        (r) => r.json.str('parse_password') == backupValue
-            ? fixture.respond(r)
-            : jsonResponse({'code': 20016}, 400),
-      );
-      await expectLater(
-        BaiduPublicParser(http, passwords: passwords).openShare(fixture.link),
-        throwsA(isA<ParserPasswordRequired>()),
-      );
-      expect(http.calls.map((r) => r.json.str('parse_password')), [
-        '今日密码',
-        '主源新密码',
-      ]);
-      expect(fetches, 2);
-      expect(backupFetches, 0);
-    },
-  );
-
-  test(
-    'both authenticated passwords rejected stop and keep a retry delay',
-    () async {
-      await passwords.authenticated();
-      next = '主源新密码';
-      backupValue = '备用最终密码';
-      final http = FakeHttp((_) => jsonResponse({'code': 20016}, 400));
-      final parser = BaiduPublicParser(http, passwords: passwords);
-      await expectLater(
-        parser.openShare(BaiduPublicFixture().link),
-        throwsA(
-          isA<AppException>().having(
-            (e) => e.message,
-            'bounded',
-            contains('密码'),
-          ),
-        ),
-      );
-      await expectLater(
-        parser.openShare(BaiduPublicFixture().link),
-        throwsA(isA<AppException>()),
-      );
-      expect(http.calls, hasLength(2));
-      expect(fetches, 2);
-      expect(backupFetches, 0);
-    },
-  );
-
-  test(
-    'share extraction-code errors and outages never invalidate the password',
-    () async {
-      for (final response in [
-        jsonResponse({'code': 20001, 'message': '分享提取码错误'}),
-        const HttpResult(503, '<html>upstream unavailable</html>'),
-      ]) {
-        final http = FakeHttp((_) => response);
-        final parser = BaiduPublicParser(http, passwords: passwords);
-        await expectLater(
-          parser.openShare(BaiduPublicFixture().link),
-          throwsA(isA<AppException>()),
-        );
-        expect(http.calls, hasLength(1));
-      }
-      expect(fetches, 1);
-      expect((await passwords.authenticated()).value, next);
-    },
-  );
 }

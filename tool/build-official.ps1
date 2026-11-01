@@ -4,6 +4,8 @@ param(
     [string]$Flutter = 'flutter',
     [string]$Go = 'go',
     [string]$Iscc,
+    [ValidateSet('x64', 'arm64')][string]$WindowsArchitecture = 'x64',
+    [string]$SevenZip,
     [switch]$RebuildNative,
     [switch]$Force,
     [switch]$CheckConfig
@@ -33,7 +35,7 @@ try {
         Write-Host ('Official APK: ' + (Join-Path $projectPath 'build/app/outputs/flutter-apk/app-release.apk'))
     }
     if ($buildWindows) {
-        & (Join-Path $PSScriptRoot 'build-windows.ps1') -Flutter $Flutter -Go $Go -BuildConfig $buildConfig
-        & (Join-Path $PSScriptRoot 'build-windows-installer.ps1') -Iscc $Iscc -Force:$Force
+        & (Join-Path $PSScriptRoot 'build-windows.ps1') -Flutter $Flutter -Go $Go -BuildConfig $buildConfig -Architecture $WindowsArchitecture -SevenZip $SevenZip
+        & (Join-Path $PSScriptRoot 'build-windows-installer.ps1') -Iscc $Iscc -Architecture $WindowsArchitecture -Force:$Force
     }
 } finally { $buildLock.Dispose() }

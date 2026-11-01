@@ -89,7 +89,7 @@ class _AppearancePageState extends State<AppearancePage> {
                 const SizedBox(height: 24),
                 _section('主题配色', _palettes()),
                 const SizedBox(height: 24),
-                _section('导航栏毛玻璃', _glassStyles()),
+                _section('玻璃效果', _glassStyles()),
                 const SizedBox(height: 24),
                 _section(
                   '导航入口',

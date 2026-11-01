@@ -117,6 +117,13 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  Future<void> choosePublic(WidgetTester tester) async {
+    final route = find.byKey(const ValueKey('baidu-route-mf_dg22'));
+    await tester.ensureVisible(route);
+    await tester.tap(route);
+    await tester.pumpAndSettle();
+  }
+
   Future<void> parse(WidgetTester tester) async {
     await tester.ensureVisible(find.byKey(const Key('parse-start')));
     await tester.tap(find.byKey(const Key('parse-start')));
@@ -142,11 +149,72 @@ void main() {
     });
   }
 
+  scenario('Baidu defaults to account parsing and uses the logged-in account', (
+    tester,
+  ) async {
+    await render(tester, loggedIn: true);
+    await enter(tester);
+    expect(
+      tester
+          .widget<BaiduShareRoutePicker>(find.byType(BaiduShareRoutePicker))
+          .value,
+      BaiduShareRoute.account,
+    );
+    await parse(tester);
+    final browser = tester.widget<BrowserPage>(find.byType(BrowserPage));
+    expect(
+      BaiduShareRoute.fromSession(browser.session),
+      BaiduShareRoute.account,
+    );
+    expect(
+      http.calls.every((call) => call.uri.host == 'pan.baidu.com'),
+      isTrue,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   scenario(
-    'Baidu defaults to public parsing and opens its files without login',
+    'Baidu account default asks for login and retains input when cancelled',
     (tester) async {
       await render(tester);
       await enter(tester);
+      await parse(tester);
+      expect(find.text('百度网盘需要登录'), findsOneWidget);
+      expect(find.byType(BrowserPage), findsNothing);
+      expect(http.calls, isEmpty);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('parse-input')))
+            .controller!
+            .text,
+        BaiduPublicFixture.url,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  scenario(
+    'Baidu can explicitly choose public parsing and open its files without login',
+    (tester) async {
+      await render(tester);
+      await enter(tester);
+      await choosePublic(tester);
+      expect(
+        tester
+            .widgetList<ChoiceChip>(find.byType(ChoiceChip))
+            .map((chip) => chip.key)
+            .where(
+              (key) =>
+                  key == const ValueKey('baidu-route-account') ||
+                  key == const ValueKey('baidu-route-mf_dg22'),
+            ),
+        [
+          const ValueKey('baidu-route-account'),
+          const ValueKey('baidu-route-mf_dg22'),
+        ],
+      );
       expect(
         tester
             .widget<BaiduShareRoutePicker>(find.byType(BaiduShareRoutePicker))
@@ -171,6 +239,7 @@ void main() {
       await render(tester, loggedIn: true);
       fixture.publicFailure = true;
       await enter(tester);
+      await choosePublic(tester);
       await parse(tester);
       expect(find.byType(BrowserPage), findsNothing);
       expect(find.textContaining('解析站暂不可用'), findsOneWidget);
@@ -194,6 +263,7 @@ void main() {
   ) async {
     await render(tester, loggedIn: true);
     await enter(tester);
+    await choosePublic(tester);
     await parse(tester);
     await tester.tap(find.byKey(const ValueKey('baidu-route-account')));
     await tester.pumpAndSettle();
@@ -221,7 +291,10 @@ void main() {
     tester,
   ) async {
     await render(tester);
-    final session = await services.cloud.share(fixture.link);
+    final session = await services.cloud.share(
+      fixture.link,
+      baiduRoute: BaiduShareRoute.publicParser,
+    );
     bool? accepted;
     await tester.pumpWidget(
       MaterialApp(
@@ -267,6 +340,7 @@ void main() {
       hub.setOpen(true);
       await tester.pumpAndSettle();
       expect(find.byType(BaiduShareRoutePicker), findsOneWidget);
+      await choosePublic(tester);
       expect(
         tester
             .widget<TextField>(find.byKey(const Key('parse-input')))
@@ -312,6 +386,7 @@ void main() {
     (tester) async {
       await render(tester, loggedIn: true);
       await enter(tester);
+      await choosePublic(tester);
       await parse(tester);
       final before = http.calls.length;
       hub.setOpen(false);

@@ -8,6 +8,8 @@ import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/http_retry.dart';
 import 'support.dart';
 
+class _LocalIo extends HttpOverrides {}
+
 class _FailureAdapter implements HttpClientAdapter {
   _FailureAdapter(
     this.type, {
@@ -49,6 +51,48 @@ ReadRetryScope _scope({
 );
 
 void main() {
+  for (final peek in [false, true]) {
+    test(
+      'Preparation retries a truncated ${peek ? 'peek' : 'GET'} response',
+      () async {
+        HttpOverrides.global = _LocalIo();
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        var requests = 0;
+        server.listen((request) async {
+          if (++requests == 1) {
+            final socket = await request.response.detachSocket(
+              writeHeaders: false,
+            );
+            socket.write(
+              'HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{"url":',
+            );
+            await socket.flush();
+            socket.destroy();
+          } else {
+            request.response.write('{"url":"x"}');
+            await request.response.close();
+          }
+        });
+        final dio = Dio();
+        addTearDown(() async {
+          dio.close(force: true);
+          await server.close(force: true);
+          HttpOverrides.global = null;
+        });
+        final http = RetryingJsonHttp(DioJsonHttp(client: dio));
+        final url = 'http://127.0.0.1:${server.port}/read';
+        final delays = <Duration>[];
+        final result = await _scope(
+          retries: 1,
+          delays: delays,
+        ).run(() => peek ? http.peek(url, const {}) : http.get(url));
+        expect(result.json.str('url'), 'x');
+        expect(requests, 2);
+        expect(delays, [const Duration(seconds: 2)]);
+      },
+    );
+  }
+
   for (final interrupted in [true, false]) {
     test(
       'TLS ${interrupted ? 'connection interruption retries' : 'certificate failure is not retried'}',
@@ -89,6 +133,47 @@ void main() {
         }
       },
     );
+  }
+
+  for (final (message, retryable) in [
+    ('Connection closed before full header was received', true),
+    ('Invalid header field name', false),
+    ('Redirect limit exceeded', false),
+  ]) {
+    test('Preparation handles HTTP connection error: $message', () async {
+      final adapter = _FailureAdapter(
+        DioExceptionType.unknown,
+        recover: true,
+        error: HttpException(
+          message,
+          uri: Uri.parse('https://private-host.example/?token=private-token'),
+        ),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      addTearDown(() => dio.close(force: true));
+      final http = RetryingJsonHttp(DioJsonHttp(client: dio));
+      final pending = _scope(
+        retries: 1,
+      ).run(() => http.get('https://example.test/read'));
+      if (retryable) {
+        expect((await pending).status, 200);
+        expect(adapter.calls, 2);
+      } else {
+        await expectLater(
+          pending,
+          throwsA(
+            isA<HttpRequestFailure>()
+                .having((error) => error.retryable, 'retryable', false)
+                .having(
+                  (error) => error.toString(),
+                  'redacted',
+                  isNot(contains('private-')),
+                ),
+          ),
+        );
+        expect(adapter.calls, 1);
+      }
+    });
   }
 
   for (final type in [

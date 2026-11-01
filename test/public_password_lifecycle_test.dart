@@ -25,13 +25,13 @@ class _LifecycleServices extends AppServices {
   int prefetches = 0;
 
   @override
-  void refreshPublicDownloadPassword() => prefetches++;
+  void refreshEntryData() => prefetches++;
 }
 
 void main() {
   for (final initial in [AppLifecycleState.resumed, AppLifecycleState.paused]) {
     testWidgets(
-      'daily prefetch follows opening, resume and Windows focus: $initial',
+      'entry prefetch follows opening, resume and Windows focus: $initial',
       (tester) async {
         final services = _LifecycleServices();
         tester.binding.handleAppLifecycleStateChanged(initial);

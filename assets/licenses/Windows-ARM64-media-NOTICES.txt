@@ -1,0 +1,32 @@
+Windows ARM64 media runtime
+
+Windows ARM64 builds retain media_kit and media_kit_video's MIT-licensed
+integration code. They use the following architecture-specific binaries.
+Android and Windows x64 retain their existing media distributions.
+
+libmpv: shinchiro/mpv-winbuild-cmake, release 20261021
+Archive: mpv-dev-aarch64-20261021-git-e471496c56.7z
+SHA-256: 015f133399b3525021b6d937cf54ace2761d4f70224d5e62f5df24191b28f398
+Build source: https://github.com/shinchiro/mpv-winbuild-cmake/tree/20261021
+mpv source: https://github.com/mpv-player/mpv/tree/e471496c56
+FFmpeg source: https://github.com/FFmpeg/FFmpeg
+This distribution may enable GPL codecs and dependencies. Preserve the
+applicable component licenses and provide corresponding source for the
+distributed build; see the upstream build configuration and mpv-GPL-2.0.txt.
+
+ANGLE, D3D compiler, Vulkan loader and SwiftShader: Electron 32.3.3, Windows ARM64
+Archive: electron-v32.3.3-win32-arm64.zip
+SHA-256: 0cdac1de0f5750a0d327896b7b4fdeec47a32cc8a9ede1148dc8552a60417a4f
+Distribution: https://github.com/electron/electron/releases/tag/v32.3.3
+Electron source: https://github.com/electron/electron/tree/v32.3.3
+ANGLE source: https://chromium.googlesource.com/angle/angle
+SwiftShader source: https://swiftshader.googlesource.com/SwiftShader
+Vulkan loader source: https://github.com/KhronosGroup/Vulkan-Loader
+The complete Electron license and Chromium component notices from this
+verified archive are installed in the Windows runtime's licenses directory.
+The application does not embed or run Electron.
+
+EGL/GLES/KHR public headers use the existing pinned ANGLE v1.0.1 archive.
+Headers are architecture independent; all distributed DLLs and generated
+MSVC import libraries in the ARM64 runtime target ARM64.
+Header distribution: https://github.com/alexmercerind/flutter-windows-ANGLE-OpenGL-ES/tree/v1.0.1

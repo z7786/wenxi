@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../domain/models.dart';
@@ -19,6 +20,13 @@ class ResourceLinkHealth {
   final ResourceLinkState state;
   final String message;
   final DateTime? checkedAt;
+  bool get settled =>
+      state != ResourceLinkState.pending && state != ResourceLinkState.checking;
+  int get sortRank => switch (state) {
+    ResourceLinkState.valid => 0,
+    ResourceLinkState.invalid => 2,
+    _ => 1,
+  };
   String get label => switch (state) {
     ResourceLinkState.pending => '待检测',
     ResourceLinkState.checking => '检测中',
@@ -62,24 +70,60 @@ abstract class ResourceLinkCheckApi {
 
 class ResourceLinkCheckLimited implements Exception {}
 
-/// A bounded, viewport-driven queue. Cache entries include the extraction code.
-/// Probes never transfer shares. Explicitly invalid links are placed after
-/// links that are valid or still being checked.
+/// Checks returned search links before publication. Completed states are pinned
+/// for the batch so cache expiry cannot restart earlier checks in a long search.
+class ResourceLinkCheckBatch {
+  ResourceLinkCheckBatch._(this._owner);
+  final ResourceLinkChecks _owner;
+  final _hits = <String, ResourceSearchHit>{};
+  final _results = <String, ResourceLinkHealth>{};
+  final _completion = Completer<void>();
+  bool _sealed = false, _closed = false, _paused = false;
+
+  int get totalCount => _hits.length;
+  int get checkedCount => _results.length;
+  bool get paused => _paused;
+  Map<String, ResourceLinkHealth> get results => UnmodifiableMapView(_results);
+
+  void update(Iterable<ResourceSearchHit> hits) =>
+      _owner._updateBatch(this, hits);
+
+  Future<void> finish() {
+    if (!_closed) {
+      _sealed = true;
+      _owner._pump();
+    }
+    return _completion.future;
+  }
+
+  void pause() => _owner._setBatchPaused(this, true);
+
+  void resume() => _owner._setBatchPaused(this, false);
+
+  void cancel() => _owner._closeBatch(this, cancel: true);
+}
+
+/// A bounded queue shared by pre-publication search batches and visible
+/// recommendations. Probes never transfer shares; cache keys include passwords.
 class ResourceLinkChecks extends ChangeNotifier {
   ResourceLinkChecks(
     this.api, {
     this.clock = DateTime.now,
     this.debounce = const Duration(milliseconds: 180),
     this.concurrency = 3,
-  }) : assert(concurrency > 0);
+    this.timeout = const Duration(seconds: 16),
+  }) : assert(concurrency > 0),
+       assert(timeout > Duration.zero);
   final ResourceLinkCheckApi api;
   final DateTime Function() clock;
-  final Duration debounce;
+  final Duration debounce, timeout;
   final int concurrency;
   final _cache = <String, (DateTime, ResourceLinkHealth)>{};
   final _active = <String, CancelToken>{};
+  final _deadlines = <CancelToken, Timer>{};
   final _limitedUntil = <String, DateTime>{};
   Map<String, ResourceSearchHit> _visible = {};
+  ResourceLinkCheckBatch? _batch;
   Timer? _debounce, _cooldown;
   bool _closed = false;
 
@@ -94,6 +138,8 @@ class ResourceLinkChecks extends ChangeNotifier {
     if (_active.containsKey(key)) {
       return const ResourceLinkHealth(ResourceLinkState.checking);
     }
+    final pinned = _batch?._results[key];
+    if (pinned != null) return pinned;
     final cached = _cache[key];
     if (cached != null && clock().isBefore(cached.$1)) return cached.$2;
     final until = _limitedUntil[_provider(hit)];
@@ -106,25 +152,15 @@ class ResourceLinkChecks extends ChangeNotifier {
     return const ResourceLinkHealth(ResourceLinkState.pending);
   }
 
-  /// Stable health ordering for a result list. Unknown, locked and checking
-  /// states stay in the middle because a network failure must not be treated
-  /// as proof that a share is dead.
+  /// Valid, unconfirmed, then explicitly invalid, preserving order within each
+  /// group. Call before publication, rather than during scrolling.
   List<ResourceSearchHit> orderHits(Iterable<ResourceSearchHit> hits) {
     final values = hits.toList();
     final original = {
       for (final (index, hit) in values.indexed) resourceLinkKey(hit): index,
     };
-    int rank(ResourceLinkState state) => switch (state) {
-      ResourceLinkState.valid => 0,
-      ResourceLinkState.locked ||
-      ResourceLinkState.checking ||
-      ResourceLinkState.pending ||
-      ResourceLinkState.unknown => 1,
-      ResourceLinkState.unsupported => 2,
-      ResourceLinkState.invalid => 3,
-    };
     values.sort((a, b) {
-      final result = rank(health(a).state).compareTo(rank(health(b).state));
+      final result = health(a).sortRank.compareTo(health(b).sortRank);
       return result == 0
           ? original[resourceLinkKey(a)]!.compareTo(
               original[resourceLinkKey(b)]!,
@@ -135,7 +171,7 @@ class ResourceLinkChecks extends ChangeNotifier {
   }
 
   void setVisible(Iterable<ResourceSearchHit> hits) {
-    if (_closed) return;
+    if (_closed || _batch != null) return;
     final next = {
       for (final hit in hits.where(canCheckResourceLink).take(50))
         resourceLinkKey(hit): hit,
@@ -154,7 +190,7 @@ class ResourceLinkChecks extends ChangeNotifier {
     }
     _visible = next;
     for (final key in _active.keys.toList()) {
-      if (!next.containsKey(key)) _active.remove(key)!.cancel();
+      if (!next.containsKey(key)) _cancelProbe(key);
     }
     _schedule();
   }
@@ -173,10 +209,69 @@ class ResourceLinkChecks extends ChangeNotifier {
     _cooldown?.cancel();
     _cooldown = null;
     _visible = {};
-    for (final token in _active.values) {
-      token.cancel();
+    if (_batch == null) _cancelActive();
+  }
+
+  void _cancelActive() {
+    for (final key in _active.keys.toList()) {
+      _cancelProbe(key);
     }
-    _active.clear();
+  }
+
+  void _cancelProbe(String key) {
+    final token = _active.remove(key);
+    if (token == null) return;
+    _deadlines.remove(token)?.cancel();
+    token.cancel();
+  }
+
+  ResourceLinkCheckBatch beginBatch() {
+    assert(!_closed);
+    _batch?.cancel();
+    clearVisible();
+    return _batch = ResourceLinkCheckBatch._(this);
+  }
+
+  void _updateBatch(
+    ResourceLinkCheckBatch batch,
+    Iterable<ResourceSearchHit> hits,
+  ) {
+    if (_closed || batch._closed || batch._sealed || _batch != batch) return;
+    final next = {for (final hit in hits) resourceLinkKey(hit): hit};
+    batch._hits
+      ..clear()
+      ..addAll(next);
+    batch._results.removeWhere((key, _) => !next.containsKey(key));
+    for (final key in _active.keys.toList()) {
+      if (!next.containsKey(key)) _cancelProbe(key);
+    }
+    _pump();
+  }
+
+  void _closeBatch(ResourceLinkCheckBatch batch, {bool cancel = false}) {
+    if (batch._closed) return;
+    batch._closed = true;
+    if (_batch == batch) {
+      if (cancel) _cancelActive();
+      _batch = null;
+    }
+    batch._completion.complete();
+  }
+
+  void _setBatchPaused(ResourceLinkCheckBatch batch, bool paused) {
+    if (_closed ||
+        batch._closed ||
+        batch._paused == paused ||
+        _batch != batch) {
+      return;
+    }
+    batch._paused = paused;
+    if (paused) {
+      _cancelActive();
+    } else {
+      _pump();
+    }
+    notifyListeners();
   }
 
   void retry(ResourceSearchHit hit) {
@@ -184,7 +279,16 @@ class ResourceLinkChecks extends ChangeNotifier {
     final key = resourceLinkKey(hit);
     if (_active.containsKey(key)) return;
     _cache.remove(key);
-    _visible = {..._visible, key: hit};
+    if (_batch case final batch?) {
+      if (!batch._hits.containsKey(key)) return;
+      batch._results.remove(key);
+      final remaining = Map<String, ResourceSearchHit>.of(batch._hits);
+      batch._hits
+        ..clear()
+        ..addAll({key: hit, ...remaining});
+    } else {
+      _visible = {key: hit, ..._visible};
+    }
     _pump();
     notifyListeners();
   }
@@ -194,6 +298,37 @@ class ResourceLinkChecks extends ChangeNotifier {
     _cooldown?.cancel();
     _cooldown = null;
     _limitedUntil.removeWhere((_, until) => !clock().isBefore(until));
+    if (_batch case final batch?) {
+      var changed = false;
+      for (final entry in batch._hits.entries) {
+        if (batch._results.containsKey(entry.key)) continue;
+        final current = health(entry.value);
+        if (current.settled) {
+          batch._results[entry.key] = current;
+          changed = true;
+        }
+      }
+      if (batch._sealed && batch.checkedCount == batch.totalCount) {
+        _closeBatch(batch);
+        notifyListeners();
+        return;
+      }
+      if (!batch._paused) {
+        for (final entry in batch._hits.entries) {
+          if (_active.length >= concurrency) break;
+          if (batch._results.containsKey(entry.key) ||
+              _active.containsKey(entry.key)) {
+            continue;
+          }
+          final token = CancelToken();
+          _active[entry.key] = token;
+          unawaited(_run(entry.key, entry.value, token));
+          changed = true;
+        }
+      }
+      if (changed) notifyListeners();
+      return;
+    }
     DateTime? wakeAt;
     for (final hit in _visible.values) {
       final until = _limitedUntil[_provider(hit)];
@@ -220,8 +355,30 @@ class ResourceLinkChecks extends ChangeNotifier {
     CancelToken token,
   ) async {
     ResourceLinkHealth result;
+    var timedOut = false;
+    final expired = Completer<ResourceLinkHealth>();
+    final deadline = Timer(timeout, () {
+      timedOut = true;
+      expired.completeError(TimeoutException('Link check timed out'));
+    });
+    _deadlines[token] = deadline;
     try {
-      result = await Future.sync(() => api.check(hit, token));
+      result = await Future.any([
+        Future.sync(() => api.check(hit, token)),
+        expired.future,
+        token.whenCancel.then<ResourceLinkHealth>(
+          (_) => throw StateError('cancelled'),
+        ),
+      ]);
+      if (!result.settled) {
+        result = ResourceLinkHealth.checked(ResourceLinkState.unknown, clock());
+      } else if (result.checkedAt == null) {
+        result = ResourceLinkHealth(
+          result.state,
+          message: result.message,
+          checkedAt: clock(),
+        );
+      }
     } catch (e) {
       result = ResourceLinkHealth(
         ResourceLinkState.unknown,
@@ -233,9 +390,17 @@ class ResourceLinkChecks extends ChangeNotifier {
       if (!token.isCancelled && e is ResourceLinkCheckLimited) {
         _limitedUntil[_provider(hit)] = clock().add(const Duration(minutes: 1));
       }
+    } finally {
+      deadline.cancel();
+      _deadlines.remove(token);
     }
     if (_closed || token.isCancelled || !identical(_active[key], token)) return;
     _active.remove(key);
+    if (timedOut) token.cancel('deadline');
+    final batch = _batch;
+    if (batch != null && batch._hits.containsKey(key)) {
+      batch._results[key] = result;
+    }
     final ttl = switch (result.state) {
       ResourceLinkState.valid => const Duration(minutes: 10),
       ResourceLinkState.invalid => const Duration(minutes: 3),
@@ -253,6 +418,7 @@ class ResourceLinkChecks extends ChangeNotifier {
   @override
   void dispose() {
     _closed = true;
+    _batch?.cancel();
     clearVisible();
     api.dispose();
     super.dispose();

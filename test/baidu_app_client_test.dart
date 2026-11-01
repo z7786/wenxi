@@ -1,3 +1,4 @@
+import 'package:asterlink/data/providers/baidu_link_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/providers/baidu_app_client.dart';
@@ -128,7 +129,10 @@ void main() {
               expect(device['osVersion'], '14');
               expect(device['networkType'], 'wifi');
               expect(device['downloadVersion'], '13.15.4');
-              return (url: 'https://fixture.baidupcs.com/file', preview: true);
+              return const BaiduResolvedLink(
+                url: 'https://fixture.baidupcs.com/file',
+                preview: true,
+              );
             },
       );
       const session = BrowseSession(

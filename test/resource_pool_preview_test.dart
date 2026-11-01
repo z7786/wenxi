@@ -6,6 +6,7 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/resource_pool_preview.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/domain/baidu_share_route.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/resource_search.dart';
 import 'resource_search_test.dart' show SearchApiFixture;
@@ -184,7 +185,13 @@ void main() {
     },
   );
 
-  for (final reason in ['policy_disabled', 'policy_probability']) {
+  for (final reason in [
+    'policy_disabled',
+    'policy_probability',
+    'backend_unavailable',
+    'insufficient_space',
+    'no_account',
+  ]) {
     test(
       '$reason immediately uses the original file even after a cached transfer',
       () async {
@@ -202,6 +209,8 @@ void main() {
         );
         expect(result.session, same(original));
         expect(result.file, same(originalFile));
+        expect(result.parentId, original.rootId);
+        expect(result.siblings, [originalFile]);
         expect(api.openCalls, hasLength(2));
         expect(connector.opened, hasLength(1));
       },
@@ -260,13 +269,58 @@ void main() {
   );
 
   test(
-    'fallback is explicit and never opens an untransferred share as successful',
+    'space fallback preserves nested parent and the chosen Baidu parse route',
+    () async {
+      for (final route in BaiduShareRoute.values) {
+        final session = BrowseSession(
+          platform: CloudPlatform.baidu,
+          mode: BrowseMode.share,
+          title: 'Python',
+          rootId: '/',
+          metadata: {
+            BaiduShareRoute.metadataKey: route.key,
+            'parserSiteId': 'chosen-site',
+            'parserPasswordGrant': 'existing-grant',
+          },
+        );
+        const nested = CloudFile(
+          id: 'baidu-file',
+          name: 'lesson.mp4',
+          size: 123,
+          parentId: '/owner-private-path',
+        );
+        api.resolve = (hit, _, _) async => ResourceSearchOpenResult(
+          hit: hit,
+          mode: 'original',
+          reason: 'insufficient_space',
+        );
+        final target = await pool.resolve(
+          session,
+          nested,
+          ['docs'],
+          RequestScope(),
+          sourceParentId: '/docs',
+        );
+        expect(target.session, same(session));
+        expect(BaiduShareRoute.fromSession(target.session), route);
+        expect(target.session.meta('parserSiteId'), 'chosen-site');
+        expect(target.session.meta('parserPasswordGrant'), 'existing-grant');
+        expect(target.file, same(nested));
+        expect(target.parentId, '/docs');
+        expect(api.openSelections.last.parentId, '/docs');
+        expect(connector.opened, isEmpty);
+      }
+    },
+  );
+
+  test(
+    'general transfer failure stays explicit and never opens a new share',
     () async {
       api.resolve = (hit, _, _) async => ResourceSearchOpenResult(
         hit: hit,
         mode: 'original',
-        reason: 'no_account',
-        message: '该网盘暂时没有可用的转存账号',
+        reason: 'transfer_failed',
+        message: '暂时未能生成新的分享链接',
       );
       await expectLater(
         pool.resolve(original, originalFile, [], RequestScope()),
@@ -274,7 +328,7 @@ void main() {
           isA<AppException>().having(
             (e) => e.message,
             'message',
-            contains('没有可用'),
+            contains('新的分享链接'),
           ),
         ),
       );

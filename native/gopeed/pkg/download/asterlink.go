@@ -4,6 +4,7 @@ package download
 // Android must not delete/export a payload while an asynchronous Pause is still writing it.
 import (
 	"context"
+	corebt "github.com/GopeedLab/gopeed/internal/protocol/bt"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
 	"sync"
@@ -21,6 +22,13 @@ func (t *Task) ConnectionCounts() (active, total int) {
 		return counters.ConnectionCounts()
 	}
 	return 0, 0
+}
+
+func (t *Task) BTSourceState() *corebt.SourceState {
+	if source, ok := t.fetcher.(interface{ BTSourceState() *corebt.SourceState }); ok {
+		return source.BTSourceState()
+	}
+	return nil
 }
 
 func (t *Task) AliyunTransferState() *fhttp.AliyunTransferState {
@@ -125,7 +133,7 @@ func (d *Downloader) ReplacePausedRequest(id string, req *base.Request, connecti
 	}
 	// Upgrade old Baidu checkpoints without discarding their completed ranges.
 	// Other providers retain the options captured when the task was created.
-	if limit := fhttp.BaiduConnectionLimit(connectionProfile); limit > 0 {
+	if (connectionProfile == "baidu" || connectionProfile == "baidu_preview" || connectionProfile == "baidu_direct") && len(routeOptions) == 1 && routeOptions[0] != nil {
 		if err := base.ParseOptsExtra[fhttp.OptsExtra](task.Meta.Opts); err != nil {
 			return err
 		}
@@ -133,7 +141,10 @@ func (d *Downloader) ReplacePausedRequest(id string, req *base.Request, connecti
 			task.Meta.Opts.Extra = &fhttp.OptsExtra{}
 		}
 		extra := task.Meta.Opts.Extra.(*fhttp.OptsExtra)
-		extra.Connections = limit
+		extra.Connections = max(1, min(512, routeOptions[0].Connections))
+		if limit := fhttp.BaiduConnectionLimit(connectionProfile); limit > 0 {
+			extra.Connections = min(extra.Connections, limit)
+		}
 		extra.ConnectionProfile = connectionProfile
 		if task.fetcher != nil {
 			task.fetcher.Meta().Opts = task.Meta.Opts

@@ -16,6 +16,7 @@ import 'package:asterlink/ui/player_page.dart';
 import 'package:asterlink/ui/loading_indicator.dart';
 import 'package:asterlink/ui/player_theme.dart';
 import 'package:asterlink/platform/player_screenshot.dart';
+import 'package:asterlink/platform/windows_external_player.dart';
 import 'package:asterlink/playback/playback_sleep_timer.dart';
 import 'package:asterlink/ui/subtitle_appearance.dart';
 import 'package:asterlink/core/json.dart';
@@ -28,6 +29,14 @@ class _FixtureExternalStream extends ExternalPlaybackStream {
   Future<void> start() async {}
   @override
   String get url => 'http://127.0.0.1:12345/fixture/video';
+}
+
+class _WindowsPlayerDevice extends FakePlaybackDevice {
+  _WindowsPlayerDevice() {
+    supportsExternalPlayer = true;
+  }
+  @override
+  final windowsExternalPlayer = WindowsExternalPlayer();
 }
 
 class _ScreenshotActions extends PlayerScreenshotActions {
@@ -85,6 +94,7 @@ void main() {
     double scale = 1,
     bool dark = false,
     Future<XFile?> Function()? chooseSubtitle,
+    Future<XFile?> Function()? chooseExternalPlayer,
     PlaybackFixture? suppliedFixture,
     FakePlaybackDevice? suppliedDevice,
     bool downloadAvailable = false,
@@ -131,6 +141,7 @@ void main() {
               subtitleDirectory: directory,
               device: device,
               chooseSubtitle: chooseSubtitle,
+              chooseExternalPlayer: chooseExternalPlayer,
               screenshotActions: screenshotActions,
               confirmDownload: confirmDownload,
               onDownload: downloadAvailable
@@ -271,7 +282,65 @@ void main() {
     },
   );
 
-  testWidgets('A narrow desktop window does not expose the phone-only action', (
+  testWidgets('Windows selects, remembers and changes external players', (
+    tester,
+  ) async {
+    final device = _WindowsPlayerDevice();
+    var choices = 0;
+    final page = await render(
+      tester,
+      size: const Size(1200, 760),
+      suppliedDevice: device,
+      chooseExternalPlayer: () async =>
+          XFile('C:/Players/player${++choices}.exe'),
+    );
+    device.externalPlayer = (url, _, _) async {
+      expect(url, startsWith('http://127.0.0.1:'));
+      return true;
+    };
+    await tap(tester, find.byTooltip('第三方播放器'));
+    expect(device.windowsExternalPlayer!.executable, 'C:/Players/player1.exe');
+    expect(
+      page.fixture.store.data['windowsExternalPlayer'],
+      'C:/Players/player1.exe',
+    );
+    expect(page.fixture.current.state.playing, isFalse);
+    await page.fixture.controller.play();
+    await tap(tester, find.byTooltip('第三方播放器'));
+    expect(find.text('选择其他播放器'), findsOneWidget);
+    await tap(tester, find.text('取消'));
+    expect(page.fixture.current.state.playing, isTrue);
+    expect(choices, 1);
+    await tap(tester, find.byTooltip('第三方播放器'));
+    await tap(tester, find.text('player1.exe'));
+    expect(choices, 1);
+    await page.fixture.controller.play();
+    await tap(tester, find.byTooltip('第三方播放器'));
+    await tap(tester, find.text('选择其他播放器'));
+    expect(choices, 2);
+    expect(
+      page.fixture.store.data['windowsExternalPlayer'],
+      'C:/Players/player2.exe',
+    );
+  });
+
+  testWidgets('Windows file chooser cancellation keeps internal playback', (
+    tester,
+  ) async {
+    final device = _WindowsPlayerDevice();
+    final page = await render(
+      tester,
+      size: const Size(1200, 760),
+      suppliedDevice: device,
+      chooseExternalPlayer: () async => null,
+    );
+    await tap(tester, find.byTooltip('第三方播放器'));
+    expect(device.calls, isNot(contains('externalPlayer')));
+    expect(page.fixture.current.state.playing, isTrue);
+    expect(page.fixture.leases.values.single, 1);
+  });
+
+  testWidgets('A device without external playback hides the action', (
     tester,
   ) async {
     await render(
@@ -943,9 +1012,7 @@ void main() {
     final rect = tester.getRect(slider);
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await mouse.addPointer(location: Offset.zero);
-    await mouse.moveTo(
-      Offset(rect.left + rect.width * .5, rect.center.dy),
-    );
+    await mouse.moveTo(Offset(rect.left + rect.width * .5, rect.center.dy));
     await tester.pump();
     expect(find.byKey(const Key('player-seek-hover-time')), findsOneWidget);
     expect(find.text('05:00'), findsOneWidget);
@@ -978,6 +1045,95 @@ void main() {
         find.byKey(const Key('player-controls-fade'), skipOffstage: false),
       );
       expect(fade.opacity.value, 0);
+    },
+  );
+
+  for (final (size, scale) in [
+    (const Size(320, 700), 1.8),
+    (const Size(393, 864), 1.0),
+    (const Size(844, 390), 1.0),
+  ]) {
+    testWidgets(
+      'Rotation button fits the player at $size and text scale $scale',
+      (tester) async {
+        await render(
+          tester,
+          size: size,
+          scale: scale,
+          suppliedDevice: FakePlaybackDevice()..supportsOrientation = true,
+        );
+        for (final key in [
+          'player-orientation',
+          'player-play-pause',
+          'player-fullscreen',
+        ]) {
+          final button = find.byKey(Key(key));
+          expect(button.hitTestable(), findsOneWidget);
+          expect(tester.getRect(button).right, lessThanOrEqualTo(size.width));
+        }
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'Rotation button preserves playback and overrides automatic video direction',
+    (tester) async {
+      final page = await render(
+        tester,
+        size: const Size(844, 390),
+        suppliedDevice: FakePlaybackDevice()..supportsOrientation = true,
+      );
+      final backend = page.fixture.current;
+      final position = backend.state.position;
+      final preparations = page.fixture.preparations;
+      final rotation = find.byKey(const Key('player-orientation'));
+      expect(find.byTooltip('切换竖屏'), findsOneWidget);
+      await tester.tap(rotation);
+      await tester.pump();
+      expect(page.device.orientation, PlaybackOrientation.portrait);
+      tester.view.physicalSize = const Size(390, 844);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 120));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('player-layout-cover')), findsNothing);
+      expect(find.byTooltip('切换横屏'), findsOneWidget);
+      expect(backend.state.playing, isTrue);
+      expect(backend.state.position, position);
+      expect(page.fixture.history.preferences.autoRotate, isTrue);
+      await page.fixture.controller.pause();
+      await tester.pump();
+      expect(page.device.orientation, PlaybackOrientation.portrait);
+      await page.fixture.controller.play();
+      await tester.pumpAndSettle();
+      backend.emit(backend.state.copyWith(width: 1024, height: 576));
+      await tester.pump();
+      expect(page.device.orientation, PlaybackOrientation.portrait);
+      await tap(tester, find.byKey(const Key('player-lock')));
+      expect(page.device.orientationLocked, isTrue);
+      expect(rotation.hitTestable(), findsNothing);
+      await tap(tester, find.byKey(const Key('player-unlock')));
+      expect(page.device.orientation, PlaybackOrientation.portrait);
+      await tester.tap(rotation);
+      await tester.pump();
+      expect(page.device.orientation, PlaybackOrientation.landscape);
+      tester.view.physicalSize = const Size(844, 390);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 120));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('切换竖屏'), findsOneWidget);
+      expect(page.fixture.current, same(backend));
+      expect(page.fixture.preparations, preparations);
+      expect(backend.state.position, position);
+      await tap(tester, find.byTooltip('播放设置'));
+      final automatic = find.text('自动适配视频方向');
+      await scrollPanelTo(tester, automatic);
+      await tap(tester, automatic);
+      expect(page.device.orientation, PlaybackOrientation.system);
+      await tap(tester, automatic);
+      expect(page.device.orientation, PlaybackOrientation.landscape);
+      await tap(tester, find.byTooltip('关闭面板'));
+      expect(tester.takeException(), isNull);
     },
   );
 
@@ -1219,7 +1375,7 @@ void main() {
   );
 
   testWidgets(
-    'Single taps toggle controls and double taps pause without seeking',
+    'Single taps toggle controls and double taps pause and resume without overlays',
     (tester) async {
       final page = await render(tester), backend = page.fixture.current;
       final initialVolumeWrites = backend.volumes.length;
@@ -1241,12 +1397,281 @@ void main() {
       expect(backend.state.position, position);
       expect(backend.state.playing, isFalse);
       expect(backend.volumes.length, initialVolumeWrites);
+      expect(find.byKey(const Key('player-top-controls')), findsNothing);
+      expect(find.byKey(const Key('player-bottom-controls')), findsNothing);
+      expect(find.byTooltip('播放设置'), findsNothing);
+      expect(page.device.barsVisible, isFalse);
       await tester.tapAt(const Offset(320, 300));
       await tester.pump(const Duration(milliseconds: 70));
       await tester.tapAt(const Offset(320, 300));
       await tester.pumpAndSettle();
       expect(backend.state.playing, isTrue);
       expect(backend.state.position, position);
+      expect(find.byKey(const Key('player-top-controls')), findsNothing);
+      expect(find.byKey(const Key('player-bottom-controls')), findsNothing);
+      expect(page.device.barsVisible, isFalse);
+      await tester.tapAt(const Offset(196, 300));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('player-play-pause')), findsOneWidget);
+      expect(find.byTooltip('播放设置'), findsOneWidget);
+      expect(page.device.barsVisible, isTrue);
+    },
+  );
+
+  testWidgets(
+    'Double tapping with visible controls hides them while preserving the paused frame',
+    (tester) async {
+      final page = await render(tester);
+      final backend = page.fixture.current;
+      final position = backend.state.position;
+      final preparations = page.fixture.preparations;
+      expect(find.byKey(const Key('player-play-pause')), findsOneWidget);
+      await tester.tapAt(const Offset(196, 300));
+      await tester.pump(const Duration(milliseconds: 70));
+      await tester.tapAt(const Offset(196, 300));
+      await tester.pump();
+      expect(backend.state.playing, isFalse);
+      expect(
+        find.byKey(const Key('player-play-pause')).hitTestable(),
+        findsNothing,
+      );
+      expect(page.device.barsVisible, isFalse);
+      await tester.pumpAndSettle();
+      final captions = tester.getRect(find.byKey(const Key('player-captions')));
+      backend.emit(backend.state.copyWith(buffer: const Duration(minutes: 3)));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 5));
+      expect(find.byKey(const Key('player-top-controls')), findsNothing);
+      expect(find.byKey(const Key('player-bottom-controls')), findsNothing);
+      expect(find.byTooltip('播放设置'), findsNothing);
+      expect(page.device.barsVisible, isFalse);
+      expect(
+        tester.getRect(find.byKey(const Key('player-captions'))),
+        captions,
+      );
+      expect(backend.state.position, position);
+      expect(page.fixture.current, same(backend));
+      expect(page.fixture.preparations, preparations);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  Future<void> openSkipSettings(WidgetTester tester) async {
+    await tap(tester, find.byTooltip('播放设置'));
+    await scrollPanelTo(tester, find.byKey(const Key('player-skip-settings')));
+    await tap(tester, find.text('跳过片头片尾'));
+  }
+
+  for (final (size, scale, playing) in [
+    (const Size(393, 864), 1.0, true),
+    (const Size(844, 390), 1.0, true),
+    (const Size(320, 700), 1.8, false),
+  ]) {
+    testWidgets(
+      'Skip capture uses the latest timeline and remembers the folder at $size',
+      (tester) async {
+        final fixture = PlaybackFixture(
+          suppliedEntries: [
+            for (var index = 0; index < 2; index++)
+              PlaybackEntry(
+                id: '$index',
+                key: 'skip-capture-$index',
+                name: '第 ${index + 1} 集.mkv',
+                video: true,
+                settingsFolder: 'skip-capture-show',
+              ),
+          ],
+        );
+        final page = await render(
+          tester,
+          size: size,
+          scale: scale,
+          suppliedFixture: fixture,
+        );
+        final backend = fixture.current;
+        if (!playing) {
+          await fixture.controller.pause();
+          await tester.pump();
+        }
+        final preparations = fixture.preparations;
+        final seeks = backend.seeks.length;
+        final plays = backend.plays;
+        final pauses = backend.pauses;
+        await openSkipSettings(tester);
+        backend.emit(
+          backend.state.copyWith(position: const Duration(milliseconds: 83945)),
+        );
+        await tester.pump();
+        final captureIntro = find.byKey(const Key('player-capture-skip-intro'));
+        await scrollPanelTo(tester, captureIntro);
+        expect(captureIntro.hitTestable(), findsOneWidget);
+        await tap(tester, captureIntro);
+        expect(fixture.controller.preferences.skipIntroSeconds, 83);
+        expect(fixture.controller.preferences.skipOutroSeconds, 0);
+        expect(
+          fixture.history.preferencesFor('skip-capture-show').skipIntroSeconds,
+          83,
+        );
+        expect(fixture.history.preferences.skipIntroSeconds, 0);
+        expect(
+          tester
+              .widget<Slider>(find.byKey(const Key('player-skip-intro')))
+              .value,
+          83,
+        );
+        backend.emit(
+          backend.state.copyWith(position: const Duration(seconds: 503)),
+        );
+        await tester.pump();
+        final captureOutro = find.byKey(const Key('player-capture-skip-outro'));
+        await scrollPanelTo(tester, captureOutro);
+        expect(captureOutro.hitTestable(), findsOneWidget);
+        await tap(tester, captureOutro);
+        expect(fixture.controller.preferences.skipIntroSeconds, 83);
+        expect(fixture.controller.preferences.skipOutroSeconds, 97);
+        expect(
+          fixture.history.preferencesFor('skip-capture-show').skipOutroSeconds,
+          97,
+        );
+        expect(fixture.history.preferences.skipOutroSeconds, 0);
+        expect(
+          tester
+              .widget<Slider>(find.byKey(const Key('player-skip-outro')))
+              .value,
+          97,
+        );
+        expect(backend.state.position, const Duration(seconds: 503));
+        expect(backend.state.playing, playing);
+        expect(backend.plays, plays);
+        expect(backend.pauses, pauses);
+        expect(backend.seeks.length, seeks);
+        expect(fixture.preparations, preparations);
+        expect(fixture.current, same(backend));
+        expect(find.byKey(const Key('player-panel')), findsOneWidget);
+        await tap(tester, find.byTooltip('关闭面板'));
+        await fixture.controller.next();
+        await tester.pumpAndSettle();
+        expect(fixture.controller.preferences.skipIntroSeconds, 83);
+        expect(fixture.controller.preferences.skipOutroSeconds, 97);
+        expect(fixture.current.seeks, contains(const Duration(seconds: 83)));
+        expect(page.device.started, isTrue);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'Skip capture is disabled without duration and clamps positions to the timeline',
+    (tester) async {
+      final page = await render(
+        tester,
+        suppliedFixture: PlaybackFixture(
+          data: {
+            'playbackPreferences': {
+              'skipIntroSeconds': 15,
+              'skipOutroSeconds': 20,
+            },
+          },
+        ),
+      );
+      final controller = page.fixture.controller;
+      final backend = page.fixture.current;
+      await controller.pause();
+      backend.emit(backend.state.copyWith(duration: Duration.zero));
+      await tester.pump();
+      await openSkipSettings(tester);
+      final captureIntro = find.byKey(const Key('player-capture-skip-intro'));
+      final captureOutro = find.byKey(const Key('player-capture-skip-outro'));
+      for (final button in [captureIntro, captureOutro]) {
+        await scrollPanelTo(tester, button);
+        expect(tester.widget<TextButton>(button).onPressed, isNull);
+      }
+      expect(controller.preferences.skipIntroSeconds, 15);
+      expect(controller.preferences.skipOutroSeconds, 20);
+      backend.emit(
+        backend.state.copyWith(
+          duration: const Duration(minutes: 10),
+          position: Duration.zero,
+        ),
+      );
+      await tester.pump();
+      await scrollPanelTo(tester, captureIntro);
+      expect(tester.widget<TextButton>(captureIntro).onPressed, isNotNull);
+      await tap(tester, captureIntro);
+      expect(page.fixture.history.preferences.skipIntroSeconds, 0);
+      backend.emit(
+        backend.state.copyWith(position: const Duration(minutes: 12)),
+      );
+      await tester.pump();
+      await tap(tester, captureIntro);
+      expect(page.fixture.history.preferences.skipIntroSeconds, 600);
+      await scrollPanelTo(tester, captureOutro);
+      await tap(tester, captureOutro);
+      expect(page.fixture.history.preferences.skipOutroSeconds, 0);
+      backend.emit(
+        backend.state.copyWith(position: const Duration(seconds: -1)),
+      );
+      await tester.pump();
+      expect(tester.widget<TextButton>(captureIntro).onPressed, isNull);
+      expect(tester.widget<TextButton>(captureOutro).onPressed, isNull);
+      expect(backend.state.playing, isFalse);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'Skip capture rejects values above 600 seconds and accepts the exact limit',
+    (tester) async {
+      final page = await render(
+        tester,
+        suppliedFixture: PlaybackFixture(
+          data: {
+            'playbackPreferences': {
+              'skipIntroSeconds': 11,
+              'skipOutroSeconds': 17,
+            },
+          },
+        ),
+      );
+      final controller = page.fixture.controller;
+      final backend = page.fixture.current;
+      await controller.pause();
+      backend.emit(
+        backend.state.copyWith(
+          duration: const Duration(minutes: 30),
+          position: const Duration(seconds: 650),
+        ),
+      );
+      await tester.pump();
+      await openSkipSettings(tester);
+      final captureIntro = find.byKey(const Key('player-capture-skip-intro'));
+      final captureOutro = find.byKey(const Key('player-capture-skip-outro'));
+      await scrollPanelTo(tester, captureIntro);
+      await tap(tester, captureIntro);
+      expect(find.text('片头最多支持 600 秒，请调整播放位置后再捕获'), findsOneWidget);
+      expect(page.fixture.history.preferences.skipIntroSeconds, 11);
+      await scrollPanelTo(tester, captureOutro);
+      await tap(tester, captureOutro);
+      expect(find.text('片尾最多支持 600 秒，请调整播放位置后再捕获'), findsOneWidget);
+      expect(page.fixture.history.preferences.skipOutroSeconds, 17);
+      backend.emit(
+        backend.state.copyWith(position: const Duration(minutes: 10)),
+      );
+      await tester.pump();
+      await scrollPanelTo(tester, captureIntro);
+      await tap(tester, captureIntro);
+      expect(page.fixture.history.preferences.skipIntroSeconds, 600);
+      backend.emit(
+        backend.state.copyWith(position: const Duration(minutes: 20)),
+      );
+      await tester.pump();
+      await scrollPanelTo(tester, captureOutro);
+      await tap(tester, captureOutro);
+      expect(page.fixture.history.preferences.skipOutroSeconds, 600);
+      expect(backend.state.position, const Duration(minutes: 20));
+      expect(backend.state.playing, isFalse);
+      expect(tester.takeException(), isNull);
     },
   );
 

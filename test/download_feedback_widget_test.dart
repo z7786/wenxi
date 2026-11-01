@@ -116,7 +116,7 @@ void main() {
             final indexed = tester.widget<IndexedStack>(
               find.byType(IndexedStack).first,
             );
-            expect(indexed.index, 2);
+            expect(indexed.index, 3);
             expect(tester.takeException(), isNull);
           } finally {
             await tester.pumpWidget(const SizedBox.shrink());

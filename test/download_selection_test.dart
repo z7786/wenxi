@@ -24,6 +24,8 @@ class _SelectionFiles extends FakeFiles {
   _SelectionFiles(super.directory);
   final failPaths = <String>{};
   Completer<FileAvailability>? blocked;
+  Completer<void>? deletionBlocked;
+  int blockDeletionAt = 1;
   int deletes = 0, inspections = 0, checked = 0;
   @override
   Future<FileAvailability> inspect(String? path) async {
@@ -47,6 +49,9 @@ class _SelectionFiles extends FakeFiles {
   @override
   Future<void> delete(String? path) async {
     deletes++;
+    if (deletionBlocked != null && deletes == blockDeletionAt) {
+      await deletionBlocked!.future;
+    }
     if (failPaths.contains(path)) throw const AppException('文件正在使用');
     await super.delete(path);
   }
@@ -197,6 +202,10 @@ void main() {
     await tester.pumpAndSettle();
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
+      if (files.deletionBlocked?.isCompleted == false) {
+        files.deletionBlocked!.complete();
+        await tester.pump();
+      }
       if (files.blocked?.isCompleted == false) {
         files.blocked!.complete(FileAvailability.inaccessible);
         await tester.pump();
@@ -247,6 +256,123 @@ void main() {
       tester.binding.handleAppLifecycleStateChanged(state);
     }
   }
+
+  for (final entry in ['single', 'batch', 'clear', 'failed']) {
+    testWidgets('Deletion progress is visible through the $entry entry', (
+      tester,
+    ) async {
+      final (services, _, files) = await render(
+        tester,
+        unfinishedSavedFile: entry == 'failed',
+      );
+      files.deletionBlocked = Completer<void>();
+      files.blockDeletionAt = entry == 'single' || entry == 'failed' ? 1 : 2;
+      if (entry == 'single') {
+        await tester.tap(row('completed-a'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('downloads-remove-record')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byType(CheckboxListTile));
+        await tester.tap(
+          find.byKey(const Key('downloads-confirm-single-delete')),
+        );
+      } else if (entry == 'batch') {
+        await select(tester, 'completed-a');
+        await tester.tap(row('completed-b'));
+        await tester.tap(action('delete'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byType(CheckboxListTile));
+        await tester.tap(find.byKey(const Key('downloads-confirm-delete')));
+      } else {
+        await tester.tap(find.byTooltip('更多操作'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(entry == 'failed' ? '清理失败任务' : '清理下载记录'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('downloads-clear-files')));
+        await tester.tap(find.byKey(const Key('downloads-confirm-clear')));
+      }
+      final expectedDeletes = files.blockDeletionAt;
+      for (
+        var tries = 0;
+        tries < 100 && files.deletes < expectedDeletes;
+        tries++
+      ) {
+        await tester.pump(const Duration(milliseconds: 20));
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+      }
+      expect(files.deletes, expectedDeletes);
+      await tester.pump(const Duration(milliseconds: 150));
+      final count = entry == 'single' || entry == 'failed'
+          ? 1
+          : entry == 'batch'
+          ? 2
+          : 4;
+      final processed = entry == 'single' || entry == 'failed' ? 0 : 1;
+      expect(find.text('已处理 $processed / $count 项'), findsOneWidget);
+      expect(find.text('正在删除本地文件…'), findsOneWidget);
+      expect(find.textContaining('已删除 0 项'), findsOneWidget);
+      if (processed > 0) {
+        expect(find.textContaining('等待保存 1 项'), findsOneWidget);
+      }
+      expect(
+        tester
+            .widget<LinearProgressIndicator>(
+              find.byKey(const Key('operation-item-progress')),
+            )
+            .value,
+        0,
+      );
+      expect(services.downloads.tasks, hasLength(4));
+      files.deletionBlocked!.complete();
+      await waitFor(tester, () => services.downloads.tasks.length == 4 - count);
+      expect(find.byKey(const Key('operation-item-progress')), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('Cancelling visible deletion finishes only the current file', (
+    tester,
+  ) async {
+    final (services, _, files) = await render(tester);
+    final keptPath = services.downloads.task('completed-b')!.savedPath!;
+    files.deletionBlocked = Completer<void>();
+    await select(tester, 'completed-a');
+    await tester.tap(row('completed-b'));
+    await tester.tap(action('delete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(CheckboxListTile));
+    await tester.tap(find.byKey(const Key('downloads-confirm-delete')));
+    for (var tries = 0; tries < 100 && files.deletes == 0; tries++) {
+      await tester.pump(const Duration(milliseconds: 20));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+    }
+    expect(files.deletes, 1);
+    expect(find.text('已处理 0 / 2 项'), findsOneWidget);
+    final dialog = find.ancestor(
+      of: find.byKey(const Key('operation-item-progress')),
+      matching: find.byType(AlertDialog),
+    );
+    await tester.tap(
+      find.descendant(
+        of: dialog,
+        matching: find.widgetWithText(TextButton, '取消'),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('operation-item-progress')), findsNothing);
+    files.deletionBlocked!.complete();
+    await waitFor(tester, () => services.downloads.task('completed-a') == null);
+    expect(services.downloads.task('completed-b'), isNotNull);
+    expect(files.deletes, 1);
+    await tester.runAsync(
+      () async => expect(await File(keptPath).exists(), isTrue),
+    );
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
     'A missing file can be removed from its details without file access',

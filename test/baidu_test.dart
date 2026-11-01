@@ -1,3 +1,4 @@
+import 'package:asterlink/data/providers/baidu_link_service.dart';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
@@ -33,8 +34,8 @@ const _share = BrowseSession(
 );
 const _file = CloudFile(
   id: '789',
-  name: '测试 + 文件.mp4',
-  token: '/视频/测试 + 文件.mp4',
+  name: '测试 + 文件.bin',
+  token: '/视频/测试 + 文件.bin',
   size: 42,
 );
 Credential _credential([Map<String, String> extra = const {}]) => Credential(
@@ -895,12 +896,38 @@ void main() {
     });
 
     test(
+      'Account direct delivery uses service headers without sending the account to CDN',
+      () async {
+        final fixture = _DownloadFixture()
+          ..resolvedLink = const BaiduResolvedLink(
+            url: 'https://fixture.baidupcs.com/file',
+            profile: 'baidu_direct',
+            headers: {
+              'host': 'fixture.baidu-int.com',
+              'user-agent': 'netdisk',
+              'accept-encoding': 'identity',
+            },
+          );
+        final spec = await fixture.connector.download(
+          _personal,
+          _file,
+          _credential(),
+        );
+        expect(spec.profile, 'baidu_direct');
+        expect(spec.headers['host'], 'fixture.baidu-int.com');
+        expect(spec.headers.containsKey('Cookie'), isFalse);
+        expect(spec.headers.containsKey('cookie'), isFalse);
+        expect(spec.headers.containsKey('Referer'), isFalse);
+      },
+    );
+
+    test(
       'Legacy files forward their file ID when the path is unavailable',
       () async {
         final fixture = _DownloadFixture();
         await fixture.connector.download(
           _personal,
-          const CloudFile(id: '789', name: 'legacy.mp4'),
+          const CloudFile(id: '789', name: 'legacy.bin'),
           _credential(),
         );
         expect(fixture.lookups.single['fileId'], '789');
@@ -938,7 +965,7 @@ void main() {
                 required device,
               }) async {
                 scope.cancel();
-                return (
+                return const BaiduResolvedLink(
                   url: 'https://fixture.baidupcs.com/file',
                   preview: true,
                 );
@@ -1022,7 +1049,7 @@ void main() {
       'Unexpected transfer paths cannot be used to resolve another file',
       () async {
         final fixture = _DownloadFixture()
-          ..transferredPath = '/existing-user-file.mp4';
+          ..transferredPath = '/existing-user-file.bin';
         await expectLater(
           fixture.connector.download(_share, _file, _credential()),
           _message('百度转存未返回完整文件路径'),
@@ -1148,6 +1175,7 @@ class _DownloadFixture {
   int listHttpStatus = 200;
   final savedFiles = <String, Json>{};
   Object? lookupError;
+  BaiduResolvedLink? resolvedLink;
   Json managerResult = {'errno': 0};
   String accountUk = '999';
   bool transferError = false, stageError = false;
@@ -1157,7 +1185,7 @@ class _DownloadFixture {
   final created = <String>[], deleted = <String>[];
   final staged = <DownloadCleanup>[];
 
-  Future<({String url, bool preview})> lookup({
+  Future<BaiduResolvedLink> lookup({
     required String cookie,
     required String path,
     required String fileId,
@@ -1174,7 +1202,11 @@ class _DownloadFixture {
     lookupAfterList = http.calls.lastOrNull?.uri.path == '/api/list';
     await onLookup?.call();
     if (lookupError != null) throw lookupError!;
-    return (url: 'https://example.com/plain', preview: true);
+    return resolvedLink ??
+        const BaiduResolvedLink(
+          url: 'https://example.com/plain',
+          preview: true,
+        );
   }
 
   BrowseSession get boundShare => BrowseSession.fromJson({

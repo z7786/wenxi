@@ -52,13 +52,24 @@ class OperationProgressView extends StatelessWidget {
                 Expanded(
                   child: Semantics(
                     liveRegion: running,
-                    child: Text(
-                      step == null ? label : _stepLabel(step),
-                      style: TextStyle(
-                        color: color,
-                        fontSize: 13,
-                        height: 1.45,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          step == null ? label : _stepLabel(step),
+                          style: TextStyle(
+                            color: color,
+                            fontSize: 13,
+                            height: 1.45,
+                          ),
+                        ),
+                        if (step?.items != null)
+                          _ItemProgress(
+                            step: step!,
+                            accent: accent,
+                            foreground: muted,
+                          ),
+                      ],
                     ),
                   ),
                 ),
@@ -166,6 +177,10 @@ class OperationProgressView extends StatelessWidget {
 }
 
 String _stepLabel(OperationStep step) {
+  if (step.status == OperationStepStatus.running &&
+      step.items?.activity != null) {
+    return step.items!.activity!.runningLabel;
+  }
   final label = switch (step.status) {
     OperationStepStatus.running =>
       step.waitingForRetry ? '请求较频繁，正在等待重试…' : step.stage.runningLabel,
@@ -224,20 +239,83 @@ class _StepRow extends StatelessWidget {
           Expanded(
             child: Semantics(
               liveRegion: running || failed,
-              child: Text(
-                _stepLabel(step),
-                style: TextStyle(
-                  fontSize: 13,
-                  height: 1.45,
-                  fontWeight: running ? FontWeight.w600 : FontWeight.w400,
-                  color: running
-                      ? foreground
-                      : failed
-                      ? error
-                      : muted,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    _stepLabel(step),
+                    style: TextStyle(
+                      fontSize: 13,
+                      height: 1.45,
+                      fontWeight: running ? FontWeight.w600 : FontWeight.w400,
+                      color: running
+                          ? foreground
+                          : failed
+                          ? error
+                          : muted,
+                    ),
+                  ),
+                  if (step.items != null)
+                    _ItemProgress(
+                      step: step,
+                      accent: failed ? error : accent,
+                      foreground: muted,
+                    ),
+                ],
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ItemProgress extends StatelessWidget {
+  const _ItemProgress({
+    required this.step,
+    required this.accent,
+    required this.foreground,
+  });
+
+  final OperationStep step;
+  final Color accent, foreground;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = step.items!;
+    final settled = items.succeeded + items.failed + items.skipped;
+    final ratio = items.total == 0 ? 1.0 : settled / items.total;
+    final details = [
+      '已删除 ${items.succeeded} 项',
+      if (items.failed > 0) '失败 ${items.failed} 项',
+      if (items.skipped > 0) '跳过 ${items.skipped} 项',
+      if (items.processed > settled) '等待保存 ${items.processed - settled} 项',
+    ];
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            '已处理 ${items.processed} / ${items.total} 项',
+            style: TextStyle(color: foreground, fontSize: 12, height: 1.45),
+          ),
+          const SizedBox(height: 6),
+          LinearProgressIndicator(
+            key: const Key('operation-item-progress'),
+            value: ratio,
+            minHeight: 4,
+            color: accent,
+            backgroundColor: accent.withValues(alpha: .12),
+            borderRadius: BorderRadius.circular(4),
+            semanticsLabel: '删除进度，已处理 ${items.processed} / ${items.total} 项',
+            semanticsValue: '${(ratio * 100).floor()}',
+          ),
+          const SizedBox(height: 6),
+          Text(
+            details.join(' · '),
+            style: TextStyle(color: foreground, fontSize: 12, height: 1.45),
           ),
         ],
       ),

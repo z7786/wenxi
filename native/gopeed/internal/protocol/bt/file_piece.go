@@ -24,6 +24,11 @@ func (fs *filePieceImpl) pieceKey() metainfo.PieceKey {
 }
 
 func (fs *filePieceImpl) Completion() storage.Completion {
+	fs.ioMu.RLock()
+	defer fs.ioMu.RUnlock()
+	if fs.frozen {
+		return storage.Completion{Ok: true}
+	}
 	c, err := fs.completion.Get(fs.pieceKey())
 	if err != nil {
 		log.Printf("error getting piece completion: %s", err)
@@ -53,9 +58,16 @@ func (fs *filePieceImpl) Completion() storage.Completion {
 }
 
 func (fs *filePieceImpl) MarkComplete() error {
+	fs.ioMu.RLock()
+	defer fs.ioMu.RUnlock()
+	if fs.frozen {
+		return nil
+	}
 	return fs.completion.Set(fs.pieceKey(), true)
 }
 
 func (fs *filePieceImpl) MarkNotComplete() error {
+	fs.ioMu.RLock()
+	defer fs.ioMu.RUnlock()
 	return fs.completion.Set(fs.pieceKey(), false)
 }

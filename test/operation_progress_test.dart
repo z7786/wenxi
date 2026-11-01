@@ -8,6 +8,126 @@ import 'package:asterlink/domain/models.dart';
 import 'support.dart';
 
 void main() {
+  test(
+    'Item progress deduplicates updates and retains returned failures',
+    () async {
+      final outer = OperationProgress(), inner = OperationProgress();
+      addTearDown(outer.dispose);
+      addTearDown(inner.dispose);
+      const items = (
+        processed: 3,
+        total: 5,
+        succeeded: 1,
+        failed: 1,
+        skipped: 0,
+        activity: OperationStage.removeDownloadRecords,
+      );
+      var reports = 0;
+      outer.addListener(() => reports++);
+      await outer.run(
+        () => inner.run(
+          () => OperationProgress.step(
+            OperationStage.deleteDownloads,
+            () async {
+              OperationProgress.reportItems(items);
+              final count = reports;
+              OperationProgress.reportItems(items);
+              OperationProgress.reportItems((
+                processed: 6,
+                total: 5,
+                succeeded: 0,
+                failed: 0,
+                skipped: 0,
+                activity: null,
+              ));
+              expect(reports, count);
+              return false;
+            },
+            statusForResult: (ok) =>
+                ok ? OperationStepStatus.completed : OperationStepStatus.failed,
+          ),
+        ),
+      );
+      expect(outer.value.single.items, items);
+      expect(inner.value.single.items, items);
+      expect(outer.value.single.status, OperationStepStatus.failed);
+      expect(inner.value.single.status, OperationStepStatus.failed);
+    },
+  );
+
+  test(
+    'Cancelled item progress freezes and late reports cannot enter a new run',
+    () async {
+      final progress = OperationProgress();
+      addTearDown(progress.dispose);
+      final release = Completer<void>(), current = Completer<void>();
+      final old = progress.run(
+        () => OperationProgress.step(OperationStage.deleteDownloads, () async {
+          OperationProgress.reportItems((
+            processed: 1,
+            total: 3,
+            succeeded: 0,
+            failed: 0,
+            skipped: 0,
+            activity: OperationStage.deleteFiles,
+          ));
+          await release.future;
+          OperationProgress.reportItems((
+            processed: 3,
+            total: 3,
+            succeeded: 3,
+            failed: 0,
+            skipped: 0,
+            activity: OperationStage.removeDownloadRecords,
+          ));
+        }),
+      );
+      progress.close(cancelled: true);
+      expect(progress.value.single.items!.processed, 1);
+      expect(progress.value.single.items!.succeeded, 0);
+      expect(progress.value.single.status, OperationStepStatus.cancelled);
+      final fresh = progress.run(
+        () => OperationProgress.step(
+          OperationStage.readFiles,
+          () => current.future,
+        ),
+      );
+      release.complete();
+      await old;
+      expect(progress.value.single.items, isNull);
+      expect(progress.value.single.status, OperationStepStatus.running);
+      current.complete();
+      await fresh;
+    },
+  );
+
+  test('Detached cleanup only reports to its own progress observer', () async {
+    final dialog = OperationProgress(), cleanup = OperationProgress();
+    addTearDown(dialog.dispose);
+    addTearDown(cleanup.dispose);
+    final release = Completer<void>();
+    late Future<void> background;
+    await dialog.run(
+      () => OperationProgress.step(OperationStage.deleteDownloads, () async {
+        background = OperationProgress.detached(
+          () => cleanup.run(
+            () => OperationProgress.step(
+              OperationStage.cleanup,
+              () => release.future,
+            ),
+          ),
+        );
+      }),
+    );
+    expect(dialog.value.single.stage, OperationStage.deleteDownloads);
+    expect(dialog.value.single.status, OperationStepStatus.completed);
+    expect(cleanup.value.single.status, OperationStepStatus.running);
+    release.complete();
+    await background;
+    expect(cleanup.value.single.status, OperationStepStatus.completed);
+    expect(dialog.value, hasLength(1));
+  });
+
   test('A step stays running until its real work completes', () async {
     final progress = OperationProgress(), pending = Completer<String>();
     addTearDown(progress.dispose);

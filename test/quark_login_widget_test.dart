@@ -101,7 +101,7 @@ void main() {
                         MaterialPageRoute(
                           builder: (_) => QuarkLoginPage(
                             services,
-                            onUseWeb: () {},
+                            onUseWeb: () => Navigator.pop(context),
                             onUseManual: () {},
                             verifyCaptcha: ({required useSlider}) async =>
                                 quarkProof(slider: useSlider),
@@ -133,20 +133,6 @@ void main() {
     await tester.ensureVisible(finder);
     await tester.tap(finder);
     await tester.pump();
-  }
-
-  Future<void> qrMode(WidgetTester tester) async {
-    final method = find.byKey(const ValueKey('quark-login-method'));
-    await tester.ensureVisible(method);
-    await tester.tap(find.descendant(of: method, matching: find.text('扫码登录')));
-    await tester.pumpAndSettle();
-  }
-
-  Future<void> mobileMode(WidgetTester tester) async {
-    final method = find.byKey(const ValueKey('quark-login-method'));
-    await tester.ensureVisible(method);
-    await tester.tap(find.descendant(of: method, matching: find.text('手机号登录')));
-    await tester.pumpAndSettle();
   }
 
   Future<void> fillSms(WidgetTester tester) async {
@@ -186,7 +172,7 @@ void main() {
     (const Size(360, 800), 1.5, 'phone-large-text'),
   ]) {
     testWidgets(
-      'native phone and QR login layout at $size with text scale $scale',
+      'native phone login layout without QR at $size with text scale $scale',
       (tester) async {
         await render(tester, size: size, scale: scale);
         expect(find.byType(QuarkLoginPage), findsOneWidget);
@@ -194,10 +180,11 @@ void main() {
         expect(find.byKey(const ValueKey('quark-sms-mobile')), findsOneWidget);
         expect(f.http.calls, isEmpty);
         await screenshot(tester, '$name-sms');
-        await qrMode(tester);
-        expect(find.byKey(const ValueKey('quark-login-qr')), findsOneWidget);
-        expect(find.byKey(const ValueKey('quark-sms-mobile')), findsNothing);
-        await screenshot(tester, '$name-qr');
+        expect(find.text('扫码登录'), findsNothing);
+        expect(find.byKey(const ValueKey('quark-login-method')), findsNothing);
+        expect(find.byKey(const ValueKey('quark-login-qr')), findsNothing);
+        await tester.pump(const Duration(seconds: 6));
+        expect(f.http.calls, isEmpty);
         expect(tester.takeException(), isNull);
       },
     );
@@ -211,7 +198,7 @@ void main() {
     await tap(tester, 'native-login-web');
     await tester.pumpAndSettle();
     expect(find.byType(WebLoginPage), findsOneWidget);
-    expect(find.text('切换手机号或扫码登录'), findsOneWidget);
+    expect(find.text('切换手机号登录'), findsOneWidget);
     expect(closed, isFalse);
     await tap(tester, 'web-login-password');
     await tester.pumpAndSettle();
@@ -303,99 +290,41 @@ void main() {
     expect(closed, isTrue);
   });
 
-  testWidgets(
-    'QR polling pauses in the background and confirmed scan saves the reserved account',
-    (tester) async {
-      await render(tester);
-      final owner = tester
-          .widget<PasswordLoginFlow>(find.byType(PasswordLoginFlow))
-          .accountId;
-      await qrMode(tester);
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pump();
-      int polls() => f.http.calls
-          .where((r) => r.uri.path.endsWith('/getServiceTicketByQrcodeToken'))
-          .length;
-      expect(polls(), 1);
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
-      await tester.pump(const Duration(seconds: 6));
-      expect(polls(), 1);
-      f.scanned = true;
-      await tester.runAsync(() async {
-        tester.binding.handleAppLifecycleStateChanged(
-          AppLifecycleState.resumed,
-        );
-        await until(
-          () => services.vault.credential(CloudPlatform.quark) != null,
-        );
-      });
-      await tester.pumpAndSettle();
-      expect(services.vault.activeAccountId(CloudPlatform.quark), owner);
-      expect(
-        services.vault.credential(CloudPlatform.quark)!.field('authType'),
-        'qrCookie',
-      );
-      expect(closed, isTrue);
-    },
-  );
-
-  testWidgets('expired QR offers refresh without changing the saved account', (
-    tester,
-  ) async {
-    await render(tester);
-    await qrMode(tester);
-    f.expired = true;
-    await tester.pump(const Duration(seconds: 2));
-    await tester.pumpAndSettle();
-    expect(find.text('二维码已过期，请重新获取'), findsOneWidget);
-    expect(find.byKey(const ValueKey('quark-login-qr')), findsNothing);
-    expect(services.vault.credential(CloudPlatform.quark), isNull);
-    f.expired = false;
-    await tap(tester, 'quark-qr-refresh');
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('quark-login-qr')), findsOneWidget);
-    expect(
-      f.http.calls.where((r) => r.uri.path.endsWith('/getTokenForQrcodeLogin')),
-      hasLength(2),
-    );
-  });
-
   for (final action in ['switch', 'back']) {
-    testWidgets('$action cancels a pending confirmed QR before it can save', (
+    testWidgets('$action cancels pending SMS login before it can save', (
       tester,
     ) async {
-      await render(tester);
-      await qrMode(tester);
+      await render(tester, nativeOnly: true);
+      await fillSms(tester);
+      await tester.enterText(
+        find.byKey(const ValueKey('quark-sms-code')),
+        '1234',
+      );
       final answer = Completer<HttpResult>();
       var cancelled = false;
       f.override = (r) {
-        if (r.uri.path.endsWith('/getServiceTicketByQrcodeToken')) {
+        if (r.uri.path.endsWith('/commit')) {
           RequestScope.current!.whenCancel.then((_) => cancelled = true);
           return answer.future;
         }
         return null;
       };
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pump();
+      await tester.runAsync(() async {
+        await tap(tester, 'quark-sms-submit');
+        await until(
+          () => f.http.calls.any((r) => r.uri.path.endsWith('/commit')),
+        );
+      });
       if (action == 'switch') {
-        await mobileMode(tester);
+        await tap(tester, 'native-login-web');
       } else {
         Navigator.of(tester.element(find.byType(QuarkLoginPage))).pop();
         await tester.pump();
       }
-      await tester.pump();
-      expect(cancelled, isTrue);
-      f.scanned = true;
+      await tester.runAsync(() => until(() => cancelled));
       f.override = null;
       answer.complete(
-        await f.respond(
-          RecordedRequest(
-            'GET',
-            'https://uop.quark.cn/cas/ajax/getServiceTicketByQrcodeToken',
-            null,
-            {},
-          ),
-        ),
+        jsonResponse({'status': 20000, 'data': 'late-fixture-ticket'}),
       );
       await tester.pumpAndSettle();
       expect(services.vault.credential(CloudPlatform.quark), isNull);

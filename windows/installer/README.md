@@ -3,6 +3,7 @@
 ## 安装行为
 
 - 中文安装向导，支持 Windows 10/11 x64；普通用户安装，无需主动请求管理员权限。
+- 增加独立 Windows ARM64 包：`-Architecture arm64`，仅允许 ARM64 Windows 安装；应用与依赖使用原生 ARM64。完整构建见 [Windows ARM64 构建说明](../../docs/WINDOWS-ARM64-BUILD.md)。
 - 默认安装到 `%LOCALAPPDATA%\Programs\AsterLink`，可以选择 D 盘等可写目录。
 - 默认勾选创建桌面快捷方式，同时创建开始菜单入口和系统卸载入口。
 - 完成页面可以选择运行软件；静默安装不会自动启动软件。

@@ -129,6 +129,7 @@ class BrowserUiFixture {
   static Future<BrowserUiFixture> create({
     CloudPlatform platform = CloudPlatform.tianyi,
     String view = 'list',
+    DateTime Function() clock = DateTime.now,
   }) async {
     final directory = Directory.systemTemp.createTempSync(
       'asterlink-browser-test-',
@@ -149,6 +150,7 @@ class BrowserUiFixture {
       transport: FakeNative(),
       files: FakeFiles(Directory('${directory.path}/saved')),
       platformFeatures: false,
+      clock: clock,
       http: FakeHttp(),
     );
     services.cloud.connectors[platform] = connector;

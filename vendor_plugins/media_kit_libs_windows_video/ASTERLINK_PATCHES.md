@@ -27,3 +27,20 @@ Native regression covers HTTP Range, streaming startup, truncated input,
 bounded source recovery, cached seeking, rotation, subtitle rendering, BT and
 download-backed playback. This does not establish compatibility with every
 GPU, HDR display or Android device. Android's runtime is unchanged.
+
+Windows ARM64 uses a separate dependency directory and native runtime:
+
+- libmpv: `shinchiro/mpv-winbuild-cmake`, release `20261021`, archive
+  `mpv-dev-aarch64-20261021-git-e471496c56.7z`, SHA-256
+  `015f133399b3525021b6d937cf54ace2761d4f70224d5e62f5df24191b28f398`.
+- ANGLE: DLLs from Electron `32.3.3`'s official Windows ARM64 archive, SHA-256
+  `0cdac1de0f5750a0d327896b7b4fdeec47a32cc8a9ede1148dc8552a60417a4f`.
+  Public EGL/GLES headers remain from the existing ANGLE pin. Electron is not
+  embedded. The complete component licenses accompany the Windows payload.
+- `tool/prepare-windows-arm64-media.ps1` verifies downloads, extracts only
+  native dependencies and license notices, and generates ARM64 MSVC import
+  libraries directly from the DLL exports. Modern 7-Zip is required to read
+  the ARM64-filtered libmpv archive.
+- Installer preparation verifies the PE architecture of every DLL/EXE and the
+  ELF/PE architecture of the Dart AOT snapshot before packaging. Native helper
+  output is separate from the x64 binary. The x64 configuration is unchanged.

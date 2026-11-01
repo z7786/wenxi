@@ -82,6 +82,10 @@ class _BrowserPageState extends State<BrowserPage> {
   late int? accountRevision;
   late String? highlight = widget.highlightedFileId;
   late List<CloudFile> items = List.of(widget.initialItems ?? const []);
+  late DateTime _timeReference;
+  // CloudFile is immutable. Reuse pinyin keys across selection/menu rebuilds;
+  // weak keys let discarded directory and search results leave memory.
+  final _nameKeys = Expando<NaturalName>();
   final selected = <String>{}, search = TextEditingController();
   final _progress = OperationProgress();
   late final CloudDirectorySearch _deepSearch;
@@ -139,6 +143,7 @@ class _BrowserPageState extends State<BrowserPage> {
   @override
   void initState() {
     super.initState();
+    _timeReference = widget.services.clock();
     accountRevision = widget.services.cloud
         .sessionCredential(session)
         ?.updatedAt;
@@ -373,6 +378,7 @@ class _BrowserPageState extends State<BrowserPage> {
     final current = ++_searchGeneration, captured = session;
     setState(() {
       _searchResults = true;
+      _timeReference = widget.services.clock();
       selected.clear();
       _selectionMode = false;
       loading = false;
@@ -465,6 +471,7 @@ class _BrowserPageState extends State<BrowserPage> {
       _progress.close();
       setState(() {
         items = files;
+        _timeReference = widget.services.clock();
         _deepSearch.remember(session, parent, files);
         if (highlight != null) {
           final target = files
@@ -542,11 +549,20 @@ class _BrowserPageState extends State<BrowserPage> {
         )
         .toList();
     final dates = sort == 'date'
-        ? {for (final file in result) file: cloudFileDate(file.modifiedAt)}
+        ? {
+            for (final file in result)
+              file: cloudFileSortDate(
+                file.modifiedAt,
+                reference: _timeReference,
+              ),
+          }
         : <CloudFile, DateTime?>{};
     final names = sort == 'size'
         ? <CloudFile, NaturalName>{}
-        : {for (final file in result) file: NaturalName(file.name)};
+        : {
+            for (final file in result)
+              file: _nameKeys[file] ??= NaturalName(file.name),
+          };
     final positions = {for (final (index, file) in result.indexed) file: index};
     result.sort((a, b) {
       if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;

@@ -137,7 +137,7 @@ enum UnsupportedCloudPlatform {
   }
 }
 
-enum LinkKind { cloudShare, direct, magnet, torrent, unsupportedCloud }
+enum LinkKind { cloudShare, direct, magnet, torrent, unsupportedCloud, ed2k }
 
 class ParsedLink {
   ParsedLink({
@@ -487,6 +487,7 @@ class DownloadSpec {
     this.appUpdateKey,
     this.guestDownload = false,
     this.networkPolicy,
+    this.maxPlaybackConnections,
   });
   final String url, fileName, relativePath;
   final Map<String, String> headers;
@@ -497,7 +498,11 @@ class DownloadSpec {
   final String? appUpdateKey;
   final bool guestDownload;
   final DownloadNetworkPolicy? networkPolicy;
+
+  /// A positive upstream limit; null leaves playback concurrency unrestricted.
+  final int? maxPlaybackConnections;
   bool get isTorrent => torrent != null;
+  bool get isEd2k => url.toLowerCase().startsWith('ed2k://');
   bool get needsPreparation => !isTorrent && url.isEmpty && source != null;
   CloudPlatform? get platform => CloudPlatform.fromKey(
     source?.str('platform') ?? asJson(source?['session']).str('platform'),
@@ -526,6 +531,7 @@ class DownloadSpec {
     appUpdateKey: appUpdateKey ?? this.appUpdateKey,
     guestDownload: guestDownload ?? this.guestDownload,
     networkPolicy: networkPolicy,
+    maxPlaybackConnections: maxPlaybackConnections,
   );
   Json toJson() => {
     'url': url,
@@ -542,6 +548,8 @@ class DownloadSpec {
     if (appUpdateKey != null) 'appUpdateKey': appUpdateKey,
     if (guestDownload) 'guestDownload': true,
     if (networkPolicy != null) 'networkPolicy': networkPolicy!.toJson(),
+    if (maxPlaybackConnections != null)
+      'maxPlaybackConnections': maxPlaybackConnections,
   };
   factory DownloadSpec.fromJson(Json j) => DownloadSpec(
     url: j.str('url'),
@@ -562,6 +570,9 @@ class DownloadSpec {
     networkPolicy: j['networkPolicy'] == null
         ? null
         : DownloadNetworkPolicy.fromJson(j.obj('networkPolicy')),
+    maxPlaybackConnections: j.integer('maxPlaybackConnections') > 0
+        ? j.integer('maxPlaybackConnections')
+        : null,
   );
 }
 

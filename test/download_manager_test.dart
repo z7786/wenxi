@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:asterlink/core/json.dart';
+import 'package:asterlink/core/operation_progress.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/legacy_import.dart';
@@ -28,9 +29,11 @@ class _ProbeHttp extends TransferHttp {
 class _BatchFiles extends FakeFiles {
   _BatchFiles(super.directory);
   final failPaths = <String>{};
+  Future<void> Function(String? path)? beforeDelete;
   void Function()? afterDelete;
   @override
   Future<void> delete(String? path) async {
+    await beforeDelete?.call(path);
     if (failPaths.contains(path)) throw const AppException('文件正在使用');
     await super.delete(path);
     afterDelete?.call();
@@ -39,6 +42,9 @@ class _BatchFiles extends FakeFiles {
 
 class _RemovalNative extends FakeNative {
   final writers = <String>{};
+  final removedIds = <String>[];
+  Future<void> Function(String)? afterRemove;
+  int snapshots = 0;
   String? failingId;
   Completer<void>? blocked;
   bool entered = false;
@@ -54,10 +60,13 @@ class _RemovalNative extends FakeNative {
     }
     if (method == 'remove') {
       calls.add(method);
+      removedIds.add(id);
       if (writers.contains(id)) removedWhileWriting = true;
+      await afterRemove?.call(id);
       return null;
     }
     final result = await super.call(method, args);
+    if (method == 'snapshot') snapshots++;
     if (method == 'pause' || method == 'snapshot' && finish) writers.remove(id);
     if (method == 'snapshot' && reportedTotalConnections != null) {
       return {
@@ -140,6 +149,56 @@ void main() {
     expect(store.data['nativeRemovals'], contains('cold'));
     expect(manager.tasks, isEmpty);
   });
+
+  test(
+    'Legacy Baidu single thread tasks adopt current settings once',
+    () async {
+      await store.put('settings', {
+        'downloadThreadOverrides': {'baidu': 12},
+      });
+      await store.put('tasks', [
+        for (final profile in ['baidu', 'baidu_preview'])
+          DownloadTask(
+            id: profile,
+            spec: DownloadSpec(
+              url: 'https://fixture.baidupcs.com/file',
+              fileName: 'file.bin',
+              profile: profile,
+            ),
+            createdAt: 1,
+            connections: 1,
+            downloaded: 500,
+            status: DownloadStatus.paused,
+          ).toJson(),
+      ]);
+      await manager.initialize();
+      for (final entry in manager.tasks) {
+        expect(entry.connections, 12);
+        expect(entry.downloaded, 500);
+      }
+      expect(store.data['baiduConnectionsPolicy'], 1);
+      await manager.importPausedQueue(
+        () => store.put('tasks', [
+          DownloadTask(
+            id: 'explicit',
+            spec: const DownloadSpec(
+              url: 'https://fixture.baidupcs.com/file',
+              fileName: 'file.bin',
+              profile: 'baidu_preview',
+            ),
+            createdAt: 2,
+            connections: 1,
+            status: DownloadStatus.paused,
+          ).toJson(),
+        ]),
+      );
+      expect(
+        manager.tasks.single.connections,
+        1,
+        reason: 'later explicit single thread choices persist',
+      );
+    },
+  );
   test(
     'Bulk storage failure keeps live and durable records without cleanup markers',
     () async {
@@ -177,21 +236,352 @@ void main() {
       await diskManager.initialize();
       final blocked = Directory('${diskStore.file!.path}.tmp');
       await blocked.create();
+      final progress = OperationProgress();
+      addTearDown(progress.dispose);
+      final snapshots = <OperationItems>[];
+      progress.addListener(() {
+        final items = progress.value.lastOrNull?.items;
+        if (items != null) snapshots.add(items);
+      });
       try {
-        final result = await diskManager.batch([
-          'one',
-          'two',
-        ], DownloadBatchAction.delete);
+        final result = await progress.run(
+          () => diskManager.batch(['one', 'two'], DownloadBatchAction.delete),
+        );
         expect(result.failed.keys, ['one', 'two']);
         expect(result.succeeded, isEmpty);
         expect(diskManager.tasks, hasLength(2));
         expect(diskStore.data.list('tasks'), hasLength(2));
         expect(diskStore.data['downloadRemovals'] ?? [], isEmpty);
+        expect(snapshots.map((items) => items.succeeded), everyElement(0));
+        expect(progress.value.single.items!.processed, 2);
+        expect(progress.value.single.items!.failed, 2);
+        expect(progress.value.single.status, OperationStepStatus.failed);
       } finally {
         await blocked.delete();
         await diskManager.close();
         diskManager.dispose();
       }
+    },
+  );
+  test(
+    'A failed bulk file-removal commit retains records for a safe retry',
+    () async {
+      final diskStore = await StateStore.open(
+        Directory(p.join(root.path, 'delete-state')),
+        testKey: Uint8List(32),
+      );
+      final diskManager = DownloadManager(
+        store: diskStore,
+        engine: GopeedEngine(
+          native,
+          diskStore,
+          Vault(diskStore),
+          Directory(p.join(root.path, 'delete-native')),
+          Directory(p.join(root.path, 'delete-cache')),
+        ),
+        files: files,
+        cleanups: CleanupOutbox(diskStore, FakeHttp()),
+        http: _ProbeHttp(),
+        refreshSource: (_) async => throw StateError('unused'),
+      );
+      final records = <Json>[];
+      final paths = <String>[];
+      await files.directory.create();
+      for (final id in ['one', 'two']) {
+        final path = p.join(files.directory.path, '$id.bin');
+        await File(path).writeAsBytes([1, 2, 3, 4]);
+        paths.add(path);
+        records.add(
+          DownloadTask(
+            id: id,
+            spec: const DownloadSpec(
+              url: 'https://example.test/a',
+              fileName: 'a',
+            ),
+            createdAt: 1,
+            status: DownloadStatus.completed,
+            savedPath: path,
+          ).toJson(),
+        );
+      }
+      await diskStore.put('tasks', records);
+      await diskManager.initialize();
+      final blocked = Directory('${diskStore.file!.path}.tmp');
+      await blocked.create();
+      final progress = OperationProgress();
+      addTearDown(progress.dispose);
+      final snapshots = <OperationItems>[];
+      progress.addListener(() {
+        final items = progress.value.lastOrNull?.items;
+        if (items != null) snapshots.add(items);
+      });
+      try {
+        final result = await progress.run(
+          () => diskManager.batch(
+            ['one', 'two'],
+            DownloadBatchAction.delete,
+            deleteFiles: true,
+          ),
+        );
+        expect(result.succeeded, isEmpty);
+        expect(result.failed.keys, ['one', 'two']);
+        expect(diskManager.tasks, hasLength(2));
+        expect(diskStore.data['downloadRemovals'] ?? [], isEmpty);
+        expect(diskStore.data['nativeRemovals'] ?? [], isEmpty);
+        expect(snapshots.map((items) => items.succeeded), everyElement(0));
+        expect(progress.value.single.items!.processed, 2);
+        expect(progress.value.single.items!.failed, 2);
+        expect(progress.value.single.status, OperationStepStatus.failed);
+        final reopened = await StateStore.open(
+          diskStore.file!.parent,
+          testKey: Uint8List(32),
+        );
+        expect(
+          reopened.data.list('tasks').map((task) => task.str('savedPath')),
+          unorderedEquals(paths),
+        );
+        for (final path in paths) {
+          expect(await File(path).exists(), isFalse);
+        }
+        await blocked.delete();
+        final retry = await progress.run(
+          () => diskManager.batch(
+            ['one', 'two'],
+            DownloadBatchAction.delete,
+            deleteFiles: true,
+          ),
+        );
+        expect(retry.succeeded, ['one', 'two']);
+        expect(retry.failed, isEmpty);
+        expect(diskManager.tasks, isEmpty);
+        expect(native.openCount, 0);
+        expect(progress.value.single.items!.succeeded, 2);
+        expect(progress.value.single.items!.failed, 0);
+        expect(progress.value.single.status, OperationStepStatus.completed);
+      } finally {
+        if (await blocked.exists()) await blocked.delete();
+        await diskManager.close();
+        diskManager.dispose();
+      }
+    },
+  );
+
+  test('Task snapshots keep their order and expose the latest state', () async {
+    await store.put('tasks', [
+      for (final (id, createdAt) in [('old', 1), ('new', 3), ('middle', 2)])
+        DownloadTask(
+          id: id,
+          createdAt: createdAt,
+          status: DownloadStatus.failed,
+          spec: const DownloadSpec(url: '', fileName: 'file.bin'),
+        ).toJson(),
+    ]);
+    await manager.initialize();
+    final snapshot = manager.tasks;
+    expect(snapshot.map((task) => task.id), ['new', 'middle', 'old']);
+    await manager.pause('middle');
+    expect(manager.tasks.map((task) => task.id), ['new', 'middle', 'old']);
+    expect(manager.tasks[1].status, DownloadStatus.paused);
+    expect(snapshot[1].status, DownloadStatus.failed);
+    snapshot
+      ..clear()
+      ..add(manager.task('old')!);
+    expect(manager.tasks, hasLength(3));
+    await manager.delete('new');
+    expect(manager.tasks.map((task) => task.id), ['middle', 'old']);
+    await manager.importPausedQueue(
+      () => store.put('tasks', [
+        DownloadTask(
+          id: 'imported',
+          createdAt: 9,
+          status: DownloadStatus.paused,
+          spec: const DownloadSpec(url: '', fileName: 'imported.bin'),
+        ).toJson(),
+      ]),
+    );
+    expect(manager.tasks.single.id, 'imported');
+  });
+
+  for (final deleteFiles in [false, true]) {
+    test(
+      'Bulk removal merges durable cleanup writes; files=$deleteFiles',
+      () async {
+        const count = 130;
+        final ids = List.generate(count, (i) => 'cleanup-$i');
+        await files.directory.create();
+        final records = <Json>[];
+        for (final id in ids) {
+          final path = p.join(files.directory.path, '$id.bin');
+          await File(path).writeAsBytes([1, 2, 3, 4]);
+          records.add(
+            DownloadTask(
+              id: id,
+              spec: const DownloadSpec(
+                url: 'https://example.test/a',
+                fileName: 'a',
+              ),
+              createdAt: 1,
+              status: DownloadStatus.completed,
+              savedPath: path,
+            ).toJson(),
+          );
+          final cache = await engine.taskDirectory(id).create(recursive: true);
+          await File(p.join(cache.path, 'part')).writeAsBytes([1, 2, 3, 4]);
+        }
+        await store.put('tasks', records);
+        await manager.initialize();
+        await engine.begin({
+          'id': 'runtime',
+          'url': 'https://example.test/runtime',
+        });
+        await engine.pause('runtime');
+        var writes = 0;
+        store.addListener(() => writes++);
+        final progress = OperationProgress();
+        addTearDown(progress.dispose);
+        var reports = 0;
+        progress.addListener(() => reports++);
+        final result = await progress.run(
+          () => manager.batch(
+            ids,
+            DownloadBatchAction.delete,
+            deleteFiles: deleteFiles,
+          ),
+        );
+        await until(
+          () =>
+              store.data['downloadRemovals'] is List &&
+              (store.data['downloadRemovals'] as List).isEmpty &&
+              (store.data['nativeRemovals'] as List? ?? []).isEmpty,
+        );
+        expect(result.succeeded, ids);
+        expect(result.failed, isEmpty);
+        expect(manager.tasks, isEmpty);
+        expect(writes, lessThanOrEqualTo(6));
+        expect(progress.value, hasLength(1));
+        expect(progress.value.single.items!.total, count);
+        expect(progress.value.single.items!.processed, count);
+        expect(progress.value.single.items!.succeeded, count);
+        expect(progress.value.single.status, OperationStepStatus.completed);
+        expect(reports, lessThan(50));
+        expect(native.removedIds.toSet(), ids.toSet());
+        expect(native.removedWhileWriting, isFalse);
+        for (final id in ids) {
+          expect(
+            await File(p.join(files.directory.path, '$id.bin')).exists(),
+            !deleteFiles,
+          );
+          expect(await engine.taskDirectory(id).exists(), isFalse);
+        }
+      },
+    );
+  }
+
+  test(
+    'Cleanup acknowledgements retain failed and newly queued markers',
+    () async {
+      await manager.initialize();
+      await engine.begin({
+        'id': 'runtime',
+        'url': 'https://example.test/runtime',
+      });
+      await engine.pause('runtime');
+      final cleanupEngine = _CacheFailureEngine(
+        native,
+        store,
+        Vault(store),
+        engine.storage,
+        engine.cache,
+      );
+      // Use the initialized engine for native calls and a blocked cache path for
+      // one item, as a moved/unmounted destination would do in the application.
+      await cleanupEngine.begin({
+        'id': 'runtime-2',
+        'url': 'https://example.test/runtime',
+      });
+      await cleanupEngine.pause('runtime-2');
+      final cleanupManager = DownloadManager(
+        store: store,
+        engine: cleanupEngine,
+        files: files,
+        cleanups: cleanups,
+        http: _ProbeHttp(),
+        refreshSource: (_) async => throw StateError('unused'),
+      );
+      native.failingId = 'native-blocked';
+      native.afterRemove = (id) async {
+        if (id != 'clean') return;
+        await store.change((draft) {
+          draft['downloadRemovals'] = [
+            ...draft['downloadRemovals'] as List,
+            'added-later',
+          ];
+          draft['nativeRemovals'] = [
+            ...draft['nativeRemovals'] as List,
+            'added-later',
+          ];
+        });
+      };
+      await store.change((draft) {
+        draft['downloadRemovals'] = [
+          'clean',
+          'native-blocked',
+          'cache-blocked',
+        ];
+        draft['nativeRemovals'] = ['clean', 'native-blocked', 'cache-blocked'];
+        draft['completedCacheRemovals'] = ['clean', 'cache-blocked'];
+        draft['downloadCacheRoots'] = {
+          'clean': p.join(
+            root.path,
+            'destination',
+            GopeedEngine.destinationCacheName,
+          ),
+          'cache-blocked': p.join(
+            root.path,
+            'destination',
+            GopeedEngine.destinationCacheName,
+          ),
+        };
+      });
+      try {
+        await cleanupManager.initialize();
+        await until(
+          () => !(store.data['downloadRemovals'] as List).contains('clean'),
+        );
+        expect(store.data['downloadRemovals'], [
+          'native-blocked',
+          'cache-blocked',
+          'added-later',
+        ]);
+        expect(store.data['nativeRemovals'], ['native-blocked', 'added-later']);
+        expect(store.data['completedCacheRemovals'], ['cache-blocked']);
+        expect(store.data.obj('downloadCacheRoots').keys, ['cache-blocked']);
+      } finally {
+        await cleanupManager.close();
+        cleanupManager.dispose();
+      }
+    },
+  );
+
+  test(
+    'Starting the engine clears successful pending markers in one commit',
+    () async {
+      native.failingId = 'blocked';
+      await store.put('nativeRemovals', [
+        for (var i = 0; i < 130; i++) 'old-$i',
+        'blocked',
+      ]);
+      await store.put('secrets', {'flutter.gopeed.key': 'fixture-key'});
+      var writes = 0;
+      store.addListener(() => writes++);
+      await engine.begin({
+        'id': 'runtime',
+        'url': 'https://example.test/runtime',
+      });
+      await engine.pause('runtime');
+      expect(store.data['nativeRemovals'], ['blocked']);
+      expect(native.removedIds, hasLength(130));
+      expect(writes, 1);
     },
   );
   for (final cancelAfterFirstGroup in [false, true]) {
@@ -221,6 +611,8 @@ void main() {
         native.failingId = ids.first;
         final blocked = native.blocked = Completer<void>();
         final scope = RequestScope();
+        final progress = OperationProgress();
+        addTearDown(progress.dispose);
         var commits = 0;
         void changed() {
           commits++;
@@ -230,11 +622,25 @@ void main() {
         store.addListener(changed);
         try {
           final result = await scope
-              .run(() => manager.batch(ids, DownloadBatchAction.delete))
+              .run(
+                () => progress.run(
+                  () => manager.batch(ids, DownloadBatchAction.delete),
+                ),
+              )
               .timeout(const Duration(seconds: 2));
           expect(result.succeeded.length, cancelAfterFirstGroup ? 64 : count);
           expect(result.cancelled, cancelAfterFirstGroup);
           expect(commits, cancelAfterFirstGroup ? 1 : 3);
+          final items = progress.value.single.items!;
+          expect(items.total, count);
+          expect(items.processed, cancelAfterFirstGroup ? 64 : count);
+          expect(items.succeeded, result.succeeded.length);
+          expect(
+            progress.value.single.status,
+            cancelAfterFirstGroup
+                ? OperationStepStatus.cancelled
+                : OperationStepStatus.completed,
+          );
           expect(manager.tasks.length, cancelAfterFirstGroup ? count - 64 : 0);
           expect(store.data['downloadRemovals'], containsAll(result.succeeded));
         } finally {
@@ -672,6 +1078,37 @@ void main() {
     },
   );
   test(
+    'Idle progress skips notifications while connection changes still notify',
+    () async {
+      native
+        ..finish = false
+        ..reportedActiveConnections = 1
+        ..reportedTotalConnections = 8;
+      await manager.initialize();
+      final id = await manager.enqueue(
+        const DownloadSpec(
+          url: 'https://example.test/steady',
+          fileName: 'steady.bin',
+          expectedSize: 4,
+        ),
+      );
+      await until(() => manager.httpConnections(id) == (active: 1, total: 8));
+      final before = manager.task(id)!;
+      final samples = native.snapshots;
+      var notifications = 0;
+      manager.addListener(() => notifications++);
+      await until(() => native.snapshots >= samples + 2);
+      expect(manager.task(id), same(before));
+      expect(notifications, 0);
+      native.reportedActiveConnections = 3;
+      await until(() => manager.httpConnections(id) == (active: 3, total: 8));
+      expect(manager.task(id), same(before));
+      expect(notifications, 1);
+      await manager.pause(id);
+      expect(manager.httpConnections(id), isNull);
+    },
+  );
+  test(
     'Export failure keeps a verified payload so retry needs no network transfer',
     () async {
       files.failSave = true;
@@ -713,10 +1150,18 @@ void main() {
         ),
       );
       await until(() => native.writer);
-      await manager.delete(id);
+      final progress = OperationProgress();
+      addTearDown(progress.dispose);
+      final activities = <OperationStage?>[];
+      progress.addListener(
+        () => activities.add(progress.value.lastOrNull?.items?.activity),
+      );
+      await progress.run(() => manager.delete(id));
       expect(native.removedWhileWriting, isFalse);
       expect(native.writer, isFalse);
       expect(manager.task(id), isNull);
+      expect(activities, contains(OperationStage.stopDownloads));
+      expect(progress.value.single.items!.succeeded, 1);
     },
   );
   test('Pause-all removes queued work before freeing running slots', () async {
@@ -899,6 +1344,108 @@ void main() {
   }
 
   test(
+    'Single deletion shows file work and only confirms a saved record removal',
+    () async {
+      final paths = await savedBatch();
+      final progress = OperationProgress();
+      addTearDown(progress.dispose);
+      final entered = Completer<void>(), release = Completer<void>();
+      files.beforeDelete = (path) async {
+        expect(path, paths.first);
+        entered.complete();
+        await release.future;
+      };
+      final work = progress.run(
+        () => manager.delete('saved-0', deleteFile: true),
+      );
+      await entered.future;
+      try {
+        final step = progress.value.single;
+        expect(step.items!.total, 1);
+        expect(step.items!.processed, 0);
+        expect(step.items!.succeeded, 0);
+        expect(step.items!.activity, OperationStage.deleteFiles);
+        expect(step.status, OperationStepStatus.running);
+        expect(manager.task('saved-0'), isNotNull);
+        expect(
+          store.data.list('tasks').map((task) => task.str('id')),
+          contains('saved-0'),
+        );
+      } finally {
+        release.complete();
+      }
+      await work;
+      expect(progress.value.single.items!.processed, 1);
+      expect(progress.value.single.items!.succeeded, 1);
+      expect(progress.value.single.status, OperationStepStatus.completed);
+      expect(
+        store.data.list('tasks').map((task) => task.str('id')),
+        isNot(contains('saved-0')),
+      );
+      expect(await File(paths.first).exists(), isFalse);
+    },
+  );
+
+  test(
+    'Partial batch progress stays visible while a later file is blocked',
+    () async {
+      final paths = await savedBatch();
+      final progress = OperationProgress();
+      addTearDown(progress.dispose);
+      final entered = Completer<void>(), release = Completer<void>();
+      files.beforeDelete = (path) async {
+        if (path == paths[1]) {
+          entered.complete();
+          await release.future;
+        }
+      };
+      final work = progress.run(
+        () => manager.batch(
+          ['saved-0', 'missing', 'saved-1', 'saved-0'],
+          DownloadBatchAction.delete,
+          deleteFiles: true,
+        ),
+      );
+      await entered.future;
+      try {
+        await until(() => progress.value.single.items!.processed == 2);
+        final items = progress.value.single.items!;
+        expect(items.total, 3);
+        expect(items.succeeded, 0);
+        expect(items.skipped, 1);
+        expect(items.activity, OperationStage.deleteFiles);
+        expect(manager.task('saved-0'), isNotNull);
+        expect(manager.task('saved-1'), isNotNull);
+      } finally {
+        release.complete();
+      }
+      final result = await work;
+      expect(result.succeeded, ['saved-0', 'saved-1']);
+      expect(result.skipped, ['missing']);
+      expect(progress.value.single.items!.processed, 3);
+      expect(progress.value.single.items!.succeeded, 2);
+      expect(progress.value.single.items!.skipped, 1);
+    },
+  );
+
+  test(
+    'A cancelled single deletion keeps the unstarted file and record',
+    () async {
+      final paths = await savedBatch();
+      final scope = RequestScope()..cancel();
+      final progress = OperationProgress();
+      addTearDown(progress.dispose);
+      await scope.run(
+        () => progress.run(() => manager.delete('saved-0', deleteFile: true)),
+      );
+      expect(progress.value.single.status, OperationStepStatus.cancelled);
+      expect(progress.value.single.items!.processed, 0);
+      expect(manager.task('saved-0'), isNotNull);
+      expect(await File(paths.first).exists(), isTrue);
+    },
+  );
+
+  test(
     'Batch record deletion retains exported files and unselected records',
     () async {
       final paths = await savedBatch();
@@ -920,10 +1467,14 @@ void main() {
     () async {
       final paths = await savedBatch();
       files.failPaths.add(paths[0]);
-      final result = await manager.batch(
-        ['saved-0', 'saved-1'],
-        DownloadBatchAction.delete,
-        deleteFiles: true,
+      final progress = OperationProgress();
+      addTearDown(progress.dispose);
+      final result = await progress.run(
+        () => manager.batch(
+          ['saved-0', 'saved-1'],
+          DownloadBatchAction.delete,
+          deleteFiles: true,
+        ),
       );
       expect(result.succeeded, ['saved-1']);
       expect(result.failed.keys, ['saved-0']);
@@ -933,6 +1484,10 @@ void main() {
       expect(await File(paths[1]).exists(), isFalse);
       expect(await File(paths[2]).exists(), isTrue);
       expect(manager.task('saved-2'), isNotNull);
+      expect(progress.value.single.items!.processed, 2);
+      expect(progress.value.single.items!.succeeded, 1);
+      expect(progress.value.single.items!.failed, 1);
+      expect(progress.value.single.status, OperationStepStatus.failed);
     },
   );
 
@@ -941,12 +1496,16 @@ void main() {
     () async {
       final paths = await savedBatch();
       final scope = RequestScope();
+      final progress = OperationProgress();
+      addTearDown(progress.dispose);
       files.afterDelete = scope.cancel;
       final result = await scope.run(
-        () => manager.batch(
-          ['saved-0', 'saved-1', 'saved-2'],
-          DownloadBatchAction.delete,
-          deleteFiles: true,
+        () => progress.run(
+          () => manager.batch(
+            ['saved-0', 'saved-1', 'saved-2'],
+            DownloadBatchAction.delete,
+            deleteFiles: true,
+          ),
         ),
       );
       expect(result.cancelled, isTrue);
@@ -956,6 +1515,10 @@ void main() {
       expect(await File(paths[1]).exists(), isTrue);
       expect(await File(paths[2]).exists(), isTrue);
       expect(manager.tasks.map((task) => task.id), ['saved-2', 'saved-1']);
+      expect(progress.value.single.status, OperationStepStatus.cancelled);
+      expect(progress.value.single.items!.processed, 1);
+      expect(progress.value.single.items!.total, 3);
+      expect(progress.value.single.items!.succeeded, 1);
     },
   );
   test('Wrong checksums never become completed exports', () async {

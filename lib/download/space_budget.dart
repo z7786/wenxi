@@ -1,8 +1,15 @@
 import '../core/json.dart';
 
 class DownloadSpaceException extends AppException {
-  const DownloadSpaceException({this.volume}) : super('存储空间不足，进度已保留，请释放空间后继续');
+  const DownloadSpaceException({
+    this.volume,
+    this.freeBytes,
+    this.requiredBytes,
+    this.reservedBytes,
+    this.marginBytes,
+  }) : super('存储空间不足，进度已保留，请释放空间后继续');
   final String? volume;
+  final int? freeBytes, requiredBytes, reservedBytes, marginBytes;
 }
 
 class SpaceBudget {
@@ -36,7 +43,13 @@ class SpaceBudget {
       // Some document providers do not expose capacity. The writer reports
       // storage errors while retaining the task's existing bytes/checkpoint.
       if (free >= 0 && free < others + entry.value + margin) {
-        throw DownloadSpaceException(volume: entry.key);
+        throw DownloadSpaceException(
+          volume: entry.key,
+          freeBytes: free,
+          requiredBytes: entry.value,
+          reservedBytes: others,
+          marginBytes: margin,
+        );
       }
     }
     _reservations[id] = {

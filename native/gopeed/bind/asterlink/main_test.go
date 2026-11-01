@@ -254,17 +254,17 @@ func TestHTTPConnectionCountsExcludeCooldown(t *testing.T) {
 	}
 }
 
-func TestBaiduUpgradesLegacyCheckpointConnectionLimit(t *testing.T) {
+func TestBaiduUpgradesLegacySingleConnectionCheckpoint(t *testing.T) {
 	for _, tc := range []struct {
 		profile string
 		limit   int
 	}{
-		{"baidu", 1}, {"baidu_preview", 1},
+		{"baidu", 4}, {"baidu_preview", 4},
 	} {
 		t.Run(tc.profile, func(t *testing.T) {
 			storage, payload, key := openTestCore(t)
 			f := serveFile(t, 2*1024*1024, 30*time.Millisecond)
-			startFile(t, "baidu-resume", f.server.URL+"/file", 64, 1024*1024)
+			startFile(t, "baidu-resume", f.server.URL+"/file", 1, 1024*1024)
 			waitState(t, "baidu-resume", func(s snapshot) bool { return s.Downloaded > 0 && s.Status != "done" })
 			if err := Pause("baidu-resume"); err != nil {
 				t.Fatal(err)
@@ -291,8 +291,10 @@ func TestBaiduUpgradesLegacyCheckpointConnectionLimit(t *testing.T) {
 			}
 			state := waitState(t, "baidu-resume", func(s snapshot) bool { return s.Status == "done" })
 			assertPayload(t, state, f.data)
-			if f.peak.Load() != int32(tc.limit) || state.TotalConnections != tc.limit {
-				t.Fatalf("peak=%d total=%d, want %d", f.peak.Load(), state.TotalConnections, tc.limit)
+			// A completed saved range can occupy a checkpoint slot. Unread tails
+			// must run in parallel without exceeding the requested budget.
+			if f.peak.Load() < 2 || f.peak.Load() > int32(tc.limit) || state.TotalConnections != tc.limit {
+				t.Fatalf("peak=%d total=%d, budget=%d", f.peak.Load(), state.TotalConnections, tc.limit)
 			}
 		})
 	}

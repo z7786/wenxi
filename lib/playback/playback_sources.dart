@@ -114,7 +114,11 @@ PlaybackController cloudPlayback(
       return services.cloud.preparePlayback(session, files[entry.id]!);
     }),
     prepareDownload:
-        {CloudPlatform.uc, CloudPlatform.aliyun}.contains(session.platform) &&
+        {
+              CloudPlatform.baidu,
+              CloudPlatform.uc,
+              CloudPlatform.aliyun,
+            }.contains(session.platform) &&
             kind == FileKind.video
         ? (entry, scope) async {
             checkAccount();
@@ -148,10 +152,12 @@ PlaybackController cloudPlayback(
           SubtitleFiles.maximumBytes,
         );
         RequestScope.checkpoint();
+        checkAccount();
         staged = await SubtitleFiles(
           Directory(p.join(services.cacheDirectory.path, 'subtitles')),
         ).stage(subtitle.name, Stream.value(bytes));
         RequestScope.checkpoint();
+        checkAccount();
         final result = staged;
         staged = null;
         return result;

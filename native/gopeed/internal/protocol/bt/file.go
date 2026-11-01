@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 
 	"github.com/anacrolix/missinggo/v2"
 
@@ -28,6 +30,7 @@ type newFileClientOpts struct {
 	HandleFileTorrent func(infoHash metainfo.Hash, ft *fileTorrentImpl)
 	FilePathMaker     storage.FilePathMaker
 	PieceCompletion   storage.PieceCompletion
+	IsolateCompletion bool
 }
 
 func newFileOpts(opts newFileClientOpts) storage.ClientImplCloser {
@@ -69,12 +72,14 @@ func (fs fileClientImpl) OpenTorrent(ctx context.Context, info *metainfo.Info, i
 
 		files = append(files, f)
 	}
-	t := &fileTorrentImpl{
-		files,
-		segments.NewIndex(common.LengthIterFromUpvertedFiles(upvertedFiles)),
-		infoHash,
-		fs.opts.PieceCompletion,
+	completion := fs.opts.PieceCompletion
+	if fs.opts.IsolateCompletion {
+		completion = storage.NewMapPieceCompletion()
 	}
+	t := &fileTorrentImpl{files: files,
+		segmentLocater: segments.NewIndex(common.LengthIterFromUpvertedFiles(upvertedFiles)),
+		infoHash:       infoHash, completion: completion,
+		received: make([]atomic.Int64, len(files))}
 	fs.opts.HandleFileTorrent(infoHash, t)
 	return storage.TorrentImpl{
 		Piece: t.Piece,
@@ -94,6 +99,9 @@ type fileTorrentImpl struct {
 	segmentLocater segments.Index
 	infoHash       metainfo.Hash
 	completion     storage.PieceCompletion
+	received       []atomic.Int64
+	ioMu           sync.RWMutex
+	frozen         bool
 }
 
 func (fts *fileTorrentImpl) Piece(p metainfo.Piece) storage.PieceImpl {
@@ -113,6 +121,12 @@ func (fts *fileTorrentImpl) Close() error {
 }
 
 func (fts *fileTorrentImpl) setTorrentDir(dir string) {
+	fts.ioMu.Lock()
+	defer fts.ioMu.Unlock()
+	fts.setTorrentDirLocked(dir)
+}
+
+func (fts *fileTorrentImpl) setTorrentDirLocked(dir string) {
 	for i, f := range fts.files {
 		fts.files[i].path = filepath.Join(dir, f.rawPath)
 		if f.length == 0 {
@@ -170,6 +184,11 @@ func (fst *fileTorrentImplIO) readFileAt(file file, b []byte, off int64) (n int,
 
 // Only returns EOF at the end of the torrent. Premature EOF is ErrUnexpectedEOF.
 func (fst fileTorrentImplIO) ReadAt(b []byte, off int64) (n int, err error) {
+	fst.fts.ioMu.RLock()
+	defer fst.fts.ioMu.RUnlock()
+	if fst.fts.frozen {
+		return 0, io.EOF
+	}
 	fst.fts.segmentLocater.Locate(segments.Extent{off, int64(len(b))}, func(i int, e segments.Extent) bool {
 		n1, err1 := fst.readFileAt(fst.fts.files[i], b[:e.Length], e.Start)
 		n += n1
@@ -184,6 +203,11 @@ func (fst fileTorrentImplIO) ReadAt(b []byte, off int64) (n int, err error) {
 }
 
 func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
+	fst.fts.ioMu.RLock()
+	defer fst.fts.ioMu.RUnlock()
+	if fst.fts.frozen {
+		return 0, errFrozen
+	}
 	// log.Printf("write at %v: %v bytes", off, len(p))
 	fst.fts.segmentLocater.Locate(segments.Extent{off, int64(len(p))}, func(i int, e segments.Extent) bool {
 		name := fst.fts.files[i].path
@@ -195,6 +219,9 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 		}
 		var n1 int
 		n1, err = f.WriteAt(p[:e.Length], e.Start)
+		if n1 > 0 {
+			fst.fts.received[i].Add(int64(n1))
+		}
 		// log.Printf("%v %v wrote %v: %v", i, e, n1, err)
 		closeErr := f.Close()
 		n += n1

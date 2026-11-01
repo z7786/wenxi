@@ -137,8 +137,15 @@ https://github.com/example/files
     const defaults = AppSettings();
     expect(defaults.connectionsFor(CloudPlatform.quark), 512);
     expect(defaults.connectionsFor(CloudPlatform.uc), 512);
-    expect(defaults.connectionsFor(CloudPlatform.baidu), 1);
+    expect(defaults.connectionsFor(CloudPlatform.baidu), 8);
     expect(defaults.connectionsFor(CloudPlatform.baidu, 'baidu_public'), 64);
+    expect(defaults.connectionsFor(CloudPlatform.baidu, 'baidu_direct'), 3);
+    expect(
+      const AppSettings(
+        threadOverrides: {'baidu_direct': 512},
+      ).connectionsFor(CloudPlatform.baidu, 'baidu_direct'),
+      8,
+    );
     expect(
       const AppSettings(
         threadOverrides: {'baidu': 1, 'baidu_public': 32},
@@ -152,7 +159,7 @@ https://github.com/example/files
       ).connectionsFor(CloudPlatform.baidu, 'baidu_public'),
       16,
     );
-    expect(defaults.connectionsFor(CloudPlatform.baidu, 'baidu_preview'), 1);
+    expect(defaults.connectionsFor(CloudPlatform.baidu, 'baidu_preview'), 8);
     expect(
       defaults.connectionProfileFor(null, 'baidu_preview'),
       'baidu_preview',
@@ -162,21 +169,21 @@ https://github.com/example/files
         threads: 512,
         threadOverrides: {'baidu': 512},
       ).connectionsFor(null, 'baidu_preview'),
-      1,
+      512,
     );
     expect(
       const AppSettings(
         threads: 512,
         threadOverrides: {'baidu': 512},
       ).connectionsFor(CloudPlatform.baidu),
-      1,
+      512,
     );
     expect(
       const AppSettings(
         threads: 512,
         threadOverrides: {'baidu': 0},
       ).connectionsFor(null, 'baidu'),
-      1,
+      512,
     );
     expect(defaults.connectionsFor(CloudPlatform.xunlei), 64);
     expect(defaults.connectionsFor(null), 64);

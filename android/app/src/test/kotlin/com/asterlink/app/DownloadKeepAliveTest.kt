@@ -1,5 +1,6 @@
 package com.asterlink.app
 
+import android.Manifest
 import android.app.Application
 import android.app.Notification
 import android.app.NotificationChannel
@@ -7,6 +8,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.Looper
 import android.provider.Settings
 import io.flutter.plugin.common.MethodChannel
@@ -21,14 +24,30 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.Implementation
+import org.robolectric.annotation.Implements
+import org.robolectric.annotation.Resetter
+import org.robolectric.shadows.ShadowNotificationManager
 import java.time.Duration
 
 class DownloadTestApplication : Application(), DownloadServiceOwner {
     override lateinit var downloadKeepAlive: DownloadKeepAlive
 }
 
+@Implements(NotificationManager::class)
+class FailingDownloadNotifications : ShadowNotificationManager() {
+    companion object {
+        var rejectUpdates = false
+        @JvmStatic @Resetter fun resetFailure() { rejectUpdates = false }
+    }
+    @Implementation override fun notify(id: Int, notification: Notification) {
+        if (rejectUpdates) throw SecurityException("notification update rejected")
+        super.notify(id, notification)
+    }
+}
+
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [28], manifest = Config.NONE, application = DownloadTestApplication::class)
+@Config(sdk = [28, 35], manifest = Config.NONE, application = DownloadTestApplication::class)
 class DownloadKeepAliveTest {
     private lateinit var app: DownloadTestApplication
     private val controllers = mutableListOf<ServiceController<FlutterDownloadService>>()
@@ -80,6 +99,9 @@ class DownloadKeepAliveTest {
         assertEquals(Notification.VISIBILITY_PRIVATE, notification.visibility)
         assertNotNull(notification.publicVersion)
         assertEquals("全部暂停", notification.actions.single().title)
+        if (Build.VERSION.SDK_INT >= 29) {
+            assertEquals(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC, service.foregroundServiceType)
+        }
     }
 
     @Test fun updatesReuseServiceAndIdleImmediatelyReleasesResources() {
@@ -230,6 +252,84 @@ class DownloadKeepAliveTest {
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMinutes(2))
         assertFalse(service.wakeLockHeld)
         assertEquals("downloadServiceStalled", commands.single().first)
+    }
+
+    @Test fun aLateHeartbeatCannotRestartAStalledServiceUntilTheAppReturns() {
+        val service = start()
+        keeper.dartReady()
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMinutes(2))
+        assertFalse(service.wakeLockHeld)
+        assertEquals("downloadServiceStalled", commands.single().first)
+        commands.single().second(true)
+        val blocked = Reply()
+        keeper.update(DownloadNotice(1, "迟到的进度"), blocked)
+        assertNotNull(blocked.error)
+        assertFalse(keeper.running)
+        assertFalse(keeper.recoveryExpected)
+        keeper.appVisible()
+        val allowed = Reply()
+        keeper.update(DownloadNotice(1, "继续下载"), allowed)
+        createService().onStartCommand(Intent(), 0, 2)
+        assertEquals(1, allowed.calls)
+        assertNull(allowed.error)
+        assertTrue(keeper.running)
+    }
+
+    @Test fun aTimedOutPauseRetriesOnReturnAndIgnoresItsLateAcknowledgement() {
+        start()
+        keeper.dartReady()
+        keeper.pause()
+        idle()
+        val late = commands.single().second
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(10))
+        assertFalse(keeper.running)
+        keeper.appVisible()
+        idle()
+        assertEquals(listOf("pauseAll", "pauseAll"), commands.map { it.first })
+        commands.last().second(true)
+        val reply = Reply()
+        keeper.update(DownloadNotice(1, "继续下载"), reply)
+        createService().onStartCommand(Intent(), 0, 2)
+        late(false)
+        assertNull(reply.error)
+        assertTrue(keeper.running)
+        assertEquals(listOf("download.pause_timeout"), errors)
+    }
+
+    @Test @Config(shadows = [FailingDownloadNotifications::class])
+    fun notificationFailureCannotPreventThePauseCommandOrLeaveAWakeLock() {
+        val service = start()
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        keeper.dartReady()
+        FailingDownloadNotifications.rejectUpdates = true
+        try {
+            keeper.pause()
+            idle()
+        } finally {
+            FailingDownloadNotifications.rejectUpdates = false
+        }
+        assertEquals("pauseAll", commands.single().first)
+        commands.single().second(true)
+        assertFalse(service.wakeLockHeld)
+        assertFalse(keeper.running)
+        assertEquals(listOf("download.pause_notice_failed"), errors)
+    }
+
+    @Test @Config(sdk = [35])
+    fun grantingNotificationsRefreshesAnUnchangedNoticeWithoutRestartingTheService() {
+        shadowOf(app).denyPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        val service = start()
+        val notice = DownloadNotice(1, "等待网络恢复")
+        keeper.update(notice, Reply())
+        assertTrue(service.wakeLockHeld)
+        val services = shadowOf(app)
+        assertNotNull(services.nextStartedService)
+        shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        keeper.update(notice, Reply())
+        assertNull(services.nextStartedService)
+        val notification = shadowOf(app.getSystemService(NotificationManager::class.java))
+            .getNotification(FlutterDownloadService.NOTIFICATION_ID)
+        assertEquals("等待网络恢复", notification.extras.getString(Notification.EXTRA_TEXT))
     }
 
     @Test fun destructionReleasesLockAndLateRecoveryCallbackCannotUndoPause() {

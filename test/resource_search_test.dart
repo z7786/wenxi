@@ -6,9 +6,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/resource_search.dart';
 import 'package:asterlink/data/resource_search_api.dart';
+import 'package:asterlink/data/resource_link_checks.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/resource_search.dart';
 import 'support.dart';
+import 'resource_link_check_support.dart';
+
+Stream<ResourceSearchBatch> checkedSearchBatch(List<ResourceSearchHit> hits) {
+  // A local cancellation future stays inside fake_async's clock/zone.
+  final stream = StreamController<ResourceSearchBatch>(onCancel: () async {});
+  stream.add(ResourceSearchBatch(hits, complete: true));
+  unawaited(stream.close());
+  return stream.stream;
+}
 
 ResourceSearchHit searchHit(
   String id, {
@@ -212,10 +222,41 @@ void main() {
       expect(result.items.single.link!.passcode, 'aB12');
       expect(http.calls.single.uri.path, '/api/v1/search');
       expect(http.calls.single.uri.queryParameters['keyword'], 'Python 教程');
-      expect(http.calls.single.uri.queryParameters['limit'], '1000');
+      expect(http.calls.single.uri.queryParameters['limit'], '0');
       expect(http.calls.single.headers.keys, isNot(contains('X-API-Key')));
     },
   );
+
+  test('search batches accept more than one thousand results', () {
+    final batch = ResourceSearchBatch.fromJson({
+      'type': 'complete',
+      'results': [
+        for (var i = 0; i < 1500; i++)
+          {'title': 'Python 教程 $i', 'url': 'https://pan.quark.cn/s/lesson$i'},
+      ],
+    });
+    expect(batch.items, hasLength(1500));
+    expect(batch.complete, true);
+  });
+
+  test('SSE total bytes do not truncate later search batches', () async {
+    final description = 'x' * (1024 * 1024);
+    final chunks = Stream.fromIterable([
+      for (var i = 0; i < 5; i++)
+        utf8.encode(
+          'data: ${jsonEncode({
+            'type': 'update',
+            'results': [
+              {'title': 'Python $i', 'description': description},
+            ],
+          })}\n\n',
+        ),
+      utf8.encode('data: {"type":"complete","results":[]}\n\n'),
+    ]);
+    final events = await decodeSearchEvents(chunks).toList();
+    expect(events, hasLength(6));
+    expect(events.last['type'], 'complete');
+  });
 
   test(
     'canonical identities ignore tracking queries and retain separate shares',
@@ -335,9 +376,9 @@ void main() {
   );
 
   test(
-    'more than sixty streamed hits survive final ordering and cache',
+    'more than one thousand streamed hits survive final ordering and cache',
     () async {
-      final hits = List.generate(120, (i) => searchHit('bulk$i'));
+      final hits = List.generate(1500, (i) => searchHit('bulk$i'));
       final api = SearchApiFixture(
         (_, _) => Stream.fromIterable([
           ResourceSearchBatch(hits.take(75).toList()),
@@ -347,10 +388,10 @@ void main() {
       final search = ResourceSearch(store: StateStore.memory(), api: api);
       addTearDown(search.dispose);
       await search.search('Python');
-      expect(search.allItems.length, 120);
-      expect(search.items.first.identity, 'Quark:bulk119');
+      expect(search.allItems.length, 1500);
+      expect(search.items.first.identity, 'Quark:bulk1499');
       await search.search('python');
-      expect(search.items.length, 120);
+      expect(search.items.length, 1500);
       expect(api.calls.length, 1);
     },
   );
@@ -435,6 +476,397 @@ void main() {
       time.flushMicrotasks();
     });
   });
+
+  test('checked links are published in batches before the search finishes', () {
+    fakeAsync((fake) {
+      final stream = StreamController<ResourceSearchBatch>(
+        onCancel: () async {},
+      );
+      final probe = LinkCheckApiFixture();
+      final search = ResourceSearch(
+        store: StateStore.memory(),
+        api: SearchApiFixture((_, _) => stream.stream),
+        linkChecks: ResourceLinkChecks(probe),
+      );
+      unawaited(search.search('Python'));
+      stream.add(
+        ResourceSearchBatch([
+          searchHit('dead'),
+          searchHit('good'),
+          searchHit('locked'),
+          searchHit('slow'),
+        ]),
+      );
+      fake.flushMicrotasks();
+      expect(search.items, isEmpty);
+      expect(search.checkTotal, 4);
+      expect(probe.calls, hasLength(3));
+      probe.calls[1].complete(ResourceLinkState.valid);
+      probe.calls[0].complete(ResourceLinkState.invalid);
+      probe.calls[2].complete(ResourceLinkState.locked);
+      fake.flushMicrotasks();
+      fake.elapse(const Duration(milliseconds: 250));
+      expect(search.phase, ResourceSearchPhase.searching);
+      expect(search.items.map((h) => h.identity), [
+        'Quark:good',
+        'Quark:locked',
+        'Quark:dead',
+      ]);
+      expect(search.checkCompleted, 3);
+      expect(search.items.any((hit) => hit.identity == 'Quark:slow'), isFalse);
+      stream.add(ResourceSearchBatch(search.allItems, complete: true));
+      unawaited(stream.close());
+      fake.flushMicrotasks();
+      expect(search.phase, ResourceSearchPhase.checking);
+      probe.calls.last.complete(ResourceLinkState.unknown);
+      fake.flushMicrotasks();
+      expect(search.phase, ResourceSearchPhase.complete);
+      expect(search.items.map((h) => h.identity), [
+        'Quark:good',
+        'Quark:locked',
+        'Quark:slow',
+        'Quark:dead',
+      ]);
+      search.dispose();
+      fake.flushMicrotasks();
+      expect(fake.pendingTimers, isEmpty);
+    });
+  });
+
+  test(
+    'all unconfirmed states share a middle group and manual rechecks preserve order',
+    () {
+      fakeAsync((fake) {
+        final hits = [
+          searchHit('invalid'),
+          searchHit('unknown'),
+          searchHit('unsupported'),
+          searchHit('locked'),
+          searchHit('valid', url: 'https://pan.baidu.com/s/1valid'),
+        ];
+        final probe = LinkCheckApiFixture();
+        final checks = ResourceLinkChecks(probe, concurrency: 5);
+        final search = ResourceSearch(
+          store: StateStore.memory(),
+          api: SearchApiFixture((_, _) => checkedSearchBatch(hits)),
+          linkChecks: checks,
+        );
+        unawaited(search.search('Python'));
+        fake.flushMicrotasks();
+        for (final (i, state) in [
+          ResourceLinkState.invalid,
+          ResourceLinkState.unknown,
+          ResourceLinkState.unsupported,
+          ResourceLinkState.locked,
+          ResourceLinkState.valid,
+        ].indexed) {
+          probe.calls[i].complete(state);
+        }
+        fake.flushMicrotasks();
+        final order = search.items.map((h) => h.identity).toList();
+        expect(order, [
+          'Baidu:valid',
+          'Quark:unknown',
+          'Quark:unsupported',
+          'Quark:locked',
+          'Quark:invalid',
+        ]);
+        checks.retry(hits.first);
+        fake.flushMicrotasks();
+        expect(search.items.map((h) => h.identity), order);
+        probe.calls.last.complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        expect(search.health(hits.first)!.state, ResourceLinkState.valid);
+        expect(search.items.map((h) => h.identity), order);
+        search.filter('夸克网盘');
+        expect(search.items.map((h) => h.identity), order.skip(1));
+        search.filter(null);
+        expect(search.items.map((h) => h.identity), order);
+        search.dispose();
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test(
+    'stopping detection publishes found links once and rejects late results',
+    () {
+      fakeAsync((fake) {
+        final hits = [searchHit('good'), searchHit('slow')];
+        final probe = LinkCheckApiFixture();
+        final search = ResourceSearch(
+          store: StateStore.memory(),
+          api: SearchApiFixture((_, _) => checkedSearchBatch(hits)),
+          linkChecks: ResourceLinkChecks(probe),
+        );
+        var finished = false;
+        unawaited(search.search('Python').then((_) => finished = true));
+        fake.flushMicrotasks();
+        probe.calls.first.complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        search.stop();
+        fake.flushMicrotasks();
+        expect(finished, isTrue);
+        expect(search.phase, ResourceSearchPhase.stopped);
+        expect(search.items, hasLength(2));
+        expect(search.health(hits.last)!.state, ResourceLinkState.unknown);
+        expect(probe.calls.last.cancellation.isCancelled, isTrue);
+        probe.calls.last.complete(ResourceLinkState.invalid);
+        fake.flushMicrotasks();
+        expect(search.health(hits.last)!.state, ResourceLinkState.unknown);
+        search.dispose();
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test('later results remain independent of an earlier slow probe', () {
+    fakeAsync((fake) {
+      final stream = StreamController<ResourceSearchBatch>(
+        onCancel: () async {},
+      );
+      final probe = LinkCheckApiFixture();
+      final search = ResourceSearch(
+        store: StateStore.memory(),
+        api: SearchApiFixture((_, _) => stream.stream),
+        linkChecks: ResourceLinkChecks(probe),
+      );
+      unawaited(search.search('Python'));
+      stream.add(ResourceSearchBatch([searchHit('slow')]));
+      fake.flushMicrotasks();
+      stream.add(
+        ResourceSearchBatch([searchHit('second'), searchHit('third')]),
+      );
+      fake.flushMicrotasks();
+      expect(probe.calls, hasLength(3));
+      probe.calls[1].complete(ResourceLinkState.valid);
+      probe.calls[2].complete(ResourceLinkState.unknown);
+      fake.flushMicrotasks();
+      fake.elapse(const Duration(milliseconds: 250));
+      expect(search.items.map((hit) => hit.identity), [
+        'Quark:second',
+        'Quark:third',
+      ]);
+      expect(search.checkCompleted, 2);
+      probe.calls.first.complete(ResourceLinkState.invalid);
+      stream.add(ResourceSearchBatch(search.allItems, complete: true));
+      unawaited(stream.close());
+      fake.flushMicrotasks();
+      expect(search.phase, ResourceSearchPhase.complete);
+      expect(search.items.last.identity, 'Quark:slow');
+      search.dispose();
+      fake.flushMicrotasks();
+      expect(fake.pendingTimers, isEmpty);
+    });
+  });
+
+  test(
+    'corrected passwords are checked again without showing duplicate or unchecked rows',
+    () {
+      fakeAsync((fake) {
+        final stream = StreamController<ResourceSearchBatch>(
+          onCancel: () async {},
+        );
+        final probe = LinkCheckApiFixture();
+        final checks = ResourceLinkChecks(probe);
+        final search = ResourceSearch(
+          store: StateStore.memory(),
+          api: SearchApiFixture((_, _) => stream.stream),
+          linkChecks: checks,
+        );
+        final hit = searchHit('book');
+        final protected = searchHit('book', password: 'aB12');
+        unawaited(search.search('Python'));
+        stream.add(ResourceSearchBatch([hit]));
+        fake.flushMicrotasks();
+        probe.calls.first.complete(ResourceLinkState.locked);
+        fake.flushMicrotasks();
+        fake.elapse(const Duration(milliseconds: 250));
+        expect(search.items.single.password, isEmpty);
+        stream.add(ResourceSearchBatch([protected]));
+        fake.flushMicrotasks();
+        expect(probe.calls, hasLength(2));
+        expect(probe.calls.last.hit.password, 'aB12');
+        expect(search.items.single.password, isEmpty);
+        probe.calls.last.complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        fake.elapse(const Duration(milliseconds: 250));
+        expect(search.items, hasLength(1));
+        expect(search.items.single.password, 'aB12');
+        expect(
+          search.health(search.items.single)!.state,
+          ResourceLinkState.valid,
+        );
+        stream.add(ResourceSearchBatch([protected], complete: true));
+        unawaited(stream.close());
+        fake.flushMicrotasks();
+        expect(search.phase, ResourceSearchPhase.complete);
+        search.dispose();
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test(
+    'final batches can remove provisional results while remaining checks continue',
+    () {
+      fakeAsync((fake) {
+        final stream = StreamController<ResourceSearchBatch>(
+          onCancel: () async {},
+        );
+        final probe = LinkCheckApiFixture();
+        final search = ResourceSearch(
+          store: StateStore.memory(),
+          api: SearchApiFixture((_, _) => stream.stream),
+          linkChecks: ResourceLinkChecks(probe),
+        );
+        final hits = [
+          searchHit('one'),
+          searchHit('removed'),
+          searchHit('slow'),
+        ];
+        unawaited(search.search('Python'));
+        stream.add(ResourceSearchBatch(hits));
+        fake.flushMicrotasks();
+        probe.calls[0].complete(ResourceLinkState.valid);
+        probe.calls[1].complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        fake.elapse(const Duration(milliseconds: 250));
+        expect(search.items, hasLength(2));
+        stream.add(ResourceSearchBatch([hits[2], hits[0]], complete: true));
+        unawaited(stream.close());
+        fake.flushMicrotasks();
+        expect(search.items.single.identity, 'Quark:one');
+        expect(search.phase, ResourceSearchPhase.checking);
+        probe.calls.last.complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        expect(search.items.map((hit) => hit.identity), [
+          'Quark:slow',
+          'Quark:one',
+        ]);
+        search.dispose();
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test(
+    'search deadline stops probes and preserves found links as unconfirmed',
+    () {
+      fakeAsync((fake) {
+        final stream = StreamController<ResourceSearchBatch>(
+          onCancel: () async {},
+        );
+        final probe = LinkCheckApiFixture();
+        final search = ResourceSearch(
+          store: StateStore.memory(),
+          api: SearchApiFixture((_, _) => stream.stream),
+          linkChecks: ResourceLinkChecks(probe),
+          budget: const Duration(seconds: 2),
+        );
+        unawaited(search.search('Python'));
+        stream.add(ResourceSearchBatch([searchHit('slow')]));
+        fake.flushMicrotasks();
+        fake.elapse(const Duration(seconds: 2));
+        expect(search.phase, ResourceSearchPhase.failed);
+        expect(search.items, hasLength(1));
+        expect(
+          search.health(search.items.single)!.state,
+          ResourceLinkState.unknown,
+        );
+        expect(probe.calls.single.cancellation.isCancelled, isTrue);
+        search.dispose();
+        unawaited(stream.close());
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test(
+    'new queries cancel publication timers and checks from older searches',
+    () {
+      fakeAsync((fake) {
+        final probe = LinkCheckApiFixture();
+        final search = ResourceSearch(
+          store: StateStore.memory(),
+          api: SearchApiFixture(
+            (keyword, _) => checkedSearchBatch([
+              searchHit('${keyword}one'),
+              searchHit('${keyword}two'),
+            ]),
+          ),
+          linkChecks: ResourceLinkChecks(probe),
+        );
+        unawaited(search.search('old'));
+        fake.flushMicrotasks();
+        probe.calls.first.complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        final old = probe.calls.last;
+        unawaited(search.search('new'));
+        fake.flushMicrotasks();
+        expect(old.cancellation.isCancelled, isTrue);
+        fake.elapse(const Duration(milliseconds: 300));
+        expect(search.items, isEmpty);
+        old.complete(ResourceLinkState.invalid);
+        for (final call in probe.calls.skip(2)) {
+          call.complete(ResourceLinkState.valid);
+        }
+        fake.flushMicrotasks();
+        expect(search.items.map((hit) => hit.identity), [
+          'Quark:newone',
+          'Quark:newtwo',
+        ]);
+        search.dispose();
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
+
+  test(
+    'cached searches reuse fresh health and recheck expired results before publishing',
+    () {
+      fakeAsync((fake) {
+        final probe = LinkCheckApiFixture();
+        DateTime clock() => DateTime(2026, 10, 29).add(fake.elapsed);
+        final api = SearchApiFixture(
+          (_, _) => checkedSearchBatch([searchHit('cache')]),
+        );
+        final search = ResourceSearch(
+          store: StateStore.memory(),
+          api: api,
+          clock: clock,
+          linkChecks: ResourceLinkChecks(probe, clock: clock),
+        );
+        unawaited(search.search('Python'));
+        fake.flushMicrotasks();
+        probe.calls.single.complete(ResourceLinkState.unknown);
+        fake.flushMicrotasks();
+        unawaited(search.search('python'));
+        fake.flushMicrotasks();
+        expect(search.fromCache, isTrue);
+        expect(probe.calls, hasLength(1));
+        expect(search.items, hasLength(1));
+        fake.elapse(const Duration(minutes: 1));
+        unawaited(search.search('Python'));
+        fake.flushMicrotasks();
+        expect(api.calls, hasLength(1));
+        expect(probe.calls, hasLength(2));
+        expect(search.items, isEmpty);
+        probe.calls.last.complete(ResourceLinkState.valid);
+        fake.flushMicrotasks();
+        expect(search.items, hasLength(1));
+        search.dispose();
+        fake.flushMicrotasks();
+        expect(fake.pendingTimers, isEmpty);
+      });
+    },
+  );
 
   test('cloud display priority keeps unsupported results available', () async {
     final api = SearchApiFixture(

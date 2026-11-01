@@ -77,6 +77,28 @@ function(extract_archive_if_incomplete archive destination)
   endforeach()
 endfunction()
 
+if(FLUTTER_TARGET_PLATFORM STREQUAL "windows-arm64")
+  # ARM64 archives and MSVC import libraries are prepared by the build script.
+  # The x64 runtime keeps its original dependency pins below.
+  set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv-20261021")
+  set(ANGLE_SRC "${CMAKE_BINARY_DIR}/ANGLE")
+  foreach(required
+      "${LIBMPV_SRC}/libmpv-2.dll"
+      "${CMAKE_BINARY_DIR}/libmpv/libmpv.dll.a"
+      "${CMAKE_BINARY_DIR}/libmpv/include/client.h"
+      "${ANGLE_SRC}/libEGL.dll"
+      "${ANGLE_SRC}/libGLESv2.dll"
+      "${ANGLE_SRC}/d3dcompiler_47.dll"
+      "${ANGLE_SRC}/vk_swiftshader.dll"
+      "${ANGLE_SRC}/vulkan-1.dll"
+      "${ANGLE_SRC}/include/EGL/egl.h"
+      "${ANGLE_SRC}/lib/libEGL.dll.lib"
+      "${ANGLE_SRC}/lib/libGLESv2.dll.lib")
+    if(NOT EXISTS "${required}")
+      message(FATAL_ERROR "Missing ARM64 dependency ${required}. Run tool/prepare-windows-media.ps1 -Architecture arm64.")
+    endif()
+  endforeach()
+else()
 # libmpv archive containing the pre-built shared libraries & headers.
 set(LIBMPV "mpv-dev-x86_64-20241021-git-0f78584.7z")
 
@@ -133,6 +155,7 @@ download_and_verify(
 extract_archive_if_incomplete("${ANGLE_ARCHIVE}" "${ANGLE_SRC}"
   d3dcompiler_47.dll libEGL.dll libGLESv2.dll vk_swiftshader.dll vulkan-1.dll
   include/EGL/egl.h lib/libEGL.dll.lib lib/libGLESv2.dll.lib)
+endif()
 
 # ------------------------------------------------------------------------------
 set(PLUGIN_NAME "media_kit_libs_windows_video_plugin")
