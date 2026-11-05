@@ -18,6 +18,7 @@ $platformAnchor = @'
         : 'windows-x64';
     final targetPlatform = TargetPlatform.fromName(defaultTargetPlatform);
 '@
+$platformAnchor = $platformAnchor.Replace("`r`n", "`n")
 if (-not $source.Contains($optionAnchor) -or -not $source.Contains($platformAnchor.TrimEnd())) {
     throw 'Unexpected Flutter source. No SDK files were changed.'
 }
@@ -32,7 +33,7 @@ $options = @'
       help: 'Target Windows architecture for the isolated AsterLink build SDK.',
     );
 '@
-$source = $source.Replace($optionAnchor, $options.TrimEnd())
+$source = $source.Replace($optionAnchor, $options.Replace("`r`n", "`n").TrimEnd())
 $source = $source.Replace($platformAnchor.TrimEnd(), "    final targetPlatform = TargetPlatform.fromName(stringArg('target-platform')!);")
 $source = $source.Replace('  final OperatingSystemUtils _operatingSystemUtils;', '')
 $source = $source.Replace("  }) : _operatingSystemUtils = operatingSystemUtils,`n       super(verboseHelp: verboseHelp) {", '  }) : super(verboseHelp: verboseHelp) {')
