@@ -41,9 +41,8 @@ for sdk, target in [('iphoneos', 'arm64-apple-ios13.0'),
     modules.mkdir(exist_ok=True)
     (modules / 'module.modulemap').write_text(
         'framework module AsterLinkCore { umbrella header "AsterLinkCore.h" export * }\n')
-    # Link the C archive into a Mach-O image. Xcode rejects Go archives whose
-    # objects mix old and new Apple platform load commands when packaging them
-    # directly; the SDK linker emits a single platform for the final framework.
+    # A dynamic framework exposes only the C ABI and keeps Go and C++ symbols
+    # private. The SDK linker also verifies every object targets this platform.
     exports = folder / 'exports.txt'
     exports.write_text('_AsterLinkCall\n_AsterLinkFree\n')
     subprocess.run([compiler, '-target', target, '-isysroot', sdk_path,

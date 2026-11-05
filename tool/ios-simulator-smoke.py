@@ -13,9 +13,10 @@ def sim(*args, **kwargs):
     return subprocess.check_output(['xcrun', 'simctl', *args], text=True, **kwargs).strip()
 runtimes = json.loads(sim('list', 'runtimes', '--json'))['runtimes']
 runtime = next(item for item in reversed(runtimes) if item.get('isAvailable') and 'iOS' in item['name'])
-devices = json.loads(sim('list', 'devicetypes', '--json'))['devicetypes']
-device_type = next(item for item in reversed(devices) if 'iPhone' in item['name'])
-device = sim('create', 'AsterLink iOS CI', device_type['identifier'], runtime['identifier'])
+available = json.loads(sim('list', 'devices', 'available', '--json'))['devices']
+device_type = next(item for item in available[runtime['identifier']]
+                   if item.get('isAvailable') and 'iPhone' in item['name'])
+device = sim('create', 'AsterLink iOS CI', device_type['deviceTypeIdentifier'], runtime['identifier'])
 try:
     sim('boot', device)
     sim('bootstatus', device, '-b')
