@@ -19,7 +19,7 @@ jobs:
     environment: ${{ (github.event_name == 'push' || inputs.official) && 'release' || '' }}
     timeout-minutes: 60
     env:
-      PUB_HOSTED_URL: https://pub.flutter-io.cn
+      PUB_HOSTED_URL: https://pub.dev
       FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
       GOPROXY: https://proxy.golang.org,direct
       GOTOOLCHAIN: go1.24.7
@@ -46,6 +46,7 @@ jobs:
           dart tool/sync_version.dart --check
           flutter config --no-enable-swift-package-manager
           xcodebuild -version
+          python -c "from pathlib import Path; p=Path('pubspec.lock'); p.write_text(p.read_text().replace('https://pub.flutter-io.cn', 'https://pub.dev'))"
       - name: Prepare existing client configuration
         if: github.event_name == 'push' || inputs.official
         env:
