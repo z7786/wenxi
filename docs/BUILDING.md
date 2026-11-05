@@ -23,7 +23,7 @@ flutter pub get --enforce-lockfile
 
 提交到 `main` 或创建面向 `main` 的 PR 会运行 `CI`，先完成源码检查及 Flutter、原生组件测试，再构建 Android ARM64 和 Windows x64。该流程使用公开配置，安卓构建检查不需要签名密钥。
 
-正式安装包在仓库的 **Actions → Build signed release → Run workflow** 中选择 `main` 后生成。推送与 `pubspec.yaml` 版本匹配的 `v` 标签也会触发，例如版本 `2.2.0+220` 对应 `v2.2.0`。工作流读取 GitHub 的 `release` environment：
+正式安装包在仓库的 **Actions → Build signed release → Run workflow** 中选择 `main` 后生成。推送与 `pubspec.yaml` 版本匹配的 `v` 标签也会触发，例如版本 `2.2.0+220` 对应 `v2.2.0+220`。工作流读取 GitHub 的 `release` environment：
 
 | 类型 | 名称 |
 | --- | --- |
