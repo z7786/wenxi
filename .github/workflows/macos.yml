@@ -36,6 +36,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
+      - name: Cache native test compilation
+        uses: actions/cache@668efc2e3b91c097bfbecfcf8e1b4f2d0185dcaa # v5
+        with:
+          path: ~/Library/Caches/go-build
+          key: macos-arm64-go-1.24.7-${{ hashFiles('native/gopeed/go.sum', 'native/gopeed/**/*.go') }}
+          restore-keys: macos-arm64-go-1.24.7-
       - name: Verify source and configure macOS
         run: |
           test "$(uname -m)" = arm64

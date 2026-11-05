@@ -9,6 +9,7 @@ import '../core/json.dart';
 import '../domain/playback.dart';
 import '../platform/windows_pip.dart';
 import 'desktop_pip_surface.dart';
+import '../playback/video_output_policy.dart';
 
 class IndependentPlayerApp extends StatelessWidget {
   const IndependentPlayerApp({super.key, required this.endpoint});
@@ -156,7 +157,7 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
       video = VideoController(
         decoder,
         configuration: VideoControllerConfiguration(
-          enableHardwareAcceleration: true,
+          enableHardwareAcceleration: supportsNativeHardwareRendering,
           hwdec: preferences.hardwareAcceleration ? null : 'no',
         ),
       );

@@ -15,6 +15,7 @@ import 'playback_stall_monitor.dart';
 import 'playback_buffer_policy.dart';
 import 'playback_metrics.dart';
 import 'subtitle_fonts.dart';
+import 'video_output_policy.dart';
 
 /// The controller also runs against a deterministic backend in lifecycle tests.
 abstract class PlaybackBackend extends ChangeNotifier {
@@ -130,8 +131,9 @@ class MediaKitBackend extends PlaybackBackend {
           // Keep it when decoding on the CPU; the native output already falls
           // back to CPU rendering if ANGLE cannot initialize.
           enableHardwareAcceleration:
-              defaultTargetPlatform == TargetPlatform.windows ||
-              hardwareAcceleration,
+              supportsNativeHardwareRendering &&
+              (defaultTargetPlatform == TargetPlatform.windows ||
+                  hardwareAcceleration),
           hwdec: hardwareAcceleration ? null : 'no',
         ),
       );

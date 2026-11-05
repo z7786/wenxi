@@ -2,6 +2,7 @@ import Cocoa
 import FlutterMacOS
 import UniformTypeIdentifiers
 import IOKit.pwr_mgt
+import OpenGL
 
 class MainFlutterWindow: NSWindow {
   private var nativeChannel: FlutterMethodChannel?
@@ -11,6 +12,24 @@ class MainFlutterWindow: NSWindow {
   private var externalPanel: NSOpenPanel?
 
   override func awakeFromNib() {
+    // media_kit's native OpenGL output assumes this pixel format exists.
+    // Virtual Macs may have no accelerated OpenGL device; keep decoding
+    // enabled and use its pixel buffer output on those machines.
+    let attributes: [CGLPixelFormatAttribute] = [
+      kCGLPFAOpenGLProfile, CGLPixelFormatAttribute(kCGLOGLPVersion_3_2_Core.rawValue),
+      kCGLPFAAccelerated, kCGLPFADoubleBuffer,
+      kCGLPFAColorSize, CGLPixelFormatAttribute(rawValue: 64), kCGLPFAColorFloat,
+      kCGLPFABackingStore, kCGLPFAAllowOfflineRenderers,
+      kCGLPFASupportsAutomaticGraphicsSwitching, CGLPixelFormatAttribute(rawValue: 0)
+    ]
+    var pixelFormat: CGLPixelFormatObj?
+    var count: GLint = 0
+    let status = CGLChoosePixelFormat(attributes, &pixelFormat, &count)
+    if status != kCGLNoError || pixelFormat == nil {
+      setenv("ASTERLINK_MACOS_SOFTWARE_RENDERING", "1", 1)
+      NSLog("AsterLink: accelerated OpenGL unavailable; using compatible video output")
+    }
+    if let pixelFormat = pixelFormat { CGLDestroyPixelFormat(pixelFormat) }
     let project = FlutterDartProject()
     project.dartEntrypointArguments = Array(CommandLine.arguments.dropFirst())
     let flutterViewController = FlutterViewController(project: project)
