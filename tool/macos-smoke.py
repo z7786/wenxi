@@ -78,9 +78,21 @@ with tempfile.TemporaryDirectory(prefix='asterlink-playback-') as temporary:
                           'videoGeometry': {'width': 160, 'height': 90}})
 
         def do_POST(self):
-            length = int(self.headers.get('Content-Length', 0))
-            assert 0 < length < 16384
-            progress.setdefault(self.path, []).append(json.loads(self.rfile.read(length)))
+            body = bytearray()
+            if self.headers.get('Transfer-Encoding', '').lower() == 'chunked':
+                while True:
+                    size = int(self.rfile.readline(128).split(b';', 1)[0], 16)
+                    assert len(body) + size < 16384
+                    if size == 0:
+                        assert self.rfile.readline(128) == b'\r\n'
+                        break
+                    body.extend(self.rfile.read(size))
+                    assert self.rfile.read(2) == b'\r\n'
+            else:
+                length = int(self.headers.get('Content-Length', 0))
+                assert 0 < length < 16384
+                body.extend(self.rfile.read(length))
+            progress.setdefault(self.path, []).append(json.loads(body))
             self.respond({})
 
         def respond(self, value):
@@ -95,6 +107,7 @@ with tempfile.TemporaryDirectory(prefix='asterlink-playback-') as temporary:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     players = []
+    playback_passed = False
     with (root / '.local/macos-playback.log').open('wb') as output:
         try:
             for index in range(2):
@@ -103,9 +116,12 @@ with tempfile.TemporaryDirectory(prefix='asterlink-playback-') as temporary:
                                                 stdout=output, stderr=output))
             deadline = time.monotonic() + 35
             while time.monotonic() < deadline:
-                assert all(player.poll() is None for player in players), 'Independent playback process exited'
+                assert all(player.poll() is None for player in players), (
+                    'Independent playback process exited: codes=' + str([player.poll() for player in players]) +
+                    ', ready=' + str({path: len(values) for path, values in progress.items()}))
                 if all(any(state.get('positionMs', 0) > 500 and state.get('durationMs', 0) > 1000
                            for state in progress.get(f'/window{index}', [])) for index in range(2)):
+                    playback_passed = True
                     break
                 time.sleep(.5)
             else:
@@ -120,5 +136,7 @@ with tempfile.TemporaryDirectory(prefix='asterlink-playback-') as temporary:
                     player.wait()
             server.shutdown()
             server.server_close()
+    if not playback_passed:
+        print((root / '.local/macos-playback.log').read_text(errors='replace')[-8000:])
 
 print('macOS smoke passed: native helper, free disk space, startup, two independent windows and video decoding')

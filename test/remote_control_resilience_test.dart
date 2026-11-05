@@ -203,7 +203,11 @@ void main() {
       expect(bad.config.cloud(CloudPlatform.uc).enabled, isFalse);
       expect(bad.config.updates['android']!.build, 50);
       expect(bad.config.aboutText, '有效内容');
-      expect(bad.issues.length, CloudPlatform.values.length + 2);
+      expect(bad.issues.length, CloudPlatform.values.length + 3);
+      expect(
+        bad.issues.map((issue) => issue.section),
+        contains('updates.macos'),
+      );
     },
   );
 
