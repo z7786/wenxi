@@ -225,7 +225,9 @@ class ClientSearchHost {
       initialUrlRequest: URLRequest(url: WebUri(uri.toString())),
       initialSettings: InAppWebViewSettings(
         javaScriptEnabled: true,
-        incognito: true,
+        // macOS CookieManager reads WKWebsiteDataStore.default(); using a
+        // nonpersistent store would lose the search challenge cookies.
+        incognito: !io.Platform.isMacOS,
       ),
       onLoadStop: (controller, _) {
         if (!ready.isCompleted) ready.complete(controller);
