@@ -75,9 +75,12 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ASTERLINK_CLIENT_DEFINES_JSON: ${{ secrets.ASTERLINK_CLIENT_DEFINES_JSON }}
         run: python tool/prepare-ci-release.py --android
       - name: Prepare Windows release settings
         if: matrix.target == 'windows'
+        env:
+          ASTERLINK_CLIENT_DEFINES_JSON: ${{ secrets.ASTERLINK_CLIENT_DEFINES_JSON }}
         run: python tool/prepare-ci-release.py
       - name: Build, test and inspect Android
         if: matrix.target == 'android'

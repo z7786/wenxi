@@ -263,6 +263,50 @@ class SigningSettingsTest(unittest.TestCase):
             settings.prepare(self.root, environment={})
         self.assertEqual(config.read_text(encoding='utf-8'), '{"local":true}')
 
+    def test_client_defines_are_restored_without_exposing_them_in_build_settings(self):
+        files = {'cloud-command.defines.json': {
+            'ASTERLINK_QUARK_COMMAND_KEY': 'fixture-quark',
+            'ASTERLINK_UC_COMMAND_KEY': 'fixture-uc',
+        }}
+        settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': json.dumps(files)})
+        local = self.root / '.local'
+        self.assertEqual(json.loads((local / 'cloud-command.defines.json').read_text()),
+                         files['cloud-command.defines.json'])
+        self.assertNotIn('fixture-quark', (local / 'build-config.json').read_text())
+
+    def test_unknown_files_fields_and_non_string_values_are_rejected_before_writing(self):
+        invalid = [
+            {'../outside.json': {}},
+            {'cloud-command.defines.json': {'ADMIN_PASSWORD': 'synthetic'}},
+            {'cloud-command.defines.json': {
+                'ASTERLINK_QUARK_COMMAND_KEY': 123, 'ASTERLINK_UC_COMMAND_KEY': 'fixture',
+            }},
+            ['cloud-command.defines.json'],
+        ]
+        for files in invalid:
+            with self.subTest(files=files), self.assertRaises(ValueError):
+                settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': json.dumps(files)})
+            self.assertFalse((self.root / '.local').exists())
+
+    def test_malformed_client_config_error_does_not_echo_secret_values(self):
+        with self.assertRaises(ValueError) as error:
+            settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': 'synthetic-private-data'})
+        self.assertNotIn('synthetic-private-data', str(error.exception))
+        self.assertFalse((self.root / '.local').exists())
+
+    def test_existing_client_config_is_not_overwritten(self):
+        local = self.root / '.local'
+        local.mkdir()
+        defines = local / 'cloud-command.defines.json'
+        defines.write_text('{"local":true}', encoding='utf-8')
+        files = {'cloud-command.defines.json': {
+            'ASTERLINK_QUARK_COMMAND_KEY': 'fixture-quark', 'ASTERLINK_UC_COMMAND_KEY': 'fixture-uc',
+        }}
+        with self.assertRaises(ValueError):
+            settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': json.dumps(files)})
+        self.assertEqual(defines.read_text(), '{"local":true}')
+        self.assertFalse((local / 'build-config.json').exists())
+
     def test_properties_escape_metacharacters_and_keep_secrets_out_of_config(self):
         env = {
             'ANDROID_KEYSTORE_BASE64': base64.b64encode(b'synthetic-keystore').decode(),

@@ -32,6 +32,8 @@ flutter pub get --enforce-lockfile
 
 已有用户覆盖安装需要继续使用原签名密钥。私有配置和签名只放在 environment 中，不能提交到源码。
 
+使用私有口令解析、百度取链及解析配置时，额外设置 Secret `ASTERLINK_CLIENT_DEFINES_JSON`。其 JSON 对象以 `baidu-api.defines.json`、`cloud-command.defines.json`、`parser-hub.defines.json` 为键，值为对应本机 `.local/` 文件的 JSON 对象。准备脚本只接受这些文件及已知客户端字段，写入临时构建目录后沿用本机构建的配置校验；不包含后端源码或管理凭据。
+
 构建成功后，在运行详情底部的 **Artifacts** 下载 `release-android`（签名 APK）和 `release-windows`（x64 安装器、便携 ZIP），保留 14 天。工作流只生成并上传构建附件，公开 Release 另行发布。
 
 新增 ED2K 需要更新 Gopeed 原生组件。升级已有工作目录时，Android 构建加 `-RebuildNative`（正式入口同样支持该参数），避免沿用旧 AAR；Windows 构建会重建所选架构 helper。源码与验证说明见 [ED2K 下载](ED2K-DOWNLOAD.md)。

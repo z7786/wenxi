@@ -7,6 +7,39 @@ from pathlib import Path
 import re
 
 
+CLIENT_DEFINE_FILES = {
+    'baidu-api.defines.json': {
+        'ASTERLINK_BAIDU_API_ACCESS_KEY', 'ASTERLINK_BAIDU_API_PUBLIC_KEY',
+        'ASTERLINK_BAIDU_API_URL', 'ASTERLINK_BAIDU_RELAY_API_URL',
+    },
+    'cloud-command.defines.json': {'ASTERLINK_QUARK_COMMAND_KEY', 'ASTERLINK_UC_COMMAND_KEY'},
+    'parser-hub.defines.json': {
+        'ASTERLINK_PARSER_HUB_URL', 'ASTERLINK_PARSER_HUB_KEY',
+        'ASTERLINK_PARSER_HUB_PUBLIC_KEY', 'ASTERLINK_PARSER_RULES_BACKUP_URL',
+    },
+}
+
+
+def client_defines(local, raw):
+    if not raw:
+        return {}
+    try:
+        files = json.loads(raw)
+    except (ValueError, TypeError) as error:
+        raise ValueError('Invalid client build configuration JSON') from error
+    if not isinstance(files, dict) or not files or set(files) - CLIENT_DEFINE_FILES.keys():
+        raise ValueError('Unexpected client build configuration files')
+    for name, values in files.items():
+        allowed = CLIENT_DEFINE_FILES[name]
+        required = allowed - {'ASTERLINK_PARSER_RULES_BACKUP_URL', 'ASTERLINK_BAIDU_RELAY_API_URL'}
+        if (not isinstance(values, dict) or not required <= values.keys() or
+                values.keys() - allowed or any(not isinstance(value, str) for value in values.values())):
+            raise ValueError('Invalid client build configuration fields')
+        if (local / name).exists():
+            raise ValueError('Refusing to overwrite existing client build configuration')
+    return files
+
+
 def properties_escape(value):
     output = []
     for char in value:
@@ -45,6 +78,7 @@ def prepare(root, sign_android=False, environment=None):
     })
     if config['metricsAppKey'] and not re.fullmatch('[0-9a-fA-F]{24}', config['metricsAppKey']):
         raise ValueError('UMENG_APPKEY has an invalid format')
+    defines = client_defines(local, env.get('ASTERLINK_CLIENT_DEFINES_JSON', ''))
     key_path = local / 'ci-release.jks'
     properties_path = local / 'keystore.properties'
     key_bytes, properties = None, None
@@ -72,6 +106,8 @@ def prepare(root, sign_android=False, environment=None):
         key_path.write_bytes(key_bytes)
         properties_path.write_text(properties, encoding='ascii')
     config_path.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
+    for name, values in defines.items():
+        (local / name).write_text(json.dumps(values, indent=2) + '\n', encoding='utf-8')
     return config
 
 
