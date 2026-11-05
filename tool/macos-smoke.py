@@ -16,6 +16,7 @@ parser.add_argument('--app', required=True)
 args = parser.parse_args()
 app = Path(args.app).resolve()
 root = Path(__file__).resolve().parent.parent
+(root / '.local').mkdir(exist_ok=True)
 metadata = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
 helper = app / 'Contents/MacOS/asterlink_gopeed'
 query = '\n'.join(json.dumps({'seq': index, 'method': method, 'args': values})
