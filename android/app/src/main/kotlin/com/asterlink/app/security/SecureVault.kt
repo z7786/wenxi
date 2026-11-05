@@ -1,12 +1,9 @@
 package com.asterlink.app.security
 
 import android.content.Context
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.util.Base64
 import org.json.JSONObject
 import java.security.KeyStore
-import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
 data class StoredCredential(
@@ -38,6 +35,7 @@ interface CredentialStore {
 
 class SecureVault(context: Context) : CredentialStore {
     private val preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val plain = context.getSharedPreferences("asterlink_plain_v2", Context.MODE_PRIVATE)
 
     @Synchronized
     override fun putCredential(platformKey: String, credential: StoredCredential) {
@@ -46,14 +44,14 @@ class SecureVault(context: Context) : CredentialStore {
             put("updatedAt", credential.updatedAt)
             put("fields", JSONObject(credential.fields))
         }.toString()
-        preferences.edit().putString("credential.$platformKey", encrypt(json)).apply()
+        plain.edit().putString("credential.$platformKey", json).remove("removed.credential.$platformKey").apply()
     }
 
     @Synchronized
     override fun getCredential(platformKey: String): StoredCredential? {
-        val encrypted = preferences.getString("credential.$platformKey", null) ?: return null
+        val value = read("credential.$platformKey") ?: return null
         return runCatching {
-            val json = JSONObject(decrypt(encrypted))
+            val json = JSONObject(value)
             val fieldsJson = json.getJSONObject("fields")
             val fields = fieldsJson.keys().asSequence().associateWith(fieldsJson::getString)
             StoredCredential(
@@ -66,31 +64,35 @@ class SecureVault(context: Context) : CredentialStore {
 
     @Synchronized
     override fun removeCredential(platformKey: String) {
-        preferences.edit().remove("credential.$platformKey").apply()
+        plain.edit().remove("credential.$platformKey").putBoolean("removed.credential.$platformKey", true).apply()
     }
 
     @Synchronized
     override fun putSecret(key: String, value: String) {
-        preferences.edit().putString("secret.$key", encrypt(value)).apply()
+        plain.edit().putString("secret.$key", value).remove("removed.secret.$key").apply()
     }
 
     @Synchronized
-    override fun getSecret(key: String): String? = preferences.getString("secret.$key", null)?.let { encrypted ->
-        runCatching { decrypt(encrypted) }.getOrNull()
-    }
+    override fun getSecret(key: String): String? = read("secret.$key")
 
     @Synchronized
     override fun removeSecret(key: String) {
-        preferences.edit().remove("secret.$key").apply()
+        plain.edit().remove("secret.$key").putBoolean("removed.secret.$key", true).apply()
     }
 
-    fun seal(value: String): String = encrypt(value)
+    fun seal(value: String): String = "plain-v2:$value"
 
-    fun open(value: String): String? = runCatching { decrypt(value) }.getOrNull()
+    fun open(value: String): String? = if (value.startsWith("plain-v2:")) value.removePrefix("plain-v2:")
+        else runCatching { decrypt(value) }.getOrNull()
 
-    private fun encrypt(value: String): String {
-        val packed = AesGcmBox.seal(secretKey(), value.toByteArray(Charsets.UTF_8))
-        return Base64.encodeToString(packed, Base64.NO_WRAP)
+    private fun read(name: String): String? {
+        if (plain.getBoolean("removed.$name", false)) return null
+        if (plain.contains(name)) return plain.getString(name, null)
+        // Older native records remain available for a one-time read. Preserve
+        // ciphertext when the old key is unavailable; never generate a new key.
+        val value = preferences.getString(name, null)?.let(::open) ?: return null
+        plain.edit().putString(name, value).apply()
+        return value
     }
 
     private fun decrypt(value: String): String {
@@ -100,20 +102,8 @@ class SecureVault(context: Context) : CredentialStore {
 
     private fun secretKey(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
-            init(
-                KeyGenParameterSpec.Builder(
-                    KEY_ALIAS,
-                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-                )
-                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                    .setRandomizedEncryptionRequired(true)
-                    .build()
-            )
-            generateKey()
-        }
+        return keyStore.getKey(KEY_ALIAS, null) as? SecretKey
+            ?: error("Legacy credential key is unavailable")
     }
 
     private companion object {

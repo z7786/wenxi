@@ -432,7 +432,7 @@ void main() {
   }
 
   test(
-    'Saved credentials survive an encrypted store restart and can renew again',
+    'Saved credentials survive a plain store restart and can renew again',
     () async {
       final directory = Directory.systemTemp.createTempSync(
         'asterlink-tianyi-session-',
@@ -444,11 +444,17 @@ void main() {
       await f.seed();
       await f.list();
       await store.flush();
-      for (final file in directory.listSync().whereType<File>()) {
-        final raw = utf8.decode(file.readAsBytesSync(), allowMalformed: true);
-        expect(raw, isNot(contains(_password)));
-        expect(raw, isNot(contains('fixture-user')));
-        expect(raw, isNot(contains('COOKIE_LOGIN_USER')));
+      final snapshots = directory.listSync().whereType<File>().where(
+        (file) => file.path.endsWith('.json'),
+      );
+      expect(snapshots, isNotEmpty);
+      for (final file in snapshots) {
+        final snapshot = jsonDecode(utf8.decode(file.readAsBytesSync())) as Map;
+        expect(snapshot['format'], 'asterlink-state-v2');
+        expect(
+          snapshot['sha256'],
+          isA<String>().having((s) => s.length, 'length', 64),
+        );
       }
       final restored = await StateStore.open(directory, testKey: testKey);
       final next = TianyiLoginFixture(key, store: restored);

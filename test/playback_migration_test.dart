@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback.dart';
-import 'package:asterlink/playback/media_backend.dart';
+import 'package:asterlink/playback/playback_failure.dart';
 import 'player_support.dart';
 import 'support.dart';
 
@@ -49,18 +49,18 @@ void main() {
   test(
     'Transport errors are distinguished from decoder initialization failures',
     () {
-      expect(isPlaybackSourceError('HTTP error 403 Forbidden'), isTrue);
+      expect(PlaybackFailure.fromLog('HTTP error 403 Forbidden')?.sourceFailure, isTrue);
       expect(
-        isPlaybackSourceError('Failed to open https://example.invalid/video'),
+        PlaybackFailure.fromLog('Failed to open https://example.invalid/video')?.sourceFailure,
         isTrue,
       );
-      expect(isPlaybackSourceError('Connection refused'), isTrue);
+      expect(PlaybackFailure.fromLog('Connection refused')?.sourceFailure, isTrue);
       expect(
-        isPlaybackSourceError('Could not initialize video decoder'),
+        PlaybackFailure.fromLog('Could not initialize video decoder')?.sourceFailure,
         isFalse,
       );
       expect(
-        isPlaybackSourceError('Video output initialization failed'),
+        PlaybackFailure.fromLog('Video output initialization failed')?.sourceFailure,
         isFalse,
       );
     },

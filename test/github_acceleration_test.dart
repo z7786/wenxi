@@ -15,14 +15,43 @@ import 'package:asterlink/platform/native_engine.dart';
 import 'support.dart';
 
 class _ProxyProbe extends TransferHttp {
-  final urls = <String>[];
-  Future<void> Function()? duringProbe;
+  int calls = 0;
 
   @override
   Future<Probe> probe(String url, Map<String, String> headers) async {
-    urls.add(url);
-    await duringProbe?.call();
+    calls++;
     return const Probe(RemoteIdentity(4, '"github-file"', null), false);
+  }
+}
+
+class _ProxyNative extends FakeNative {
+  final urls = <String>[];
+  final stops = <String>[];
+  Future<void> Function()? duringProbe;
+  Json Function(Json)? response;
+  @override
+  Future<Object?> call(String method, [Json args = const {}]) async {
+    if (method == 'httpProbeStart') {
+      urls.add(args.str('url'));
+      await duringProbe?.call();
+      return null;
+    }
+    if (method == 'httpProbeStatus') {
+      return response?.call(args) ??
+          {
+            'status': 'done',
+            'code': 206,
+            'headers': {
+              'content-range': 'bytes 0-3/4',
+              'etag': '"github-file"',
+            },
+          };
+    }
+    if (method == 'httpProbeStop') {
+      stops.add(args.str('id'));
+      return null;
+    }
+    return super.call(method, args);
   }
 }
 
@@ -196,6 +225,7 @@ void main() {
       );
       expect(proxy.apply(spec), same(spec));
       expect(proxy.apply(spec).networkPolicy, same(policy));
+      expect(proxy.downloadCandidates(spec), [spec]);
     },
   );
 
@@ -206,7 +236,7 @@ void main() {
         'aster-github-proxy-',
       );
       final store = StateStore.memory();
-      final native = FakeNative()..finish = false;
+      final native = _ProxyNative()..finish = false;
       final http = _ProxyProbe();
       final manager = DownloadManager(
         store: store,
@@ -224,7 +254,7 @@ void main() {
       );
       try {
         await manager.initialize();
-        http.duringProbe = () => store.put('settings', {
+        native.duringProbe = () => store.put('settings', {
           'githubAcceleration': const GitHubAcceleration(
             mode: 'ghproxy.net',
           ).toJson(),
@@ -238,16 +268,17 @@ void main() {
           ),
         );
         await until(() => native.begins.isNotEmpty);
-        expect(http.urls.single, 'https://gh-proxy.com/$release');
-        expect(native.begins.single.str('url'), http.urls.single);
+        expect(native.urls.single, 'https://gh-proxy.com/$release');
+        expect(native.begins.single.str('url'), native.urls.single);
+        expect(http.calls, 0);
         expect(manager.task(id)!.spec.url, release);
         expect(manager.task(id)!.spec.appUpdateKey, 'fixture-update');
         await manager.pause(id);
-        http.duringProbe = null;
+        native.duringProbe = null;
         await manager.resume(id);
         await until(() => native.begins.length == 2);
-        expect(http.urls.last, 'https://ghproxy.net/$release');
-        expect(native.begins.last.str('url'), http.urls.last);
+        expect(native.urls.last, 'https://ghproxy.net/$release');
+        expect(native.begins.last.str('url'), native.urls.last);
         expect(manager.task(id)!.spec.url, release);
         await manager.pause(id);
         await store.put(
@@ -258,7 +289,7 @@ void main() {
         );
         await manager.resume(id);
         await until(() => native.begins.length == 3);
-        expect(http.urls.last, release);
+        expect(native.urls.last, release);
         expect(native.begins.last.str('url'), release);
         await manager.pause(id);
         expect(store.data.list('tasks').single.obj('spec').str('url'), release);
@@ -275,6 +306,94 @@ void main() {
           isTrue,
         );
         await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test(
+    'Public proxy fallbacks retain original headers and exclude signed requests',
+    () {
+      const spec = DownloadSpec(url: raw, fileName: 'file.txt');
+      expect(proxy.downloadCandidates(spec).map((s) => s.url), [
+        'https://gh-proxy.com/$raw',
+        raw,
+        'https://ghproxy.net/$raw',
+        'https://ghfast.top/$raw',
+      ]);
+      expect(
+        const GitHubAcceleration(mode: 'direct').downloadCandidates(spec),
+        [spec],
+      );
+      const private = DownloadSpec(
+        url: raw,
+        fileName: 'file.txt',
+        headers: {'Cookie': 'private=fixture'},
+      );
+      expect(proxy.downloadCandidates(private), [private]);
+      expect(
+        proxy
+            .downloadCandidates(spec.copyWith(url: '$raw?token=private'))
+            .length,
+        1,
+      );
+    },
+  );
+
+  test(
+    'Bad mirror ranges fall back without altering the persisted source URL',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'aster-github-fallback-',
+      );
+      final store = StateStore.memory();
+      final native = _ProxyNative();
+      native.response = (_) => switch (native.urls.last) {
+        'https://gh-proxy.com/$raw' => {
+          'status': 'error',
+          'errorKind': 'content',
+        },
+        raw => {'status': 'error', 'errorKind': 'network', 'retryable': true},
+        _ => {
+          'status': 'done',
+          'code': 206,
+          'headers': {'content-range': 'bytes 0-3/4', 'etag': '"github-file"'},
+        },
+      };
+      final http = _ProxyProbe();
+      final manager = DownloadManager(
+        store: store,
+        engine: GopeedEngine(
+          native,
+          store,
+          Vault(store),
+          Directory('${root.path}/engine'),
+          Directory('${root.path}/cache'),
+        ),
+        files: FakeFiles(Directory('${root.path}/saved')),
+        cleanups: CleanupOutbox(store, FakeHttp()),
+        http: http,
+        refreshSource: (spec) async => spec,
+      );
+      try {
+        await manager.initialize();
+        final id = await manager.enqueue(
+          const DownloadSpec(url: raw, fileName: 'file.txt', expectedSize: 4),
+        );
+        await until(() => manager.task(id)!.status == DownloadStatus.completed);
+        expect(native.urls, [
+          'https://gh-proxy.com/$raw',
+          raw,
+          'https://ghproxy.net/$raw',
+        ]);
+        expect(native.begins.single.str('url'), native.urls.last);
+        expect(native.stops.length, 3);
+        expect(manager.task(id)!.spec.url, raw);
+        expect(http.calls, 0);
+      } finally {
+        await manager.close();
+        manager.dispose();
+        http.dio.close(force: true);
+        await root.delete(recursive: true);
       }
     },
   );

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:media_kit/media_kit.dart';
+import 'package:asterlink/playback/playback_state.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/playback_store.dart';
 import 'package:asterlink/data/state_store.dart';
@@ -12,6 +12,19 @@ import 'package:asterlink/playback/subtitle_files.dart';
 import 'player_support.dart';
 import 'support.dart';
 
+class _DelayedPlaybackStore extends PlaybackStore {
+  _DelayedPlaybackStore(super.store);
+  Future<void>? saveBarrier;
+  int saves = 0;
+
+  @override
+  Future<void> save(String key, PlaybackBookmark bookmark) async {
+    saves++;
+    await saveBarrier;
+    await super.save(key, bookmark);
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
@@ -19,6 +32,7 @@ void main() {
     () {
       final preferences = PlaybackPreferences.fromJson({
         'rate': double.nan,
+        'boostRate': double.infinity,
         'volume': 500,
         'subtitleSize': -5,
         'subtitleBottom': double.infinity,
@@ -28,6 +42,8 @@ void main() {
         'fit': 'unknown',
       });
       expect(preferences.rate, 1);
+      expect(preferences.boostRate, 2);
+      expect(preferences.showScreenshotButton, isTrue);
       expect(preferences.volume, 100);
       expect(preferences.subtitleSize, 14);
       expect(preferences.subtitleBottom, .04);
@@ -421,6 +437,134 @@ void main() {
         expect(fixture.current.state.playing, isTrue);
       },
     );
+    for (final switching in [false, true]) {
+      test(
+        switching
+            ? 'Next pauses the old audio before a pending progress write completes'
+            : 'Background pauses audio before a pending progress write completes',
+        () async {
+          fixture = PlaybackFixture(historyFactory: _DelayedPlaybackStore.new);
+          await fixture.controller.start();
+          final backend = fixture.current;
+          const position = Duration(seconds: 123);
+          backend.emit(backend.state.copyWith(position: position));
+          final history = fixture.history as _DelayedPlaybackStore;
+          final gate = Completer<void>();
+          history.saveBarrier = gate.future;
+          final action = switching
+              ? fixture.controller.next()
+              : fixture.controller.background(pictureInPicture: false);
+          try {
+            await until(() => history.saves > 0);
+            expect(backend.state.playing, isFalse);
+            expect(backend.pauses, greaterThan(0));
+            expect(backend.state.position, position);
+            expect(backend.state.volume, 100);
+            // A retiring native backend can now release its source while disk
+            // persistence continues; foreground backgrounding keeps its lease.
+            expect(
+              fixture.leases[backend.openedSource!.url],
+              switching ? 0 : 1,
+            );
+            expect(fixture.preparations, 1);
+          } finally {
+            gate.complete();
+            await action;
+          }
+          expect(history.bookmark(fixture.entries[0].key)?.position, position);
+          if (switching) {
+            expect(backend.closed, isTrue);
+            expect(fixture.current.state.playing, isTrue);
+          }
+        },
+      );
+    }
+    test(
+      'Close releases native buffers while a bookmark is waiting for disk',
+      () async {
+        fixture = PlaybackFixture(historyFactory: _DelayedPlaybackStore.new);
+        await fixture.controller.start();
+        fixture.current.emit(
+          fixture.current.state.copyWith(position: const Duration(seconds: 84)),
+        );
+        final history = fixture.history as _DelayedPlaybackStore;
+        final gate = Completer<void>();
+        history.saveBarrier = gate.future;
+        final closing = fixture.controller.close();
+        var complete = false;
+        closing.then((_) => complete = true);
+        try {
+          await until(() => fixture.current.closed);
+          expect(fixture.current.state.playing, isFalse);
+          expect(complete, isFalse);
+          expect(history.saves, greaterThan(0));
+        } finally {
+          gate.complete();
+          await closing;
+        }
+        expect(
+          fixture.history.bookmark(fixture.entries.first.key)!.position,
+          const Duration(seconds: 84),
+        );
+        expect(fixture.leases.values.every((count) => count == 0), isTrue);
+      },
+    );
+
+    test(
+      'A delayed background bookmark cannot pause a later foreground play',
+      () async {
+        fixture = PlaybackFixture(historyFactory: _DelayedPlaybackStore.new);
+        await fixture.controller.start();
+        fixture.current.emit(
+          fixture.current.state.copyWith(position: const Duration(seconds: 80)),
+        );
+        final history = fixture.history as _DelayedPlaybackStore;
+        final gate = Completer<void>();
+        history.saveBarrier = gate.future;
+        final background = fixture.controller.background(
+          pictureInPicture: false,
+        );
+        try {
+          await until(() => history.saves > 0);
+          fixture.controller.foreground();
+          await fixture.controller.play();
+          expect(fixture.current.state.playing, isTrue);
+        } finally {
+          gate.complete();
+          await background;
+        }
+        expect(fixture.current.state.playing, isTrue);
+      },
+    );
+    test(
+      'Next pauses audio while an old subtitle command is still pending',
+      () async {
+        await fixture.controller.start();
+        final backend = fixture.current;
+        final gate = Completer<void>();
+        backend.subtitleBarrier = gate.future;
+        final changes = backend.subtitleChanges;
+        final subtitle = fixture.controller.setSubtitleTrack(
+          SubtitleTrack.no(),
+        );
+        await until(() => backend.subtitleChanges > changes);
+        final next = fixture.controller.next();
+        try {
+          await until(() => fixture.controller.loading);
+          await Future<void>.delayed(Duration.zero);
+          expect(backend.state.playing, isFalse);
+          expect(backend.pauses, greaterThan(0));
+          expect(backend.closed, isFalse);
+          expect(fixture.leases[backend.openedSource!.url], 1);
+        } finally {
+          gate.complete();
+          await subtitle;
+          await next;
+        }
+        expect(backend.closed, isTrue);
+        expect(fixture.current.state.playing, isTrue);
+      },
+    );
     test(
       'Retry resolves a fresh URL and resumes the old position without leaking authentication',
       () async {
@@ -463,6 +607,101 @@ void main() {
         expect(fixture.current.rates.last, 1.5);
         expect(fixture.controller.boosting, isFalse);
         expect(fixture.current.state.playing, isFalse);
+      },
+    );
+    test(
+      'Configured boost and slide speed stay separate from regular speed',
+      () async {
+        await fixture.controller.start();
+        await fixture.controller.setRate(1.5);
+        await fixture.controller.updatePreferences(
+          fixture.controller.preferences.copyWith(boostRate: 2.75),
+        );
+        await fixture.controller.beginBoost();
+        expect(fixture.current.rates.last, 2.75);
+        await fixture.controller.adjustBoost(3.5);
+        expect(fixture.current.rates.last, 3.5);
+        expect(fixture.history.preferences.boostRate, 2.75);
+        expect(fixture.history.preferences.rate, 1.5);
+        await fixture.controller.endBoost();
+        expect(fixture.current.rates.last, 1.5);
+        await fixture.controller.beginBoost();
+        expect(fixture.current.rates.last, 2.75);
+        await fixture.controller.next();
+        expect(fixture.controller.boosting, isFalse);
+        expect(fixture.current.rates.last, 1.5);
+      },
+    );
+    test(
+      'Locking holds a temporary speed across release without changing preferences',
+      () async {
+        await fixture.controller.start();
+        await fixture.controller.setRate(1.25);
+        await fixture.controller.beginBoost();
+        await fixture.controller.adjustBoost(3);
+        fixture.controller.lockBoost();
+        await fixture.controller.releaseBoost();
+        expect(fixture.controller.boostLocked, isTrue);
+        expect(fixture.controller.boosting, isTrue);
+        expect(fixture.current.state.rate, 3);
+        expect(fixture.history.preferences.rate, 1.25);
+        expect(fixture.history.preferences.boostRate, 2);
+        await fixture.controller.endBoost();
+        expect(fixture.controller.boostLocked, isFalse);
+        expect(fixture.current.state.rate, 1.25);
+        await fixture.controller.beginBoost();
+        await fixture.controller.releaseBoost();
+        expect(fixture.controller.boosting, isFalse);
+        expect(fixture.current.state.rate, 1.25);
+      },
+    );
+    for (final action in ['pause', 'next', 'background', 'select speed']) {
+      test('A locked speed is cleared by $action', () async {
+        await fixture.controller.start();
+        await fixture.controller.setRate(1.5);
+        await fixture.controller.beginBoost();
+        await fixture.controller.adjustBoost(3.5);
+        fixture.controller.lockBoost();
+        await fixture.controller.releaseBoost();
+        switch (action) {
+          case 'pause':
+            await fixture.controller.pause();
+          case 'next':
+            await fixture.controller.next();
+          case 'background':
+            await fixture.controller.background(pictureInPicture: false);
+          case 'select speed':
+            await fixture.controller.setRate(2.5);
+        }
+        expect(fixture.controller.boosting, isFalse);
+        expect(fixture.controller.boostLocked, isFalse);
+        expect(
+          fixture.current.state.rate,
+          action == 'select speed' ? 2.5 : 1.5,
+        );
+        await fixture.controller.beginBoost();
+        expect(fixture.controller.boostLocked, isFalse);
+        expect(fixture.current.state.rate, 2);
+      });
+    }
+    test(
+      'Releasing while a native rate write is pending restores speed last',
+      () async {
+        await fixture.controller.start();
+        await fixture.controller.setRate(1.25);
+        final backend = fixture.current;
+        final barrier = Completer<void>();
+        backend.rateBarrier = barrier.future;
+        final begin = fixture.controller.beginBoost();
+        for (final rate in [2.5, 2.75, 3.0, 4.0]) {
+          unawaited(fixture.controller.adjustBoost(rate));
+        }
+        final end = fixture.controller.endBoost();
+        barrier.complete();
+        await Future.wait([begin, end]);
+        expect(backend.rates.last, 1.25);
+        expect(backend.rates.where((rate) => rate > 1.25), [2.0]);
+        expect(fixture.controller.boosting, isFalse);
       },
     );
     test(

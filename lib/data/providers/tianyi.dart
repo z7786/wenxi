@@ -9,11 +9,13 @@ import '../../core/login_crypto.dart';
 import '../../core/json.dart';
 import '../../diagnostics/app_log.dart';
 import '../../domain/auth.dart';
+import '../../domain/file_types.dart';
 import '../../domain/models.dart';
 import '../../domain/tianyi_web_login.dart';
 import '../../domain/tianyi_share.dart';
 import '../../domain/uploads.dart';
 import '../http.dart';
+import '../http_retry.dart';
 import '../uploads/upload_io.dart';
 import '../../core/operation_progress.dart';
 import '../state_store.dart';
@@ -25,7 +27,6 @@ class TianyiConnector extends CloudConnector {
   TianyiConnector(
     this.http, {
     this.store,
-    this.stageCleanup,
     this.passwordLogin,
     this.taskDelay = const Duration(milliseconds: 800),
     this.maxTaskPolls = 60,
@@ -33,25 +34,27 @@ class TianyiConnector extends CloudConnector {
 
   final JsonHttp http;
   final CredentialStore? store;
-  final Future<void> Function(DownloadCleanup)? stageCleanup;
   final Future<LoginResult> Function(String username, String password)?
   passwordLogin;
   final Duration taskDelay;
   final int maxTaskPolls;
   static const origin = 'https://cloud.189.cn';
-  static const _familyOrigin = 'https://api.cloud.189.cn';
+  static const _openOrigin = 'https://api.cloud.189.cn';
+  static const _h5Origin = 'https://h5.cloud.189.cn';
   static const _familyAppKey = '600100422';
   static const _familySessionPath = 'portal/v2/getUserBriefInfo';
   static const _familyTokenPath = 'open/oauth2/getAccessTokenBySsKey';
   static const root = '-11';
   static const webUa =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+  static const _mobileUa =
+      'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
   static const _pageSize = 60;
   static const autoLoginFailureMessage = '天翼自动登录失败，请重新登录或切换网页登录';
   static const _autoFailed = AccountLoginRequired(autoLoginFailureMessage);
   static const _accountChanged = AccountLoginRequired('天翼账号已变化，请重新登录');
   final _refreshing = <int, (Credential, Future<Credential>)>{};
-  ({String cookie, int? revision, String token})? _familyAccess;
+  ({String cookie, int? revision, String token})? _accessToken;
   final _zoneKey = Object();
   _TianyiSession get _session => Zone.current[_zoneKey] as _TianyiSession;
   @override
@@ -68,10 +71,11 @@ class TianyiConnector extends CloudConnector {
     Credential? credential,
     Future<T> Function() action, {
     bool candidate = false,
+    bool fresh = false,
   }) async {
     // Password renewal validates a new candidate while a stored session is
     // awaiting it. Its cookies must never inherit or mutate the old session.
-    if (!candidate && Zone.current[_zoneKey] != null) {
+    if (!candidate && !fresh && Zone.current[_zoneKey] != null) {
       _checkpoint();
       return action();
     }
@@ -128,10 +132,23 @@ class TianyiConnector extends CloudConnector {
   static bool _okCode(Object? value) =>
       value == null || {'', '0', 'Success', 'success'}.contains('$value');
 
-  Json _checked(HttpResult response) {
+  Json _checked(
+    HttpResult response, {
+    bool downloading = false,
+    bool optionalVideo = false,
+  }) {
     if (response.status == 401 ||
         response.status >= 300 && response.status < 400) {
       throw const _TianyiSessionExpired();
+    }
+    if (optionalVideo &&
+        ReadRetryScope.transientStatuses.contains(response.status)) {
+      throw HttpRequestFailure(
+        '天翼视频取链接口暂时不可用（HTTP ${response.status}）',
+        kind: 'http',
+        status: response.status,
+        retryable: true,
+      );
     }
     final data = response.json;
     final code =
@@ -156,8 +173,11 @@ class TianyiConnector extends CloudConnector {
     if (code == 'InvalidDeviceStatus') {
       throw const AccountLoginRequired('天翼要求设备安全验证，请在官方客户端完成验证后重新登录');
     }
-    if (code == 'FileTooLarge') throw const _TianyiFileTooLarge();
+    if (code == 'FileTooLarge' && (downloading || optionalVideo)) {
+      throw const _TianyiFileTooLarge();
+    }
     final message = switch (code) {
+      'FileTooLarge' => '天翼当前操作触发文件大小限制（FileTooLarge）',
       'AccessCodeError' ||
       'ShareAccessCodeError' ||
       'ShareAccessCodeNotMatch' => '天翼访问码错误，请检查后重新解析',
@@ -187,7 +207,9 @@ class TianyiConnector extends CloudConnector {
           _okCode(data['res_code']) &&
           _okCode(data['errorCode']) &&
           _okCode(data['code']) &&
-          (!data.containsKey('success') || data.boolean('success')),
+          (!data.containsKey('success') ||
+              data.boolean('success') ||
+              optionalVideo),
       message,
     );
     return data;
@@ -268,11 +290,10 @@ class TianyiConnector extends CloudConnector {
     String shareCookie = '',
     Map<String, String> extraHeaders = const {},
     bool renewSession = true,
-    Future<void> Function(Json)? onResponse,
   }) async {
     if (path.startsWith('open/family/')) {
       require(method == 'GET' && !public, '家庭云暂不支持此操作');
-      return _familyApi(path, params);
+      return _tokenApi(path, params, family: true);
     }
     for (var attempt = 0; ; attempt++) {
       _checkpoint();
@@ -320,7 +341,11 @@ class TianyiConnector extends CloudConnector {
         result = switch (path) {
           _familySessionPath => _familyChecked(response, 'session'),
           _familyTokenPath => _familyChecked(response, 'authorize'),
-          _ => _checked(response),
+          _ => _checked(
+            response,
+            downloading: path == 'open/file/getFileDownloadUrl',
+            optionalVideo: path == 'portal/getNewVlcVideoPlayUrl',
+          ),
         };
       } on _TianyiSessionExpired catch (error, stack) {
         _checkpoint();
@@ -342,8 +367,10 @@ class TianyiConnector extends CloudConnector {
             },
           );
         }
-        if (public ||
-            !renewSession ||
+        if (public) {
+          throw const _TianyiPublicLoginRequired();
+        }
+        if (!renewSession ||
             owner == null ||
             passwordLogin == null ||
             !_hasPassword(owner)) {
@@ -364,15 +391,13 @@ class TianyiConnector extends CloudConnector {
       }
       // Only an explicit expired session retries this one API request. A
       // successful transfer/mutation or a network error is never replayed.
-      // Journal allocated folders even after cancellation, under the old owner.
-      await onResponse?.call(result);
       _checkpoint();
       if (!public) await _acceptCookies(response, owner);
       return result;
     }
   }
 
-  static String _familySignature(Map<String, Object?> values) {
+  static String _accessSignature(Map<String, Object?> values) {
     // The official web client sorts unescaped key=value pairs before MD5.
     final pairs =
         values.entries
@@ -384,7 +409,7 @@ class TianyiConnector extends CloudConnector {
 
   Json _familyChecked(HttpResult response, String stage) {
     try {
-      return _checked(response);
+      return _checked(response, downloading: stage == 'getFileDownloadUrl');
     } catch (error, stack) {
       _checkpoint();
       var code = '';
@@ -416,9 +441,9 @@ class TianyiConnector extends CloudConnector {
     }
   }
 
-  Future<String> _getFamilyAccessToken() async {
+  Future<String> _getAccessToken() async {
     _checkpoint();
-    final cached = _familyAccess;
+    final cached = _accessToken;
     if (cached != null &&
         cached.cookie == _session.cookie &&
         cached.revision == _session.owner?.updatedAt) {
@@ -443,7 +468,7 @@ class TianyiConnector extends CloudConnector {
           extraHeaders: {
             'AppKey': _familyAppKey,
             'Timestamp': timestamp,
-            'Signature': _familySignature({
+            'Signature': _accessSignature({
               'sessionKey': sessionKey,
               'AppKey': _familyAppKey,
               'Timestamp': timestamp,
@@ -464,9 +489,9 @@ class TianyiConnector extends CloudConnector {
             token.isNotEmpty &&
             token.length <= 8192 &&
             !RegExp(r'[\x00-\x20\x7f-\x9f]').hasMatch(token),
-        '天翼未返回有效家庭云授权，请重新登录后重试',
+        '天翼未返回有效访问授权，请重新登录后重试',
       );
-      _familyAccess = (
+      _accessToken = (
         cookie: _session.cookie,
         revision: _session.owner?.updatedAt,
         token: token,
@@ -475,38 +500,48 @@ class TianyiConnector extends CloudConnector {
     }
   }
 
-  Future<Json> _familyApi(String path, Map<String, Object?> params) async {
+  // Family cloud and the mobile website use the same signed token protocol.
+  Future<Json> _tokenApi(
+    String path,
+    Map<String, Object?> params, {
+    bool family = false,
+  }) async {
     for (var attempt = 0; ; attempt++) {
-      final token = await _getFamilyAccessToken();
+      final token = await _getAccessToken();
       _checkpoint();
       final timestamp = '${DateTime.now().millisecondsSinceEpoch}';
       final response = await http.request(
         'GET',
-        query('$_familyOrigin/$path.action', params),
+        query('$_openOrigin/$path.action', params),
         headers: {
           'Accept': 'application/json;charset=UTF-8',
           'AccessToken': token,
           'Timestamp': timestamp,
-          'Signature': _familySignature({
+          'Signature': _accessSignature({
             ...params,
             'AccessToken': token,
             'Timestamp': timestamp,
           }),
           'Sign-Type': '1',
-          'User-Agent': webUa,
-          'Referer': '$origin/web/',
-          'Origin': origin,
+          'User-Agent': family ? webUa : _mobileUa,
+          'Referer': family ? '$origin/web/' : '$_h5Origin/share.html',
+          'Origin': family ? origin : _h5Origin,
+          if (!family) 'X-Request-ID': newId().replaceAll('-', ''),
         },
         followRedirects: false,
       );
       _checkpoint();
       try {
-        return _familyChecked(response, path.split('/').last);
+        return family
+            ? _familyChecked(response, path.split('/').last)
+            : _checked(response, downloading: true);
       } on _TianyiSessionExpired {
         // A concurrent request may already have replaced this expired token.
-        if (_familyAccess?.token == token) _familyAccess = null;
+        if (_accessToken?.token == token) _accessToken = null;
         if (attempt > 0) {
-          throw const AccountLoginRequired('天翼家庭云授权已失效，请重新登录');
+          throw AccountLoginRequired(
+            family ? '天翼家庭云授权已失效，请重新登录' : '天翼下载授权已失效，请重新登录',
+          );
         }
       }
     }
@@ -752,6 +787,31 @@ class TianyiConnector extends CloudConnector {
     _ => null,
   };
 
+  Future<Json> _shareRead(
+    String path,
+    Credential? credential, {
+    Map<String, Object?> params = const {},
+    String shareCookie = '',
+  }) async {
+    try {
+      return await _api(
+        path,
+        public: true,
+        params: params,
+        shareCookie: shareCookie,
+      );
+    } on _TianyiPublicLoginRequired {
+      if (credential == null) rethrow;
+      // Only an explicit login requirement uses the app account. A cancelled
+      // share, incorrect access code or network failure never retries with it.
+      return _run(
+        credential,
+        () => _api(path, params: params, shareCookie: shareCookie),
+        fresh: true,
+      );
+    }
+  }
+
   @override
   Future<BrowseSession> openShare(
     ParsedLink link,
@@ -763,9 +823,9 @@ class TianyiConnector extends CloudConnector {
       accessCode.isEmpty || RegExp(r'^[A-Za-z0-9]{1,12}$').hasMatch(accessCode),
       '天翼访问码格式无效',
     );
-    final info = await _api(
+    final info = await _shareRead(
       'open/share/getShareInfoByCodeV2',
-      public: true,
+      credential,
       params: {'shareCode': code},
     );
     final folder = _flag(info['isFolder']);
@@ -774,9 +834,9 @@ class TianyiConnector extends CloudConnector {
     require(!needsCode || accessCode.isNotEmpty, '该天翼分享需要访问码，请补充后重新解析');
     var shareId = info.str('shareId');
     if (accessCode.isNotEmpty || shareId.isEmpty) {
-      shareId = (await _api(
+      shareId = (await _shareRead(
         'open/share/checkAccessCode',
-        public: true,
+        credential,
         params: {'shareCode': code, 'accessCode': accessCode},
       )).str('shareId');
     }
@@ -795,7 +855,7 @@ class TianyiConnector extends CloudConnector {
         'isFolder': '$folder',
       },
     );
-  });
+  }, fresh: true);
 
   void _share(BrowseSession session) {
     require(
@@ -858,34 +918,38 @@ class TianyiConnector extends CloudConnector {
       require(!single || parent == session.rootId, '单文件分享没有子目录');
       final files = <CloudFile>[], seen = <String>{};
       for (var page = 1; page <= 200; page++) {
-        final result = await _api(
-          sharing
-              ? 'open/share/listShareDir'
-              : session.isFamily
-              ? 'open/family/file/listFiles'
-              : 'open/file/listFiles',
-          public: sharing,
-          shareCookie: sharing ? _shareCookie(session) : '',
-          params: {
-            'pageNum': page,
-            'pageSize': _pageSize,
-            'iconOption': 5,
-            'orderBy': 'lastOpTime',
-            'descending': true,
-            if (session.isFamily) 'familyId': session.familyId,
-            if (sharing) ...{
-              'fileId': parent,
-              if (!single) 'shareDirFileId': parent,
-              'isFolder': !single,
-              'shareId': session.meta('shareId'),
-              'shareMode': session.meta('shareMode').ifEmpty('1'),
-              'accessCode': session.meta('accessCode'),
-            } else ...{
-              'folderId': parent,
-              'mediaType': 0,
-            },
+        final params = <String, Object?>{
+          'pageNum': page,
+          'pageSize': _pageSize,
+          'iconOption': 5,
+          'orderBy': 'lastOpTime',
+          'descending': true,
+          if (session.isFamily) 'familyId': session.familyId,
+          if (sharing) ...{
+            'fileId': parent,
+            if (!single) 'shareDirFileId': parent,
+            'isFolder': !single,
+            'shareId': session.meta('shareId'),
+            'shareMode': session.meta('shareMode').ifEmpty('1'),
+            'accessCode': session.meta('accessCode'),
+          } else ...{
+            'folderId': parent,
+            'mediaType': 0,
           },
-        );
+        };
+        final result = sharing
+            ? await _shareRead(
+                'open/share/listShareDir',
+                credential,
+                params: params,
+                shareCookie: _shareCookie(session),
+              )
+            : await _api(
+                session.isFamily
+                    ? 'open/family/file/listFiles'
+                    : 'open/file/listFiles',
+                params: params,
+              );
         require(result['fileListAO'] is Map, '天翼未返回文件列表，请重试');
         final data = result.obj('fileListAO');
         final total = data.containsKey('count')
@@ -934,6 +998,7 @@ class TianyiConnector extends CloudConnector {
       }
       throw const AppException('天翼目录分页过多，请进入子目录后重试');
     },
+    fresh: session.mode == BrowseMode.share,
   );
 
   void _personal(BrowseSession session) => require(
@@ -952,11 +1017,7 @@ class TianyiConnector extends CloudConnector {
       !(file.isDirectory &&
           {'0', '-10', '-12', '-13', '-14', '-15', '-16'}.contains(file.id));
 
-  Future<CloudFile> _createFolder(
-    String parent,
-    String name, {
-    Future<void> Function(CloudFile)? allocated,
-  }) async {
+  Future<CloudFile> _createFolder(String parent, String name) async {
     _name(name);
     require(parent.isNotEmpty, '天翼目标目录无效');
     CloudFile read(Json data) {
@@ -972,7 +1033,6 @@ class TianyiConnector extends CloudConnector {
       'open/file/createFolder',
       method: 'POST',
       params: {'parentFolderId': parent, 'folderName': name},
-      onResponse: allocated == null ? null : (data) => allocated(read(data)),
     );
     return read(result);
   }
@@ -1130,21 +1190,132 @@ class TianyiConnector extends CloudConnector {
     String familyId = '',
     BrowseSession? share,
   }) async {
-    final result = await _api(
-      familyId.isEmpty
-          ? 'open/file/getFileDownloadUrl'
-          : 'open/family/file/getFileDownloadUrl',
-      shareCookie: share == null ? '' : _shareCookie(share),
-      params: {
-        'fileId': file.id,
-        if (familyId.isEmpty) 'dt': 1,
-        if (share != null) 'shareId': share.meta('shareId'),
-        if (familyId.isNotEmpty) ...{'familyId': familyId, 'type': 1},
-      },
-    );
+    final params = <String, Object?>{
+      'fileId': file.id,
+      // Both official share clients download the original shared file ID.
+      if (share != null) ...{'dt': 1, 'shareId': share.meta('shareId')},
+      if (familyId.isNotEmpty) ...{'familyId': familyId, 'type': 1},
+    };
+    final Json result;
+    try {
+      result = await _api(
+        familyId.isEmpty
+            ? 'open/file/getFileDownloadUrl'
+            : 'open/family/file/getFileDownloadUrl',
+        shareCookie: share == null ? '' : _shareCookie(share),
+        params: params,
+      );
+    } on _TianyiFileTooLarge {
+      _checkpoint();
+      if (familyId.isNotEmpty) rethrow;
+      try {
+        final mobile = await _tokenApi('open/file/getFileDownloadUrl', params);
+        final spec = _downloadSpec(
+          file,
+          mobile.str('fileDownloadUrl'),
+          mobile: true,
+        );
+        DiagnosticLog.event(
+          'tianyi.download_route',
+          fields: {
+            'route': share == null
+                ? 'personal-mobile-direct'
+                : 'share-mobile-direct',
+          },
+        );
+        return spec;
+      } on _TianyiFileTooLarge {
+        _checkpoint();
+        if (fileKind(file.name) == FileKind.video) {
+          final original = await ReadRetryScope.withoutRetries(
+            () => _originalVideoDownload(file, share: share),
+          );
+          if (original != null) return original;
+        }
+        rethrow;
+      }
+    }
+    return _downloadSpec(file, result.str('fileDownloadUrl'));
+  }
+
+  Future<DownloadSpec?> _originalVideoDownload(
+    CloudFile file, {
+    BrowseSession? share,
+  }) async {
+    try {
+      final result = await _api(
+        'portal/getNewVlcVideoPlayUrl',
+        shareCookie: share == null ? '' : _shareCookie(share),
+        params: {
+          'fileId': file.id,
+          'type': share == null ? 2 : 4,
+          if (share != null) ...{
+            'shareId': share.meta('shareId'),
+            if (share.meta('isFolder') == 'true') 'dt': 1,
+          },
+        },
+      );
+      // An unsupported preview is optional. Authentication, share permissions
+      // and other API errors are still checked before reaching this point.
+      if (result.containsKey('success') && !result.boolean('success')) {
+        return null;
+      }
+      final url = result.obj('normal').str('url');
+      if (url.isEmpty) return null;
+      // Only the original rendition can satisfy the selected file's length
+      // and checksum. A transcode URL must never replace an original download.
+      final DownloadSpec spec;
+      try {
+        spec = _downloadSpec(file, url);
+      } on AppException {
+        // An invalid optional address cannot replace the selected file.
+        return null;
+      }
+      final probe = await http.peek(spec.url, spec.headers, maxBytes: 512);
+      _checkpoint();
+      if (!{200, 206}.contains(probe.status)) return null;
+      final contentType = probe.header('content-type').toLowerCase();
+      if (contentType.contains('mpegurl') ||
+          contentType.contains('text/html') ||
+          contentType.contains('application/json') ||
+          probe.body.trimLeft().startsWith('#EXTM3U')) {
+        return null;
+      }
+      final range = RegExp(
+        r'^bytes\s+0-\d+/(\d+)$',
+        caseSensitive: false,
+      ).firstMatch(probe.header('content-range').trim());
+      final length = probe.status == 206
+          ? int.tryParse(range?.group(1) ?? '')
+          : int.tryParse(probe.header('content-length'));
+      if (file.size <= 0 || length != file.size) return null;
+      DiagnosticLog.event(
+        'tianyi.download_route',
+        fields: {
+          'route': share == null
+              ? 'personal-original-video'
+              : 'share-original-video',
+        },
+      );
+      return spec;
+    } on _TianyiFileTooLarge {
+      _checkpoint();
+      return null;
+    } on HttpRequestFailure {
+      _checkpoint();
+      // This optional read has one attempt before reporting the size error.
+      return null;
+    }
+  }
+
+  DownloadSpec _downloadSpec(
+    CloudFile file,
+    String address, {
+    bool mobile = false,
+  }) {
     // Family responses HTML-escape query separators even inside JSON. Keep the
     // signed query bytes intact: decoding/rebuilding URI parameters changes it.
-    var url = result.str('fileDownloadUrl').replaceAll('&amp;', '&');
+    var url = address.replaceAll('&amp;', '&');
     final uri = Uri.tryParse(url);
     require(
       uri != null &&
@@ -1169,7 +1340,10 @@ class TianyiConnector extends CloudConnector {
       checksumValue: file.hashValue,
       profile: 'tianyi',
       // A signed CDN URL does not need the user's web login cookies.
-      headers: {'User-Agent': webUa, 'Referer': '$origin/'},
+      headers: {
+        'User-Agent': mobile ? _mobileUa : webUa,
+        'Referer': mobile ? '$_h5Origin/' : '$origin/',
+      },
     );
   }
 
@@ -1194,79 +1368,10 @@ class TianyiConnector extends CloudConnector {
           );
         }
         _share(s);
-        try {
-          // The official share endpoint uses the original file ID and does
-          // not consume the receiving account's storage. Only an explicit
-          // size restriction falls back to the existing transfer flow.
-          return await OperationProgress.step(
-            OperationStage.downloadLink,
-            () => _fileDownload(f, share: s),
-          );
-        } on _TianyiFileTooLarge {
-          _checkpoint();
-        }
-        final personal = await openPersonal(c!);
-        final name = 'AsterLink临时转存_${newId()}';
-        late DownloadCleanup cleanup;
-        final folder = await OperationProgress.step(
-          OperationStage.createTemporary,
-          () => _createFolder(
-            root,
-            name,
-            allocated: (folder) async {
-              cleanup = DownloadCleanup(
-                url: '',
-                action: {
-                  'kind': 'temporary-folder',
-                  'platform': platform.key,
-                  'folderId': folder.id,
-                  'name': name,
-                  'accountRevision': c.updatedAt,
-                },
-              );
-              await stageCleanup?.call(cleanup);
-            },
-          ),
-        );
-        await OperationProgress.step(
-          OperationStage.transfer,
-          () => saveShare(s, [f], folder.id, c),
-        );
-        final actual = await OperationProgress.step(
-          OperationStage.waitTransfer,
-          () async {
-            for (var attempt = 0; attempt < 8; attempt++) {
-              final entries = await list(personal, folder.id, c);
-              final matches = entries
-                  .where(
-                    (item) =>
-                        !item.isDirectory &&
-                        item.name == f.name &&
-                        (f.size <= 0 || item.size == f.size),
-                  )
-                  .toList();
-              require(matches.length <= 1, '天翼转存目录有多个同名文件，无法确定下载目标');
-              if (matches.length == 1) {
-                final actual = matches.single;
-                require(
-                  f.hashValue == null ||
-                      actual.hashValue == null ||
-                      f.hashType != actual.hashType ||
-                      f.hashValue!.toLowerCase() ==
-                          actual.hashValue!.toLowerCase(),
-                  '天翼转存文件校验标识不一致',
-                );
-                return actual;
-              }
-              if (attempt < 7) await Future<void>.delayed(taskDelay);
-            }
-            throw const AppException('天翼已转存，但目标文件尚不可见，请稍后重试');
-          },
-        );
-        return (await OperationProgress.step(
+        return OperationProgress.step(
           OperationStage.downloadLink,
-          () => _fileDownload(actual),
-        )).copyWith(fileName: f.name, cleanup: cleanup);
+          () => _fileDownload(f, share: s),
+        );
       });
 
   @override
@@ -1322,6 +1427,10 @@ class _TianyiSessionExpired extends AccountLoginRequired {
   const _TianyiSessionExpired() : super('天翼登录已失效，请重新登录');
 }
 
+class _TianyiPublicLoginRequired extends AccountLoginRequired {
+  const _TianyiPublicLoginRequired() : super('天翼要求登录后访问此分享，请先登录天翼云盘');
+}
+
 class _TianyiFileTooLarge extends AppException {
-  const _TianyiFileTooLarge() : super('天翼限制此文件通过网页直链下载，请使用官方客户端下载');
+  const _TianyiFileTooLarge() : super('天翼未返回可用下载链接（文件大小限制），请稍后重试或在网页版确认');
 }

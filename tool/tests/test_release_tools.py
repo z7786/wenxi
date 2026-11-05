@@ -123,6 +123,9 @@ class PublicFilesTest(unittest.TestCase):
             'native/gopeed/internal/protocol/http/build.data',
             'native/gopeed/internal/protocol/http/download.data',
             'outputs/player-tests.txt', 'outputs/task.network-response',
+            'dist/verification.json', 'dist/SHA256SUMS.txt',
+            'tool/DISK_CLEANUP_PANEL.md', 'tool/disk_cleanup_panel.py',
+            'tool/run_disk_cleanup_panel.cmd',
             'setup.exe', 'app-release.apk', 'download.zip', 'capture.har',
         ]
         public_paths = [
@@ -162,6 +165,9 @@ class PublicFilesTest(unittest.TestCase):
             'setup.exe', 'download.zip', 'capture.har',
             'native/gopeed/internal/protocol/http/download.data',
             'outputs/player-tests.txt', 'outputs/task.network-response',
+            'dist/verification.json', 'dist/SHA256SUMS.txt',
+            'tool/DISK_CLEANUP_PANEL.md', 'tool/disk_cleanup_panel.py',
+            'tool/run_disk_cleanup_panel.cmd',
         ]
         for name in paths:
             path = self.root / name

@@ -8,6 +8,7 @@ import '../domain/baidu_share_route.dart';
 import '../domain/public_share_route.dart';
 import '../domain/uploads.dart';
 import '../domain/auth.dart';
+import '../domain/ctfile_captcha.dart';
 import '../domain/downloads.dart';
 import '../domain/uc_video_download.dart';
 import '../domain/download_retries.dart';
@@ -124,7 +125,6 @@ class CloudRepository {
       CloudPlatform.tianyi: TianyiConnector(
         http,
         store: vault,
-        stageCleanup: _stageCleanup,
         passwordLogin: (username, password) =>
             tianyiLogin.password(username, password),
       ),
@@ -435,6 +435,8 @@ class CloudRepository {
     BaiduShareRoute baiduRoute = BaiduShareRoute.account,
     String? parserSiteId,
     String? parserPasswordGrant,
+    CtfileCaptchaProof? ctfileProof,
+    String? ctfileAccessPass,
   }) async {
     final p = link.platform;
     require(p != null, '此链接不是支持的网盘分享');
@@ -459,6 +461,15 @@ class CloudRepository {
                 parserSiteId: parserSiteId,
                 parserPasswordGrant: parserPasswordGrant,
               )
+            : provider is CtfileConnector
+            ? provider.openShare(
+                link,
+                account,
+                proof: ctfileProof,
+                accessPass: ctfileAccessPass,
+              )
+            : provider is LanzouConnector
+            ? provider.openShare(link, account, incremental: true)
             : provider.openShare(link, account),
       );
       ensureAvailable(p);
@@ -491,6 +502,7 @@ class CloudRepository {
 
   Future<List<CloudFile>> list(BrowseSession session, String parent) =>
       withSession(session, () async {
+        final timer = Stopwatch()..start();
         ensureAvailable(session.platform);
         final account = session.mode == BrowseMode.personal
             ? credential(session.platform)
@@ -508,8 +520,46 @@ class CloudRepository {
           vault.credential(session.platform)?.updatedAt == account?.updatedAt,
           '账号已变化，请重新打开文件列表',
         );
+        DiagnosticLog.event(
+          'browse.list_ready',
+          fields: {
+            'platform': session.platform.name,
+            'count': result.length,
+            'elapsedMs': timer.elapsedMilliseconds,
+          },
+        );
         return result;
       });
+
+  Future<CloudFilePage> listPage(
+    BrowseSession session,
+    String parent, {
+    String? cursor,
+  }) => withSession(session, () async {
+    ensureAvailable(session.platform);
+    final account = session.mode == BrowseMode.personal
+        ? credential(session.platform)
+        : vault.credential(session.platform);
+    final page = await OperationProgress.step(
+      OperationStage.readFiles,
+      () async {
+        if (session.platform != CloudPlatform.baidu &&
+            PublicShareRoute.uses(session)) {
+          require(cursor == null, '文件列表分页已失效，请刷新');
+          return CloudFilePage(await publicParser.list(session, parent));
+        }
+        return connector(
+          session.platform,
+        ).listPage(session, parent, account, cursor: cursor);
+      },
+    );
+    ensureAvailable(session.platform);
+    require(
+      vault.credential(session.platform)?.updatedAt == account?.updatedAt,
+      '账号已变化，请重新打开文件列表',
+    );
+    return page;
+  });
 
   String directoryId(BrowseSession session, CloudFile file) =>
       session.platform == CloudPlatform.baidu
@@ -967,6 +1017,9 @@ class CloudRepository {
             ? null
             : origin.session.meta('parserSiteId'),
         parserPasswordGrant: origin.session.meta('parserPasswordGrant'),
+        ctfileAccessPass: origin.session.meta('ctfileAccessPass').isEmpty
+            ? null
+            : origin.session.meta('ctfileAccessPass'),
       );
     } else {
       session = await reopenSpace(origin.session);

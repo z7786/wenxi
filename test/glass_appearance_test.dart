@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/data/backgrounds.dart';
 import 'package:asterlink/domain/appearance.dart';
@@ -70,6 +71,56 @@ Future<Color> navigationPixel(
 double colorDistance(Color a, Color b) =>
     ((a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()) * 255 / 3;
 
+Future<(int, int)> selectedNavigationPixels(
+  WidgetTester tester,
+  int selectedIndex,
+) async {
+  final boundary = tester.renderObject<RenderRepaintBoundary>(
+    find.byKey(const Key('glass-capture')),
+  );
+  final tab = find.byKey(ValueKey('navigation-$selectedIndex'));
+  final accent = Theme.of(tester.element(tab)).colorScheme.primary;
+  final regions =
+      [
+        find.descendant(of: tab, matching: find.byType(SvgPicture)),
+        find.descendant(of: tab, matching: find.byType(Text)),
+      ].map((finder) {
+        final rect = tester.getRect(finder);
+        return Rect.fromPoints(
+          boundary.globalToLocal(rect.topLeft),
+          boundary.globalToLocal(rect.bottomRight),
+        );
+      }).toList();
+  return (await tester.runAsync(() async {
+    final image = await boundary.toImage(pixelRatio: 1);
+    try {
+      final data = (await image.toByteData(
+        format: ui.ImageByteFormat.rawRgba,
+      ))!;
+      int count(Rect region) {
+        var pixels = 0;
+        for (var y = region.top.ceil(); y < region.bottom.floor(); y++) {
+          for (var x = region.left.ceil(); x < region.right.floor(); x++) {
+            final offset = (y * image.width + x) * 4;
+            final color = Color.fromARGB(
+              255,
+              data.getUint8(offset),
+              data.getUint8(offset + 1),
+              data.getUint8(offset + 2),
+            );
+            if (colorDistance(color, accent) < 12) pixels++;
+          }
+        }
+        return pixels;
+      }
+
+      return (count(regions[0]), count(regions[1]));
+    } finally {
+      image.dispose();
+    }
+  }))!;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   String? fontFamily;
@@ -99,6 +150,7 @@ void main() {
     required Brightness brightness,
     bool rail = false,
     bool highContrast = false,
+    int selectedIndex = 0,
     Color backdrop = const Color(0xff1e88e5),
   }) async {
     await tester.pumpWidget(
@@ -127,7 +179,7 @@ void main() {
                           : Alignment.bottomCenter,
                       child: AppNavigation(
                         rail: rail,
-                        selectedIndex: 0,
+                        selectedIndex: selectedIndex,
                         onSelected: (_) {},
                       ),
                     ),
@@ -140,6 +192,32 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+  }
+
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'opaque navigation keeps selected icons and labels visible (${brightness.name})',
+      (tester) async {
+        for (final style in GlassStyle.values) {
+          for (final selectedIndex in [0, 3]) {
+            await renderNavigation(
+              tester,
+              style: style,
+              brightness: brightness,
+              highContrast: style != GlassStyle.solid,
+              selectedIndex: selectedIndex,
+            );
+            final (icon, label) = await selectedNavigationPixels(
+              tester,
+              selectedIndex,
+            );
+            expect(icon, greaterThan(10), reason: '$style selected icon');
+            expect(label, greaterThan(10), reason: '$style selected label');
+          }
+        }
+        expect(tester.takeException(), isNull);
+      },
+    );
   }
 
   for (final rail in [false, true]) {

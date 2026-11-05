@@ -24,6 +24,7 @@ class ExternalPlayerOpening(
     private val activity: () -> Activity?,
     private val files: FileOpening,
 ) {
+    private val history = context.getSharedPreferences("external-player-history", Context.MODE_PRIVATE)
     private var dialog: AlertDialog? = null
     private var owner: Activity? = null
     private var session: String? = null
@@ -40,6 +41,7 @@ class ExternalPlayerOpening(
             val targets = targets(intent)
             if (targets.isEmpty()) throw FileOpenFailure("no_player", "未找到可播放此视频的第三方播放器，请先安装 VLC、MX Player 等播放器")
             val labels = targets.map { it.loadLabel(context.packageManager).toString() }
+            val recent = history.getString("recent", "").orEmpty().split('\n')
             val adapter = object : ArrayAdapter<String>(current, android.R.layout.select_dialog_item, labels) {
                 override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                     val view = super.getView(position, convertView, parent) as TextView
@@ -48,6 +50,7 @@ class ExternalPlayerOpening(
                     icon.setBounds(0, 0, size, size)
                     view.setCompoundDrawablesRelative(icon, null, null, null)
                     view.compoundDrawablePadding = (16 * current.resources.displayMetrics.density).toInt()
+                    view.text = labels[position] + if (targets[position].activityInfo.packageName in recent) "  · 最近使用" else ""
                     return view
                 }
             }
@@ -59,25 +62,29 @@ class ExternalPlayerOpening(
             }
             val chooser = AlertDialog.Builder(current)
                 .setTitle("选择第三方播放器")
-                .setAdapter(adapter) { _, index ->
-                    try {
-                        val target = targets[index].activityInfo
-                        current.startActivity(Intent(intent).setComponent(ComponentName(target.packageName, target.name)))
-                        finish(true)
-                    } catch (error: Exception) {
-                        finish(false, failure(error))
-                    }
-                }
+                .setAdapter(adapter, null)
                 .setNegativeButton("取消") { _, _ -> finish(false) }
                 .create()
             owner = current
             this.session = session
             dialog = chooser
+            var choosing = false
             chooser.setOnDismissListener {
                 if (dialog === chooser) { dialog = null; owner = null; this.session = null }
-                finish(false)
+                if (!choosing) finish(false)
             }
             chooser.show()
+            chooser.listView.setOnItemClickListener { _, _, index, _ ->
+                choosing = true
+                val target = targets[index].activityInfo
+                chooser.dismiss()
+                try {
+                    current.startActivity(Intent(intent).setComponent(ComponentName(target.packageName, target.name)))
+                    history.edit().putString("recent", (listOf(target.packageName) +
+                        recent.filter { it.isNotBlank() && it != target.packageName }).take(12).joinToString("\n")).apply()
+                    finish(true)
+                } catch (error: Exception) { finish(false, failure(error)) }
+            }
         } catch (error: Exception) {
             dialog = null
             owner = null
@@ -109,6 +116,7 @@ class ExternalPlayerOpening(
     @Suppress("DEPRECATION")
     fun targets(intent: Intent): List<ResolveInfo> {
         val collator = Collator.getInstance()
+        val recent = history.getString("recent", "").orEmpty().split('\n')
         val types = listOfNotNull(intent.type, "video/*", "application/x-mpegurl".takeIf { intent.type?.contains("mpegurl") == true }).distinct()
         return types.flatMap { type -> context.packageManager.queryIntentActivities(Intent(intent).setDataAndType(intent.data, type), PackageManager.MATCH_DEFAULT_ONLY) }
             .filter {
@@ -117,7 +125,11 @@ class ExternalPlayerOpening(
                     (info.permission == null || context.checkSelfPermission(info.permission) == PackageManager.PERMISSION_GRANTED)
             }
             .distinctBy { it.activityInfo.packageName }
-            .sortedWith { a, b -> collator.compare(a.loadLabel(context.packageManager).toString(), b.loadLabel(context.packageManager).toString()) }
+            .sortedWith { a, b ->
+                val left = recent.indexOf(a.activityInfo.packageName).takeIf { it >= 0 } ?: Int.MAX_VALUE
+                val right = recent.indexOf(b.activityInfo.packageName).takeIf { it >= 0 } ?: Int.MAX_VALUE
+                if (left != right) left.compareTo(right) else
+                    collator.compare(a.loadLabel(context.packageManager).toString(), b.loadLabel(context.packageManager).toString()) }
     }
 
     companion object {

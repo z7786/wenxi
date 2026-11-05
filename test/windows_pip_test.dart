@@ -14,6 +14,7 @@ class _Window {
   bool failPin = false, beforeFullMax = false;
   Size minimum = appWindowMinimumSize;
   String titleStyle = 'normal';
+  bool frameless = false;
   double aspect = 0;
   Completer<void>? holdResize;
 
@@ -56,6 +57,9 @@ class _Window {
         aspect = args['aspectRatio'];
       case 'setTitleBarStyle':
         titleStyle = args['titleBarStyle'];
+        frameless = false;
+      case 'setAsFrameless':
+        frameless = true;
       case 'setMaximizable':
         maximizable = args['isMaximizable'];
       case 'setResizable':
@@ -109,8 +113,8 @@ void main() {
       expect(await device.enterPip(), isTrue);
       expect(device.inPip, isTrue);
       expect(window.alwaysOnTop, isTrue);
-      expect(window.titleStyle, 'hidden');
-      expect(window.minimum, const Size(240, 160));
+      expect(window.frameless, isTrue);
+      expect(window.minimum, const Size(240, 135));
       expect(window.bounds.size, const Size(480, 270));
       expect(window.bounds.left, lessThan(0));
       expect(window.maximizable, isFalse);
@@ -132,6 +136,7 @@ void main() {
       expect(window.minimum, appWindowMinimumSize);
       expect(window.alwaysOnTop, isFalse);
       expect(window.titleStyle, 'normal');
+      expect(window.frameless, isFalse);
       expect(window.aspect, 0);
       expect(window.maximizable, isTrue);
       expect(window.resizable, isFalse);

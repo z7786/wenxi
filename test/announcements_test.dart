@@ -133,4 +133,23 @@ void main() {
     expect(feed.messages.length, greaterThanOrEqualTo(2));
     expect(feed.skippedItems, 0);
   });
+
+  test('Pictures and mini-program buttons survive cache serialization', () {
+    final source = {
+      'announcements': [
+        {
+          ...announcementRow('mini-program'),
+          'content': '活动详情\n\n![活动图片](https://images.example.test/notice.png)',
+          'buttonText': '打开微信小程序',
+          'buttonUrl': 'weixin://dl/business/?t=example-ticket',
+        },
+      ],
+    };
+    final feed = AnnouncementFeed.fromJson(source);
+    final message = feed.messages.single;
+    final restored = AnnouncementFeed.fromJson(feed.toJson()).messages.single;
+    expect(restored.content, message.content);
+    expect(restored.buttonUrl, message.buttonUrl);
+    expect(restored.contentKey, message.contentKey);
+  });
 }

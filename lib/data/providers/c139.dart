@@ -7,6 +7,8 @@ import '../../core/crypto_box.dart';
 import '../../core/json.dart';
 import '../../diagnostics/app_log.dart';
 import '../../domain/auth.dart';
+import '../../domain/c139_passcode.dart';
+import 'c139_passcode.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
 import '../http.dart';
@@ -306,6 +308,7 @@ class C139Connector extends CloudConnector {
     final plain = encoded(operation == null ? body : {operation: body});
     final headers = {
       'hcy-cool-flag': '1',
+      'Accept-Encoding': 'identity',
       'x-deviceinfo': '||3|12.27.0|||||chrome 150.0.0.0|360X444|zh-cn|||',
       'x-huawei-channelsrc': '10245500',
       'x-mm-source': '0002',
@@ -328,8 +331,12 @@ class C139Connector extends CloudConnector {
       C139Protocol.encrypt(plain),
       headers,
     );
-    if ({401, 403}.contains(response.status)) check(response, const {});
+    if (!response.successful) check(response, const {});
     Json j;
+    require(
+      response.body.length <= C139PasscodeProtocol.maxResponseBytes,
+      '移动分享响应过大',
+    );
     try {
       j = response.json;
     } on AppException {
@@ -375,6 +382,28 @@ class C139Connector extends CloudConnector {
 
   @override
   Future<BrowseSession> openShare(ParsedLink link, Credential? c) async {
+    final command = C139Passcode.fromLink(link);
+    if (command != null) {
+      if (c == null) throw const AccountLoginRequired('移动口令解析需要先登录移动云盘');
+      final page = await _commandPage(command, 'root', 1, c);
+      final session = BrowseSession(
+        platform: platform,
+        mode: BrowseMode.share,
+        title: page.str('lkName').ifEmpty('移动云盘口令分享'),
+        rootId: 'root',
+        metadata: {
+          'linkCode': command.code,
+          'linkCodeType': '${command.codeType}',
+          'linkId': page.str('linkID').ifEmpty(page.str('linkId')),
+          'password': command.password ?? '',
+          'authorization': requiredAuth(c),
+          'account': accountId(requiredAuth(c)),
+          'cookie': c.primary,
+        },
+        sourceLink: link,
+      );
+      return _resolveCommandShare(session, c);
+    }
     require(link.shareId?.isNotEmpty == true, '139 分享链接缺少链接 ID');
     final general =
         data(
@@ -403,6 +432,83 @@ class C139Connector extends CloudConnector {
         'cookie': c?.primary ?? '',
       },
       sourceLink: link,
+    );
+  }
+
+  static int _commandFileSize(Json item) {
+    final size = int.tryParse(item.str('coSize'));
+    require(size != null && size >= 0, '移动口令文件大小无效，请刷新重试');
+    return size!;
+  }
+
+  Future<Json> _commandPage(
+    C139Passcode command,
+    String parent,
+    int begin,
+    Credential credential,
+  ) async {
+    final auth = requiredAuth(credential);
+    // Web sessions use the signed JSON endpoint and its web protocol key.
+    // The app's XML dispatcher rejects those sessions with an empty HTTP 500.
+    final response = await share(
+      '$shareBase/IOutLink/getOutLinkInfoV6',
+      'getOutLinkInfoReq',
+      C139PasscodeProtocol.requestData(
+        command,
+        accountId(auth),
+        parent: parent,
+        begin: begin,
+        end: begin + 199,
+      ),
+      auth,
+    );
+    require(
+      response.str('resultCode') == '0' && response['data'] is Map,
+      '移动口令服务未返回有效结果，请刷新重试',
+    );
+    return data(response);
+  }
+
+  Future<BrowseSession> _resolveCommandShare(
+    BrowseSession session,
+    Credential credential,
+  ) async {
+    if (session.meta('linkId').isNotEmpty || session.meta('linkCode').isEmpty) {
+      return session;
+    }
+    final auth = requiredAuth(credential);
+    final command = C139Passcode(
+      session.meta('linkCode'),
+      password: session.meta('password'),
+    );
+    // The directory endpoint omits the share ID for command links. The web
+    // detail endpoint resolves it; a command token is not a transfer link ID.
+    final result = data(
+      await share(
+        '$shareBase/IOutLink/getOutLinkGeneral',
+        'getOutLinkGeneralReq',
+        C139PasscodeProtocol.generalRequestData(command, accountId(auth)),
+        auth,
+      ),
+    );
+    final entries = result.list('outLinkGeneral');
+    require(entries.length == 1, '移动口令未返回有效分享详情，请重新解析后重试');
+    final general = entries.single;
+    final linkId = general.str('linkID').ifEmpty(general.str('linkId')).trim();
+    require(linkId.isNotEmpty, '移动口令未返回有效分享 ID，请重新解析后重试');
+    return BrowseSession(
+      platform: session.platform,
+      mode: session.mode,
+      title: general.str('lkName').ifEmpty(session.title),
+      rootId: session.rootId,
+      metadata: {
+        ...session.metadata,
+        'linkId': linkId,
+        'password': session
+            .meta('password')
+            .ifEmpty(general.str('passwd').ifEmpty(general.str('password'))),
+      },
+      sourceLink: session.sourceLink,
     );
   }
 
@@ -727,6 +833,64 @@ class C139Connector extends CloudConnector {
     }
     final files = <CloudFile>[], seen = <String>{};
     final dir = parent.ifEmpty('root');
+    if (s.mode == BrowseMode.share && s.meta('linkCode').isNotEmpty) {
+      if (c == null) throw const AccountLoginRequired('移动口令解析需要先登录移动云盘');
+      final command = C139Passcode(
+        s.meta('linkCode'),
+        password: s.meta('password'),
+      );
+      for (var begin = 1; begin <= 20000; begin += 200) {
+        final page = await _commandPage(command, dir, begin, c);
+        final batch = [
+          for (final item in C139PasscodeProtocol.items(
+            page,
+            'caLst',
+            'outLinkCaInfo',
+          ))
+            CloudFile(
+              id: item.str('caID'),
+              name: item.str('caName'),
+              isDirectory: true,
+              parentId: dir,
+              modifiedAt: item.str('udTime').ifEmpty(item.str('ctTime')),
+            ),
+          for (final item in C139PasscodeProtocol.items(
+            page,
+            'coLst',
+            'outLinkCoInfo',
+          ))
+            CloudFile(
+              id: item.str('coID'),
+              name: item.str('coName'),
+              size: _commandFileSize(item),
+              parentId: dir,
+              modifiedAt: item.str('udTime').ifEmpty(item.str('ctTime')),
+            ),
+        ];
+        require(
+          batch.every((f) => f.id.isNotEmpty && f.name.isNotEmpty),
+          '移动口令文件列表不完整，请刷新重试',
+        );
+        final fresh = batch.where((f) => seen.add(f.id)).toList();
+        files.addAll(fresh);
+        final totalText = page.str('nodNum');
+        final total = int.tryParse(totalText);
+        require(
+          totalText.isEmpty || total != null && total >= 0,
+          '移动口令目录数量无效，请刷新重试',
+        );
+        require(fresh.length == batch.length, '移动口令目录分页重复，请刷新重试');
+        if (total != null) {
+          require(files.length <= total, '移动口令目录数量不一致，请刷新重试');
+        }
+        if (total != null && files.length == total ||
+            total == null && batch.length < 200) {
+          return files;
+        }
+        require(batch.length == 200 && begin < 19801, '移动口令目录分页不完整，请刷新重试');
+      }
+      return files;
+    }
     if (s.mode == BrowseMode.share) {
       for (var begin = 1; begin <= 20000; begin += 200) {
         final d = data(
@@ -841,6 +1005,8 @@ class C139Connector extends CloudConnector {
     CloudFile file,
     Credential account,
   ) async {
+    share = await _resolveCommandShare(share, account);
+    require(share.meta('linkId').isNotEmpty, '此移动口令未返回可转存的分享 ID，请使用原分享链接下载或转存');
     final personal = await openPersonal(account);
     final name = 'AsterLink临时转存_${newId()}';
     final directory = await OperationProgress.step(
@@ -1170,6 +1336,8 @@ class C139Connector extends CloudConnector {
     Credential c,
   ) async {
     require(s.mode == BrowseMode.share, '请打开分享链接');
+    s = await _resolveCommandShare(s, c);
+    require(s.meta('linkId').isNotEmpty, '此移动口令未返回可转存的分享 ID，请使用原分享链接下载或转存');
     final auth = requiredAuth(c), account = accountId(requiredAuth(c));
     require(account.isNotEmpty, '无法从 139 Authorization 解析账号');
     final request = {

@@ -48,4 +48,15 @@ flutter pub get
 
 便携使用时保留完整运行目录，不能只复制 EXE。
 
+Android、Windows x64 / ARM64 内置播放恢复为仓库原有的 media_kit 1.2.6、
+media_kit_video 2.0.1 和 libmpv。继续使用 `vendor_plugins/` 中的本地补丁、
+固定原生依赖及 Windows ARM64 媒体准备脚本；当前构建不使用 MDK / FVP。
+播放器界面、网盘取链、BT、边下边播和投屏沿用现有逻辑。系统音量同步、
+切后台/切集先暂停、播放进度保存和后台释放播放器的优化继续保留。
+
+Windows 原生播放回归可先运行 `tool/prepare-player-test.ps1`，再执行
+`flutter test test/native_playback_test.dart --concurrency=1`。这些测试使用本地
+libmpv 和测试媒体，采用空音频/视频输出；它们不能替代安卓真机硬解、功耗
+和长时间播放验证。
+
 更新链接的配置与安装行为见 [App 内更新](IN-APP-UPDATE.md)。

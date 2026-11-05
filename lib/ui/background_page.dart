@@ -104,6 +104,8 @@ class _BackgroundPageState extends State<BackgroundPage> {
         mode: _draft.theme,
         palette: _draft.themePalette,
         glassStyle: _draft.glassStyle,
+        glassControls: _draft.glassControls,
+        glassLowPower: _draft.glassLowPower,
         background: background,
         hideResourceNavigation: _draft.hideResourceNavigation,
       );

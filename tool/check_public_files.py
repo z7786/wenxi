@@ -17,7 +17,7 @@ import tempfile
 MAX_FILE_BYTES = 100 * 1024 * 1024
 PRIVATE_ROOTS = {
     '.local', '.dart_tool', '.idea', 'logs', 'outputs', 'logo', 'releases',
-    'caiiliao', 'build', 'coverage', '\u6f14\u793a\u622a\u56fe',
+    'caiiliao', 'build', 'coverage', 'dist', '\u6f14\u793a\u622a\u56fe',
     'backend', 'wwwroot', '5.com', '.claude',
 }
 PRIVATE_DIRECTORIES = {'tool/password_updater', 'tool/demo'}
@@ -25,6 +25,8 @@ PRIVATE_FILES = {
     'control.json', 'config.fixed.json', 'LanzouAPI-master.zip',
     'announcements.json', '\u516c\u544a\u7f16\u8f91\u5668.html',
     'tool/announcement-editor.test.cjs', '\u4ea4\u4e92.txt',
+    'tool/DISK_CLEANUP_PANEL.md', 'tool/disk_cleanup_panel.py',
+    'tool/run_disk_cleanup_panel.cmd',
     'docs/CLOUD-PROVIDERS-2026-09-24.md',
     'docs/OPENLIST-CLOUDS-SMS-2026-09-24.md',
     'docs/QUARK-AUTHENTICATED-DIRECT-DOWNLOAD.md',

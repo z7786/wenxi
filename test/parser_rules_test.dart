@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/data/http.dart';
@@ -762,12 +761,11 @@ void main() {
       },
     );
     test(
-      'manual approval survives encrypted restart for the same share and expires at Beijing midnight',
+      'manual approval survives plain-state restart for the same share and expires at Beijing midnight',
       () async {
         await hub.close();
-        final key = CryptoBox.random(32);
         final dataDirectory = Directory('${directory.path}/state');
-        vault = Vault(await StateStore.open(dataDirectory, testKey: key));
+        vault = Vault(await StateStore.open(dataDirectory));
         hub = createHub();
         manifest = 'bundle-rich-prompt';
         await hub.refresh(force: true);
@@ -794,15 +792,12 @@ void main() {
           isNot(contains(BaiduPublicFixture.password)),
         );
         expect(
-          utf8.decode(
-            await vault.store.file!.readAsBytes(),
-            allowMalformed: true,
-          ),
-          isNot(contains(BaiduPublicFixture.password)),
+          jsonEncode(decodePlainState(await vault.store.file!.readAsBytes())),
+          contains(BaiduPublicFixture.password),
         );
         await hub.close();
         vault.store.dispose();
-        vault = Vault(await StateStore.open(dataDirectory, testKey: key));
+        vault = Vault(await StateStore.open(dataDirectory));
         addTearDown(() => vault.store.dispose());
         hub = createHub();
         now = now.add(const Duration(minutes: 6));

@@ -98,6 +98,9 @@ void main() {
       expect(find.textContaining('完整做种者'), findsNothing);
       expect(tester.widget<Text>(badge).data, 'BT');
       expect(tester.takeException(), isNull);
+      // Close services before the binding unmounts the app on its fake clock.
+      // Teardown can then await the completed close during real file cleanup.
+      await tester.runAsync(() => services.close());
     },
   );
 }

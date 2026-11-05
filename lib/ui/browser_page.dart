@@ -14,6 +14,7 @@ import '../data/cloud_search.dart';
 import '../data/cloud_search_history.dart';
 import '../domain/cloud_search_options.dart';
 import '../domain/models.dart';
+import '../domain/browser_return.dart';
 import '../domain/aliyun_share.dart';
 import '../domain/baidu_share_route.dart';
 import '../domain/public_share_route.dart';
@@ -49,7 +50,10 @@ class BrowserPage extends StatefulWidget {
     this.picking = false,
     this.excludedFolders = const {},
     this.initialItems,
+    this.initialCursor,
     this.initialTrail,
+    this.initialScrollOffset = 0,
+    this.initialSearchText = '',
     this.highlightedFileId,
     this.searchPage = false,
     this.popAtInitialDirectory = false,
@@ -62,7 +66,10 @@ class BrowserPage extends StatefulWidget {
   final bool picking;
   final Set<String> excludedFolders;
   final List<CloudFile>? initialItems;
+  final String? initialCursor;
   final List<(String, String)>? initialTrail;
+  final double initialScrollOffset;
+  final String initialSearchText;
   final String? highlightedFileId;
   final bool searchPage;
   final bool popAtInitialDirectory;
@@ -82,11 +89,23 @@ class _BrowserPageState extends State<BrowserPage> {
   late int? accountRevision;
   late String? highlight = widget.highlightedFileId;
   late List<CloudFile> items = List.of(widget.initialItems ?? const []);
+  late String? _nextCursor = widget.initialCursor;
+  bool _loadingMore = false;
+  String _pageError = '';
+  RequestScope? _pageRequest;
+  bool get _hasMore => _nextCursor != null;
   late DateTime _timeReference;
   // CloudFile is immutable. Reuse pinyin keys across selection/menu rebuilds;
   // weak keys let discarded directory and search results leave memory.
   final _nameKeys = Expando<NaturalName>();
+  Object? _displayInputs;
+  List<CloudFile> _displayed = const [];
+  List<CloudFile> _searchFiles = const [];
+  int _searchFilesGeneration = -1, _searchFilesCount = -1;
   final selected = <String>{}, search = TextEditingController();
+  late final _fileScroll = ScrollController(
+    initialScrollOffset: widget.initialScrollOffset,
+  );
   final _progress = OperationProgress();
   late final CloudDirectorySearch _deepSearch;
   bool _searchResults = false;
@@ -98,8 +117,18 @@ class _BrowserPageState extends State<BrowserPage> {
   bool get _includeSubfolders => widget.searchPage;
   List<(String, String)> get _searchTrail =>
       _searchEntireDrive ? [(session.rootId, '全部文件')] : List.of(stack);
-  List<CloudFile> get _sourceItems =>
-      _searchResults ? _deepSearch.hits.map((hit) => hit.file).toList() : items;
+  List<CloudFile> get _sourceItems {
+    if (!_searchResults) return items;
+    final count = _deepSearch.hits.length;
+    if (_searchFilesGeneration != _searchGeneration ||
+        _searchFilesCount != count) {
+      _searchFilesGeneration = _searchGeneration;
+      _searchFilesCount = count;
+      _searchFiles = _deepSearch.hits.map((hit) => hit.file).toList();
+    }
+    return _searchFiles;
+  }
+
   CloudSearchHit? _hit(CloudFile file) =>
       _searchResults ? _deepSearch.hitFor(file) : null;
   String _fileKey(CloudFile file) => _hit(file)?.key ?? file.id;
@@ -131,6 +160,11 @@ class _BrowserPageState extends State<BrowserPage> {
   BrowserDisplaySettings get _display =>
       widget.services.settings.browserDisplayFor(session.platform);
   String get view => widget.searchPage ? 'list' : _display.view;
+  String _selectAllLabel(List<CloudFile> files) => _allVisibleSelected(files)
+      ? '取消全选'
+      : _hasMore
+      ? '全选已加载'
+      : '全选';
   String get sort => _display.sort;
   bool get ascending => _display.ascending;
   String error = '';
@@ -143,6 +177,9 @@ class _BrowserPageState extends State<BrowserPage> {
   @override
   void initState() {
     super.initState();
+    if (!widget.picking) {
+      widget.services.registerBrowserReturn(this, _captureReturnTarget);
+    }
     _timeReference = widget.services.clock();
     accountRevision = widget.services.cloud
         .sessionCredential(session)
@@ -155,9 +192,11 @@ class _BrowserPageState extends State<BrowserPage> {
         _checkAccount();
       },
     )..addListener(_searchChanged);
-    if (widget.initialItems != null) {
+    if (widget.initialItems != null && !_hasMore) {
       _deepSearch.remember(session, stack.last.$1, items);
     }
+    search.text = widget.initialSearchText;
+    _fileScroll.addListener(_scrollChanged);
     if (highlight != null) {
       search.text =
           items.where((f) => f.id == highlight).firstOrNull?.name ?? '';
@@ -187,6 +226,7 @@ class _BrowserPageState extends State<BrowserPage> {
 
   @override
   void dispose() {
+    widget.services.unregisterBrowserReturn(this);
     widget.services.parserRules.removeListener(_parserRulesChanged);
     widget.services.control.removeListener(_controlChanged);
     widget.services.store.removeListener(_profileChanged);
@@ -195,13 +235,77 @@ class _BrowserPageState extends State<BrowserPage> {
     _searchPaint?.cancel();
     _deepSearch.dispose();
     request?.cancel();
+    _pageRequest?.cancel();
     _progress.dispose();
     search.dispose();
+    _fileScroll.dispose();
     super.dispose();
   }
 
   void _parserRulesChanged() {
     if (mounted) setState(() {});
+  }
+
+  void _scrollChanged() {
+    if (_fileScroll.hasClients &&
+        _fileScroll.position.extentAfter < 160 &&
+        _pageError.isEmpty &&
+        !_selecting) {
+      unawaited(_loadMore());
+    }
+  }
+
+  Future<void> _loadMore() async {
+    final cursor = _nextCursor;
+    if (!mounted ||
+        cursor == null ||
+        _loadingMore ||
+        loading ||
+        changingAccount ||
+        _searchResults ||
+        widget.searchPage ||
+        !_available) {
+      return;
+    }
+    final current = generation, captured = session, parent = stack.last.$1;
+    final scope = _pageRequest = RequestScope();
+    setState(() {
+      _loadingMore = true;
+      _pageError = '';
+    });
+    try {
+      _checkAccount();
+      final page = await scope.run(
+        () => widget.services.cloud.listPage(captured, parent, cursor: cursor),
+      );
+      _checkAccount();
+      if (!mounted ||
+          current != generation ||
+          captured != session ||
+          _nextCursor != cursor) {
+        return;
+      }
+      setState(() {
+        final merged = {for (final file in items) file.id: file};
+        for (final file in page.files) {
+          merged[file.id] = file;
+        }
+        items = merged.values.toList();
+        _nextCursor = page.nextCursor;
+        if (!_hasMore) _deepSearch.remember(session, parent, items);
+      });
+    } catch (e) {
+      if (mounted && current == generation && captured == session) {
+        setState(() => _pageError = errorText(e));
+      }
+    } finally {
+      if (mounted && identical(_pageRequest, scope)) {
+        setState(() {
+          _loadingMore = false;
+          _pageRequest = null;
+        });
+      }
+    }
   }
 
   void _controlChanged() {
@@ -221,10 +325,12 @@ class _BrowserPageState extends State<BrowserPage> {
     } else {
       _resetSearch(clearCache: true);
       request?.cancel();
+      _pageRequest?.cancel();
       _progress.close(cancelled: true);
       generation++;
       setState(() {
         loading = false;
+        _loadingMore = false;
         selected.clear();
         _selectionMode = false;
       });
@@ -324,6 +430,9 @@ class _BrowserPageState extends State<BrowserPage> {
       message(context, errorText(failure));
       return;
     }
+    _pageRequest?.cancel();
+    _pageRequest = null;
+    setState(() => _loadingMore = false);
     await Navigator.push<void>(
       context,
       MaterialPageRoute(
@@ -331,7 +440,9 @@ class _BrowserPageState extends State<BrowserPage> {
           widget.services,
           session,
           currentTrail: List.of(stack),
-          currentItems: loading || error.isNotEmpty ? null : List.of(items),
+          currentItems: loading || error.isNotEmpty || _hasMore
+              ? null
+              : List.of(items),
           poolPreview: widget.poolPreview,
         ),
       ),
@@ -445,6 +556,12 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   Future<void> _load({bool preserveSelection = false}) async {
+    _pageRequest?.cancel();
+    _pageRequest = null;
+    _loadingMore = false;
+    _nextCursor = null;
+    _pageError = '';
+    if (!preserveSelection && _fileScroll.hasClients) _fileScroll.jumpTo(0);
     final previousSelection = preserveSelection
         ? Set<String>.of(selected)
         : <String>{};
@@ -463,16 +580,22 @@ class _BrowserPageState extends State<BrowserPage> {
     });
     try {
       _checkAccount();
-      final files = await scope.run(
-        () => _progress.run(() => widget.services.cloud.list(session, parent)),
+      final page = await scope.run(
+        () => _progress.run(
+          () async => highlight != null
+              ? CloudFilePage(await widget.services.cloud.list(session, parent))
+              : await widget.services.cloud.listPage(session, parent),
+        ),
       );
+      final files = page.files;
       _checkAccount();
       if (!mounted || current != generation) return;
       _progress.close();
       setState(() {
         items = files;
+        _nextCursor = page.nextCursor;
         _timeReference = widget.services.clock();
-        _deepSearch.remember(session, parent, files);
+        if (!_hasMore) _deepSearch.remember(session, parent, files);
         if (highlight != null) {
           final target = files
               .where((file) => file.id == highlight)
@@ -537,7 +660,20 @@ class _BrowserPageState extends State<BrowserPage> {
     final query = _includeSubfolders && !_searchResults
         ? ''
         : search.text.trim().toLowerCase();
-    final result = _sourceItems
+    final source = _sourceItems;
+    final inputs = (
+      source,
+      session,
+      query,
+      sort,
+      ascending,
+      _timeReference,
+      widget.picking,
+      widget.excludedFolders.join('\u0000'),
+    );
+    if (_displayInputs == inputs) return _displayed;
+    final timer = Stopwatch()..start();
+    final result = source
         .where(
           (f) =>
               f.name.toLowerCase().contains(query) &&
@@ -557,12 +693,10 @@ class _BrowserPageState extends State<BrowserPage> {
               ),
           }
         : <CloudFile, DateTime?>{};
-    final names = sort == 'size'
-        ? <CloudFile, NaturalName>{}
-        : {
-            for (final file in result)
-              file: _nameKeys[file] ??= NaturalName(file.name),
-          };
+    // Valid modification dates do not need a pinyin key. Build names lazily
+    // only for name sorting or the missing-date fallback.
+    NaturalName name(CloudFile file) =>
+        _nameKeys[file] ??= NaturalName(file.name);
     final positions = {for (final (index, file) in result.indexed) file: index};
     result.sort((a, b) {
       if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
@@ -571,15 +705,27 @@ class _BrowserPageState extends State<BrowserPage> {
       }
       final order = switch (sort) {
         'size' => a.size.compareTo(b.size),
-        'date' =>
-          dates[a]?.compareTo(dates[b]!) ?? names[a]!.compareTo(names[b]!),
-        _ => names[a]!.compareTo(names[b]!),
+        'date' => dates[a]?.compareTo(dates[b]!) ?? name(a).compareTo(name(b)),
+        _ => name(a).compareTo(name(b)),
       };
       // Keep equivalent names (e.g. 第1集 and 第01集) in their source order.
       if (order == 0) return positions[a]!.compareTo(positions[b]!);
       return ascending ? order : -order;
     });
-    return result;
+    _displayInputs = inputs;
+    _displayed = List.unmodifiable(result);
+    if (timer.elapsedMilliseconds >= 100) {
+      DiagnosticLog.event(
+        'browse.sort_slow',
+        fields: {
+          'platform': session.platform.name,
+          'sort': sort,
+          'count': source.length,
+          'elapsedMs': timer.elapsedMilliseconds,
+        },
+      );
+    }
+    return _displayed;
   }
 
   Future<void> _download(List<CloudFile> files) async {
@@ -648,12 +794,26 @@ class _BrowserPageState extends State<BrowserPage> {
     }, label: '正在添加下载任务…');
     if (mounted && added != null && added > 0) {
       _finishSelection();
-      message(
-        context,
-        '已添加 $added 个下载任务',
-        onTap: widget.services.requestDownloadManager,
-      );
+      message(context, '已添加 $added 个下载任务', onTap: _openDownloadManager);
     }
+  }
+
+  void _openDownloadManager() {
+    if (!mounted) return;
+    widget.services.requestDownloadManager();
+  }
+
+  BrowserReturnTarget? _captureReturnTarget() {
+    if (!mounted || loading || changingAccount || error.isNotEmpty) return null;
+    return BrowserReturnTarget(
+      session: session,
+      items: items,
+      trail: stack,
+      scrollOffset: _fileScroll.hasClients ? _fileScroll.offset : 0,
+      searchText: _searchResults ? '' : search.text,
+      poolPreview: widget.poolPreview,
+      cursor: _nextCursor,
+    );
   }
 
   Future<String?> _destination(List<CloudFile> files) async {
@@ -1178,7 +1338,7 @@ class _BrowserPageState extends State<BrowserPage> {
       if (displayed.isNotEmpty)
         AppMenuAction(
           value: 'select-all',
-          label: _allVisibleSelected(displayed) ? '取消全选' : '全选',
+          label: _selectAllLabel(displayed),
           icon: CupertinoIcons.checkmark_circle,
         ),
       if (_selecting)
@@ -1604,6 +1764,7 @@ class _BrowserPageState extends State<BrowserPage> {
   }) async {
     _resetSearch(clearCache: true);
     request?.cancel();
+    _pageRequest?.cancel();
     generation++;
     setState(() {
       session = value;
@@ -1620,6 +1781,9 @@ class _BrowserPageState extends State<BrowserPage> {
       _selectionMode = false;
       error = '';
       loading = initialItems == null;
+      _nextCursor = null;
+      _loadingMore = false;
+      _pageError = '';
       if (initialItems != null) {
         _deepSearch.remember(session, stack.last.$1, items);
       }
@@ -1800,7 +1964,12 @@ class _BrowserPageState extends State<BrowserPage> {
 
   Future<void> _changeSort(String value) async {
     try {
-      await widget.services.updateBrowserDisplay(session.platform, sort: value);
+      final parts = value.split(':');
+      await widget.services.updateBrowserDisplay(
+        session.platform,
+        sort: parts.first,
+        ascending: parts.length > 1 ? parts[1] == 'asc' : null,
+      );
     } catch (_) {
       if (mounted) message(context, '排序方式保存失败，请重试');
     }
@@ -1921,6 +2090,7 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   Widget _fileListContent(List<CloudFile> files, BoxConstraints constraints) {
+    final footer = _hasMore && !_searchResults && !widget.searchPage;
     final key = ValueKey(
       '${session.platform.name}:${session.mode.name}:${session.familyId}:${session.personalSpaceId}:${stack.last.$1}:$view:${_searchResults ? _searchGeneration : 0}',
     );
@@ -1936,6 +2106,7 @@ class _BrowserPageState extends State<BrowserPage> {
           : 0.0;
       return GridView.builder(
         key: key,
+        controller: _fileScroll,
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(16, 2, 16, 20),
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -1950,24 +2121,56 @@ class _BrowserPageState extends State<BrowserPage> {
               (_searchResults ? scaler.scale(11) * 1.3 * 2 + 4 : 0) +
               30,
         ),
-        itemCount: files.length,
-        itemBuilder: (context, index) => _gridCard(
-          files[index],
-          width,
-          mediaHeight,
-          titleHeight,
-          constraints.maxWidth >= 750,
-        ),
+        itemCount: files.length + (footer ? 1 : 0),
+        itemBuilder: (context, index) => index == files.length
+            ? _pageFooter()
+            : _gridCard(
+                files[index],
+                width,
+                mediaHeight,
+                titleHeight,
+                constraints.maxWidth >= 750,
+              ),
       );
     }
     return ListView.builder(
       key: key,
+      controller: _fileScroll,
       physics: const AlwaysScrollableScrollPhysics(),
-      itemCount: files.length,
-      itemBuilder: (context, index) =>
-          _listRow(files[index], constraints.maxWidth >= 750),
+      itemCount: files.length + (footer ? 1 : 0),
+      itemBuilder: (context, index) => index == files.length
+          ? _pageFooter()
+          : _listRow(files[index], constraints.maxWidth >= 750),
     );
   }
+
+  Widget _pageFooter() => Padding(
+    key: const Key('browser-page-footer'),
+    padding: const EdgeInsets.all(12),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_loadingMore) const AppLoadingIndicator(),
+        if (_pageError.isNotEmpty)
+          Text(
+            _pageError,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        TextButton(
+          key: const Key('browser-load-more'),
+          onPressed: _loadingMore ? null : _loadMore,
+          child: Text(
+            _loadingMore
+                ? '正在加载…'
+                : _pageError.isEmpty
+                ? '加载更多'
+                : '重试加载',
+          ),
+        ),
+      ],
+    ),
+  );
 
   Widget _listRow(CloudFile file, bool wide) {
     final checked = selected.contains(_fileKey(file));
@@ -2267,17 +2470,13 @@ class _BrowserPageState extends State<BrowserPage> {
                   ('size', '大小', CupertinoIcons.doc),
                   ('date', '时间', CupertinoIcons.clock),
                 ])
-                  AppMenuAction(
-                    value: option.$1,
-                    label: option.$2,
-                    icon: option.$3,
-                    selected: sort == option.$1,
-                    detail: sort == option.$1
-                        ? ascending
-                              ? '↑ 升序'
-                              : '↓ 降序'
-                        : null,
-                  ),
+                  for (final direction in [true, false])
+                    AppMenuAction(
+                      value: '${option.$1}:${direction ? 'asc' : 'desc'}',
+                      label: '${option.$2} · ${direction ? '正序' : '倒序'}',
+                      icon: option.$3,
+                      selected: sort == option.$1 && ascending == direction,
+                    ),
               ],
             ),
             if (!widget.picking)
@@ -2463,17 +2662,13 @@ class _BrowserPageState extends State<BrowserPage> {
                   ('date', '时间', CupertinoIcons.clock),
                   ('size', '大小', CupertinoIcons.doc),
                 ])
-                  AppMenuAction(
-                    value: option.$1,
-                    label: option.$2,
-                    icon: option.$3,
-                    selected: sort == option.$1,
-                    detail: sort == option.$1
-                        ? ascending
-                              ? '↑ 升序'
-                              : '↓ 降序'
-                        : null,
-                  ),
+                  for (final direction in [true, false])
+                    AppMenuAction(
+                      value: '${option.$1}:${direction ? 'asc' : 'desc'}',
+                      label: '${option.$2} · ${direction ? '正序' : '倒序'}',
+                      icon: option.$3,
+                      selected: sort == option.$1 && ascending == direction,
+                    ),
               ],
             ),
           ),
@@ -2663,9 +2858,7 @@ class _BrowserPageState extends State<BrowserPage> {
                           onPressed: files.isEmpty
                               ? null
                               : () => _toggleAllVisible(files),
-                          child: Text(
-                            _allVisibleSelected(files) ? '取消全选' : '全选',
-                          ),
+                          child: Text(_selectAllLabel(files)),
                         ),
                         Text(
                           '已选 ${selection.length} 项',
@@ -2846,6 +3039,13 @@ class _BrowserPageState extends State<BrowserPage> {
             ? '选择目标文件夹'
             : session.title.ifEmpty(session.platform.label),
         actions: [
+          if (!widget.picking)
+            IconButton(
+              key: const Key('browser-download-manager'),
+              tooltip: '下载管理',
+              onPressed: _openDownloadManager,
+              icon: const Icon(CupertinoIcons.arrow_down_circle, size: 21),
+            ),
           if (!widget.picking &&
               session.mode == BrowseMode.share &&
               session.sourceLink != null)
@@ -3052,6 +3252,21 @@ class _BrowserPageState extends State<BrowserPage> {
                     ),
                   ),
                   _browserToolbar(files),
+                  if (_hasMore)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '已加载 ${items.length} 项 · 排序仅针对已加载文件，搜索会查找完整目录',
+                          key: const Key('browser-page-status'),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: secondary(context),
+                          ),
+                        ),
+                      ),
+                    ),
                   if (_includeSubfolders && search.text.trim().isNotEmpty)
                     _searchSummary(),
                   if (_selecting && !widget.picking)
@@ -3065,9 +3280,7 @@ class _BrowserPageState extends State<BrowserPage> {
                               onPressed: files.isEmpty
                                   ? null
                                   : () => _toggleAllVisible(files),
-                              child: Text(
-                                _allVisibleSelected(files) ? '取消全选' : '全选',
-                              ),
+                              child: Text(_selectAllLabel(files)),
                             ),
                             Text(
                               '已选 ${selection.length} 项',
@@ -3197,7 +3410,7 @@ class _BrowserPageState extends State<BrowserPage> {
                                 child: const Text('重试'),
                               ),
                             )
-                          : files.isEmpty
+                          : files.isEmpty && !_hasMore
                           ? _folderContextMenu(
                               EmptyPanel(
                                 _searchResults

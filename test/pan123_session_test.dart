@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/providers/pan123.dart';
@@ -1009,32 +1008,29 @@ void main() {
   );
 
   test(
-    'Remembered 123 passwords survive encrypted storage without appearing in disk files or diagnostics',
+    'Remembered 123 passwords survive plain storage and remain redacted in diagnostics',
     () async {
       final directory = await Directory.systemTemp.createTemp(
         'asterlink-123-vault-test-',
       );
       addTearDown(() => directory.delete(recursive: true));
-      final key = CryptoBox.random(32);
-      final encryptedStore = await StateStore.open(directory, testKey: key);
-      final f = _Fixture(store: encryptedStore);
+      final store = await StateStore.open(directory);
+      final f = _Fixture(store: store);
       final result = await f.login.submit(
         _platform,
         (_) => f.connector.password('fixture-phone', _password),
       );
-      await encryptedStore.flush();
-      for (final file
-          in await directory
-              .list()
-              .where((entry) => entry is File)
-              .cast<File>()
-              .toList()) {
-        final raw = latin1.decode(await file.readAsBytes());
-        expect(raw, isNot(contains('Example password')));
-        expect(raw, isNot(contains('fixture-phone')));
-        expect(raw, isNot(contains('renewed-token')));
-      }
-      final reopened = await StateStore.open(directory, testKey: key);
+      await store.flush();
+      expect(store.file!.path, endsWith('state-v2.json'));
+      final snapshot = StateStore.memory(
+        decodePlainState(await store.file!.readAsBytes()),
+      );
+      addTearDown(snapshot.dispose);
+      final saved = Vault(snapshot).credential(_platform)!;
+      expect(saved.primary, 'fixture-phone');
+      expect(saved.field('secondary'), _password);
+      expect(saved.field('accessToken'), 'renewed-token');
+      final reopened = await StateStore.open(directory);
       expect(
         Vault(reopened).credential(_platform)!.field('secondary'),
         _password,
@@ -1049,7 +1045,7 @@ void main() {
       await f.login.remove(_platform);
       expect(f.vault.credential(_platform), isNull);
       reopened.dispose();
-      encryptedStore.dispose();
+      store.dispose();
     },
   );
 }

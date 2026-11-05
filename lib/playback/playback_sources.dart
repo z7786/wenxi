@@ -12,6 +12,7 @@ import '../domain/playback.dart';
 import '../domain/playback_source.dart';
 import '../platform/file_access.dart';
 import 'media_backend.dart';
+import 'playback_backend_factory.dart';
 import 'playback_controller.dart';
 import 'subtitle_files.dart';
 import 'subtitle_matching.dart';
@@ -187,8 +188,10 @@ PlaybackController cloudPlayback(
     },
     backendFactory:
         backendFactory ??
-        (entry, hardware) =>
-            MediaKitBackend(video: entry.video, hardwareAcceleration: hardware),
+        (entry, hardware) => createPlaybackBackend(
+          video: entry.video,
+          hardwareAcceleration: hardware,
+        ),
   );
 }
 
@@ -246,7 +249,9 @@ PlaybackController downloadedPlayback(
     release: (_) async {},
     backendFactory:
         backendFactory ??
-        (entry, hardware) =>
-            MediaKitBackend(video: entry.video, hardwareAcceleration: hardware),
+        (entry, hardware) => createPlaybackBackend(
+          video: entry.video,
+          hardwareAcceleration: hardware,
+        ),
   );
 }

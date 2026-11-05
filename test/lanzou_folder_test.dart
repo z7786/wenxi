@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
+import 'package:asterlink/core/operation_progress.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/http.dart';
@@ -26,6 +27,128 @@ CloudRepository repository(LanzouFolderFixture fixture) {
 }
 
 void main() {
+  const paginationScript = '''
+function loaded(msg) {
+  var data = msg.text;
+  if(data.length<50){
+    document.getElementById("filemore").style.display="none";
+  }
+}''';
+
+  test('Only a recognized folder pagination template ends on a short page', () {
+    expect(LanzouPage(lanzouFolderPage()).folderPageSize, isNull);
+    expect(
+      LanzouPage(
+        lanzouFolderPage(paginationScript: paginationScript),
+      ).folderPageSize,
+      50,
+    );
+    expect(
+      LanzouPage(
+        lanzouFolderPage(paginationScript: '/* $paginationScript */'),
+      ).folderPageSize,
+      isNull,
+    );
+    expect(
+      LanzouPage(
+        lanzouFolderPage(
+          paginationScript: paginationScript.replaceAll('filemore', 'advert'),
+        ),
+      ).folderPageSize,
+      isNull,
+    );
+  });
+
+  test(
+    'A short final folder page completes without an extra list request',
+    () async {
+      final fixture = LanzouFolderFixture();
+      fixture.folders['/bFolder123'] = lanzouFolderPage(
+        paginationScript: paginationScript,
+      );
+      fixture.pages['321']![1]!['text'] = [
+        for (var i = 0; i < 50; i++)
+          {'id': 'iFile$i', 'name_all': 'file$i.zip', 'size': '1 M'},
+      ];
+      fixture.pages['321']![2] = {
+        'zt': 1,
+        'text': [
+          {'id': 'iLastFile', 'name_all': 'last.zip', 'size': '1 M'},
+        ],
+      };
+      final session = await fixture.openFolder();
+      final files = await fixture.connector.list(session, session.rootId, null);
+      expect(files, hasLength(51));
+      expect(files.last.id, 'iLastFile');
+      expect(fixture.http.calls.where((r) => r.method == 'POST'), hasLength(2));
+    },
+  );
+
+  test(
+    'Folder parsing reports file counts and rate-limit waiting as files are read',
+    () async {
+      final fixture = LanzouFolderFixture();
+      fixture.folders['/bFolder123'] = lanzouFolderPage(
+        paginationScript: paginationScript,
+      );
+      fixture.pages['321']![1]!['text'] = [
+        for (var i = 0; i < 50; i++)
+          {'id': 'iFile$i', 'name_all': 'file$i.zip', 'size': '1 M'},
+      ];
+      fixture.pages['321']![2] = {
+        'zt': 1,
+        'text': [
+          {'id': 'iLastFile', 'name_all': 'last.zip', 'size': '1 M'},
+        ],
+      };
+      var limited = false;
+      fixture.folderOverride = (request) {
+        if (request.method == 'POST' &&
+            Uri.splitQueryString(request.body as String)['pg'] == '2' &&
+            !limited) {
+          limited = true;
+          return HttpResult(200, jsonEncode({'zt': 4}));
+        }
+        return null;
+      };
+      final progress = OperationProgress();
+      final readings = <OperationStep>[];
+      progress.addListener(() {
+        final reading = progress.value
+            .where((step) => step.stage == OperationStage.readFiles)
+            .lastOrNull;
+        if (reading != null) readings.add(reading);
+      });
+      final repo = repository(fixture);
+      try {
+        await progress.run(() async {
+          final session = await repo.share(fixture.folderLink());
+          expect(await repo.list(session, session.rootId), hasLength(51));
+        });
+        expect(
+          readings.map((step) => step.itemsRead),
+          containsAll([0, 50, 51]),
+        );
+        expect(
+          readings.any((step) => step.itemsRead == 50 && step.waitingForRetry),
+          isTrue,
+        );
+        expect(
+          progress.value.every(
+            (step) => step.status == OperationStepStatus.completed,
+          ),
+          isTrue,
+        );
+        expect(
+          fixture.http.calls.where((r) => r.method == 'POST'),
+          hasLength(3),
+        );
+      } finally {
+        progress.dispose();
+      }
+    },
+  );
+
   test(
     'MoePal aliases work for folder roots, cross-domain children and file downloads',
     () async {

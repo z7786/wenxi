@@ -7,17 +7,18 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+import 'package:asterlink/playback/playback_state.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/auth.dart';
 import '../domain/playback.dart';
+import '../data/external_player_history.dart';
 import '../domain/playback_source.dart';
 import '../platform/playback_device.dart';
 import '../platform/player_screenshot.dart';
 import '../playback/playback_controller.dart';
+import '../playback/floating_playback.dart';
 import '../playback/playback_sleep_timer.dart';
 import '../playback/subtitle_files.dart';
 import '../diagnostics/app_log.dart';
@@ -26,11 +27,13 @@ import 'player_rate_input.dart';
 import 'player_connections_input.dart';
 import 'player_playlist_panel.dart';
 import 'player_aspect_panel.dart';
+import 'player_layout_panel.dart';
+import 'player_skip_time_dialog.dart';
 import 'player_sleep_panel.dart';
 import 'player_screenshot_panel.dart';
 import 'player_cast_panel.dart';
 import '../playback/cast/cast_discovery.dart';
-import 'pip_resize_handles.dart';
+import 'desktop_pip_surface.dart';
 import 'loading_indicator.dart';
 
 class PlayerPage extends StatefulWidget {
@@ -46,17 +49,19 @@ class PlayerPage extends StatefulWidget {
     this.onAuthorizeUcTv,
     this.screenshotActions = const PlayerScreenshotActions(),
     this.castDiscoveryFactory = CastDiscovery.new,
+    this.resumeSession = false,
   });
   final PlaybackController controller;
   final Directory subtitleDirectory;
   final PlaybackDevice? device;
   final Future<void> Function(DownloadSpec source)? onDownload;
-  final Future<bool> Function()? confirmDownload;
+  final Future<bool> Function(BuildContext)? confirmDownload;
   final Future<XFile?> Function()? chooseSubtitle;
   final Future<XFile?> Function()? chooseExternalPlayer;
-  final Future<bool> Function()? onAuthorizeUcTv;
+  final Future<bool> Function(BuildContext)? onAuthorizeUcTv;
   final PlayerScreenshotActions screenshotActions;
   final CastDiscovery Function() castDiscoveryFactory;
+  final bool resumeSession;
   @override
   State<PlayerPage> createState() => _PlayerPageState();
 }
@@ -68,8 +73,11 @@ class _PlayerPageState extends State<PlayerPage>
   final focus = FocusNode(debugLabel: 'AsterLink player');
   Timer? _hideTimer, _hudTimer, _volumeTimer, _layoutDeadline, _layoutQuiet;
   Timer? _lockTimer;
+  Timer? _boostIndicatorTimer;
+  bool _boostIndicatorVisible = false;
   Timer? _nativeSubtitleTimer;
   double _nativeSubtitleHeight = 0,
+      _nativeSubtitleWidth = 0,
       _nativeSubtitleBottom = 0,
       _nativeSubtitleLift = 0,
       _nativeSubtitleSize = 22;
@@ -102,6 +110,7 @@ class _PlayerPageState extends State<PlayerPage>
       widget.onAuthorizeUcTv != null;
   bool _wasPlaying = false, _pauseWithoutControls = false;
   int _modalDepth = 0, _seenGeneration = -1;
+  int _lifecycleRevision = 0;
   String hud = '', _seenNotice = '';
   String _seenFontMessage = '';
   Duration? _seekPreview;
@@ -112,14 +121,37 @@ class _PlayerPageState extends State<PlayerPage>
   double _verticalInitial = 0, _verticalTarget = 0;
   bool _brightnessDrag = false, _verticalActive = false;
   double _lastAudibleVolume = 100;
+  int _volumeRevision = 0;
   RawDialogRoute<void>? _activePanel;
+  PlaybackPreferences? _layoutDraft;
+  double _boostStartRate = 2;
+  bool _boostGestureActive = false;
+  Offset _boostLastOffset = Offset.zero, _boostVerticalOrigin = Offset.zero;
+  double _boostHorizontalOrigin = 0;
+  bool get _editingLayout => _layoutDraft != null;
+  PlaybackPreferences get _chromePreferences =>
+      _layoutDraft ?? controller.preferences;
   Color get _chromeForeground => Colors.white;
-  bool _sidePanel(Size size) => size.width >= 600 || size.width > size.height;
+  bool _sidePanel(Size size) =>
+      size.width >= 480 &&
+      (controller.preferences.panelLayout == 'side' ||
+          controller.preferences.panelLayout == 'auto' &&
+              (size.width >= 600 || size.width > size.height));
   PlaybackOrientation get _screenOrientation =>
       _orientationOverride ??
       (MediaQuery.orientationOf(context) == Orientation.landscape
           ? PlaybackOrientation.landscape
           : PlaybackOrientation.portrait);
+  bool get _fullscreenActive =>
+      fullscreen ||
+      controller.hasVideo &&
+          device.supportsOrientation &&
+          _screenOrientation == PlaybackOrientation.landscape;
+  String get _fullscreenLabel => _fullscreenActive
+      ? controller.hasVideo && device.supportsOrientation
+            ? '竖屏'
+            : '退出全屏'
+      : '全屏';
 
   @override
   void initState() {
@@ -157,11 +189,22 @@ class _PlayerPageState extends State<PlayerPage>
   Future<void> _initialize() async {
     try {
       await device.start(video: controller.hasVideo);
+      if (mounted && device.supportsSystemVolume) {
+        await controller.useSystemVolume(
+          device.setSystemVolume,
+          device.systemVolume,
+        );
+      }
     } catch (_) {
       if (mounted) _showHud('系统播放控制暂不可用');
     }
     if (!mounted) return;
-    await controller.start();
+    if (!widget.resumeSession || !controller.ready) {
+      await controller.start();
+    } else {
+      controller.foreground();
+      await _syncDevice();
+    }
     if (mounted) {
       _onController();
       _touch();
@@ -207,6 +250,11 @@ class _PlayerPageState extends State<PlayerPage>
       _seenFontMessage = fontMessage;
       if (fontMessage.isNotEmpty) _showHud(fontMessage);
     }
+    if (!controller.boosting) {
+      _boostIndicatorTimer?.cancel();
+      _boostIndicatorVisible = false;
+      _boostGestureActive = false;
+    }
     if (wasVisible != visible) _animateChrome();
     final state = controller.state;
     // Position and buffer updates only rebuild the bottom progress controls.
@@ -223,6 +271,7 @@ class _PlayerPageState extends State<PlayerPage>
       controller.error,
       controller.preferences,
       controller.boosting,
+      controller.boostLocked,
       controller.videoGeometry,
       controller.resumedFrom,
       controller.subtitleLoading,
@@ -270,6 +319,7 @@ class _PlayerPageState extends State<PlayerPage>
         backend
             .setSubtitlePresentation(
               size: _nativeSubtitleSize,
+              width: _nativeSubtitleWidth,
               height: _nativeSubtitleHeight,
               backgroundColor: controller.preferences.subtitleBackgroundArgb,
               bottom:
@@ -425,6 +475,15 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _onDevice() {
     if (mounted) {
+      if (device.inPip && _editingLayout) _cancelLayout();
+      if (device.supportsSystemVolume) {
+        _run(
+          () => controller.useSystemVolume(
+            device.setSystemVolume,
+            device.systemVolume,
+          ),
+        );
+      }
       final panel = _activePanel;
       if (device.inPip && panel != null && panel.isActive) {
         _activePanel = null;
@@ -437,13 +496,18 @@ class _PlayerPageState extends State<PlayerPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    final revision = ++_lifecycleRevision;
     if (state == AppLifecycleState.resumed) {
       controller.foreground();
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      if (state == AppLifecycleState.detached || (!device.inPip && !_pipBusy)) {
+        _run(() => controller.background(pictureInPicture: false));
+        return;
+      }
       _run(() async {
-        final pip =
-            state != AppLifecycleState.detached && await device.queryPip();
+        final pip = await device.queryPip();
+        if (!mounted || revision != _lifecycleRevision) return;
         await controller.background(pictureInPicture: pip);
       });
     }
@@ -455,6 +519,7 @@ class _PlayerPageState extends State<PlayerPage>
     _hideTimer?.cancel();
     _hudTimer?.cancel();
     _volumeTimer?.cancel();
+    _boostIndicatorTimer?.cancel();
     _chrome.dispose();
     _nativeSubtitleTimer?.cancel();
     _lockTimer?.cancel();
@@ -469,7 +534,12 @@ class _PlayerPageState extends State<PlayerPage>
     controller.removeListener(_onController);
     device.removeListener(_onDevice);
     focus.dispose();
-    unawaited(controller.close().catchError((Object _) {}));
+    if (controller.systemVolumeControl == device.setSystemVolume) {
+      controller.systemVolumeControl = null;
+    }
+    if (!controller.floating) {
+      unawaited(controller.close().catchError((Object _) {}));
+    }
     unawaited(device.finish().catchError((Object _) {}));
     super.dispose();
   }
@@ -491,7 +561,7 @@ class _PlayerPageState extends State<PlayerPage>
     _modalDepth++;
     _hideTimer?.cancel();
     try {
-      final authorized = await widget.onAuthorizeUcTv!();
+      final authorized = await widget.onAuthorizeUcTv!(context);
       if (mounted &&
           !_leaving &&
           authorized &&
@@ -596,6 +666,90 @@ class _PlayerPageState extends State<PlayerPage>
     });
   }
 
+  void _showBoostIndicator() {
+    _boostIndicatorTimer?.cancel();
+    setState(() => _boostIndicatorVisible = true);
+    _boostIndicatorTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (mounted) setState(() => _boostIndicatorVisible = false);
+    });
+  }
+
+  void _startBoostGesture(LongPressStartDetails details) {
+    _clearTapSequence();
+    if (locked) {
+      _showLock();
+      return;
+    }
+    if (!controller.ready || controller.casting) return;
+    _boostStartRate = controller.boosting
+        ? controller.effectiveRate
+        : controller.preferences.boostRate;
+    _boostLastOffset = _boostVerticalOrigin = Offset.zero;
+    _boostHorizontalOrigin = 0;
+    _hudTimer?.cancel();
+    setState(() {
+      _boostGestureActive = true;
+      hud = '';
+    });
+    _run(controller.beginBoost);
+    _showBoostIndicator();
+  }
+
+  void _moveBoostGesture(LongPressMoveUpdateDetails details) {
+    if (!_boostGestureActive || !controller.boosting || locked) return;
+    final offset = details.offsetFromOrigin;
+    final movement = offset - _boostLastOffset;
+    _boostLastOffset = offset;
+    // Follow horizontal movement so an upward turn also works after adjusting
+    // speed. Small diagonal drift must not trigger a vertical action.
+    if (movement.dx.abs() > movement.dy.abs()) {
+      _boostVerticalOrigin = offset;
+    }
+    final vertical = offset - _boostVerticalOrigin;
+    if (vertical.dy.abs() > vertical.dx.abs()) {
+      if (vertical.dy.abs() < 48) return;
+      if (vertical.dy > 0) {
+        _endBoostGesture(cancelled: true);
+        _showHud('已取消倍速 · 恢复 ${controller.preferences.rate}×');
+      } else {
+        final wasLocked = controller.boostLocked;
+        controller.lockBoost();
+        _boostVerticalOrigin = offset;
+        _boostHorizontalOrigin = offset.dx;
+        _boostStartRate = controller.effectiveRate;
+        if (!wasLocked) _showBoostIndicator();
+      }
+      return;
+    }
+    final rate =
+        (_boostStartRate +
+                ((offset.dx - _boostHorizontalOrigin) / 48).truncate() * .5)
+            .clamp(
+              PlaybackPreferences.minBoostRate,
+              PlaybackPreferences.maxBoostRate,
+            )
+            .toDouble();
+    if (rate == controller.effectiveRate) return;
+    _run(() => controller.adjustBoost(rate));
+    _showBoostIndicator();
+  }
+
+  void _endBoostGesture({bool cancelled = false}) {
+    // The recognizer also cancels before a long press starts, e.g. on a tap.
+    // Those events must leave an already locked speed alone.
+    if (!_boostGestureActive) return;
+    final keepSpeed = controller.boostLocked && !cancelled;
+    if (!keepSpeed) _boostIndicatorTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _boostGestureActive = false;
+        if (!keepSpeed) _boostIndicatorVisible = false;
+      });
+    }
+    _run(cancelled ? controller.endBoost : controller.releaseBoost);
+    if (keepSpeed) _setControlsVisible(false);
+  }
+
   void _toggleControls() {
     if (locked) {
       _showLock();
@@ -607,6 +761,10 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<void> _back() async {
+    if (_editingLayout) {
+      _cancelLayout();
+      return;
+    }
     if (device.supportsDesktopPip && device.inPip) {
       await _restorePip();
       return;
@@ -621,28 +779,34 @@ class _PlayerPageState extends State<PlayerPage>
     }
     if (_leaving) return;
     _leaving = true;
-    await controller.pause();
-    if (mounted) await Navigator.maybePop(context);
-    _leaving = false;
-  }
-
-  Future<void> _toggleOrientation() async {
-    if (locked || !controller.hasVideo || !device.supportsOrientation) return;
-    final next = _screenOrientation == PlaybackOrientation.landscape
-        ? PlaybackOrientation.portrait
-        : PlaybackOrientation.landscape;
-    setState(() => _orientationOverride = next);
-    _touch();
-    await _syncDevice();
+    try {
+      // Route disposal saves the final bookmark. Waiting for that disk write
+      // here can hold the back button behind a large download queue.
+      await controller.pause(save: false);
+      if (mounted) await Navigator.maybePop(context);
+    } finally {
+      _leaving = false;
+    }
   }
 
   Future<void> _toggleFullscreen() async {
     if (_fullscreenBusy || locked) return;
     _fullscreenBusy = true;
     try {
-      final next = !fullscreen;
+      final mobileVideo = controller.hasVideo && device.supportsOrientation;
+      final next = !_fullscreenActive;
       await device.fullscreen(next);
-      if (mounted) setState(() => fullscreen = next);
+      if (mounted) {
+        setState(() {
+          fullscreen = next;
+          if (mobileVideo) {
+            _orientationOverride = next
+                ? PlaybackOrientation.landscape
+                : PlaybackOrientation.portrait;
+          }
+        });
+        if (mobileVideo) await _syncDevice();
+      }
     } finally {
       _fullscreenBusy = false;
     }
@@ -699,6 +863,44 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  Future<void> _floating() async {
+    if (!device.supportsIndependentPlayerWindows ||
+        _leaving ||
+        _pipBusy ||
+        controller.loading ||
+        controller.floating) {
+      return;
+    }
+    if (controller.casting || controller.connectingCast) {
+      _showHud('请先断开电视投屏');
+      return;
+    }
+    _pipBusy = true;
+    final route = ModalRoute.of(context);
+    final navigator = Navigator.of(context);
+    final manager = FloatingPlaybackManager.of(controller.history.store);
+    try {
+      await controller.endBoost();
+      if (fullscreen) {
+        await device.fullscreen(false);
+        fullscreen = false;
+      }
+      await manager.openWindows(controller);
+      if (!mounted) return;
+      _leaving = true;
+      await device.finish();
+      // The manager owns the controller before disposal/parent finally runs.
+      if (mounted && route?.isCurrent == true) navigator.pop();
+      if (route != null) {
+        await route.completed;
+        controller.retireIndependentDecoder();
+      }
+    } finally {
+      _pipBusy = false;
+      if (mounted) _leaving = false;
+    }
+  }
+
   Future<void> _restorePip() async {
     await device.exitPip();
     _touch();
@@ -710,7 +912,7 @@ class _PlayerPageState extends State<PlayerPage>
     final navigator = Navigator.of(context);
     _leaving = true;
     try {
-      await controller.pause();
+      await controller.pause(save: false);
       await _restorePip();
       if (fullscreen) {
         await device.fullscreen(false);
@@ -789,11 +991,9 @@ class _PlayerPageState extends State<PlayerPage>
     _dragY += details.primaryDelta ?? 0;
     _verticalTarget =
         (_verticalInitial - _dragY / math.max(80, _viewportHeight * .7))
-            .clamp(_brightnessDrag ? .05 : 0, 1)
+            .clamp(0, 1)
             .toDouble();
-    _showHud(
-      '${_brightnessDrag ? '亮度' : '音量'}  ${(_verticalTarget * 100).round()}%',
-    );
+    if (_brightnessDrag) _showHud('亮度  ${(_verticalTarget * 100).round()}%');
     if (_volumeTimer == null) {
       _applyVertical();
       _volumeTimer = Timer(const Duration(milliseconds: 60), () {
@@ -803,14 +1003,20 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
-  void _applyVertical() {
+  void _applyVertical({bool save = false}) {
     if (!mounted || locked) return;
     final brightness = _brightnessDrag, value = _verticalTarget;
-    _run(
-      () => brightness
-          ? device.setBrightness(value)
-          : controller.setVolume(value * 100, save: false),
-    );
+    final revision = ++_volumeRevision;
+    _run(() async {
+      if (brightness) {
+        await device.setBrightness(value);
+      } else {
+        await controller.setVolume(value * 100, save: save);
+        if (mounted && !locked && !_leaving && revision == _volumeRevision) {
+          _showHud('音量  ${controller.state.volume.round()}%');
+        }
+      }
+    });
   }
 
   void _verticalEnd() {
@@ -818,14 +1024,18 @@ class _PlayerPageState extends State<PlayerPage>
     _volumeTimer = null;
     if (locked || !controller.ready || !_verticalActive) return;
     _verticalActive = false;
-    _applyVertical();
-    if (!_brightnessDrag) {
-      _run(() => controller.updatePreferences(controller.preferences));
-    }
+    _applyVertical(save: true);
   }
 
   KeyEventResult _key(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    if (_editingLayout) {
+      if (event.logicalKey == LogicalKeyboardKey.escape) {
+        _cancelLayout();
+        return KeyEventResult.handled;
+      }
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
@@ -851,8 +1061,12 @@ class _PlayerPageState extends State<PlayerPage>
                   (key == LogicalKeyboardKey.arrowUp ? 5 : -5))
               .clamp(0, 100)
               .toDouble();
-      _run(() => controller.setVolume(value));
-      _showHud('音量 ${value.round()}%');
+      _run(() async {
+        await controller.setVolume(value);
+        if (mounted && !_leaving) {
+          _showHud('音量 ${controller.state.volume.round()}%');
+        }
+      });
     } else if (key == LogicalKeyboardKey.keyF) {
       _run(_toggleFullscreen);
     } else if (key == LogicalKeyboardKey.escape) {
@@ -1103,10 +1317,7 @@ class _PlayerPageState extends State<PlayerPage>
             },
           ),
           const SizedBox(height: 12),
-          const Text(
-            '长按画面可临时加速，松手恢复原速度。',
-            style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.6),
-          ),
+          _boostSetting(),
         ],
       ),
     ),
@@ -1353,13 +1564,60 @@ class _PlayerPageState extends State<PlayerPage>
     ),
   );
   Future<void> _fit() => _panel(
-    '画面比例',
+    '画面比例与缩放',
     (context) => PlayerAspectPanel(
       preferences: controller.preferences,
       onChanged: (value) => _run(() => controller.updatePreferences(value)),
+      onTransformChanged: (value, save) =>
+          _run(() => controller.updatePreferences(value, save: save)),
     ),
     previewSubtitles: true,
   );
+
+  Future<void> _layout() async {
+    if (_editingLayout || device.inPip || !mounted) return;
+    _hideTimer?.cancel();
+    _clearTapSequence();
+    _modalDepth++;
+    setState(() => _layoutDraft = controller.preferences);
+    _setControlsVisible(true);
+  }
+
+  void _cancelLayout() {
+    if (!_editingLayout) return;
+    setState(() => _layoutDraft = null);
+    _modalDepth--;
+    _touch();
+  }
+
+  Future<void> _saveLayoutEditor() async {
+    final draft = _layoutDraft;
+    if (draft == null) return;
+    await controller.updatePreferences(
+      controller.preferences.withLayout(draft),
+    );
+    if (mounted) _cancelLayout();
+  }
+
+  Widget _layoutControl(
+    String id,
+    String label,
+    bool selected,
+    Widget child,
+    PlaybackPreferences Function(PlaybackPreferences, bool) change,
+  ) => !_editingLayout
+      ? child
+      : PlayerLayoutToggle(
+          key: Key('player-layout-toggle-$id'),
+          label: label,
+          selected: selected,
+          onChanged: (v) {
+            if (_layoutDraft != null) {
+              setState(() => _layoutDraft = change(_layoutDraft!, v));
+            }
+          },
+          child: child,
+        );
 
   Future<void> _sleep() =>
       _panel('定时停止', (_) => PlayerSleepPanel(timer: controller.sleepTimer));
@@ -1398,6 +1656,7 @@ class _PlayerPageState extends State<PlayerPage>
             if (include && _nativeSubtitleHeight > 0) {
               await controller.backend?.setSubtitlePresentation(
                 size: _nativeSubtitleSize,
+                width: _nativeSubtitleWidth,
                 height: _nativeSubtitleHeight,
                 bottom: (_nativeSubtitleBottom / _nativeSubtitleHeight).clamp(
                   0,
@@ -1459,16 +1718,125 @@ class _PlayerPageState extends State<PlayerPage>
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 18),
             child: LayoutBuilder(
               builder: (context, box) {
-                final actions = <(String, IconData, Future<void> Function())>[
-                  ('音轨', CupertinoIcons.speaker_2, _audio),
+                final actions = <_PlayerMenuAction>[
+                  _PlayerMenuAction(
+                    '音轨',
+                    CupertinoIcons.speaker_2,
+                    _audio,
+                    enabled: !controller.casting,
+                  ),
+                  _PlayerMenuAction(
+                    '布局',
+                    CupertinoIcons.slider_horizontal_3,
+                    _layout,
+                    key: const Key('player-layout'),
+                  ),
+                  if (!controller.preferences.showPlaylistButton)
+                    _PlayerMenuAction(
+                      '选集',
+                      CupertinoIcons.list_bullet,
+                      _playlist,
+                    ),
+                  if (!controller.preferences.showSpeedButton)
+                    _PlayerMenuAction(
+                      '倍速',
+                      CupertinoIcons.speedometer,
+                      _rates,
+                      enabled: !controller.casting,
+                    ),
+                  if (!controller.preferences.showNextButton &&
+                      controller.canPrevious)
+                    _PlayerMenuAction(
+                      '上一集',
+                      CupertinoIcons.backward_end_fill,
+                      controller.previous,
+                    ),
+                  if (!controller.preferences.showNextButton &&
+                      controller.canNext)
+                    _PlayerMenuAction(
+                      '下一集',
+                      CupertinoIcons.forward_end_fill,
+                      controller.next,
+                    ),
+                  if (!controller.preferences.showLockButton)
+                    _PlayerMenuAction(
+                      '锁定画面',
+                      CupertinoIcons.lock,
+                      () async => _toggleLock(),
+                    ),
                   if (controller.hasVideo)
-                    ('字幕', CupertinoIcons.captions_bubble, _subtitles),
+                    _PlayerMenuAction(
+                      '字幕',
+                      CupertinoIcons.captions_bubble,
+                      _subtitles,
+                      enabled: !controller.casting,
+                    ),
                   if (controller.hasVideo)
-                    ('画面', CupertinoIcons.rectangle, _fit),
+                    _PlayerMenuAction(
+                      '画面',
+                      CupertinoIcons.rectangle,
+                      _fit,
+                      enabled: !controller.casting,
+                    ),
+                  if (controller.hasVideo &&
+                      !controller.preferences.showScreenshotButton)
+                    _PlayerMenuAction(
+                      '视频截图',
+                      CupertinoIcons.camera,
+                      _screenshot,
+                      key: const Key('player-screenshot'),
+                      enabled:
+                          controller.ready &&
+                          !controller.casting &&
+                          !_screenshotBusy &&
+                          controller.backend?.supportsScreenshot == true,
+                    ),
+                  if (controller.hasVideo &&
+                      (device.supportsPip ||
+                          device.supportsIndependentPlayerWindows))
+                    _PlayerMenuAction(
+                      '画中画',
+                      CupertinoIcons.rectangle_on_rectangle,
+                      device.supportsIndependentPlayerWindows
+                          ? _floating
+                          : _pip,
+                      key: const Key('player-pip'),
+                      enabled:
+                          !controller.casting &&
+                          !controller.connectingCast &&
+                          !_pipBusy,
+                    ),
+                  if (controller.hasVideo && device.supportsExternalPlayer)
+                    _PlayerMenuAction(
+                      '第三方播放器',
+                      CupertinoIcons.arrow_up_right_square,
+                      _openExternalPlayer,
+                      key: const Key('player-external-player'),
+                      enabled:
+                          !controller.loading &&
+                          !controller.openingExternalPlayer &&
+                          !controller.casting &&
+                          !controller.connectingCast,
+                    ),
+                  if (widget.onDownload != null)
+                    _PlayerMenuAction(
+                      controller.current.platform == CloudPlatform.uc
+                          ? '下载原文件'
+                          : '下载文件',
+                      CupertinoIcons.arrow_down_to_line,
+                      _download,
+                      key: const Key('player-download'),
+                      enabled: !_adding,
+                    ),
                 ];
-                final columns = MediaQuery.textScalerOf(context).scale(13) > 19
-                    ? 2
-                    : actions.length;
+                final columns = math.min(
+                  actions.length,
+                  MediaQuery.textScalerOf(context).scale(13) > 19
+                      ? 2
+                      : box.maxWidth >= 344
+                      ? 4
+                      : 3,
+                );
                 return Wrap(
                   spacing: 4,
                   runSpacing: 12,
@@ -1476,37 +1844,57 @@ class _PlayerPageState extends State<PlayerPage>
                     for (final action in actions)
                       SizedBox(
                         width: (box.maxWidth - (columns - 1) * 4) / columns,
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(10),
-                          onTap: controller.casting
-                              ? null
-                              : () {
-                                  next = action.$3;
-                                  Navigator.pop(context);
-                                },
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            child: Column(
-                              children: [
-                                Container(
-                                  width: 44,
-                                  height: 44,
-                                  decoration: BoxDecoration(
-                                    color: Colors.white.withValues(alpha: .06),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Icon(
-                                    action.$2,
-                                    color: Colors.white,
-                                    size: 24,
-                                  ),
+                        child: Semantics(
+                          button: true,
+                          enabled: action.enabled,
+                          child: Tooltip(
+                            message: action.label,
+                            child: InkWell(
+                              key: action.key,
+                              borderRadius: BorderRadius.circular(10),
+                              onTap: action.enabled
+                                  ? () {
+                                      next = action.open;
+                                      Navigator.pop(context);
+                                    }
+                                  : null,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8,
                                 ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  action.$1,
-                                  style: const TextStyle(fontSize: 13),
+                                child: Column(
+                                  children: [
+                                    Container(
+                                      width: 44,
+                                      height: 44,
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withValues(
+                                          alpha: .06,
+                                        ),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: Icon(
+                                        action.icon,
+                                        color: action.enabled
+                                            ? Colors.white
+                                            : Colors.white30,
+                                        size: 24,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      action.label,
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: action.enabled
+                                            ? Colors.white
+                                            : Colors.white30,
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                              ],
+                              ),
                             ),
                           ),
                         ),
@@ -1517,7 +1905,7 @@ class _PlayerPageState extends State<PlayerPage>
             ),
           ),
           const Divider(height: 1),
-          if (controller.hasVideo)
+          if (controller.hasVideo && !controller.preferences.showCastButton)
             ListTile(
               key: const Key('player-cast-settings'),
               leading: Icon(
@@ -1546,50 +1934,19 @@ class _PlayerPageState extends State<PlayerPage>
               },
             ),
           ),
-          if (controller.hasVideo)
-            ListTile(
-              key: const Key('player-screenshot-settings'),
-              leading: const Icon(CupertinoIcons.camera),
-              title: const Text('视频截图'),
-              subtitle: const Text('保存画面，可选择包含字幕'),
-              enabled:
-                  controller.ready &&
-                  !controller.casting &&
-                  controller.backend?.supportsScreenshot == true,
-              trailing: const Icon(CupertinoIcons.chevron_right, size: 16),
-              onTap: () {
-                next = _screenshot;
-                Navigator.pop(context);
-              },
-            ),
           SwitchListTile(
             key: const Key('player-folder-memory'),
             title: const Text('记住此文件夹的设置'),
             subtitle: Text(
               controller.folderKey == null
                   ? '当前来源无法确定文件夹，使用通用设置'
-                  : '分别保存倍速、片头片尾、字幕样式和画面比例',
+                  : '分别保存倍速、片头片尾、字幕样式、画面比例和缩放',
             ),
             value: controller.remembersFolder,
             onChanged: controller.folderKey == null || controller.loading
                 ? null
                 : (value) => _run(() => controller.setRememberFolder(value)),
           ),
-          if (controller.hasVideo && device.supportsExternalPlayer)
-            ListTile(
-              leading: const Icon(CupertinoIcons.arrow_up_right_square),
-              title: const Text('第三方播放器'),
-              subtitle: const Text('选择手机上已安装的播放器'),
-              enabled:
-                  !controller.loading &&
-                  !controller.openingExternalPlayer &&
-                  !controller.casting &&
-                  !controller.connectingCast,
-              onTap: () {
-                next = _openExternalPlayer;
-                Navigator.pop(context);
-              },
-            ),
           if (controller.hasVideo)
             SwitchListTile(
               key: const Key('player-hardware-decoding'),
@@ -1598,6 +1955,8 @@ class _PlayerPageState extends State<PlayerPage>
                 controller.usingSoftwareDecoder &&
                         controller.preferences.hardwareAcceleration
                     ? '当前使用软件解码，设备或视频格式可能不支持硬件解码'
+                    : controller.backend?.canRetryWithSoftware == false
+                    ? '优先硬解；关闭后使用软件解码兼容模式'
                     : '初始化失败时自动切换软件解码重试',
               ),
               value: controller.preferences.hardwareAcceleration,
@@ -1771,6 +2130,10 @@ class _PlayerPageState extends State<PlayerPage>
                 ],
               ),
             ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+            child: _boostSetting(),
+          ),
           ExpansionTile(
             key: const Key('player-skip-settings'),
             title: const Text('跳过片头片尾'),
@@ -1783,7 +2146,7 @@ class _PlayerPageState extends State<PlayerPage>
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 0, 20, 16),
                 child: Text(
-                  '使用当前进度：片头取当前时间，片尾取到结束的剩余时长，最多 600 秒。跳过片尾配合自动下一集生效；短视频不会套用超过自身长度的跳过设置。',
+                  '自定义跳过时长，支持秒数或分:秒，最多 600 秒。跳过片尾配合自动下一集生效；短视频不会套用超过自身长度的跳过设置。',
                   style: TextStyle(color: Colors.white54, fontSize: 12),
                 ),
               ),
@@ -1810,7 +2173,7 @@ class _PlayerPageState extends State<PlayerPage>
             child: Text(
               [
                 '拖动进度条可快速定位播放位置。',
-                '横向滑动调整进度，左侧上下滑动调亮度，右侧调音量；长按临时加速。',
+                '横向滑动调整进度，左侧上下滑动调亮度，右侧调音量；长按加速，按住上滑锁定、下滑取消。',
                 if (Platform.isWindows)
                   '键盘：空格播放/暂停，←/→跳转，↑/↓音量，F 全屏，Esc 返回，M 静音。',
               ].join('\n\n'),
@@ -1887,19 +2250,136 @@ class _PlayerPageState extends State<PlayerPage>
     ),
   );
 
-  Future<void> _captureSkipTime({required bool intro}) async {
-    final state = controller.state;
-    if (!controller.ready ||
-        state.duration <= Duration.zero ||
-        state.position < Duration.zero) {
-      return;
-    }
-    final position = clampPlaybackPosition(state.position, state.duration);
-    final seconds = (intro ? position : state.duration - position).inSeconds;
-    if (seconds > 600) {
-      _showHud('${intro ? '片头' : '片尾'}最多支持 600 秒，请调整播放位置后再捕获');
-      return;
-    }
+  Widget _boostIndicator() {
+    final selected = (controller.effectiveRate * 4).round();
+    // Keep older configured rates while showing the half-speed gesture steps.
+    final steps = <int>{
+      for (var offset = -6; offset <= 6; offset++)
+        ((_boostStartRate + offset * .5).clamp(
+                  PlaybackPreferences.minBoostRate,
+                  PlaybackPreferences.maxBoostRate,
+                ) *
+                4)
+            .round(),
+    }.toList()..sort();
+    final start = (steps.indexOf(selected) - 2).clamp(0, steps.length - 5);
+    String label(int step) =>
+        '${(step / 4).toStringAsFixed(2).replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '')}×';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Container(
+        key: const Key('player-boost-indicator'),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xdd20232a),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final step in steps.skip(start).take(5))
+                    Container(
+                      key: ValueKey('player-boost-step-$step'),
+                      margin: const EdgeInsets.symmetric(horizontal: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      decoration: step == selected
+                          ? BoxDecoration(
+                              color: Colors.white.withValues(alpha: .18),
+                              borderRadius: BorderRadius.circular(10),
+                            )
+                          : null,
+                      child: Text(
+                        label(step),
+                        style: TextStyle(
+                          color: step == selected
+                              ? Colors.white
+                              : Colors.white54,
+                          fontSize: step == selected ? 18 : 14,
+                          fontWeight: step == selected
+                              ? FontWeight.w700
+                              : FontWeight.normal,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              controller.boostLocked ? '倍速已锁定 · 长按下滑取消' : '左右调速 · 上滑锁定 · 下滑取消',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  double _boostIndicatorTop(Size viewport, double safeTop) {
+    final aspect = controller.preferences.aspectRatio > 0
+        ? controller.preferences.aspectRatio
+        : controller.videoGeometry?.aspectRatio;
+    final videoHeight =
+        aspect != null && controller.preferences.fit == PlaybackFit.contain
+        ? math.min(viewport.height, viewport.width / aspect)
+        : viewport.height;
+    final videoTop = (viewport.height - videoHeight) / 2;
+    final gap = (videoHeight * .06).clamp(12.0, 24.0);
+    return math.max(safeTop + 12, videoTop + gap);
+  }
+
+  Widget _boostSetting() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Text('长按快进倍速 · ${controller.preferences.boostRate}×'),
+      Slider(
+        key: const Key('player-boost-rate'),
+        value: controller.preferences.boostRate,
+        min: PlaybackPreferences.minBoostRate,
+        max: PlaybackPreferences.maxBoostRate,
+        divisions: 11,
+        label: '${controller.preferences.boostRate}×',
+        onChanged: controller.casting
+            ? null
+            : (v) => _run(
+                () => controller.updatePreferences(
+                  controller.preferences.copyWith(boostRate: v),
+                  save: false,
+                ),
+              ),
+        onChangeEnd: controller.casting
+            ? null
+            : (_) => _run(
+                () => controller.updatePreferences(controller.preferences),
+              ),
+      ),
+      const Text(
+        '默认 2 倍。长按后左右滑动每档调 0.5 倍，上滑锁定、下滑取消；未锁定时松手恢复原速度。锁定后可再次长按下滑取消。',
+        style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.6),
+      ),
+    ],
+  );
+
+  Future<void> _customSkipTime({required bool intro}) async {
+    final seconds = await showDialog<int>(
+      context: context,
+      builder: (_) => PlayerSkipTimeDialog(
+        intro: intro,
+        seconds: intro
+            ? controller.preferences.skipIntroSeconds
+            : controller.preferences.skipOutroSeconds,
+      ),
+    );
+    if (seconds == null || !mounted) return;
     await controller.updatePreferences(
       controller.preferences.copyWith(
         skipIntroSeconds: intro ? seconds : null,
@@ -1926,17 +2406,12 @@ class _PlayerPageState extends State<PlayerPage>
               TextButton.icon(
                 key: Key(
                   intro
-                      ? 'player-capture-skip-intro'
-                      : 'player-capture-skip-outro',
+                      ? 'player-custom-skip-intro'
+                      : 'player-custom-skip-outro',
                 ),
-                onPressed:
-                    controller.ready &&
-                        controller.state.duration > Duration.zero &&
-                        controller.state.position >= Duration.zero
-                    ? () => _run(() => _captureSkipTime(intro: intro))
-                    : null,
+                onPressed: () => _run(() => _customSkipTime(intro: intro)),
                 icon: const Icon(CupertinoIcons.time, size: 16),
-                label: const Text('使用当前进度'),
+                label: const Text('自定义时间'),
               ),
             ],
           ),
@@ -1944,7 +2419,7 @@ class _PlayerPageState extends State<PlayerPage>
             key: Key(intro ? 'player-skip-intro' : 'player-skip-outro'),
             value: seconds.toDouble(),
             max: 600,
-            divisions: 120,
+            divisions: 600,
             label: '$seconds 秒',
             onChanged: (value) => _run(
               () => controller.updatePreferences(
@@ -1968,7 +2443,9 @@ class _PlayerPageState extends State<PlayerPage>
     if (_adding || widget.onDownload == null) return;
     setState(() => _adding = true);
     try {
-      if (!(await widget.confirmDownload?.call() ?? true) || !mounted) return;
+      if (!(await widget.confirmDownload?.call(context) ?? true) || !mounted) {
+        return;
+      }
       await controller.enqueueDownload(widget.onDownload!);
       if (mounted) _showHud('已添加到下载队列');
     } on DownloadConfirmationCancelled {
@@ -1985,15 +2462,14 @@ class _PlayerPageState extends State<PlayerPage>
     _modalDepth++;
     _hideTimer?.cancel();
     try {
+      // Choose before retiring the current stream. A cancelled/repeated picker
+      // must not wait for the player currently reading that stream to stop.
+      final windows = device.windowsExternalPlayer;
+      final executable = windows == null ? null : await _chooseWindowsPlayer();
+      if (windows != null && executable == null || !mounted || _leaving) return;
+      if (windows != null) windows.executable = executable;
       await controller.openExternalPlayer((url, title, position) async {
         if (!mounted || _leaving) return false;
-        final windows = device.windowsExternalPlayer;
-        String? executable;
-        if (windows != null) {
-          executable = await _chooseWindowsPlayer();
-          if (executable == null || !mounted || _leaving) return false;
-          windows.executable = executable;
-        }
         // Disable Android's automatic PiP before another app takes the screen.
         await _syncDevice();
         if (!mounted || _leaving) return false;
@@ -2004,10 +2480,9 @@ class _PlayerPageState extends State<PlayerPage>
         );
         if (opened && executable != null) {
           try {
-            await controller.history.store.put(
-              'windowsExternalPlayer',
-              executable,
-            );
+            await ExternalPlayerHistory(
+              controller.history.store,
+            ).used(executable);
           } catch (_) {
             // A launched player already owns the stream. A failed preference
             // write must not close that stream or restart internal audio.
@@ -2023,13 +2498,35 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<String?> _chooseWindowsPlayer() async {
-    final saved = controller.history.store.data.str('windowsExternalPlayer');
-    if (saved.isNotEmpty) {
-      final selected = await showDialog<String>(
+    final history = ExternalPlayerHistory(controller.history.store).windows;
+    final saved = history.firstOrNull ?? '';
+    if (history.isNotEmpty) {
+      final route = DialogRoute<String>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('选择外部播放器'),
-          content: const Text('在线播放时请保留此播放页面。'),
+          content: SizedBox(
+            width: 380,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const Text('最近使用，可直接点击启动。'),
+                const SizedBox(height: 8),
+                for (final path in history)
+                  ListTile(
+                    key: ValueKey('external-player-$path'),
+                    leading: const Icon(CupertinoIcons.play_rectangle),
+                    title: Text(p.basename(path)),
+                    subtitle: Text(
+                      path,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () => Navigator.pop(context, path),
+                  ),
+              ],
+            ),
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
@@ -2039,15 +2536,15 @@ class _PlayerPageState extends State<PlayerPage>
               onPressed: () => Navigator.pop(context, 'choose'),
               child: const Text('选择其他播放器'),
             ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, 'saved'),
-              child: Text(p.basename(saved)),
-            ),
           ],
         ),
       );
+      final selected = await Navigator.of(context).push(route);
+      // Wait until the Flutter modal has released focus before opening the
+      // native file dialog. Reentrant dialogs can leave Windows' owner disabled.
+      await route.completed;
       if (selected == null || !mounted || _leaving) return null;
-      if (selected == 'saved') return saved;
+      if (selected != 'choose') return selected;
     }
     final selected =
         await (widget.chooseExternalPlayer?.call() ??
@@ -2085,119 +2582,26 @@ class _PlayerPageState extends State<PlayerPage>
 
   Widget _desktopPipControls() {
     final state = controller.state;
-    final duration = state.duration.inMilliseconds.toDouble();
     return Positioned.fill(
-      child: MediaQuery.withNoTextScaling(
-        child: Column(
-          key: const Key('player-desktop-pip'),
-          children: [
-            ColoredBox(
-              color: Colors.black54,
-              child: Row(
-                children: [
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onPanStart: (_) => _run(device.dragPip),
-                      onDoubleTap: () => _run(_restorePip),
-                      child: SizedBox(
-                        height: 44,
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            controller.current.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  _icon(
-                    '还原窗口',
-                    CupertinoIcons.arrow_up_left_arrow_down_right,
-                    () => _run(_restorePip),
-                    size: 18,
-                  ),
-                  _icon(
-                    '关闭画中画',
-                    CupertinoIcons.xmark,
-                    () => _run(_closePip),
-                    size: 18,
-                  ),
-                ],
+      child: DesktopPipSurface(
+        key: const Key('player-desktop-pip'),
+        video: controller.error.isEmpty
+            ? const SizedBox.expand()
+            : const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Text('播放中断，请还原窗口重试', textAlign: TextAlign.center),
+                ),
               ),
-            ),
-            Expanded(
-              child: GestureDetector(
-                key: const Key('player-pip-drag'),
-                behavior: HitTestBehavior.opaque,
-                onPanStart: (_) => _run(device.dragPip),
-                onTap: () => _run(controller.toggle),
-                onDoubleTap: () => _run(_restorePip),
-                child: controller.error.isEmpty
-                    ? const SizedBox.expand()
-                    : Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Text(
-                            '播放中断，请还原窗口重试',
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ),
-              ),
-            ),
-            ColoredBox(
-              color: Colors.black54,
-              child: Row(
-                children: [
-                  _icon(
-                    state.playing ? '暂停' : '播放',
-                    state.playing
-                        ? CupertinoIcons.pause_fill
-                        : CupertinoIcons.play_fill,
-                    () => _run(controller.toggle),
-                    size: 20,
-                    key: const Key('player-pip-toggle'),
-                  ),
-                  Expanded(
-                    child: Slider(
-                      key: const Key('player-pip-seek'),
-                      value: (_seekPreview ?? state.position).inMilliseconds
-                          .toDouble()
-                          .clamp(0, duration > 0 ? duration : 1)
-                          .toDouble(),
-                      max: duration > 0 ? duration : 1,
-                      onChanged: duration > 0 && controller.ready
-                          ? (value) => setState(() {
-                              _seekPreview = Duration(
-                                milliseconds: value.round(),
-                              );
-                            })
-                          : null,
-                      onChangeEnd: (value) => _run(() async {
-                        await controller.seek(
-                          Duration(milliseconds: value.round()),
-                        );
-                        if (mounted) setState(() => _seekPreview = null);
-                      }),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
+        playing: state.playing,
+        position: state.position,
+        duration: state.duration,
+        onToggle: () => _run(controller.toggle),
+        onSeek: (position) => _run(() => controller.seek(position)),
+        onDrag: () => _run(device.dragPip),
+        onResize: (edge) => _run(() => device.resizePip(edge)),
+        onRestore: () => _run(_restorePip),
+        onClose: () => _run(_closePip),
       ),
     );
   }
@@ -2236,9 +2640,17 @@ class _PlayerPageState extends State<PlayerPage>
       child: AnnotatedRegion<SystemUiOverlayStyle>(
         value: SystemUiOverlayStyle.light,
         child: PopScope(
-          canPop: !fullscreen && !locked && !desktopPip,
+          canPop: !_editingLayout && !fullscreen && !locked && !desktopPip,
           onPopInvokedWithResult: (didPop, _) {
-            if (!didPop) _run(_back);
+            if (didPop) {
+              // System back and gestures also silence audio before the route
+              // transition finishes and dispose releases the player.
+              if (!_leaving && !controller.floating) {
+                _run(() => controller.pause(save: false));
+              }
+            } else {
+              _run(_back);
+            }
           },
           child: Scaffold(
             backgroundColor: Colors.black,
@@ -2255,6 +2667,17 @@ class _PlayerPageState extends State<PlayerPage>
                   final captions = state.subtitle
                       .where((line) => line.trim().isNotEmpty)
                       .join('\n');
+                  final controlsHeight =
+                      100.0 * _chromePreferences.controlsScale +
+                      insets.bottom +
+                      (_separateTimeline(
+                            (box.maxWidth - insets.horizontal) /
+                                    _chromePreferences.controlsScale -
+                                32,
+                            media.textScaler,
+                          )
+                          ? media.textScaler.scale(12) * 1.4 + 4
+                          : 0);
                   final captionBottom = pip
                       ? desktopPip
                             ? 54.0
@@ -2272,43 +2695,60 @@ class _PlayerPageState extends State<PlayerPage>
                       ? 0.0
                       : math.max(
                           0.0,
-                          math.min(box.maxHeight * .55, 100.0 + insets.bottom) -
+                          math.min(box.maxHeight * .55, controlsHeight) -
                               captionBottom,
                         );
                   _nativeSubtitleHeight = box.maxHeight;
+                  _nativeSubtitleWidth = box.maxWidth;
                   _nativeSubtitleBottom = captionBottom;
                   _nativeSubtitleLift = captionLift;
                   _nativeSubtitleSize = pip
                       ? 12
                       : controller.preferences.subtitleSize;
                   _syncNativeSubtitles();
+                  final video = backend?.buildVideo(
+                    aspectRatio:
+                        !desktopPip && controller.preferences.aspectRatio > 0
+                        ? controller.preferences.aspectRatio
+                        : controller.videoGeometry?.aspectRatio,
+                    fit: desktopPip
+                        ? BoxFit.contain
+                        : switch (controller.preferences.fit) {
+                            PlaybackFit.contain => BoxFit.contain,
+                            PlaybackFit.cover => BoxFit.cover,
+                            PlaybackFit.stretch => BoxFit.fill,
+                          },
+                  );
+                  final nativeSubtitles = backend?.buildSubtitleOverlay();
                   return Stack(
                     fit: StackFit.expand,
                     clipBehavior: Clip.hardEdge,
                     children: [
-                      if (backend?.videoController != null)
+                      if (video != null)
                         ClipRect(
                           child: RepaintBoundary(
                             key: const Key('player-video-surface'),
-                            child: Video(
+                            child: KeyedSubtree(
                               key: ObjectKey(backend),
-                              aspectRatio:
-                                  controller.preferences.aspectRatio > 0
-                                  ? controller.preferences.aspectRatio
-                                  : controller.videoGeometry?.aspectRatio,
-                              controller: backend!.videoController!,
-                              controls: NoVideoControls,
-                              pauseUponEnteringBackgroundMode: false,
-                              resumeUponEnteringForegroundMode: false,
-                              subtitleViewConfiguration:
-                                  const SubtitleViewConfiguration(
-                                    visible: false,
-                                  ),
-                              fit: switch (controller.preferences.fit) {
-                                PlaybackFit.contain => BoxFit.contain,
-                                PlaybackFit.cover => BoxFit.cover,
-                                PlaybackFit.stretch => BoxFit.fill,
-                              },
+                              child: Transform.translate(
+                                offset: desktopPip
+                                    ? Offset.zero
+                                    : Offset(
+                                        controller.preferences.videoOffsetX *
+                                            box.maxWidth /
+                                            2,
+                                        controller.preferences.videoOffsetY *
+                                            box.maxHeight /
+                                            2,
+                                      ),
+                                child: Transform.scale(
+                                  key: const Key('player-video-transform'),
+                                  scale: desktopPip
+                                      ? 1
+                                      : controller.preferences.videoScale,
+                                  child: video,
+                                ),
+                              ),
                             ),
                           ),
                         )
@@ -2350,7 +2790,15 @@ class _PlayerPageState extends State<PlayerPage>
                           ),
                         ),
                       if (!controller.casting &&
-                          backend?.rendersSubtitlesNatively != true &&
+                          nativeSubtitles != null &&
+                          controller.preferences.subtitles &&
+                          !controller.loading &&
+                          !_rotationPending)
+                        Positioned.fill(child: nativeSubtitles),
+                      if (!controller.casting &&
+                          (backend?.rendersSubtitlesNatively != true ||
+                              backend?.usesSubtitleOverlay == true &&
+                                  nativeSubtitles == null) &&
                           captions.isNotEmpty &&
                           controller.preferences.subtitles &&
                           !controller.loading &&
@@ -2379,7 +2827,7 @@ class _PlayerPageState extends State<PlayerPage>
                             ),
                           ),
                         ),
-                      if (!pip)
+                      if (!pip && !_editingLayout)
                         Positioned.fill(
                           child: GestureDetector(
                             key: const Key('player-gesture-surface'),
@@ -2396,29 +2844,11 @@ class _PlayerPageState extends State<PlayerPage>
                             onVerticalDragUpdate: _verticalUpdate,
                             onVerticalDragEnd: (_) => _verticalEnd(),
                             onVerticalDragCancel: _verticalEnd,
-                            onLongPressStart: (_) {
-                              _clearTapSequence();
-                              if (locked) {
-                                _showLock();
-                              } else if (controller.ready &&
-                                  !controller.casting) {
-                                _run(controller.beginBoost);
-                                _showHud(
-                                  '${math.max(2.0, controller.preferences.rate)} 倍速播放中',
-                                );
-                              }
-                            },
-                            onLongPressEnd: (_) {
-                              if (controller.boosting) {
-                                _run(controller.endBoost);
-                                if (!locked) {
-                                  _showHud(
-                                    '已恢复 ${controller.preferences.rate} 倍速',
-                                  );
-                                }
-                              }
-                            },
-                            onLongPressCancel: () => _run(controller.endBoost),
+                            onLongPressStart: _startBoostGesture,
+                            onLongPressMoveUpdate: _moveBoostGesture,
+                            onLongPressEnd: (_) => _endBoostGesture(),
+                            onLongPressCancel: () =>
+                                _endBoostGesture(cancelled: true),
                           ),
                         ),
                       if (controller.casting) _castCover(),
@@ -2440,18 +2870,11 @@ class _PlayerPageState extends State<PlayerPage>
                           !pip)
                         _errorPanel(),
                       if (desktopPip) _desktopPipControls(),
-                      if (desktopPip)
+                      if (!pip && !_boostGestureActive)
                         Positioned.fill(
-                          child: PipResizeHandles(
-                            onResize: (edge) =>
-                                _run(() => device.resizePip(edge)),
-                          ),
-                        ),
-                      if (!pip)
-                        Positioned.fill(
-                          child: MediaQuery(
-                            data: chromeMedia,
-                            child: ExcludeSemantics(
+                          child: _scaleChrome(
+                            chromeMedia,
+                            ExcludeSemantics(
                               excluding: !visible || locked,
                               child: IgnorePointer(
                                 ignoring: !visible || locked,
@@ -2482,8 +2905,13 @@ class _PlayerPageState extends State<PlayerPage>
                                             builder: (_, _) =>
                                                 _bottomControls(),
                                           ),
-                                          _lockControl(false),
-                                          if (controller.hasVideo)
+                                          if (_editingLayout ||
+                                              _chromePreferences.showLockButton)
+                                            _lockControl(false),
+                                          if (controller.hasVideo &&
+                                              (_editingLayout ||
+                                                  _chromePreferences
+                                                      .showScreenshotButton))
                                             _screenshotControl(),
                                         ],
                                       ],
@@ -2495,9 +2923,9 @@ class _PlayerPageState extends State<PlayerPage>
                           ),
                         ),
                       if (locked && !pip)
-                        MediaQuery(
-                          data: chromeMedia,
-                          child: IgnorePointer(
+                        _scaleChrome(
+                          chromeMedia,
+                          IgnorePointer(
                             ignoring: !_lockVisible,
                             child: ExcludeSemantics(
                               excluding: !_lockVisible,
@@ -2512,7 +2940,63 @@ class _PlayerPageState extends State<PlayerPage>
                             ),
                           ),
                         ),
-                      if (hud.isNotEmpty && !pip)
+                      if (_editingLayout && !pip)
+                        Align(
+                          alignment:
+                              box.maxWidth < 600 && box.maxHeight > box.maxWidth
+                              ? const Alignment(0, -.44)
+                              : const Alignment(0, -.22),
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: math.min(
+                                340,
+                                math.max(
+                                  180,
+                                  box.maxWidth -
+                                      144 * _chromePreferences.controlsScale,
+                                ),
+                              ),
+                              maxHeight: math.max(
+                                100,
+                                math.min(
+                                  280,
+                                  box.maxHeight - insets.vertical - 175,
+                                ),
+                              ),
+                            ),
+                            child: MediaQuery(
+                              data: media.copyWith(
+                                textScaler: media.textScaler.clamp(
+                                  maxScaleFactor: 1.0,
+                                ),
+                              ),
+                              child: PlayerLayoutEditor(
+                                preferences: _layoutDraft!,
+                                onChanged: (v) =>
+                                    setState(() => _layoutDraft = v),
+                                onCancel: _cancelLayout,
+                                onDone: () => _run(_saveLayoutEditor),
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (controller.boosting &&
+                          _boostIndicatorVisible &&
+                          !pip &&
+                          !_editingLayout &&
+                          !locked)
+                        Positioned(
+                          top: _boostIndicatorTop(box.biggest, insets.top),
+                          left: 0,
+                          right: 0,
+                          child: Align(
+                            child: IgnorePointer(child: _boostIndicator()),
+                          ),
+                        ),
+                      if (hud.isNotEmpty &&
+                          !controller.boosting &&
+                          !pip &&
+                          !_editingLayout)
                         Center(
                           child: IgnorePointer(
                             child: Container(
@@ -2549,6 +3033,34 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  Widget _scaleChrome(MediaQueryData media, Widget child) => LayoutBuilder(
+    builder: (_, box) {
+      final scale = _chromePreferences.controlsScale;
+      if (scale == 1) return MediaQuery(data: media, child: child);
+      EdgeInsets scaledInsets(EdgeInsets value) => EdgeInsets.fromLTRB(
+        value.left / scale,
+        value.top / scale,
+        value.right / scale,
+        value.bottom / scale,
+      );
+      final size = Size(box.maxWidth / scale, box.maxHeight / scale);
+      return FittedBox(
+        fit: BoxFit.fill,
+        child: SizedBox.fromSize(
+          size: size,
+          child: MediaQuery(
+            data: media.copyWith(
+              size: size,
+              padding: scaledInsets(media.padding),
+              viewPadding: scaledInsets(media.viewPadding),
+            ),
+            child: child,
+          ),
+        ),
+      );
+    },
+  );
+
   Widget _lockControl(bool isLocked) => SafeArea(
     top: false,
     bottom: false,
@@ -2559,12 +3071,18 @@ class _PlayerPageState extends State<PlayerPage>
         child: Material(
           color: Colors.black54,
           borderRadius: BorderRadius.circular(28),
-          child: _icon(
-            isLocked ? '解除锁定' : '锁定画面',
-            isLocked ? CupertinoIcons.lock_fill : CupertinoIcons.lock,
-            _toggleLock,
-            color: Colors.white,
-            key: Key(isLocked ? 'player-unlock' : 'player-lock'),
+          child: _layoutControl(
+            'lock',
+            '锁定按钮',
+            _chromePreferences.showLockButton,
+            _icon(
+              isLocked ? '解除锁定' : '锁定画面',
+              isLocked ? CupertinoIcons.lock_fill : CupertinoIcons.lock,
+              _toggleLock,
+              color: Colors.white,
+              key: Key(isLocked ? 'player-unlock' : 'player-lock'),
+            ),
+            (p, v) => p.copyWith(showLockButton: v),
           ),
         ),
       ),
@@ -2581,17 +3099,22 @@ class _PlayerPageState extends State<PlayerPage>
         child: Material(
           color: Colors.black54,
           borderRadius: BorderRadius.circular(28),
-          child: _icon(
-            '视频截图',
-            CupertinoIcons.camera,
-            controller.ready &&
-                    controller.backend?.supportsScreenshot == true &&
-                    !controller.casting &&
-                    !_screenshotBusy
-                ? () => _run(_screenshot)
-                : null,
-            color: Colors.white,
-            key: const Key('player-screenshot'),
+          child: _layoutControl(
+            'screenshot',
+            '截图按钮',
+            _chromePreferences.showScreenshotButton,
+            _icon(
+              '视频截图',
+              CupertinoIcons.camera,
+              controller.ready &&
+                      !controller.casting &&
+                      !_screenshotBusy &&
+                      controller.backend?.supportsScreenshot == true
+                  ? () => _run(_screenshot)
+                  : null,
+              key: const Key('player-screenshot-button'),
+            ),
+            (p, v) => p.copyWith(showScreenshotButton: v),
           ),
         ),
       ),
@@ -2631,84 +3154,78 @@ class _PlayerPageState extends State<PlayerPage>
                     ),
                   ),
                 ),
-                if (widget.onDownload != null)
-                  _icon(
-                    controller.current.platform == CloudPlatform.uc
-                        ? '下载原文件'
-                        : '下载文件',
-                    CupertinoIcons.arrow_down_to_line,
-                    _adding ? null : () => _run(_download),
-                  ),
-                if (controller.hasVideo)
-                  _icon(
-                    '电视投屏',
-                    controller.casting ? Icons.cast_connected : Icons.cast,
-                    () => _run(_castPanel),
-                    key: const Key('player-cast'),
-                  ),
-                if (device.supportsPip && !controller.casting)
-                  _icon(
-                    '画中画',
-                    CupertinoIcons.rectangle_on_rectangle,
-                    () => _run(_pip),
-                  ),
                 if (controller.hasVideo &&
-                    device.supportsExternalPlayer &&
-                    !controller.casting)
-                  _icon(
-                    '第三方播放器',
-                    CupertinoIcons.arrow_up_right_square,
-                    controller.loading || controller.openingExternalPlayer
-                        ? null
-                        : () => _run(_openExternalPlayer),
-                    key: const Key('player-external-player'),
+                    (_editingLayout || _chromePreferences.showCastButton))
+                  _layoutControl(
+                    'cast',
+                    '投屏按钮',
+                    _chromePreferences.showCastButton,
+                    _icon(
+                      '电视投屏',
+                      controller.casting ? Icons.cast_connected : Icons.cast,
+                      () => _run(_castPanel),
+                      key: const Key('player-cast'),
+                    ),
+                    (p, v) => p.copyWith(showCastButton: v),
                   ),
-                _icon('播放设置', CupertinoIcons.ellipsis, () => _run(_settings)),
+                _icon(
+                  '更多',
+                  CupertinoIcons.ellipsis,
+                  _editingLayout ? null : () => _run(_settings),
+                  key: const Key('player-more'),
+                ),
               ],
             ),
-            if (_resolutionLabel case final resolution?)
+            if ((_editingLayout || _chromePreferences.showResolution) &&
+                _resolutionLabel != null)
               Padding(
                 padding: const EdgeInsets.only(left: 48, right: 8, top: 2),
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Semantics(
-                    label: '视频分辨率：$resolution',
-                    excludeSemantics: true,
-                    child: Container(
-                      key: const Key('player-resolution'),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0x1affffff),
-                        border: Border.all(color: const Color(0x1fffffff)),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            CupertinoIcons.tv,
-                            size: 13,
-                            color: Colors.white70,
-                          ),
-                          const SizedBox(width: 6),
-                          Flexible(
-                            child: Text(
-                              resolution,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w500,
+                  child: _layoutControl(
+                    'resolution',
+                    '分辨率信息',
+                    _chromePreferences.showResolution,
+                    Semantics(
+                      label: '视频分辨率：${_resolutionLabel!}',
+                      excludeSemantics: true,
+                      child: Container(
+                        key: const Key('player-resolution'),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0x1affffff),
+                          border: Border.all(color: const Color(0x1fffffff)),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              CupertinoIcons.tv,
+                              size: 13,
+                              color: Colors.white70,
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                _resolutionLabel!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w500,
+                                ),
                               ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
+                    (p, v) => p.copyWith(showResolution: v),
                   ),
                 ),
               ),
@@ -2782,7 +3299,9 @@ class _PlayerPageState extends State<PlayerPage>
       state.duration,
     );
     final maximum = math.max(1, state.duration.inMilliseconds).toDouble();
+    final prefs = _chromePreferences;
     final canSeek =
+        !_editingLayout &&
         controller.ready &&
         state.duration > Duration.zero &&
         (!controller.casting || controller.castSession!.seekSupported);
@@ -2804,6 +3323,40 @@ class _PlayerPageState extends State<PlayerPage>
             builder: (context, box) {
               final wide = box.maxWidth >= 600;
               final showNext = box.maxWidth >= 350;
+              final separateTime = _separateTimeline(
+                box.maxWidth,
+                MediaQuery.textScalerOf(context),
+              );
+              final timeline = Text.rich(
+                key: const Key('player-time'),
+                TextSpan(
+                  children: [
+                    TextSpan(text: playbackTime(position)),
+                    TextSpan(
+                      text:
+                          ' / ${state.duration > Duration.zero ? playbackTime(state.duration) : '--:--'}',
+                      style: const TextStyle(color: Colors.white54),
+                    ),
+                  ],
+                ),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  height: 1.4,
+                ),
+              );
+              final nextControl = _layoutControl(
+                'next',
+                '上一集 / 下一集',
+                prefs.showNextButton,
+                _icon(
+                  '下一集',
+                  CupertinoIcons.forward_end_fill,
+                  controller.canNext ? () => _run(controller.next) : null,
+                  size: 22,
+                ),
+                (p, v) => p.copyWith(showNextButton: v),
+              );
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -2910,6 +3463,18 @@ class _PlayerPageState extends State<PlayerPage>
                       },
                     ),
                   ),
+                  if (separateTime)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: timeline,
+                      ),
+                    ),
+                  // Narrow screens normally move episode navigation into the
+                  // playlist. Keep its layout toggle reachable while editing.
+                  if (_editingLayout && !showNext)
+                    Align(alignment: Alignment.centerLeft, child: nextControl),
                   Row(
                     children: [
                       _icon(
@@ -2917,7 +3482,7 @@ class _PlayerPageState extends State<PlayerPage>
                         state.playing
                             ? CupertinoIcons.pause_fill
                             : CupertinoIcons.play_fill,
-                        controller.ready
+                        controller.ready && !_editingLayout
                             ? () {
                                 _run(controller.toggle);
                                 _touch();
@@ -2926,109 +3491,114 @@ class _PlayerPageState extends State<PlayerPage>
                         size: 27,
                         key: const Key('player-play-pause'),
                       ),
-                      if (wide)
-                        _icon(
-                          '上一集',
-                          CupertinoIcons.backward_end_fill,
-                          controller.canPrevious
-                              ? () => _run(controller.previous)
-                              : null,
-                          size: 22,
+                      if (wide &&
+                          controller.canPrevious &&
+                          (_editingLayout || prefs.showNextButton))
+                        _layoutControl(
+                          'previous',
+                          '上一集 / 下一集',
+                          prefs.showNextButton,
+                          _icon(
+                            '上一集',
+                            CupertinoIcons.backward_end_fill,
+                            () => _run(controller.previous),
+                            size: 22,
+                          ),
+                          (p, v) => p.copyWith(showNextButton: v),
                         ),
-                      if (showNext)
-                        _icon(
-                          '下一集',
-                          CupertinoIcons.forward_end_fill,
-                          controller.canNext
-                              ? () => _run(controller.next)
-                              : null,
-                          size: 22,
-                        ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
+                      if (showNext &&
+                          (controller.canNext || _editingLayout) &&
+                          (_editingLayout || prefs.showNextButton))
+                        nextControl,
+                      if (separateTime)
+                        const Spacer()
+                      else ...[
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Align(
                             alignment: Alignment.centerLeft,
-                            child: Text.rich(
-                              TextSpan(
-                                children: [
-                                  TextSpan(text: playbackTime(position)),
-                                  TextSpan(
-                                    text:
-                                        ' / ${state.duration > Duration.zero ? playbackTime(state.duration) : '--:--'}',
-                                    style: const TextStyle(
-                                      color: Colors.white54,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                              ),
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: timeline,
                             ),
                           ),
                         ),
-                      ),
-                      TextButton(
-                        key: const Key('player-speed'),
-                        onPressed: controller.casting
-                            ? null
-                            : () => _run(_rates),
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          minimumSize: const Size(56, 44),
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                      ],
+                      if (_editingLayout || prefs.showSpeedButton)
+                        _layoutControl(
+                          'speed',
+                          '倍速按钮',
+                          prefs.showSpeedButton,
+                          box.maxWidth < 270
+                              ? _icon(
+                                  '倍速',
+                                  CupertinoIcons.speedometer,
+                                  controller.casting
+                                      ? null
+                                      : () => _run(_rates),
+                                  key: const Key('player-speed'),
+                                )
+                              : TextButton(
+                                  key: const Key('player-speed'),
+                                  onPressed: controller.casting
+                                      ? null
+                                      : () => _run(_rates),
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: Colors.white,
+                                    minimumSize: const Size(56, 44),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                    ),
+                                  ),
+                                  child: Text(
+                                    controller.casting
+                                        ? '电视播放'
+                                        : controller.effectiveRate == 1
+                                        ? '倍速'
+                                        : '${controller.effectiveRate}×',
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                ),
+                          (p, v) => p.copyWith(showSpeedButton: v),
                         ),
-                        child: Text(
-                          controller.casting
-                              ? '电视播放'
-                              : controller.preferences.rate == 1
-                              ? '倍速'
-                              : '${controller.preferences.rate}×',
-                          style: const TextStyle(fontSize: 13),
-                        ),
-                      ),
-                      if (box.maxWidth < 340 ||
-                          MediaQuery.textScalerOf(context).scale(13) > 19)
-                        _icon(
-                          '\u9009\u96c6',
-                          CupertinoIcons.list_bullet,
-                          () => _run(_playlist),
-                          key: const Key('player-playlist'),
-                        )
-                      else
-                        TextButton(
-                          key: const Key('player-playlist'),
-                          onPressed: () => _run(_playlist),
-                          style: TextButton.styleFrom(
-                            foregroundColor: Colors.white,
-                            minimumSize: const Size(52, 44),
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                          ),
-                          child: const Text(
-                            '\u9009\u96c6',
-                            style: TextStyle(fontSize: 13),
-                          ),
-                        ),
-                      if (controller.hasVideo && device.supportsOrientation)
-                        _icon(
-                          _screenOrientation == PlaybackOrientation.landscape
-                              ? '切换竖屏'
-                              : '切换横屏',
-                          Icons.screen_rotation,
-                          () => _run(_toggleOrientation),
-                          size: 22,
-                          key: const Key('player-orientation'),
+                      if (_editingLayout || prefs.showPlaylistButton)
+                        _layoutControl(
+                          'playlist',
+                          '选集按钮',
+                          prefs.showPlaylistButton,
+                          box.maxWidth < 340 ||
+                                  MediaQuery.textScalerOf(context).scale(13) >
+                                      19
+                              ? _icon(
+                                  '选集',
+                                  CupertinoIcons.list_bullet,
+                                  () => _run(_playlist),
+                                  key: const Key('player-playlist'),
+                                )
+                              : TextButton(
+                                  key: const Key('player-playlist'),
+                                  onPressed: () => _run(_playlist),
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: Colors.white,
+                                    minimumSize: const Size(52, 44),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                    ),
+                                  ),
+                                  child: const Text(
+                                    '选集',
+                                    style: TextStyle(fontSize: 13),
+                                  ),
+                                ),
+                          (p, v) => p.copyWith(showPlaylistButton: v),
                         ),
                       _icon(
-                        fullscreen ? '退出全屏' : '全屏',
-                        fullscreen
+                        _fullscreenLabel,
+                        _fullscreenActive
                             ? CupertinoIcons.arrow_down_right_arrow_up_left
                             : CupertinoIcons.arrow_up_left_arrow_down_right,
-                        () => _run(_toggleFullscreen),
+                        _fullscreenBusy ? null : () => _run(_toggleFullscreen),
                         size: 22,
                         key: const Key('player-fullscreen'),
                       ),
@@ -3101,6 +3671,25 @@ class _PlayerPageState extends State<PlayerPage>
     ),
   );
 }
+
+class _PlayerMenuAction {
+  const _PlayerMenuAction(
+    this.label,
+    this.icon,
+    this.open, {
+    this.enabled = true,
+    this.key,
+  });
+
+  final String label;
+  final IconData icon;
+  final Future<void> Function() open;
+  final bool enabled;
+  final Key? key;
+}
+
+bool _separateTimeline(double width, TextScaler textScaler) =>
+    width < 600 || textScaler.scale(12) > 18;
 
 class _SeekHoverLayout extends SingleChildLayoutDelegate {
   const _SeekHoverLayout(this.x);

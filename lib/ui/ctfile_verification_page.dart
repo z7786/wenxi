@@ -186,7 +186,7 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
             FilledButton(
               key: const ValueKey('ctfile-captcha-submit'),
               onPressed: _submitImage,
-              child: const Text('确认并继续登录'),
+              child: Text(widget.challenge.share ? '确认并继续解析' : '确认并继续登录'),
             ),
           ],
         ),

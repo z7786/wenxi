@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:media_kit/media_kit.dart';
+import 'package:asterlink/playback/playback_state.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/playback_store.dart';
 import 'package:asterlink/data/state_store.dart';

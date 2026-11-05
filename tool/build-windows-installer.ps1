@@ -65,6 +65,9 @@ $runtimeFiles = @($entries | Where-Object { -not $_.PSIsContainer })
 Assert-AsterLinkWindowsArchitecture -RuntimePath $runtimePath -Architecture $Architecture
 foreach ($file in $runtimeFiles) {
     $relativeFilePath = $file.FullName.Substring($runtimePath.Length + 1)
+    if ($file.Name -match '(?i)^(fvp|mdk(?:-(braw|r3d))?|ffmpeg-9|libass)\.dll$') {
+        throw "The runtime contains a removed player library: $($file.Name)"
+    }
     if ($file.Name -match '(?i)(\.(jks|keystore|p12|pfx|pem|pdb|log)$|^unins\d+\.|^state-v\d|^\.env)' -or
         $relativeFilePath -match '(?i)(^|[\\/])(\.local|\.git|diagnostics|gopeed)([\\/]|$)') {
         throw "The runtime contains a development or user-data file: $($file.Name)"

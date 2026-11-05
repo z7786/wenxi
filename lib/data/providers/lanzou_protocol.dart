@@ -75,6 +75,23 @@ class LanzouPage {
     return '蓝奏云文件夹';
   }
 
+  /// Only current templates explicitly stop when their 50-item page is short.
+  /// Unknown templates still require the API's terminal response.
+  int? get folderPageSize {
+    for (final match in RegExp(
+      r'\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.text\s*;',
+    ).allMatches(script)) {
+      final rows = RegExp.escape(match[1]!);
+      if (RegExp(
+        '\\bif\\s*\\(\\s*$rows\\.length\\s*<\\s*50\\s*\\)\\s*\\{\\s*'
+        r'''document\.getElementById\(\s*['"]filemore['"]\s*\)\.style\.display\s*=\s*['"]none['"]''',
+      ).hasMatch(script.substring(match.end))) {
+        return 50;
+      }
+    }
+    return null;
+  }
+
   /// The public folder page supplies these fields to filemoreajax.php.
   /// Resolve its data object instead of guessing which variable is a timestamp.
   Map<String, String> folderParameters({String? passcode}) {

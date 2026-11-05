@@ -32,6 +32,8 @@ class LanzouConnector extends CloudConnector {
   static const _cacheLifetime = Duration(minutes: 15);
   final _cache = <String, _LanzouShare>{};
   final _folders = <String, _LanzouFolder>{};
+  final _pagedFolders = <String, _LanzouPagedFolder>{};
+  int _nextBrowse = 0;
 
   @override
   CloudPlatform get platform => CloudPlatform.lanzou;
@@ -170,8 +172,9 @@ class LanzouConnector extends CloudConnector {
   @override
   Future<BrowseSession> openShare(
     ParsedLink link,
-    Credential? credential,
-  ) async {
+    Credential? credential, {
+    bool incremental = false,
+  }) async {
     // An explicit parse/refresh always revalidates the share and its password.
     RequestScope.checkpoint();
     final prefix = '${_key(link)}:';
@@ -180,11 +183,15 @@ class LanzouConnector extends CloudConnector {
     final landing = await _landing(link);
     if (landing.page.isFolder) {
       final root = _folderId(link);
-      final folder = await _resolveFolder(
-        link,
-        link,
-        initialList: true,
-        landing: landing,
+      final folder = await OperationProgress.step(
+        OperationStage.readFiles,
+        () => _resolveFolder(
+          link,
+          link,
+          initialList: true,
+          landing: landing,
+          pageLimit: incremental ? 1 : null,
+        ),
       );
       return BrowseSession(
         platform: platform,
@@ -243,6 +250,18 @@ class LanzouConnector extends CloudConnector {
     return _folders[_folderKey(root, link)];
   }
 
+  void _trimPagedFolders(String keep) {
+    while (_pagedFolders.length > 1 &&
+        (_pagedFolders.length > 32 ||
+            _pagedFolders.values.fold<int>(
+                  0,
+                  (count, read) => count + read.folder.files.length,
+                ) >
+                20000)) {
+      _pagedFolders.remove(_pagedFolders.keys.firstWhere((id) => id != keep));
+    }
+  }
+
   Future<void> _folderPause(int retries) async {
     await Future.any([
       _delay(Duration(milliseconds: 600 * (retries + 1))),
@@ -256,26 +275,35 @@ class LanzouConnector extends CloudConnector {
     ParsedLink link, {
     bool initialList = false,
     _LanzouLanding? landing,
+    _LanzouFolder? previous,
+    int? pageLimit,
   }) async {
     RequestScope.checkpoint();
+    final timer = Stopwatch()..start();
     final parent = _folderId(link), key = _folderKey(root, link);
     // A failed or cancelled refresh must not expose an older partial result.
-    _folders.remove(key);
-    final opened = landing ?? await _landing(link);
+    if (previous == null) _folders.remove(key);
+    final opened = previous?.landing ?? landing ?? await _landing(link);
     final pageUri = opened.uri,
         page = opened.page,
         transport = opened.transport;
     require(!page.unavailable, '蓝奏文件夹已取消分享或不存在');
     final fields = page.folderParameters(passcode: link.passcode);
-    final entries = <String, CloudFile>{};
-    for (final child in page.subfolders) {
+    final entries = <String, CloudFile>{
+      for (final file in previous?.files ?? <CloudFile>[]) file.id: file,
+    };
+    final batch = <String, CloudFile>{};
+    for (final child
+        in previous == null
+            ? page.subfolders
+            : <({String url, String name})>[]) {
       require(child.url.isNotEmpty, '蓝奏子文件夹信息不完整，请刷新列表');
       final childUri = _shareUri(pageUri.resolve(child.url).toString());
       final id = LinkParser.shareId(platform, childUri.toString());
       require(id != null, '蓝奏子文件夹地址无效，请刷新列表');
       final childId = _folderAddress(childUri);
       if (childId == parent) continue;
-      entries[childId] = CloudFile(
+      entries[childId] = batch[childId] = CloudFile(
         id: childId,
         name: _entryName(child.name),
         isDirectory: true,
@@ -284,9 +312,22 @@ class LanzouConnector extends CloudConnector {
       );
     }
     require(entries.length <= 10000, '蓝奏文件夹内容过多，请分批解析');
-    var pg = 1, retries = 0, complete = false;
+    final pageSize = page.folderPageSize;
+    var pg = previous?.nextPage ?? 1,
+        retries = 0,
+        retryCount = 0,
+        complete = false,
+        pagesRead = 0;
+    OperationProgress.reportFiles(entries.length);
     while (pg <= 500) {
-      if (pg > 1 || retries > 0) await _folderPause(retries);
+      if (pg > 1 || retries > 0) {
+        OperationProgress.reportFiles(
+          entries.length,
+          waitingForRetry: retries > 0,
+        );
+        await _folderPause(retries);
+      }
+      OperationProgress.reportFiles(entries.length);
       final result = await transport.request(
         'POST',
         pageUri.resolve('/filemoreajax.php'),
@@ -313,6 +354,7 @@ class LanzouConnector extends CloudConnector {
         throw const AppException('蓝奏提取码错误，请检查后重新解析');
       }
       if (status == 4) {
+        retryCount++;
         require(++retries <= 2, '蓝奏请求过于频繁，请稍后再试');
         continue;
       }
@@ -357,18 +399,29 @@ class LanzouConnector extends CloudConnector {
               existing.name == file.name && existing.size == file.size,
           '蓝奏文件夹内容正在变化，请刷新后重试',
         );
-        entries[id] = file;
+        entries[id] = batch[id] = file;
       }
       require(entries.length <= 10000, '蓝奏文件夹内容过多，请分批解析');
       require(entries.length > previousCount, '蓝奏文件夹分页重复，请稍后刷新后重试');
+      OperationProgress.reportFiles(entries.length);
+      if (pageSize != null && rows.length < pageSize) {
+        complete = true;
+        break;
+      }
       retries = 0;
       pg++;
+      pagesRead++;
+      if (pageLimit != null && pagesRead >= pageLimit) break;
     }
-    require(complete, '蓝奏文件夹页数过多，请分批解析');
+    require(complete || pageLimit != null && pg <= 500, '蓝奏文件夹页数过多，请分批解析');
     RequestScope.checkpoint();
     final folder = _LanzouFolder(
       name: _entryName(page.folderName),
       files: List.unmodifiable(entries.values),
+      batch: List.unmodifiable(batch.values),
+      landing: opened,
+      nextPage: pg,
+      complete: complete,
       expires: clock().add(_cacheLifetime),
       initialList: initialList,
     );
@@ -384,6 +437,15 @@ class LanzouConnector extends CloudConnector {
       _folders.remove(_folders.keys.first);
     }
     _folders[key] = folder;
+    DiagnosticLog.event(
+      'lanzou.folder_ready',
+      fields: {
+        'count': folder.files.length,
+        'pages': pg,
+        'retries': retryCount,
+        'elapsedMs': timer.elapsedMilliseconds,
+      },
+    );
     return folder;
   }
 
@@ -421,6 +483,10 @@ class LanzouConnector extends CloudConnector {
       // later list calls revalidate so the browser's refresh is a real refresh.
       if (parentId == session.rootId && cached?.initialList == true) {
         cached!.initialList = false;
+        if (!cached.complete) {
+          return (await _resolveFolder(root, link, previous: cached)).files;
+        }
+        OperationProgress.reportFiles(cached.files.length);
         return cached.files;
       }
       return (await _resolveFolder(root, link)).files;
@@ -434,6 +500,89 @@ class LanzouConnector extends CloudConnector {
         size: int.tryParse(session.meta('displaySize')) ?? 0,
       ),
     ];
+  }
+
+  @override
+  Future<CloudFilePage> listPage(
+    BrowseSession session,
+    String parentId,
+    Credential? credential, {
+    String? cursor,
+  }) async {
+    if (session.mode != BrowseMode.share || session.rootId == '0') {
+      return super.listPage(session, parentId, credential, cursor: cursor);
+    }
+    _checkSession(session);
+    final root = session.sourceLink!, link = _folderLink(session, parentId);
+    _pagedFolders.removeWhere(
+      (_, read) => !clock().isBefore(read.folder.expires),
+    );
+    if (cursor != null) {
+      final parts = cursor.split(':'), number = int.tryParse(parts.last);
+      final read = _pagedFolders[parts.first];
+      require(
+        parts.length == 2 &&
+            number != null &&
+            read != null &&
+            read.key == _folderKey(root, link),
+        '文件列表分页已失效，请刷新后继续',
+      );
+      return RequestScope.cancellable(
+        read!.gate.run(() async {
+          RequestScope.checkpoint();
+          require(
+            identical(_pagedFolders[parts.first], read),
+            '文件列表分页已失效，请刷新后继续',
+          );
+          final saved = read.pages[number];
+          if (saved != null) return saved;
+          require(
+            !read.folder.complete && number == read.folder.nextPage,
+            '文件列表分页已失效，请刷新后继续',
+          );
+          final folder = await _resolveFolder(
+            root,
+            link,
+            previous: read.folder,
+            pageLimit: 1,
+          );
+          RequestScope.checkpoint();
+          require(
+            identical(_pagedFolders[parts.first], read),
+            '文件列表分页已失效，请刷新后继续',
+          );
+          final result = CloudFilePage(
+            folder.batch,
+            nextCursor: folder.complete
+                ? null
+                : '${parts.first}:${folder.nextPage}',
+          );
+          read.folder = folder;
+          read.pages[number!] = result;
+          _trimPagedFolders(parts.first);
+          return result;
+        }),
+      );
+    }
+    final cached = _cachedFolder(root, link);
+    final folder = cached?.initialList == true
+        ? cached!
+        : await _resolveFolder(root, link, pageLimit: 1);
+    folder.initialList = false;
+    if (folder.complete) return CloudFilePage(folder.files);
+    while (_pagedFolders.isNotEmpty &&
+        (_pagedFolders.length >= 32 ||
+            _pagedFolders.values.fold<int>(
+                      0,
+                      (count, read) => count + read.folder.files.length,
+                    ) +
+                    folder.files.length >
+                20000)) {
+      _pagedFolders.remove(_pagedFolders.keys.first);
+    }
+    final id = '${++_nextBrowse}';
+    _pagedFolders[id] = _LanzouPagedFolder(_folderKey(root, link), folder);
+    return CloudFilePage(folder.files, nextCursor: '$id:${folder.nextPage}');
   }
 
   @override
@@ -464,9 +613,12 @@ class LanzouConnector extends CloudConnector {
     require(!file.isDirectory, '请选择蓝奏文件夹中的文件下载');
     if (fromFolder) {
       final parentLink = _folderLink(session, file.parentId);
-      final folder =
+      var folder =
           _cachedFolder(root, parentLink) ??
           await _resolveFolder(root, parentLink);
+      if (!folder.complete && !folder.files.any((item) => item.id == file.id)) {
+        folder = await _resolveFolder(root, parentLink, previous: folder);
+      }
       final member = folder.files
           .where((item) => !item.isDirectory && item.id == file.id)
           .firstOrNull;
@@ -709,13 +861,29 @@ class _LanzouFolder {
   _LanzouFolder({
     required this.name,
     required this.files,
+    required this.batch,
+    required this.landing,
+    required this.nextPage,
+    required this.complete,
     required this.expires,
     required this.initialList,
   });
   final String name;
   final List<CloudFile> files;
+  final List<CloudFile> batch;
+  final _LanzouLanding landing;
+  final int nextPage;
+  final bool complete;
   final DateTime expires;
   bool initialList;
+}
+
+class _LanzouPagedFolder {
+  _LanzouPagedFolder(this.key, this.folder);
+  final String key;
+  _LanzouFolder folder;
+  final gate = AsyncGate();
+  final pages = <int, CloudFilePage>{};
 }
 
 class _LanzouTransport {

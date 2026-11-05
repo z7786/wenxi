@@ -7,6 +7,7 @@ import '../core/json.dart';
 import '../core/login_crypto.dart';
 import '../domain/resource_search.dart';
 import '../domain/models.dart';
+import '../diagnostics/app_log.dart';
 import 'client_search_host.dart';
 import 'http.dart';
 import 'state_store.dart';
@@ -43,9 +44,11 @@ class ClientSearchEngine {
   final SearchBrowserEnvironment? environment;
   final DateTime Function() clock;
   Json? _manifest;
+  Json? _envelope;
   final _sessions = <String, ClientSearchSession>{};
   DateTime? _attempt;
   Future<void>? _refresh;
+  Json? _resultCache;
   bool _disabled = false;
   String get _key =>
       'clientSearch:${hashes.sha256.convert(utf8.encode('$endpoint\n$publicKey'))}';
@@ -174,6 +177,7 @@ class ClientSearchEngine {
       if (saved['envelope'] is Map) {
         try {
           _manifest = verify(saved.obj('envelope'));
+          _envelope = saved.obj('envelope');
         } catch (_) {}
       }
       _disabled = saved.boolean('disabled') || _manifest?['enabled'] == false;
@@ -204,23 +208,42 @@ class ClientSearchEngine {
       require(!cancellation.isCancelled, '搜索已取消');
       final parsed = verify(envelope);
       final prior = revision;
-      if (prior != parsed.str('revision')) _sessions.clear();
+      final next = parsed.str('revision');
+      if (prior != next) {
+        _sessions.clear();
+        _resultCache = {};
+      }
       _manifest = parsed;
+      _envelope = envelope;
       _disabled = parsed['enabled'] == false;
-      await store.change((draft) {
-        draft[_key] = {
-          'envelope': envelope,
-          'disabled': _disabled,
-          'results': prior == parsed.str('revision')
-              ? draft.obj(_key).obj('results')
-              : {},
-        };
-      });
+      final disabled = _disabled;
+      // Verified rules are usable immediately; a large download-state write
+      // must not delay the first search while the offline copy is being saved.
+      _saveCache(
+        store.change((draft) {
+          if (revision != next) return;
+          final state = draft.obj(_key);
+          draft[_key] = {
+            'envelope': envelope,
+            'disabled': disabled,
+            'results': prior == next ? state.obj('results') : {},
+          };
+        }),
+        'search.rules_save_failed',
+      );
     } catch (_) {
       if (cancellation.isCancelled) rethrow;
       // Network and invalid updates retain the last authenticated release.
       _attempt = clock().subtract(const Duration(minutes: 4, seconds: 30));
     }
+  }
+
+  void _saveCache(Future<void> write, String event) {
+    unawaited(
+      write.catchError((Object error, StackTrace stack) {
+        DiagnosticLog.error(event, error, stack);
+      }),
+    );
   }
 
   Stream<ResourceSearchBatch> search(
@@ -248,10 +271,8 @@ class ClientSearchEngine {
     final output = <String, ResourceSearchHit>{};
     final rawOutput = <String, Json>{};
     final cachedRows = <String, Json>{};
-    final saved = store.data
-        .obj(_key)
-        .obj('results')
-        .obj(keyword.toLowerCase());
+    final cache = _resultCache ??= store.data.obj(_key).obj('results');
+    final saved = cache.obj(keyword.toLowerCase());
     if (saved.str('revision') == revision &&
         clock().millisecondsSinceEpoch - saved.integer('at') <
             const Duration(hours: 24).inMilliseconds) {
@@ -435,22 +456,47 @@ class ClientSearchEngine {
       }
       output.addAll(fresh);
       if (healthy > 0) {
-        await store.change((draft) {
-          final state = draft.obj(_key), results = state.obj('results');
-          results[keyword.toLowerCase()] = {
-            'at': clock().millisecondsSinceEpoch,
-            'revision': manifest.str('revision'),
-            'items':
-                (resultLimit > 0
-                        ? rawOutput.values.take(resultLimit)
-                        : rawOutput.values)
-                    .toList(),
-          };
-          while (results.length > 12) {
-            results.remove(results.keys.first);
+        final key = keyword.toLowerCase();
+        final cached = <String, dynamic>{
+          'at': clock().millisecondsSinceEpoch,
+          'revision': manifest.str('revision'),
+          'items':
+              (resultLimit > 0
+                      ? rawOutput.values.take(resultLimit)
+                      : rawOutput.values)
+                  .toList(),
+        };
+        // Keep this process's offline results ready even before disk catches
+        // up, and reject an old search completing after a rule replacement.
+        if (revision == manifest.str('revision')) {
+          cache[key] = cached;
+          while (cache.length > 12) {
+            cache.remove(cache.keys.first);
           }
-          draft[_key] = {...state, 'results': results};
-        });
+          final envelope = _envelope, disabled = _disabled;
+          _saveCache(
+            store.change((draft) {
+              if (revision != manifest.str('revision')) return;
+              final state = draft.obj(_key);
+              final results = state.obj('results')
+                ..removeWhere(
+                  (_, cached) => asJson(cached).str('revision') != revision,
+                );
+              // A transient failure may have lost the earlier rule write.
+              // Persist its authenticated envelope with the successful result.
+              if (envelope != null) {
+                state['envelope'] = envelope;
+                state['disabled'] = disabled;
+              }
+              results[key] = cached;
+              while (results.length > 12) {
+                results.remove(results.keys.first);
+              }
+              draft[_key] = {...state, 'results': results};
+            }),
+            'search.results_save_failed',
+          );
+        }
       }
       if (healthy == 0 && output.isEmpty) {
         throw const AppException('当前网络无法连接搜索源，缓存中也没有这个关键词的结果');

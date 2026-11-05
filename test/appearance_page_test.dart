@@ -139,9 +139,13 @@ void main() {
       await tap(tester, 'appearance-palette-mint');
       await tap(tester, 'appearance-mode-Dark');
       await tap(tester, 'appearance-glass-frosted');
+      await tap(tester, 'appearance-glass-controls');
+      await tap(tester, 'appearance-glass-low-power');
       expect(services.settings.themePalette, AppPalette.blue);
       expect(services.settings.theme, 'Light');
       expect(services.settings.glassStyle, GlassStyle.clear);
+      expect(services.settings.glassControls, isFalse);
+      expect(services.settings.glassLowPower, isFalse);
       expect(
         Theme.of(tester.element(find.text('项目资料.zip'))).colorScheme.primary,
         Color(AppPalette.mint.darkAccent),
@@ -154,6 +158,8 @@ void main() {
       expect(services.settings.themePalette, AppPalette.mint);
       expect(services.settings.theme, 'Dark');
       expect(services.settings.glassStyle, GlassStyle.frosted);
+      expect(services.settings.glassControls, isTrue);
+      expect(services.settings.glassLowPower, isTrue);
       expect(services.downloads, same(downloads));
       expect(
         tester.state(find.byType(MainShell, skipOffstage: false)),
@@ -270,8 +276,7 @@ void main() {
         matching: find.byType(BackdropFilter),
       ),
     );
-    expect(filters, isNotEmpty);
-    expect(filters.every((filter) => !filter.enabled), isTrue);
+    expect(filters.where((filter) => filter.enabled), isEmpty);
     await tester.ensureVisible(find.byKey(const Key('appearance-preview')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('navigation-2')));
@@ -315,6 +320,9 @@ void main() {
           await tap(tester, 'appearance-glass-${style.name}');
           expect(tester.takeException(), isNull);
         }
+        await tap(tester, 'appearance-glass-controls');
+        await tap(tester, 'appearance-glass-low-power');
+        expect(tester.takeException(), isNull);
         await screenshot(tester, '${scenario.$1}-options');
         expect(
           find.byKey(const Key('appearance-apply')).hitTestable(),

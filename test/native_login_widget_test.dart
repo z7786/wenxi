@@ -841,7 +841,7 @@ void main() {
             .obscureText,
         isTrue,
       );
-      expect(find.text('账号密码加密保存在本机，登录失效时自动重登'), findsOneWidget);
+      expect(find.text('账号密码保存在本机应用私有目录，登录失效时自动重登'), findsOneWidget);
       expect(find.byKey(const ValueKey('native-login-web')), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());

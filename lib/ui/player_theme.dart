@@ -20,6 +20,8 @@ ThemeData playerTheme(ThemeData inherited) {
         palette,
         appearance?.glassStyle ?? GlassStyle.clear,
         Brightness.dark,
+        glassControls: appearance?.glassControls ?? false,
+        glassLowPower: appearance?.glassLowPower ?? false,
       ),
     ],
     brightness: Brightness.dark,

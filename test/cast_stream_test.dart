@@ -7,6 +7,190 @@ import 'package:asterlink/playback/external_stream.dart';
 
 void main() {
   test(
+    'TV relay preserves the source Host for same-origin redirects and resets it for a CDN',
+    () async {
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final cdn = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      addTearDown(() => cdn.close(force: true));
+      final sourceHosts = <String?>[], cdnHeaders = <Map<String, String?>>[];
+      origin.listen((request) async {
+        final host = request.headers.value('host');
+        sourceHosts.add(host);
+        if (host != 'storage.fixture.invalid') {
+          request.response.statusCode = HttpStatus.forbidden;
+        } else {
+          request.response.statusCode = HttpStatus.found;
+          request.response.headers.set(
+            'location',
+            request.uri.path == '/entry'
+                ? '/same-origin/video'
+                : 'http://127.0.0.1:${cdn.port}/video',
+          );
+        }
+        await request.response.close();
+      });
+      cdn.listen((request) async {
+        cdnHeaders.add({
+          for (final name in ['host', 'cookie', 'authorization', 'user-agent'])
+            name: request.headers.value(name),
+        });
+        if (request.headers.value('host') != '127.0.0.1:${cdn.port}') {
+          request.response.statusCode = HttpStatus.forbidden;
+        } else {
+          request.response.headers.contentType = ContentType('video', 'mp4');
+          request.response.contentLength = 4;
+          if (request.method == 'GET') request.response.add([1, 2, 3, 4]);
+        }
+        await request.response.close();
+      });
+      final stream = ExternalPlaybackStream.lan(
+        DownloadSpec(
+          url: 'http://127.0.0.1:${origin.port}/entry',
+          fileName: 'movie.mp4',
+          headers: const {
+            'hOsT': 'storage.fixture.invalid',
+            'Cookie': 'account=fixture',
+            'Authorization': 'Bearer fixture',
+            'User-Agent': 'CloudFixture',
+          },
+        ),
+        lanAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(stream.close);
+      await stream.start();
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      for (final method in ['HEAD', 'GET']) {
+        final response = await (await client.openUrl(
+          method,
+          Uri.parse(stream.url),
+        )).close();
+        expect(response.statusCode, HttpStatus.ok);
+        expect(response.contentLength, 4);
+        expect(
+          await response.expand((e) => e).toList(),
+          method == 'GET' ? [1, 2, 3, 4] : isEmpty,
+        );
+      }
+      expect(sourceHosts, List.filled(4, 'storage.fixture.invalid'));
+      expect(cdnHeaders, hasLength(2));
+      expect(
+        cdnHeaders,
+        everyElement({
+          'host': '127.0.0.1:${cdn.port}',
+          'cookie': null,
+          'authorization': null,
+          'user-agent': 'CloudFixture',
+        }),
+      );
+    },
+  );
+
+  test(
+    'TV relay obeys an upstream connection limit instead of causing concurrent 403s',
+    () async {
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      var active = 0, peak = 0;
+      final handlers = <Future<void>>[];
+      Future<void> serve(HttpRequest request) async {
+        active++;
+        if (active > peak) peak = active;
+        try {
+          if (active > 1) {
+            request.response.statusCode = HttpStatus.forbidden;
+          } else {
+            await Future<void>.delayed(const Duration(milliseconds: 80));
+            request.response.headers.contentType = ContentType('video', 'mp4');
+            request.response.add([1, 2, 3, 4]);
+          }
+          await request.response.close();
+        } finally {
+          active--;
+        }
+      }
+
+      origin.listen((request) => handlers.add(serve(request)));
+      addTearDown(() => Future.wait(handlers));
+      final stream = ExternalPlaybackStream.lan(
+        DownloadSpec(
+          url: 'http://127.0.0.1:${origin.port}/movie.mp4',
+          fileName: 'movie.mp4',
+          maxPlaybackConnections: 1,
+        ),
+        lanAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(stream.close);
+      await stream.start();
+      final client = HttpClient()..maxConnectionsPerHost = 8;
+      addTearDown(() => client.close(force: true));
+      await Future.wait([
+        for (var i = 0; i < 4; i++)
+          () async {
+            final response = await (await client.getUrl(
+              Uri.parse(stream.url),
+            )).close();
+            expect(response.statusCode, HttpStatus.ok);
+            expect(await response.expand((e) => e).toList(), [1, 2, 3, 4]);
+          }(),
+      ]);
+      expect(peak, 1);
+    },
+  );
+
+  test(
+    'TV relay detects an extensionless HLS playlist with a fragmented UTF-8 prefix',
+    () async {
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      origin.listen((request) async {
+        if (request.uri.path == '/manifest') {
+          request.response.headers.contentType = ContentType.binary;
+          for (final chunk in [
+            [0xef],
+            [0xbb, 0xbf, 0x0a],
+            utf8.encode('#EX'),
+            utf8.encode('TM3U\n#EXTINF:1,\npart.ts\n#EXT-X-ENDLIST\n'),
+          ]) {
+            request.response.add(chunk);
+            await request.response.flush();
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+          }
+        } else {
+          request.response.add([1, 2, 3, 4]);
+        }
+        await request.response.close();
+      });
+      final stream = ExternalPlaybackStream.lan(
+        DownloadSpec(
+          url: 'http://127.0.0.1:${origin.port}/manifest',
+          fileName: 'movie.mp4',
+        ),
+        lanAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(stream.close);
+      await stream.start();
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final response = await (await client.getUrl(
+        Uri.parse(stream.url),
+      )).close();
+      final playlist = await utf8.decoder.bind(response).join();
+      expect(
+        response.headers.contentType?.mimeType,
+        'application/vnd.apple.mpegurl',
+      );
+      final segment = playlist
+          .split('\n')
+          .firstWhere((line) => line.startsWith('http'));
+      expect(Uri.parse(segment).port, Uri.parse(stream.url).port);
+      final payload = await (await client.getUrl(Uri.parse(segment))).close();
+      expect(await payload.expand((e) => e).toList(), [1, 2, 3, 4]);
+    },
+  );
+
+  test(
     'TV relay forwards cloud auth privately and supports HTTP HEAD/Range',
     () async {
       final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);

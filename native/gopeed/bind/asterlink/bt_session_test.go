@@ -94,7 +94,7 @@ func TestBTCompletedFilesKeepPeerSessionAndReleaseOldOutput(t *testing.T) {
 	}
 }
 
-func TestBTDiscoveryPersistsEncryptedAcrossRestart(t *testing.T) {
+func TestBTDiscoveryPersistsPlainAcrossRestart(t *testing.T) {
 	state, payload, key := openTestCore(t)
 	marker := "127.0.0.1:39124"
 	btpolicy.Load(btpolicy.Discovery{Version: 1, SavedAt: time.Now().Unix(), Peers: []btpolicy.SavedPeer{{Hash: "abababababababababababababababababababab", Until: time.Now().Add(time.Hour).Unix(), Addresses: []string{marker}}}})
@@ -105,8 +105,8 @@ func TestBTDiscoveryPersistsEncryptedAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(raw, []byte(marker)) {
-		t.Fatal("peer address saved unencrypted")
+	if !bytes.Contains(raw, []byte(marker)) {
+		t.Fatal("peer address missing from plain state")
 	}
 	if err = Open(state, payload, key); err != nil {
 		t.Fatal(err)

@@ -34,6 +34,8 @@ def stage(root, platform, installer=None):
         files = sorted(p for p in runtime.rglob('*') if p.is_file())
         for path in files:
             relative = path.relative_to(runtime)
+            if re.match(r'(?i)^(fvp|mdk(?:-(?:braw|r3d))?|ffmpeg-9|libass)\.dll$', path.name):
+                raise ValueError('Windows runtime contains a removed player library')
             if path.is_symlink() or runtime.resolve() not in path.resolve().parents:
                 raise ValueError('Windows runtime contains a link')
             if any(part in {'.local', '.git', 'logs', 'diagnostics'} for part in relative.parts) or path.suffix in {'.jks', '.keystore', '.p12', '.pfx', '.log', '.pdb'}:

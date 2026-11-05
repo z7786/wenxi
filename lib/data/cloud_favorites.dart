@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import '../core/json.dart';
 import '../core/natural_name.dart';
 import '../domain/models.dart';
+import '../diagnostics/app_log.dart';
 import 'cloud_repository.dart';
 import 'state_store.dart';
 
@@ -100,10 +102,34 @@ class CloudFavorites {
   CloudFavorites(this.store, this.cloud);
   final StateStore store;
   final CloudRepository cloud;
+  Object? _orderedSource, _idsSource;
+  CloudFavoriteSort? _orderedSort;
+  List<CloudFavorite> _orderedSnapshot = const [];
+  Set<String> _ids = const {};
   CloudFavoriteSort get sort =>
       CloudFavoriteSort.fromName(store.data.str('cloudFavoriteSort'));
 
-  List<CloudFavorite> get all => _ordered(store.data, sort);
+  List<CloudFavorite> get all {
+    final source = store.data['cloudFavorites'], order = sort;
+    if (!identical(source, _orderedSource) || order != _orderedSort) {
+      _orderedSource = source;
+      _orderedSort = order;
+      _orderedSnapshot = List.unmodifiable(_ordered(store.data, order));
+    }
+    return _orderedSnapshot;
+  }
+
+  Set<String> get _favoriteIds {
+    final source = store.data['cloudFavorites'];
+    if (!identical(source, _idsSource)) {
+      _idsSource = source;
+      _ids = store.data
+          .list('cloudFavorites')
+          .map((favorite) => favorite.str('id'))
+          .toSet();
+    }
+    return _ids;
+  }
 
   static List<CloudFavorite> _ordered(Json data, CloudFavoriteSort sort) {
     final favorites = data
@@ -223,9 +249,8 @@ class CloudFavorites {
         .toString();
   }
 
-  bool contains(BrowseSession session, CloudFile file) => store.data
-      .list('cloudFavorites')
-      .any((e) => e.str('id') == key(session, file));
+  bool contains(BrowseSession session, CloudFile file) =>
+      _favoriteIds.contains(key(session, file));
 
   CloudFile _shareFile(BrowseSession session) => CloudFile(
     id: '@share-link',
@@ -233,12 +258,9 @@ class CloudFavorites {
     isDirectory: true,
   );
 
-  bool containsShare(BrowseSession session) => store.data
-      .list('cloudFavorites')
-      .any(
-        (e) =>
-            e.str('id') == key(session, _shareFile(session), isShareLink: true),
-      );
+  bool containsShare(BrowseSession session) => _favoriteIds.contains(
+    key(session, _shareFile(session), isShareLink: true),
+  );
 
   Future<bool> toggleShare(BrowseSession session) => toggle(
     session,
@@ -361,22 +383,36 @@ class CloudFavorites {
         '收藏的文件已移动、删除或分享已失效',
       );
     }
-    await store.change((draft) {
-      final favorites = draft.list('cloudFavorites');
-      final index = favorites.indexWhere(
-        (item) => item.str('id') == favorite.id,
-      );
-      // A favorite or its account may have been removed while opening it.
-      if (index < 0) return;
-      var openedAt = DateTime.now().millisecondsSinceEpoch;
-      for (final item in favorites) {
-        if (item.integer('lastOpenedAt') >= openedAt) {
-          openedAt = item.integer('lastOpenedAt') + 1;
-        }
-      }
-      favorites[index] = {...favorites[index], 'lastOpenedAt': openedAt};
-      draft['cloudFavorites'] = favorites;
-    });
+    // The location is already usable. Recent-use bookkeeping must not hold
+    // the file list behind an unrelated download snapshot write.
+    final openedAt = DateTime.now().millisecondsSinceEpoch;
+    unawaited(
+      store
+          .change((draft) {
+            final favorites = draft.list('cloudFavorites');
+            final index = favorites.indexWhere(
+              (item) => item.str('id') == favorite.id,
+            );
+            // A delayed save must never recreate a removed favorite or account.
+            if (index < 0) return;
+            var timestamp = openedAt;
+            for (final item in favorites) {
+              if (item.integer('lastOpenedAt') >= timestamp) {
+                timestamp = item.integer('lastOpenedAt') + 1;
+              }
+            }
+            favorites[index] = {...favorites[index], 'lastOpenedAt': timestamp};
+            draft['cloudFavorites'] = favorites;
+          })
+          .catchError((Object error, StackTrace stack) {
+            DiagnosticLog.error(
+              'favorite.recent_save_failed',
+              error,
+              stack,
+              fields: {'platform': session.platform.name},
+            );
+          }),
+    );
     return (
       session: session,
       trail: trail,

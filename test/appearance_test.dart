@@ -50,6 +50,8 @@ void main() {
         expect(settings.theme, mode);
         expect(settings.themePalette, AppPalette.blue);
         expect(settings.glassStyle, GlassStyle.clear);
+        expect(settings.glassControls, isFalse);
+        expect(settings.glassLowPower, isFalse);
         expect(settings.hideResourceNavigation, isFalse);
         expect(settings.threads, 16);
       }
@@ -126,6 +128,8 @@ void main() {
         palette: AppPalette.mint,
         glassStyle: GlassStyle.frosted,
         hideResourceNavigation: true,
+        glassControls: true,
+        glassLowPower: true,
       );
       expect(
         native.calls,
@@ -141,12 +145,16 @@ void main() {
       expect(persisted.theme, 'Dark');
       expect(persisted.themePalette, AppPalette.mint);
       expect(persisted.glassStyle, GlassStyle.frosted);
+      expect(persisted.glassControls, isTrue);
+      expect(persisted.glassLowPower, isTrue);
       expect(persisted.hideResourceNavigation, isTrue);
       final target = StateStore.memory();
       await BackupRepository(target).restore(backup, 'theme-test-password');
       final restored = AppSettings.fromJson(target.data.obj('settings'));
       expect(restored.themePalette, AppPalette.mint);
       expect(restored.glassStyle, GlassStyle.frosted);
+      expect(restored.glassControls, isTrue);
+      expect(restored.glassLowPower, isTrue);
       expect(restored.hideResourceNavigation, isTrue);
       expect(restored.threads, 16);
       expect(restored.destination, isNull);

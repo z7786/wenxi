@@ -8,6 +8,7 @@ import 'package:asterlink/data/resource_search.dart';
 import 'package:asterlink/data/resource_search_api.dart';
 import 'package:asterlink/data/resource_link_checks.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/resource_search.dart';
 import 'support.dart';
 import 'resource_link_check_support.dart';
@@ -887,4 +888,55 @@ void main() {
     expect(search.items.last.canParse, isFalse);
     expect(search.allItems.first.canParse, isFalse);
   });
+
+  test(
+    'Cached search order responds to streamed replacements and saved priorities',
+    () async {
+      final stream = StreamController<ResourceSearchBatch>();
+      final store = StateStore.memory();
+      final search = ResourceSearch(
+        store: store,
+        api: SearchApiFixture((_, _) => stream.stream),
+      );
+      addTearDown(search.dispose);
+      final running = search.search('Python');
+      final quark = searchHit('quark');
+      final baidu = searchHit('baidu', url: 'https://pan.baidu.com/s/1cached');
+      stream.add(ResourceSearchBatch([quark, baidu]));
+      await Future<void>.delayed(Duration.zero);
+      final first = search.items;
+      expect(first.map((hit) => hit.identity), [
+        quark.identity,
+        baidu.identity,
+      ]);
+      expect(search.items, same(first));
+      final clouds = search.orderedClouds;
+      expect(search.orderedClouds, same(clouds));
+      await store.put('unrelatedProgress', 1);
+      expect(search.items, same(first));
+
+      await search.setCloudPriority([CloudPlatform.baidu, CloudPlatform.quark]);
+      expect(search.items.map((hit) => hit.identity), [
+        baidu.identity,
+        quark.identity,
+      ]);
+      expect(search.orderedClouds, ['百度网盘', '夸克网盘']);
+      search.filter('百度网盘');
+      expect(search.items.single.identity, baidu.identity);
+      search.filter(null);
+      stream.add(
+        ResourceSearchBatch([
+          searchHit('quark', password: 'new1'),
+        ], complete: true),
+      );
+      await stream.close();
+      await running;
+      expect(search.items.single.identity, quark.identity);
+      expect(search.items.single.password, 'new1');
+      expect(search.orderedClouds, ['夸克网盘']);
+      search.showRecommendations();
+      expect(search.items, isEmpty);
+      expect(search.orderedClouds, isEmpty);
+    },
+  );
 }

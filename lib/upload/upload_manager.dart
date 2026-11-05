@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:collection/collection.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import '../core/json.dart';
@@ -35,12 +36,18 @@ class UploadManager extends ChangeNotifier {
   Future<void> initialize() async {
     if (_initialized) return;
     _initialized = true;
-    for (final value in store.data.list('uploadTasks')) {
+    final raw = store.data['uploadTasks'];
+    final saved = store.data.list('uploadTasks');
+    var changed = raw != null && (raw is! List || raw.length != saved.length);
+    final seen = <String>{};
+    const equality = DeepCollectionEquality();
+    for (final value in saved) {
       try {
         final t = UploadTask.fromJson(value);
         if (t.id.isEmpty ||
-            task(t.id) != null ||
-            t.session.accountId?.isNotEmpty != true) {
+            t.session.accountId?.isNotEmpty != true ||
+            !seen.add(t.id)) {
+          changed = true;
           continue;
         }
         if (t.active) {
@@ -49,11 +56,14 @@ class UploadManager extends ChangeNotifier {
         }
         _tasks.add(t);
         _fresh.add(t.id);
+        // This also sanitizes old sessions and repairs outdated task formats.
+        changed = changed || !equality.equals(value, t.toJson());
       } catch (e, stack) {
+        changed = true;
         DiagnosticLog.error('upload.restore_failed', e, stack);
       }
     }
-    if (_tasks.isNotEmpty) await _save();
+    if (changed) await _save();
   }
 
   Future<List<String>> enqueue(

@@ -45,6 +45,10 @@ class ResourceSearch extends ChangeNotifier {
   final _cache = <String, (DateTime, List<ResourceSearchHit>)>{};
   final _healthSnapshot = <String, ResourceLinkHealth>{};
   final _healthRanks = <String, int>{};
+  int _itemsRevision = 0;
+  Object? _itemsInputs, _cloudInputs;
+  List<ResourceSearchHit> _sortedItems = const [];
+  List<String> _orderedClouds = const [];
   ResourceLinkCheckBatch? _checkBatch;
   CancelToken? _cancellation;
   Timer? _deadline;
@@ -344,43 +348,64 @@ class ResourceSearch extends ChangeNotifier {
   }
 
   List<String> get orderedClouds {
-    final names = allItems.map((hit) => hit.cloudName).toSet();
-    return [
-      for (final platform in cloudPriority)
+    final priority = cloudPriority;
+    final inputs = (_itemsRevision, priority.map((p) => p.key).join(','));
+    if (_cloudInputs == inputs) return _orderedClouds;
+    final names = _hits.values.map((hit) => hit.cloudName).toSet();
+    _cloudInputs = inputs;
+    return _orderedClouds = List.unmodifiable([
+      for (final platform in priority)
         if (names.remove(platform.label)) platform.label,
       ...(names.toList()..sort()),
-    ];
+    ]);
   }
 
   List<ResourceSearchHit> get items {
+    final priority = cloudPriority, supported = preferSupported;
+    final inputs = (
+      _itemsRevision,
+      cloudFilter,
+      includeTerms.join('\u0000'),
+      excludeTerms.join('\u0000'),
+      priority.map((p) => p.key).join(','),
+      supported,
+    );
+    if (_itemsInputs == inputs) return _sortedItems;
     final source = linkChecks == null ? _hits.values : _published.values;
+    final includes = includeTerms.map((term) => term.toLowerCase()).toList();
+    final excludes = excludeTerms.map((term) => term.toLowerCase()).toList();
     final values = source.where((hit) {
       final title = hit.title.toLowerCase();
       return (cloudFilter == null || hit.cloudName == cloudFilter) &&
-          includeTerms.every((term) => title.contains(term.toLowerCase())) &&
-          !excludeTerms.any((term) => title.contains(term.toLowerCase()));
+          includes.every(title.contains) &&
+          !excludes.any(title.contains);
     }).toList();
     final ranks = {
-      for (final (index, platform) in cloudPriority.indexed) platform: index,
+      for (final (index, platform) in priority.indexed) platform: index,
+    };
+    final healthRanks = {
+      for (final hit in values)
+        hit.identity: _healthRanks[resourceLinkKey(hit)] ?? 1,
     };
     final original = {
       for (final (index, hit) in _hits.values.indexed) hit.identity: index,
     };
     values.sort((a, b) {
-      final healthRank = (_healthRanks[resourceLinkKey(a)] ?? 1).compareTo(
-        _healthRanks[resourceLinkKey(b)] ?? 1,
+      final healthRank = healthRanks[a.identity]!.compareTo(
+        healthRanks[b.identity]!,
       );
       if (healthRank != 0) return healthRank;
       final rank = (ranks[a.platform] ?? ranks.length).compareTo(
         ranks[b.platform] ?? ranks.length,
       );
       if (rank != 0) return rank;
-      if (preferSupported && a.canParse != b.canParse) {
+      if (supported && a.canParse != b.canParse) {
         return a.canParse ? -1 : 1;
       }
       return original[a.identity]!.compareTo(original[b.identity]!);
     });
-    return values;
+    _itemsInputs = inputs;
+    return _sortedItems = List.unmodifiable(values);
   }
 
   void filter(String? value) {
@@ -432,6 +457,7 @@ class ResourceSearch extends ChangeNotifier {
       _published.clear();
       _healthSnapshot.clear();
       _healthRanks.clear();
+      _itemsRevision++;
       error = '请输入 2–120 个字符的关键词';
       notifyListeners();
       return;
@@ -451,10 +477,11 @@ class ResourceSearch extends ChangeNotifier {
     _published.clear();
     _healthSnapshot.clear();
     _healthRanks.clear();
+    _itemsRevision++;
     phase = ResourceSearchPhase.searching;
     _checkBatch = linkChecks?.beginBatch();
     notifyListeners();
-    // Search history stays in the app's encrypted local state.
+    // Search history stays in the app's private local state.
     unawaited(
       store
           .change((draft) {
@@ -552,6 +579,7 @@ class ResourceSearch extends ChangeNotifier {
   }
 
   void _updateChecks() {
+    _itemsRevision++;
     _published.removeWhere((identity, _) => !_hits.containsKey(identity));
     _checkBatch?.update(_hits.values);
   }
@@ -592,6 +620,7 @@ class ResourceSearch extends ChangeNotifier {
   }
 
   void _publishReady({bool includeUnchecked = false}) {
+    _itemsRevision++;
     _publication?.cancel();
     _publication = null;
     final results =
@@ -661,6 +690,7 @@ class ResourceSearch extends ChangeNotifier {
     _published.clear();
     _healthSnapshot.clear();
     _healthRanks.clear();
+    _itemsRevision++;
     notifyListeners();
   }
 

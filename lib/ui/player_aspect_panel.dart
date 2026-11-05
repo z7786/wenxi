@@ -8,9 +8,11 @@ class PlayerAspectPanel extends StatefulWidget {
     super.key,
     required this.preferences,
     required this.onChanged,
+    this.onTransformChanged,
   });
   final PlaybackPreferences preferences;
   final ValueChanged<PlaybackPreferences> onChanged;
+  final void Function(PlaybackPreferences, bool save)? onTransformChanged;
   @override
   State<PlayerAspectPanel> createState() => _PlayerAspectPanelState();
 }
@@ -25,6 +27,14 @@ class _PlayerAspectPanelState extends State<PlayerAspectPanel> {
     text: widget.preferences.aspectRatio > 0 ? '1' : '9',
   );
   String? _error;
+  void _transform(PlaybackPreferences preferences, bool save) {
+    if (widget.onTransformChanged case final changed?) {
+      changed(preferences, save);
+    } else {
+      widget.onChanged(preferences);
+    }
+  }
+
   @override
   void dispose() {
     _width.dispose();
@@ -175,6 +185,81 @@ class _PlayerAspectPanelState extends State<PlayerAspectPanel> {
         key: const Key('player-aspect-apply'),
         child: const Text('应用自定义比例'),
       ),
+      const SizedBox(height: 24),
+      Text(
+        '视频缩放 · ${(widget.preferences.videoScale * 100).round()}%',
+        style: const TextStyle(color: Colors.white60, fontSize: 12),
+      ),
+      Slider(
+        key: const Key('player-video-scale'),
+        min: .5,
+        max: 3,
+        divisions: 50,
+        value: widget.preferences.videoScale,
+        label: '${(widget.preferences.videoScale * 100).round()}%',
+        onChanged: (value) =>
+            _transform(widget.preferences.copyWith(videoScale: value), false),
+        onChangeEnd: (value) =>
+            _transform(widget.preferences.copyWith(videoScale: value), true),
+      ),
+      Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          for (final scale in [.5, 1.0, 1.5, 2.0, 3.0])
+            ChoiceChip(
+              label: Text('${(scale * 100).round()}%'),
+              selected: widget.preferences.videoScale == scale,
+              onSelected: (_) => widget.onChanged(
+                widget.preferences.copyWith(videoScale: scale),
+              ),
+            ),
+        ],
+      ),
+      const SizedBox(height: 16),
+      for (final horizontal in [true, false]) ...[
+        Text(
+          horizontal ? '水平位置' : '垂直位置',
+          style: const TextStyle(color: Colors.white60, fontSize: 12),
+        ),
+        Slider(
+          key: Key(
+            horizontal ? 'player-video-offset-x' : 'player-video-offset-y',
+          ),
+          min: -1,
+          max: 1,
+          divisions: 40,
+          value: horizontal
+              ? widget.preferences.videoOffsetX
+              : widget.preferences.videoOffsetY,
+          onChanged: (value) => _transform(
+            widget.preferences.copyWith(
+              videoOffsetX: horizontal ? value : null,
+              videoOffsetY: horizontal ? null : value,
+            ),
+            false,
+          ),
+          onChangeEnd: (value) => _transform(
+            widget.preferences.copyWith(
+              videoOffsetX: horizontal ? value : null,
+              videoOffsetY: horizontal ? null : value,
+            ),
+            true,
+          ),
+        ),
+      ],
+      OutlinedButton(
+        key: const Key('player-video-transform-reset'),
+        onPressed: () => widget.onChanged(
+          widget.preferences.copyWith(
+            videoScale: 1,
+            videoOffsetX: 0,
+            videoOffsetY: 0,
+          ),
+        ),
+        child: const Text('重置缩放与位置'),
+      ),
+      const SizedBox(height: 24),
     ],
   );
 }

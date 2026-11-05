@@ -13,7 +13,7 @@ typedef TianyiCaptchaPrompt =
 typedef TianyiSmsPrompt = Future<String?> Function(TianyiSmsChallenge);
 
 /// Uses the official account API without creating a WebView. A successful
-/// password login returns credentials for the encrypted vault and later renewal.
+/// password login returns credentials for local storage and later renewal.
 class TianyiLoginService {
   TianyiLoginService(this.http, this.connector);
   final JsonHttp http;

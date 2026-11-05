@@ -1104,17 +1104,21 @@ class _DownloadsPageState extends State<DownloadsPage>
         task,
         widget.services.downloads.tasks,
       );
-      await Navigator.push<void>(
-        context,
-        MaterialPageRoute(
-          builder: (_) => PlayerPage(
-            controller,
-            subtitleDirectory: Directory(
-              '${widget.services.cacheDirectory.path}/playback-subtitles',
+      try {
+        await Navigator.push<void>(
+          context,
+          MaterialPageRoute(
+            builder: (_) => PlayerPage(
+              controller,
+              subtitleDirectory: Directory(
+                '${widget.services.cacheDirectory.path}/playback-subtitles',
+              ),
             ),
           ),
-        ),
-      );
+        );
+      } finally {
+        widget.services.finishPlaybackInBackground(controller.close());
+      }
       return;
     }
     await busy(context, () async {
@@ -1474,7 +1478,7 @@ class _DownloadsPageState extends State<DownloadsPage>
               ),
             );
           } finally {
-            await controller.close();
+            widget.services.finishPlaybackInBackground(controller.close());
           }
         } catch (e) {
           if (mounted) {

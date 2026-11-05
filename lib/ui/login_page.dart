@@ -1980,8 +1980,8 @@ class _ManualLoginPageState extends State<ManualLoginPage> {
                   Expanded(
                     child: Text(
                       platform == CloudPlatform.baidu
-                          ? '登录信息加密保存在本机；下载和播放时，必要凭据会加密发送至取链服务，用你的账号获取下载地址'
-                          : '登录信息加密保存在本机',
+                          ? '登录信息保存在本机应用私有目录；下载和播放时，必要凭据会加密发送至取链服务，用你的账号获取下载地址'
+                          : '登录信息保存在本机应用私有目录',
                       style: TextStyle(fontSize: 13, color: secondary(context)),
                     ),
                   ),
@@ -2354,7 +2354,7 @@ class _XunleiLoginPageState extends State<XunleiLoginPage> {
               ),
             const SizedBox(height: 20),
             Text(
-              smsMode ? '短信需由你主动发送并填写验证码。' : '账号密码加密保存，下次自动保持登录，需要安全验证时会提示你完成。',
+              smsMode ? '短信需由你主动发送并填写验证码。' : '账号密码保存在本机应用私有目录，下次自动保持登录，需要安全验证时会提示你完成。',
               style: TextStyle(fontSize: 12, color: secondary(context)),
             ),
           ],

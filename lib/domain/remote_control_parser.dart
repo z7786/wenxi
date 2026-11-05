@@ -154,7 +154,9 @@ class RemoteControlDocument {
           title,
           content,
           buttonText: button,
-          buttonUrl: url.isEmpty ? null : f.link('buttonUrl', url),
+          buttonUrl: url.isEmpty
+              ? null
+              : f.read('buttonUrl', () => announcementButtonUri(url)),
         );
       },
       (a) => a == null

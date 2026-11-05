@@ -182,6 +182,7 @@ void main() {
       expect(batches.last.complete, true);
       expect(batches.last.items, hasLength(1));
       expect(batches.last.items.single.password, 'aB12');
+      await store.flush();
       final offline = tgClient(
         (_) async => throw const SocketException('backend offline'),
       );
@@ -313,6 +314,7 @@ void main() {
             .password,
         'aB12',
       );
+      await store.flush();
       final offline = engine(
         store,
         (_) async => throw const SocketException('offline'),
@@ -341,6 +343,7 @@ void main() {
       value = fixture('empty');
       await api.prepare(CancelToken());
       expect(api.sources, isEmpty);
+      await store.flush();
       expect(
         store.data.values.whereType<Map>().any(
           (v) => asJson(v).obj('results').isNotEmpty,
@@ -361,6 +364,7 @@ void main() {
     final api = engine(store, (_) async => fixture('disabled'));
     await api.prepare(CancelToken());
     expect(api.disabled, true);
+    await store.flush();
     final restarted = engine(
       store,
       (_) async => throw const SocketException('offline'),
@@ -402,6 +406,7 @@ void main() {
           (await api.search('Python', CancelToken(), unavailable).last).items,
           hasLength(1),
         );
+        await store.flush();
         final disk = await store.file!.readAsBytes();
         expect(
           utf8.decode(disk, allowMalformed: true),
@@ -472,6 +477,7 @@ void main() {
         (await client.search('Python', CancelToken(), server).last).items,
         hasLength(1),
       );
+      await store.flush();
       expect(
         store.data.values
             .whereType<Map>()

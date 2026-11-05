@@ -49,22 +49,53 @@ class LiquidGlassSurface extends StatefulWidget {
 
 class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
   ui.FragmentShader? _shader;
+  bool _shaderWanted = false, _shaderLoading = false, _shaderFailed = false;
 
   @override
-  void initState() {
-    super.initState();
-    unawaited(_loadShader());
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _updateShader();
+  }
+
+  @override
+  void didUpdateWidget(covariant LiquidGlassSurface oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _updateShader();
+  }
+
+  void _updateShader() {
+    final appearance = AppAppearance.of(context);
+    _shaderWanted =
+        widget.enabled &&
+        TickerMode.valuesOf(context).enabled &&
+        !MediaQuery.highContrastOf(context) &&
+        !appearance.glassLowPower &&
+        appearance.glassStyle == GlassStyle.clear &&
+        widget.refractionHeight > 0 &&
+        widget.refractionAmount > 0;
+    if (!_shaderWanted) {
+      _shader?.dispose();
+      _shader = null;
+    } else if (_shader == null && !_shaderLoading && !_shaderFailed) {
+      unawaited(_loadShader());
+    }
   }
 
   Future<void> _loadShader() async {
     if (!ui.ImageFilter.isShaderFilterSupported) return;
+    _shaderLoading = true;
     try {
       final program = await (_glassProgram ??= ui.FragmentProgram.fromAsset(
         liquidGlassShaderAsset,
       ));
-      if (mounted) setState(() => _shader = program.fragmentShader());
+      if (mounted && _shaderWanted) {
+        setState(() => _shader = program.fragmentShader());
+      }
     } catch (_) {
+      _shaderFailed = true;
       // Skia and older GPUs keep the same controls, with blur and edge light.
+    } finally {
+      _shaderLoading = false;
     }
   }
 
@@ -82,16 +113,19 @@ class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
         !widget.enabled ||
         MediaQuery.highContrastOf(context) ||
         appearance.glassStyle == GlassStyle.solid;
+    final lowPower = appearance.glassLowPower;
+    final filtering =
+        !opaque && !lowPower && TickerMode.valuesOf(context).enabled;
     final tint = (widget.tint ?? appearance.glassColor).withValues(
       alpha: opaque ? 1 : widget.opacity ?? appearance.glassOpacity,
     );
-    final sigma = opaque ? 0.0 : widget.blurSigma ?? appearance.blurSigma;
+    final sigma = filtering ? widget.blurSigma ?? appearance.blurSigma : 0.0;
     final radius = widget.borderRadius;
     final decoration = BoxDecoration(
       borderRadius: radius,
       color: tint,
       boxShadow: [
-        if (!opaque && widget.shadow > 0)
+        if (!opaque && !lowPower && widget.shadow > 0)
           BoxShadow(
             color: Colors.black.withValues(
               alpha: (dark ? .22 : .10) * widget.shadow.clamp(0.0, 1.0),
@@ -102,13 +136,16 @@ class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
           ),
       ],
     );
+    if (opaque) {
+      return DecoratedBox(decoration: decoration, child: widget.child);
+    }
     return DecoratedBox(
       // The shadow stays outside the clip; the tint belongs after the filter.
       decoration: decoration.copyWith(color: Colors.transparent),
       child: ClipRRect(
         borderRadius: radius,
         child: CustomPaint(
-          foregroundPainter: opaque || widget.highlight <= 0
+          foregroundPainter: opaque || lowPower || widget.highlight <= 0
               ? null
               : _GlassEdgePainter(
                   radius,
@@ -128,7 +165,7 @@ class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
                     );
                     final shader = _shader;
                     final refract =
-                        !opaque &&
+                        filtering &&
                         appearance.glassStyle == GlassStyle.clear &&
                         widget.refractionHeight > 0 &&
                         widget.refractionAmount > 0 &&
@@ -147,21 +184,28 @@ class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
                         ..setFloat(5, widget.depth)
                         ..setFloat(6, widget.dispersion)
                         ..setFloat(7, widget.saturation);
-                      filter = sigma > 0
-                          ? ui.ImageFilter.compose(
-                              outer: ui.ImageFilter.shader(shader),
-                              inner: filter,
-                            )
-                          : ui.ImageFilter.shader(shader);
+                      // The outer backdrop creates a surface-sized render pass.
+                      // A composed shader instead receives the parent texture,
+                      // whose dimensions and origin need not match this lens.
+                      // Keep the isolating pass even for a sharp selection lens.
+                      filter = ui.ImageFilter.blur(
+                        sigmaX: math.max(sigma, .01),
+                        sigmaY: math.max(sigma, .01),
+                      );
                     }
-                    return BackdropFilter(
-                      enabled: !opaque && (sigma > 0 || refract),
-                      filter: filter,
-                      child: DecoratedBox(
-                        decoration: decoration.copyWith(boxShadow: const []),
-                        child: const SizedBox.expand(),
-                      ),
+                    Widget surface = DecoratedBox(
+                      decoration: decoration.copyWith(boxShadow: const []),
+                      child: const SizedBox.expand(),
                     );
+                    if (refract) {
+                      surface = BackdropFilter(
+                        filter: ui.ImageFilter.shader(shader),
+                        child: surface,
+                      );
+                    }
+                    return sigma > 0 || refract
+                        ? BackdropFilter(filter: filter, child: surface)
+                        : surface;
                   },
                 ),
               ),
@@ -240,6 +284,8 @@ class _LiquidGlassButtonState extends State<LiquidGlassButton> {
     final pressed = states.contains(WidgetState.pressed);
     final solid =
         !enabled ||
+        !appearance.glassControls ||
+        appearance.glassLowPower ||
         MediaQuery.highContrastOf(context) ||
         appearance.glassStyle == GlassStyle.solid;
     final tint =
@@ -289,7 +335,7 @@ class _LiquidGlassButtonState extends State<LiquidGlassButton> {
                 saturation: 1.03,
                 highlight: pressed ? .85 : .45,
                 shadow: 0,
-                enabled: enabled,
+                enabled: enabled && appearance.glassControls,
                 lightPosition: _touch,
                 child: const SizedBox.expand(),
               ),
@@ -325,7 +371,8 @@ class _LiquidGlassButtonState extends State<LiquidGlassButton> {
         scale: pressed && !solid && !MediaQuery.disableAnimationsOf(context)
             ? 1.045
             : 1,
-        duration: MediaQuery.disableAnimationsOf(context)
+        duration:
+            MediaQuery.disableAnimationsOf(context) || appearance.glassLowPower
             ? Duration.zero
             : const Duration(milliseconds: 160),
         curve: Curves.easeOutBack,

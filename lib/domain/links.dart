@@ -4,6 +4,7 @@ import 'github.dart';
 import 'aliyun_share.dart';
 import 'link_obfuscation.dart';
 import 'ed2k.dart';
+import 'c139_passcode.dart';
 
 class LinkParser {
   static const _tail = r'''[^\s<>"'，。；！、【】《》「」“”‘’\u3000\u200b]+''';
@@ -67,8 +68,12 @@ class LinkParser {
     return '${prefix[1]!.toLowerCase()}://${prefix[2]!.toLowerCase()}${value.substring(prefix.end)}';
   }
 
-  static List<ParsedLink> parse(String text) =>
-      _parse(LinkObfuscation.cleanText(text), text);
+  static List<ParsedLink> parse(String text) {
+    final links = _parse(LinkObfuscation.cleanText(text), text);
+    final command = C139Passcode.parse(text);
+    if (links.isEmpty && command != null) return [command.toLink(text)];
+    return links;
+  }
 
   static List<ParsedLink> _parse(String text, String sourceText) {
     final matches = [
@@ -525,6 +530,13 @@ class LinkParser {
     cleaned = cleaned.replaceFirst(RegExp(r'/+$'), '');
     final uri = Uri.tryParse(cleaned);
     if (uri == null) return null;
+    final command = uri.queryParameters['linkCode'];
+    if (command != null &&
+        command.isNotEmpty &&
+        command.length <= 128 &&
+        !RegExp(r'[\x00-\x1f]').hasMatch(command)) {
+      return command;
+    }
     final parts = _parts(uri);
     final webId = _pathId(parts, r'/w/i/([A-Za-z0-9_-]+)');
     if (webId != null) return webId;

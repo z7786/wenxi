@@ -1,13 +1,54 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/playback.dart';
 import 'package:asterlink/playback/external_stream.dart';
 import 'player_support.dart';
+import 'support.dart' show until;
 
 void main() {
+  test(
+    'independent window releases the parent decoder and preserves its own progress and source lease',
+    () async {
+      final fixture = PlaybackFixture(count: 1);
+      final controller = fixture.controller;
+      await controller.start();
+      await controller.seek(const Duration(seconds: 120));
+      controller.floating = true;
+      expect(
+        await controller.openExternalPlayer((_, _, _) async => true),
+        isTrue,
+      );
+      final decoder = fixture.current;
+      controller.retireIndependentDecoder();
+      expect(controller.backend, isNull);
+      await until(() => decoder.closed && fixture.leases.values.single == 1);
+      expect(controller.playingExternally, isTrue);
+      expect(controller.closed, isFalse);
+      await controller.saveIndependentProgress(
+        PlaybackBookmark(
+          name: controller.current.name,
+          source: controller.current.source,
+          position: const Duration(seconds: 345),
+          duration: const Duration(minutes: 10),
+          completed: false,
+          updatedAt: 1,
+        ),
+      );
+      await controller.close(force: true);
+      expect(decoder.closes, 1);
+      expect(fixture.leases.values, everyElement(0));
+      expect(
+        fixture.history.bookmark(controller.current.key)!.position,
+        const Duration(seconds: 345),
+      );
+      fixture.store.dispose();
+    },
+  );
   test(
     'External playback pauses internal audio, retains its lease and survives background',
     () async {
@@ -459,6 +500,96 @@ void main() {
       expect(playlist, startsWith('#EXTM3U\n'));
       expect(playlist, contains('http://127.0.0.1:'));
       expect(playlist, isNot(contains('part.ts')));
+    },
+  );
+
+  test(
+    'Switching players repeatedly closes a blocked slow-reader transport and retains one source lease',
+    () async {
+      final chunk = Uint8List(256 * 1024);
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final active = <Future<void>>{};
+      var sentBytes = 0;
+      server.listen((request) {
+        final task = () async {
+          try {
+            request.response.headers.contentType = ContentType('video', 'mp4');
+            request.response.contentLength = chunk.length * 512;
+            for (var i = 0; i < 512; i++) {
+              request.response.add(chunk);
+              await request.response.flush();
+              sentBytes += chunk.length;
+            }
+          } catch (_) {
+            // Replacing the external player intentionally aborts this request.
+          } finally {
+            try {
+              await request.response.close();
+            } catch (_) {}
+          }
+        }();
+        active.add(task);
+        task.then((_) => active.remove(task));
+      });
+      final http = client();
+      final readers = <StreamSubscription<List<int>>>[];
+      final fixture = PlaybackFixture(
+        count: 1,
+        externalStreamFactory: (source) => ExternalPlaybackStream(
+          DownloadSpec(
+            url: 'http://127.0.0.1:${server.port}/movie.mp4',
+            fileName: source.fileName,
+          ),
+        ),
+      );
+      addTearDown(() async {
+        http.close(force: true);
+        for (final reader in readers) {
+          await reader.cancel();
+        }
+        await fixture.controller.close();
+        await server.close(force: true);
+        await Future.wait(active.toList());
+        fixture.store.dispose();
+      });
+      await fixture.controller.start();
+      var address = '';
+      Future<bool> choose(String url, String _, Duration _) async {
+        address = url;
+        return true;
+      }
+
+      await fixture.controller.openExternalPlayer(choose);
+      for (var i = 0; i < 3; i++) {
+        final oldAddress = address;
+        final previousBytes = sentBytes;
+        final response = await (await http.getUrl(Uri.parse(address))).close();
+        readers.add(response.listen((_) {}, onError: (Object _) {})..pause());
+        // Let socket buffers fill while the external app stops consuming video.
+        final watch = Stopwatch()..start();
+        while (sentBytes <= previousBytes + chunk.length * 4) {
+          if (watch.elapsed > const Duration(seconds: 3)) {
+            fail('The fixture origin never started sending video');
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        expect(
+          await fixture.controller
+              .openExternalPlayer(choose)
+              .timeout(const Duration(seconds: 2)),
+          isTrue,
+        );
+        expect(address, isNot(oldAddress));
+        expect(fixture.leases.values.single, 2);
+        expect(fixture.controller.state.playing, isFalse);
+        await expectLater(
+          http.getUrl(Uri.parse(oldAddress)),
+          throwsA(isA<SocketException>()),
+        );
+      }
+      await fixture.controller.close().timeout(const Duration(seconds: 2));
+      expect(fixture.leases.values, everyElement(0));
     },
   );
 }

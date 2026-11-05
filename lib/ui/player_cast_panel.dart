@@ -68,6 +68,7 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
     final state = controller.state;
     final max = state.duration.inMilliseconds.toDouble();
     final enabled = active && !busy && !controller.connectingCast;
+    final canSeek = enabled && cast?.seekSupported == true;
     return ListView(
       shrinkWrap: true,
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
@@ -115,10 +116,10 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
                           .round(),
                 ),
               ),
-              onChanged: enabled && cast.seekSupported
+              onChanged: canSeek
                   ? (value) => setState(() => preview = value)
                   : null,
-              onChangeEnd: enabled && cast.seekSupported
+              onChangeEnd: canSeek
                   ? (value) {
                       setState(() => preview = null);
                       unawaited(
@@ -145,7 +146,7 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
               runSpacing: 4,
               children: [
                 TextButton.icon(
-                  onPressed: enabled
+                  onPressed: canSeek
                       ? () => _run(() => controller.skip(-15))
                       : null,
                   icon: const Icon(Icons.fast_rewind),
@@ -157,7 +158,7 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
                   label: Text(state.playing ? '暂停' : '播放'),
                 ),
                 TextButton.icon(
-                  onPressed: enabled
+                  onPressed: canSeek
                       ? () => _run(() => controller.skip(15))
                       : null,
                   icon: const Icon(Icons.fast_forward),

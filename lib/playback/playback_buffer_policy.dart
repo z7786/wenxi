@@ -48,7 +48,7 @@ class PlaybackBufferPolicy {
     final target =
         (average * seconds * rate.clamp(.25, 4) / mib).ceil().clamp(16, 48) *
         mib;
-    // Only grow the packet cache within a session: mpv may keep old packets
+    // Only grow the packet cache within a session: the decoder may keep old packets
     // briefly after a reduction, so immediately giving those bytes to the
     // proxy would exceed the combined memory budget.
     return math.max(forwardBytes, target);
@@ -57,7 +57,7 @@ class PlaybackBufferPolicy {
   int proxyBytesFor(int forward) => totalBytes - backBytes - forward;
 
   /// A short initial reserve, then a larger reserve after real underruns.
-  /// The caller excludes seeks and user pauses from the rebuffer count. mpv's
+  /// The caller excludes seeks and user pauses from the rebuffer count. The decoder's
   /// threshold is in media seconds, so preserve the reserve at faster speeds.
   double resumeSeconds({required int rebufferCount, required double rate}) =>
       (6 + 2 * rebufferCount.clamp(0, 3)) * rate.clamp(.25, 4);

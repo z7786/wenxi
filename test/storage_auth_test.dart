@@ -28,7 +28,7 @@ void main() {
     expect(() => CryptoBox.open(key, original), throwsA(isA<AppException>()));
   });
   test(
-    'Atomic encrypted state survives corrupt primary and a later interrupted update',
+    'Atomic plain state survives corrupt primary and a later interrupted update',
     () async {
       final directory = await Directory.systemTemp.createTemp('aster-state-');
       addTearDown(() => directory.delete(recursive: true));
@@ -36,12 +36,12 @@ void main() {
           store = await StateStore.open(directory, testKey: key);
       await store.put('cookie', 'fixture-cookie-secret');
       await store.put('counter', 2);
-      final file = File('${directory.path}/state-v1.enc');
+      final file = File('${directory.path}/state-v2.json');
       expect(
         utf8
             .decode(await file.readAsBytes(), allowMalformed: true)
             .contains('fixture-cookie-secret'),
-        isFalse,
+        isTrue,
       );
       await file.writeAsString('corrupt');
       final recovered = await StateStore.open(directory, testKey: key);
@@ -78,7 +78,40 @@ void main() {
   );
 
   test(
-    'unchanged state preserves encrypted files and does not notify observers',
+    'A failed edit of nested download ranges cannot mutate committed state',
+    () async {
+      final store = StateStore.memory({
+        'tasks': [
+          {
+            'name': 'original',
+            'ranges': [
+              [0, 1024],
+              [2048, 4096],
+            ],
+          },
+        ],
+      });
+      final original = jsonEncode(store.data);
+      await expectLater(
+        store.change<void>((draft) {
+          final task = (draft['tasks'] as List).single as Map;
+          task['name'] = 'changed';
+          ((task['ranges'] as List).first as List)[0] = 999;
+          throw const AppException('fixture edit failed');
+        }),
+        throwsA(isA<AppException>()),
+      );
+      expect(jsonEncode(store.data), original);
+      await store.put('after', true);
+      expect((store.data.list('tasks').single['ranges'] as List).first, [
+        0,
+        1024,
+      ]);
+    },
+  );
+
+  test(
+    'unchanged state preserves plain files and does not notify observers',
     () async {
       final directory = await Directory.systemTemp.createTemp(
         'aster-state-noop-',
@@ -94,7 +127,7 @@ void main() {
         ],
       });
       await store.put('counter', 7);
-      final file = File('${directory.path}/state-v1.enc');
+      final file = File('${directory.path}/state-v2.json');
       final backup = File('${file.path}.bak');
       final before = await file.readAsBytes(),
           beforeBackup = await backup.readAsBytes();

@@ -13,6 +13,7 @@ import 'package:asterlink/data/remote_control_service.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/main.dart';
 import 'package:asterlink/ui/remote_control_dialogs.dart';
+import 'package:asterlink/ui/announcement_markdown.dart';
 import 'package:asterlink/ui/about_dialog.dart';
 import 'package:asterlink/ui/browser_page.dart';
 import 'package:asterlink/ui/cloud_page.dart';
@@ -356,6 +357,49 @@ void main() {
       );
       expect(reopened.unreadAnnouncement, isNotNull);
       reopened.close();
+    },
+  );
+
+  scenario(
+    'Startup announcement shows pictures and opens its mini-program button',
+    (tester) async {
+      final opened = <Uri>[];
+      final target = Uri.parse('weixin://dl/business/?t=example-ticket');
+      final data = controlJson(
+        noticeId: 'image-mini-program',
+        buttonText: '打开微信小程序',
+        buttonUrl: target.toString(),
+      );
+      (data['announcement'] as Map)['content'] =
+          '## 活动说明\n\n![活动图片](https://images.example.test/notice.png)\n\n点击下方按钮进入小程序。';
+      await render(
+        tester,
+        (s) => promptHome(
+          s,
+          launcher: (uri) async {
+            opened.add(uri);
+            return true;
+          },
+        ),
+        config: data,
+        foreground: true,
+      );
+      expect(find.byType(AnnouncementMarkdown), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(AnnouncementMarkdown),
+          matching: find.byType(Image),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('活动说明'), findsOneWidget);
+      expect(opened, isEmpty);
+      await tester.tap(find.byKey(const ValueKey('control-announcement-link')));
+      await tester.pumpAndSettle();
+      expect(opened, [target]);
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(services!.control.unreadAnnouncement, isNull);
+      expect(tester.takeException(), isNull);
     },
   );
 

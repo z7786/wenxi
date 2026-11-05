@@ -33,7 +33,7 @@ vec2 roundedRectNormal(vec2 p, vec2 halfSize, float radius) {
 }
 
 vec4 sampleContent(vec2 p) {
-  vec2 uv = clamp(p / u_size, vec2(0.0), vec2(1.0));
+  vec2 uv = clamp(p / u_size, 0.5 / u_size, 1.0 - 0.5 / u_size);
 #ifdef IMPELLER_TARGET_OPENGLES
   uv.y = 1.0 - uv.y;
 #endif
@@ -58,11 +58,19 @@ void main() {
   vec2 refracted = p - displacement * normal;
   vec4 color = sampleContent(refracted);
   if (u_optics.x > 0.0 && displacement > 0.0) {
-    float dispersion = u_optics.x * centered.x * centered.y
-        / max(halfSize.x * halfSize.y, 0.0001);
-    vec2 separated = displacement * normal * dispersion;
-    color.r = sampleContent(refracted + separated).r;
-    color.b = sampleContent(refracted - separated).b;
+    float dispersion = clamp(u_optics.x, 0.0, 0.3);
+    // Bound the color fringe to the rim and reconstruct straight RGB before
+    // premultiplying with a shared alpha. Mixing premultiplied channels from
+    // samples with different opacity produces white or dark color halos.
+    vec2 separated = min(displacement * dispersion, shortest * 0.04) * normal;
+    vec4 red = sampleContent(refracted + separated);
+    vec4 blue = sampleContent(refracted - separated);
+    float alpha = (red.a + color.a + blue.a) / 3.0;
+    vec3 rgb = vec3(
+        red.r / max(red.a, 0.0001),
+        color.g / max(color.a, 0.0001),
+        blue.b / max(blue.a, 0.0001));
+    color = vec4(clamp(rgb, 0.0, 1.0) * alpha, alpha);
   }
   float luminance = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
   color.rgb = clamp(mix(vec3(luminance), color.rgb, u_optics.y),

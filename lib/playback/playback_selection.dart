@@ -1,5 +1,5 @@
 import 'dart:io';
-import 'package:media_kit/media_kit.dart';
+import 'package:asterlink/playback/playback_state.dart';
 
 /// Settings belong to the media, while native readers hold independent leases.
 /// A failed native close must keep every subtitle that it may still be reading.

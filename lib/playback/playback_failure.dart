@@ -11,9 +11,17 @@ enum PlaybackFailureKind {
 }
 
 class PlaybackFailure extends AppException {
-  const PlaybackFailure(super.message, this.kind, {this.status});
+  const PlaybackFailure(
+    super.message,
+    this.kind, {
+    this.status,
+    this.decoderUnavailable = false,
+  });
   final PlaybackFailureKind kind;
   final int? status;
+
+  /// A released MediaCodec cannot recover by skipping a damaged frame.
+  final bool decoderUnavailable;
   bool get refreshable =>
       kind == PlaybackFailureKind.expired ||
       kind == PlaybackFailureKind.network;
@@ -41,6 +49,18 @@ class PlaybackFailure extends AppException {
   };
 
   static PlaybackFailure? fromLog(String message) {
+    if (RegExp(
+      r'\b(?:a?mediacodec|\w+_mediacodec)\b[^\r\n]*'
+      r'(?:\b(?:released|uninitialized) state\b|\bstate[:= ]+(?:released|uninitialized)\b|'
+      r'failed to dequeue (?:input|output) buffer[^\r\n]*status\s*=\s*-542398533)',
+      caseSensitive: false,
+    ).hasMatch(message)) {
+      return const PlaybackFailure(
+        '系统硬件解码器已异常停止，播放进度已保留；请关闭硬件解码后重试或选择外部播放器',
+        PlaybackFailureKind.decoder,
+        decoderUnavailable: true,
+      );
+    }
     final code = RegExp(
       r'\b(?:http|server returned)\b[^\r\n]*?\b(401|403|404|408|410|429|5\d\d)\b',
       caseSensitive: false,
@@ -49,6 +69,7 @@ class PlaybackFailure extends AppException {
     if (RegExp(
       r'connection (?:refused|reset|timed out)|network is unreachable|'
       r'(?:failed|unable|could not) to (?:resolve|reconnect)|'
+      r'failed to open https?://|'
       r'connection timeout|server returned 4XX|input/output error',
       caseSensitive: false,
     ).hasMatch(message)) {

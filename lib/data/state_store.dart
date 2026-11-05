@@ -1,18 +1,83 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:collection/collection.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 import '../core/crypto_box.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
+import '../diagnostics/app_log.dart';
 import 'state_key.dart';
 
-Uint8List _encryptSnapshot((Uint8List, String) args) =>
-    CryptoBox.seal(args.$1, utf8.encode(args.$2));
 Json _decryptSnapshot((Uint8List, Uint8List) args) =>
     asJson(jsonDecode(utf8.decode(CryptoBox.open(args.$1, args.$2))));
+
+Uint8List encodePlainState(Json data) {
+  final serialized = jsonEncode(data);
+  return _packPlainState(serialized);
+}
+
+Uint8List _packPlainState(String serialized) {
+  final checksum = sha256.convert(utf8.encode(serialized)).toString();
+  return Uint8List.fromList(
+    utf8.encode(
+      '{"format":"asterlink-state-v2","sha256":"$checksum","data":$serialized}',
+    ),
+  );
+}
+
+Json decodePlainState(Uint8List bytes) {
+  final raw = jsonDecode(utf8.decode(bytes));
+  require(raw is Map, '本地数据格式错误');
+  final envelope = asJson(raw);
+  require(
+    envelope.str('format') == 'asterlink-state-v2' && envelope['data'] is Map,
+    '本地数据格式错误',
+  );
+  final data = envelope.obj('data');
+  require(
+    sha256.convert(utf8.encode(jsonEncode(data))).toString() ==
+        envelope.str('sha256'),
+    '本地数据文件已损坏',
+  );
+  require(data.integer('schema', 1) == 1, '本地数据来自更新版本，请更新应用');
+  return data;
+}
+
+Object? _copyStateValue(Object? value) => switch (value) {
+  Map() => <String, dynamic>{
+    for (final entry in value.entries)
+      entry.key.toString(): _copyStateValue(entry.value),
+  },
+  List() => [for (final item in value) _copyStateValue(item)],
+  _ => value,
+};
+
+typedef _EncodedChange = ({
+  bool changed,
+  Uint8List? bytes,
+  int serializeMs,
+  int packMs,
+});
+
+_EncodedChange _encodeChange((bool, Json, Json, bool) args) {
+  final timer = Stopwatch()..start();
+  final changed =
+      args.$4 || !const DeepCollectionEquality().equals(args.$2, args.$3);
+  final serialized = changed && args.$1 ? jsonEncode(args.$3) : '';
+  final serializeMs = timer.elapsedMilliseconds;
+  timer.reset();
+  final bytes = changed && args.$1 ? _packPlainState(serialized) : null;
+  return (
+    changed: changed,
+    bytes: bytes,
+    serializeMs: serializeMs,
+    packMs: timer.elapsedMilliseconds,
+  );
+}
 
 enum StateRecoveryCause {
   missingKey,
@@ -32,22 +97,110 @@ class StateRecoveryRequired extends AppException {
   final StateRecoveryCause cause;
 }
 
-/// No plaintext accounts, cookies or signed URLs are written to state files.
+/// New snapshots are plain JSON with a checksum and atomic backup rotation.
+/// Legacy encrypted snapshots are read only during the first migration.
 class StateStore extends ChangeNotifier {
   static const keyName = LocalStateKey.name;
   static const secureStorage = FlutterSecureStorage(
     aOptions: LocalStateKey.options,
   );
-  StateStore._(this.file, this._key, this._data, [this._localKey]);
+  StateStore._(this.file, this._data);
   final File? file;
-  final Uint8List _key;
-  final LocalStateKey? _localKey;
   Json _data;
   final _gate = AsyncGate();
   final _notificationZone = Zone.current;
   Json get data => _data;
 
   static Future<StateStore> open(
+    Directory directory, {
+    Uint8List? testKey,
+    FlutterSecureStorage storage = secureStorage,
+    LocalStateKey? localKey,
+  }) async {
+    await directory.create(recursive: true);
+    final file = File(
+      '${directory.path}${Platform.pathSeparator}state-v2.json',
+    );
+    var foundPlain = false;
+    for (final candidate in [
+      file,
+      File('${file.path}.tmp'),
+      File('${file.path}.bak'),
+    ]) {
+      if (!await candidate.exists()) continue;
+      foundPlain = true;
+      Json decoded;
+      try {
+        decoded = await compute(
+          decodePlainState,
+          await candidate.readAsBytes(),
+        );
+      } on FormatException {
+        continue;
+      } on FileSystemException {
+        continue;
+      } on AppException catch (error) {
+        if (error.message == '本地数据来自更新版本，请更新应用') rethrow;
+        continue;
+      }
+      if (candidate.path != file.path) {
+        final repair = File('${file.path}.recovery');
+        await repair.writeAsBytes(await candidate.readAsBytes(), flush: true);
+        if (await file.exists()) {
+          await file.rename(
+            '${file.path}.corrupt-${DateTime.now().microsecondsSinceEpoch}',
+          );
+        }
+        await repair.rename(file.path);
+      }
+      return StateStore._(file, decoded);
+    }
+    // A corrupt current-format file must not revive stale pre-upgrade accounts.
+    if (foundPlain) {
+      throw StateRecoveryRequired(directory, StateRecoveryCause.unreadableData);
+    }
+    final legacy = File(
+      '${directory.path}${Platform.pathSeparator}state-v1.enc',
+    );
+    if (!await legacy.exists() &&
+        !await File('${legacy.path}.bak').exists() &&
+        !await File('${legacy.path}.tmp').exists()) {
+      for (final name in LocalStateKey.sidecars) {
+        if (await File(
+          '${directory.path}${Platform.pathSeparator}$name',
+        ).exists()) {
+          throw StateRecoveryRequired(
+            directory,
+            StateRecoveryCause.unreadableData,
+          );
+        }
+      }
+      return StateStore._(file, {});
+    }
+    final legacySnapshot = await readLegacySnapshot(
+      directory,
+      testKey: testKey,
+      storage: storage,
+      localKey: localKey,
+    );
+    final data = legacySnapshot.data;
+    final bytes = await compute(encodePlainState, data);
+    // Keep the original snapshots and keys until the new file is durable and
+    // readable. A stopped migration can retry without resetting user data.
+    final temporary = File('${file.path}.tmp');
+    await temporary.writeAsBytes(bytes, flush: true);
+    await compute(decodePlainState, await temporary.readAsBytes());
+    await temporary.rename(file.path);
+    DiagnosticLog.event(
+      'state.plaintext_migrated',
+      fields: {'snapshotBytes': bytes.length},
+    );
+    return StateStore._(file, data);
+  }
+
+  /// Exposed to compatibility fixtures that model an older app's snapshots.
+  @visibleForTesting
+  static Future<({Json data, Uint8List key})> readLegacySnapshot(
     Directory directory, {
     Uint8List? testKey,
     FlutterSecureStorage storage = secureStorage,
@@ -116,6 +269,7 @@ class StateStore extends ChangeNotifier {
       Json? decoded;
       // Try every key against the newest snapshot before considering older data.
       for (final candidateKey in keys) {
+        if (saved?.requiresLatestSnapshot == true && !newestSnapshot) continue;
         try {
           decoded = await compute(_decryptSnapshot, (candidateKey, bytes));
           key = candidateKey;
@@ -186,124 +340,106 @@ class StateStore extends ChangeNotifier {
         // A failed pointer repair must not prevent using authenticated data.
       }
     }
-    return StateStore._(file, key, data, localKey);
+    return (data: data, key: key);
   }
 
-  factory StateStore.memory([Json? data]) => StateStore._(
-    null,
-    Uint8List(32),
-    asJson(jsonDecode(jsonEncode(data ?? {}))),
-  );
+  factory StateStore.memory([Json? data]) =>
+      StateStore._(null, asJson(jsonDecode(jsonEncode(data ?? {}))));
 
-  Future<T> change<T>(
-    T Function(Json draft) edit, {
-    String? recoveryPassword,
-  }) => _gate.run(() async {
-    final previous = jsonEncode(_data);
-    final draft = asJson(jsonDecode(previous));
-    final result = edit(draft);
-    draft['schema'] = 1;
-    final serialized = jsonEncode(draft);
-    // Startup reconciliation and idle shutdown often leave the state unchanged.
-    // Re-encrypting a large download queue for these no-ops can take seconds.
-    // A backup import must still install its recovery password even if equal.
-    if (recoveryPassword == null && serialized == previous) return result;
-    if (file != null) {
-      final protectedImport = recoveryPassword != null && _localKey != null;
-      final originals = <String, Uint8List?>{};
-      if (protectedImport) {
-        // The imported backup never supplies a device key. Its password wraps
-        // this device's existing key, which also decrypts all later edits.
-        for (final path in [
-          file!.path,
-          '${file!.path}.bak',
-          '${file!.path}.tmp',
-          for (final name in LocalStateKey.sidecars)
-            _localKey.localFile(name).path,
-        ]) {
-          final original = File(path);
-          originals[path] = await original.exists()
-              ? await original.readAsBytes()
-              : null;
-        }
-      }
-      try {
-        Uint8List? envelope;
+  Future<T> change<T>(T Function(Json draft) edit, {String? recoveryPassword}) {
+    final timer = Stopwatch()..start();
+    return _gate.run(() async {
+      final queueMs = timer.elapsedMilliseconds;
+      // Copy containers without re-parsing every URL and torrent string on the
+      // UI isolate. Failed edits still cannot mutate the committed snapshot.
+      final draft = _copyStateValue(_data) as Json;
+      final result = edit(draft);
+      draft['schema'] = 1;
+      final args = (file != null, _data, draft, recoveryPassword != null);
+      final encoded = file == null
+          ? _encodeChange(args)
+          : await compute(_encodeChange, args, debugLabel: 'state.commit');
+      // Startup reconciliation and idle shutdown often leave the state unchanged.
+      // No-op edits do not rewrite an unchanged snapshot.
+      if (!encoded.changed) return result;
+      if (file != null) {
+        final protectedImport = recoveryPassword != null;
+        final originals = <String, Uint8List?>{};
         if (protectedImport) {
-          envelope = await _localKey.prepareRecovery(_key, recoveryPassword);
-          await _localKey.saveForImport(_key);
-        }
-        final bytes = await compute(_encryptSnapshot, (_key, serialized));
-        final temporary = File('${file!.path}.tmp');
-        final backup = File('${file!.path}.bak');
-        await temporary.writeAsBytes(bytes, flush: true);
-        // Keep one previous authenticated snapshot until the next successful commit.
-        if (await file!.exists()) {
-          if (await backup.exists()) await backup.delete();
-          await file!.rename(backup.path);
-        }
-        await temporary.rename(file!.path);
-        if (protectedImport) {
-          final reopened = await compute(_decryptSnapshot, (
-            _key,
-            await file!.readAsBytes(),
-          ));
-          require(jsonEncode(reopened) == jsonEncode(draft), '导入后的数据保存校验失败');
-          // A stopped import can still use the previous recovery password:
-          // change it only after the new state is safely on disk.
-          await _localKey.installRecovery(envelope!);
-        }
-      } catch (error, stack) {
-        if (protectedImport) {
-          try {
-            for (final entry in originals.entries) {
-              final target = File(entry.key);
-              if (entry.value != null) {
-                final rollback = File('${target.path}.rollback');
-                await rollback.writeAsBytes(entry.value!, flush: true);
-                await rollback.rename(target.path);
-              } else if (await target.exists()) {
-                await target.delete();
-              }
-            }
-          } catch (_) {
-            throw const AppException('导入未完成，请勿清除数据；重新打开应用后检查恢复提示');
+          // Preserve the previous files until a backup import passes readback.
+          for (final path in [
+            file!.path,
+            '${file!.path}.bak',
+            '${file!.path}.tmp',
+          ]) {
+            final original = File(path);
+            originals[path] = await original.exists()
+                ? await original.readAsBytes()
+                : null;
           }
         }
-        Error.throwWithStackTrace(error, stack);
+        try {
+          final temporary = File('${file!.path}.tmp');
+          final backup = File('${file!.path}.bak');
+          await temporary.writeAsBytes(encoded.bytes!, flush: true);
+          // Keep the previous complete snapshot until the next successful commit.
+          if (await file!.exists()) {
+            if (await backup.exists()) await backup.delete();
+            await file!.rename(backup.path);
+          }
+          await temporary.rename(file!.path);
+          if (protectedImport) {
+            final reopened = await compute(
+              decodePlainState,
+              await file!.readAsBytes(),
+            );
+            require(jsonEncode(reopened) == jsonEncode(draft), '导入后的数据保存校验失败');
+          }
+        } catch (error, stack) {
+          if (protectedImport) {
+            try {
+              for (final entry in originals.entries) {
+                final target = File(entry.key);
+                if (entry.value != null) {
+                  final rollback = File('${target.path}.rollback');
+                  await rollback.writeAsBytes(entry.value!, flush: true);
+                  await rollback.rename(target.path);
+                } else if (await target.exists()) {
+                  await target.delete();
+                }
+              }
+            } catch (_) {
+              throw const AppException('导入未完成，请勿清除数据；重新打开应用后检查恢复提示');
+            }
+          }
+          Error.throwWithStackTrace(error, stack);
+        }
       }
-    }
-    _data = draft;
-    _notificationZone.run(notifyListeners);
-    return result;
-  });
+      _data = draft;
+      _notificationZone.run(notifyListeners);
+      if (file != null && timer.elapsedMilliseconds >= 500) {
+        DiagnosticLog.event(
+          'state.commit_slow',
+          fields: {
+            'queueMs': queueMs,
+            'serializeMs': encoded.serializeMs,
+            'packMs': encoded.packMs,
+            'elapsedMs': timer.elapsedMilliseconds,
+            'snapshotBytes': encoded.bytes!.length,
+          },
+        );
+      }
+      return result;
+    });
+  }
+
   Future<void> put(String key, Object? value) => change((draft) {
     draft[key] = value;
   });
   Future<void> flush() => _gate.run(() async {});
 
-  /// Protect the current device key with a password while leaving its system
-  /// storage and existing snapshots intact. This also works if Keystore became
-  /// unavailable after this process successfully unlocked the state.
-  Future<void> protectRecovery(String password) => _gate.run(() async {
-    final localKey = _localKey;
-    if (file == null || localKey == null) return;
-    final envelope = await localKey.prepareRecovery(_key, password);
-    final hasSnapshot =
-        await file!.exists() ||
-        await File('${file!.path}.tmp').exists() ||
-        await File('${file!.path}.bak').exists();
-    if (!hasSnapshot) {
-      // A first-launch export can precede the first state edit. Persist that
-      // empty state before publishing a recovery envelope for it.
-      await LocalStateKey.writeAtomic(
-        file!,
-        await compute(_encryptSnapshot, (_key, jsonEncode(_data))),
-      );
-    }
-    await validateRecoveryKey(localKey.directory, _key);
-    await localKey.installRecovery(envelope);
-  });
+  /// Kept for callers of older backup APIs; current snapshots need no key.
+  Future<void> protectRecovery(String password) => flush();
 
   /// Password recovery must authenticate the current data, never silently pick
   /// an older backup encrypted with a different key.
@@ -470,8 +606,16 @@ class Vault implements CredentialStore {
       if (credential == null) continue;
       final id = activeIdIn(draft, platform)!;
       final records = all.obj(platform.key), previous = records.obj(id);
+      final name = customAccountName(
+        previous,
+        Credential.fromJson(asJson(credential)),
+      );
       records[id] = {
         ...previous,
+        if (!previous.containsKey('nameIsCustom')) ...{
+          'name': name,
+          'nameIsCustom': name.isNotEmpty,
+        },
         'credential': credential,
         'secrets': {
           for (final e in draft.obj('secrets').entries)
@@ -485,7 +629,29 @@ class Vault implements CredentialStore {
     draft['activeCloudAccounts'] = active;
   }
 
-  Future<void> initializeAccounts() => store.change(migrateDraft);
+  Future<void> initializeAccounts() {
+    final saved = store.data;
+    final accounts = saved.obj('cloudAccounts');
+    final active = saved.obj('activeCloudAccounts');
+    final draft = <String, dynamic>{
+      'cloudAccounts': accounts,
+      'activeCloudAccounts': active,
+      'credentials': saved.obj('credentials'),
+      'secrets': saved.obj('secrets'),
+    };
+    migrateDraft(draft);
+    const equality = DeepCollectionEquality();
+    // Inspect only account data. A settled migration must not clone, serialize
+    // and enqueue the entire download/search history on every launch.
+    if ((saved['cloudAccounts'] == null || saved['cloudAccounts'] is Map) &&
+        (saved['activeCloudAccounts'] == null ||
+            saved['activeCloudAccounts'] is Map) &&
+        equality.equals(accounts, draft['cloudAccounts']) &&
+        equality.equals(active, draft['activeCloudAccounts'])) {
+      return Future.value();
+    }
+    return store.change(migrateDraft);
+  }
 
   static void activateDraft(Json draft, CloudPlatform platform, String? id) {
     final record = id == null

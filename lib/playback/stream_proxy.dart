@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -217,11 +218,13 @@ class PlaybackStreamProxy {
   int _routeRevision = 0, _redirectRefreshes = 0;
   String? _etag, _modified;
   String _contentType = 'application/octet-stream';
+  String? _playlistMime;
   int _length = 0, _cachedBytes = 0, _reservedBytes = 0;
   int _active = 0, _pausedAllowance = 0, _generation = 0;
   int _deliveredBytes = 0, _cursor = 0, _clock = 0;
   bool _closed = false, _paused = false, _started = false;
   bool _seekPending = false;
+  bool _seekReadInterrupted = false;
   bool _interleavedReads = false;
   int? _lastMediaFirst, _previousMediaFirst;
   final _probeWatch = Stopwatch();
@@ -245,6 +248,7 @@ class PlaybackStreamProxy {
   int? get lastUpstreamStatus => _lastUpstreamStatus;
   int get generation => _generation;
   bool get supported => _server != null && !_closed;
+  String? get playlistMime => _playlistMime;
 
   /// Only protocol outcomes and counters; no URLs, paths or account data.
   Map<String, Object?> get diagnosticFields => {
@@ -306,7 +310,7 @@ class PlaybackStreamProxy {
     ..maxConnectionsPerHost = connections;
 
   /// A small Range probe proves byte addressing and file identity. Ignored
-  /// ranges, encoded responses and HLS/DASH keep the original mpv path.
+  /// ranges, encoded responses and HLS/DASH keep the original media source.
   Future<bool> start() async {
     if (_closed || _started) return supported;
     _started = true;
@@ -333,6 +337,13 @@ class PlaybackStreamProxy {
         await response.listen((_) {}).cancel();
         throw failure;
       }
+      final contentType = response.headers.contentType?.mimeType;
+      _playlistMime = _detectPlaylist(const [], contentType);
+      if (_playlistMime != null) {
+        _probeResult = 'playlist';
+        await response.listen((_) {}).cancel();
+        return false;
+      }
       final range = _contentRange(response);
       if (response.statusCode != HttpStatus.partialContent ||
           range == null ||
@@ -340,16 +351,17 @@ class PlaybackStreamProxy {
           range.$2 != math.min(1023, range.$3 - 1) ||
           !_identity(response)) {
         _probeResult = 'range_not_supported';
-        await response.listen((_) {}).cancel();
+        if (response.statusCode == HttpStatus.ok && _identity(response)) {
+          _playlistMime = _detectPlaylist(await _readPrefix(response), null);
+          if (_playlistMime != null) _probeResult = 'playlist';
+        } else {
+          await response.listen((_) {}).cancel();
+        }
         return false;
       }
       final prefix = await _readBody(response, range.$2 + 1);
-      final text = String.fromCharCodes(prefix).trimLeft();
-      final contentType = response.headers.contentType?.mimeType;
-      if (text.startsWith('#EXTM3U') ||
-          RegExp(r'<MPD[\s>]', caseSensitive: false).hasMatch(text) ||
-          (contentType?.contains('mpegurl') ?? false) ||
-          contentType == 'application/dash+xml') {
+      _playlistMime = _detectPlaylist(prefix, contentType);
+      if (_playlistMime != null) {
         _probeResult = 'playlist';
         return false;
       }
@@ -558,6 +570,31 @@ class PlaybackStreamProxy {
     return encoding == null || encoding.toLowerCase() == 'identity';
   }
 
+  static String? _detectPlaylist(List<int> prefix, String? contentType) {
+    final type = contentType?.toLowerCase() ?? '';
+    final text = utf8.decode(prefix, allowMalformed: true).trimLeft();
+    if (type.contains('mpegurl') || text.startsWith('#EXTM3U')) {
+      return 'application/x-mpegURL';
+    }
+    if (type == 'application/dash+xml' ||
+        RegExp(r'<MPD[\s>]', caseSensitive: false).hasMatch(text)) {
+      return 'application/dash+xml';
+    }
+    return null;
+  }
+
+  // Some playlist endpoints ignore Range and omit a useful MIME type. Read
+  // only a small prefix, then cancel; never buffer a full progressive file.
+  static Future<Uint8List> _readPrefix(HttpClientResponse response) async {
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in response.timeout(const Duration(seconds: 10))) {
+      final remaining = 1024 - bytes.length;
+      bytes.add(chunk.length > remaining ? chunk.sublist(0, remaining) : chunk);
+      if (bytes.length >= 1024) break;
+    }
+    return bytes.takeBytes();
+  }
+
   static Future<Uint8List> _readBody(
     HttpClientResponse response,
     int expected, {
@@ -646,12 +683,24 @@ class PlaybackStreamProxy {
     if (!value) _pump();
   }
 
-  /// mpv may satisfy a seek from its demuxer cache without a new HTTP request.
+  /// The decoder may satisfy a seek from its demuxer cache without a new HTTP request.
   /// Keep its current response alive until a replacement read actually arrives;
   /// cutting it here can leave the player buffering after that cache runs out.
   void prepareSeek() {
     if (_closed) return;
     _seekPending = true;
+    _seekReadInterrupted = false;
+  }
+
+  /// Wake a demuxer whose seek is waiting inside its current HTTP read. Keep
+  /// upstream requests and partial cache bytes for the replacement read.
+  void interruptReadForSeek() {
+    if (_closed || !_seekPending) return;
+    _seekReadInterrupted = true;
+    for (final reader in _readers.toList()) {
+      _cancelReader(reader, keepPartial: true);
+    }
+    _pump();
   }
 
   void _supersede() {
@@ -1074,10 +1123,12 @@ class PlaybackStreamProxy {
       if (request.method == 'HEAD') return;
       final first = start ~/ chunkBytes, last = end ~/ chunkBytes;
       final metadata =
-          end - start + 1 <= 2 * chunkBytes &&
+          end - start + 1 <= math.min(64 * 1024, 2 * chunkBytes) &&
           (first == 0 || start >= _length - 2 * chunkBytes);
       final seeking = _seekPending;
+      final interrupted = _seekReadInterrupted;
       _seekPending = false;
+      _seekReadInterrupted = false;
       if (!metadata) {
         final previous = _lastMediaFirst, beforePrevious = _previousMediaFirst;
         if (!seeking &&
@@ -1098,7 +1149,20 @@ class PlaybackStreamProxy {
       // cancelling the other reader forces an endless reopen/cancel loop.
       // Actual seeks are signalled by the backend via prepareSeek().
       if (!metadata && seeking) {
-        _supersede();
+        if (!interrupted) {
+          _supersede();
+        } else {
+          // Reuse the interrupted read's partially filled range when the
+          // decoder reopens nearby. Distant seeks release unrelated work.
+          for (final segment in _segments.values.toList()) {
+            if (segment.bytes == null && segment.owners.isEmpty &&
+                !(segment.start <= start &&
+                    segment.start + segment.size > start)) {
+              segment.cancel();
+              _segments.remove(segment.key);
+            }
+          }
+        }
       }
       // A paused seek gets one bounded preview window, only when the native
       // player needs new bytes. Cached seeks do not resume old prefetch work.

@@ -35,6 +35,7 @@ class ExternalPlayerOpeningTest {
         context = RuntimeEnvironment.getApplication()
         activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         opening = ExternalPlayerOpening(context, { activity }, FileOpening(context, { activity }))
+        context.getSharedPreferences("external-player-history", Context.MODE_PRIVATE).edit().clear().commit()
         results.clear()
     }
 
@@ -129,5 +130,29 @@ class ExternalPlayerOpeningTest {
         val intent = opening.prepare("http://127.0.0.1:39212/session/index.m3u8", "movie.mp4", -5)
         assertEquals("application/vnd.apple.mpegurl", intent.type)
         assertEquals(0, intent.getIntExtra("position", -1))
+    }
+
+    @Test fun repeatedSelectionDismissesBeforeLaunchAndKeepsMultipleRecentPlayers() {
+        installed(player("alpha.player"), player("beta.player"), player("gamma.player"))
+        for (wanted in listOf("beta.player", "gamma.player", "alpha.player", "beta.player")) {
+            open()
+            val chooser = ShadowAlertDialog.getLatestAlertDialog()
+            val offered = opening.targets(opening.prepare(video, "movie.mp4", 0))
+            val index = offered.indexOfFirst { it.activityInfo.packageName == wanted }
+            chooser.listView.performItemClick(null, index, index.toLong())
+            shadowOf(Looper.getMainLooper()).idle()
+            assertFalse(chooser.isShowing)
+            assertEquals(wanted, shadowOf(activity).nextStartedActivity.component!!.packageName)
+            assertEquals(true to null, results.last())
+        }
+        assertEquals(4, results.size)
+        assertEquals(listOf("beta.player", "alpha.player", "gamma.player"),
+            opening.targets(opening.prepare(video, "movie.mp4", 0)).map { it.activityInfo.packageName })
+        open()
+        val chooser = ShadowAlertDialog.getLatestAlertDialog()
+        chooser.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(false to null, results.last())
+        assertEquals(5, results.size)
     }
 }

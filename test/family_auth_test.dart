@@ -498,7 +498,7 @@ void main() {
   );
 
   test(
-    'Tianyi personal downloads retain cookie authentication and their original parameters',
+    'Tianyi personal downloads retain cookie authentication without share parameters',
     () async {
       final f = _TianyiFamilyFixture();
       await f.connector.familySpaces(f.credential);
@@ -506,7 +506,8 @@ void main() {
         if (request.uri.path == '/api/open/file/getFileDownloadUrl.action') {
           expect(request.headers['Cookie'], f.credential.primary);
           expect(request.headers.containsKey('AccessToken'), isFalse);
-          expect(request.uri.queryParameters['dt'], '1');
+          expect(request.uri.queryParameters.containsKey('dt'), isFalse);
+          expect(request.uri.queryParameters.containsKey('shareId'), isFalse);
           expect(request.uri.queryParameters.containsKey('familyId'), isFalse);
           return jsonResponse({
             'fileDownloadUrl': 'https://files.example.test/personal.mp4',

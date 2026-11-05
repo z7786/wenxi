@@ -4,6 +4,7 @@ import '../data/playback_store.dart';
 import '../domain/playback.dart';
 import '../platform/external_open.dart';
 import 'media_backend.dart';
+import 'playback_backend_factory.dart';
 import 'playback_controller.dart';
 
 PlaybackController externalPlayback(
@@ -30,7 +31,9 @@ PlaybackController externalPlayback(
     release: (_) async {},
     backendFactory:
         backendFactory ??
-        (entry, hardware) =>
-            MediaKitBackend(video: entry.video, hardwareAcceleration: hardware),
+        (entry, hardware) => createPlaybackBackend(
+          video: entry.video,
+          hardwareAcceleration: hardware,
+        ),
   );
 }

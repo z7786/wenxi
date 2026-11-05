@@ -11,6 +11,7 @@ import '../domain/playback_source.dart';
 import '../domain/torrent.dart';
 import '../platform/file_access.dart';
 import 'media_backend.dart';
+import 'playback_backend_factory.dart';
 import 'playback_controller.dart';
 import 'playback_sources.dart';
 import 'torrent_playback.dart';
@@ -122,14 +123,23 @@ Future<PlaybackController> _restoreRecentPlayback(
         release: (_) async {},
         backendFactory:
             backendFactory ??
-            (entry, hardware) => MediaKitBackend(
+            (entry, hardware) => createPlaybackBackend(
               video: entry.video,
               hardwareAcceleration: hardware,
             ),
       );
     case PlaybackSourceKind.torrent:
       final cache = services.store.data.obj('playbackTorrents');
-      final data = cache.obj(source.torrentHash).isNotEmpty
+      final data = source.torrentData.isNotEmpty
+          ? <String, dynamic>{
+              'hash': source.torrentHash,
+              'data': source.torrentData,
+              'files': [
+                for (final file in source.torrentFiles)
+                  {'index': file.index, 'path': file.path, 'size': file.size},
+              ],
+            }
+          : cache.obj(source.torrentHash).isNotEmpty
           ? cache.obj(source.torrentHash)
           : services.store.data.obj('torrents').obj(source.torrentHash);
       final raw = data.str('data');

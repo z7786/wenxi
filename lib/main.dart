@@ -30,6 +30,7 @@ import 'ui/startup_loading_page.dart';
 import 'ui/transfers_page.dart';
 import 'ui/mine_page.dart';
 import 'ui/parse_page.dart';
+import 'ui/browser_page.dart';
 import 'ui/resource_home_page.dart';
 import 'ui/search_security_dialog.dart';
 import 'ui/announcements_page.dart';
@@ -40,73 +41,75 @@ import 'ui/download_shutdown_prompt.dart';
 import 'ui/guest_download_prompt.dart';
 import 'ui/mobile_data_download_prompt.dart';
 import 'ui/player_page.dart';
+import 'ui/floating_playback_host.dart';
+import 'playback/floating_playback.dart';
+import 'ui/independent_player_app.dart';
+import 'playback/independent_player_window.dart';
 import 'platform/external_open.dart';
 import 'playback/external_playback.dart';
 import 'platform/windows_pip.dart';
 import 'platform/windows_window_theme.dart';
 
-Future<void> main() async {
+void main(List<String> arguments) {
   WidgetsFlutterBinding.ensureInitialized();
-  try {
-    await DiagnosticRuntime.start();
-    LicenseRegistry.addLicense(() async* {
-      for (final entry in {
-        'Gopeed': 'Gopeed-LICENSE.txt',
-        'Kelpie / goed2k ED2K': 'Kelpie-LICENSE.txt',
-        'Kelpie / goed2k notices': 'Kelpie-NOTICE.txt',
-        'ED2K UPnP (BSD)': 'Kelpie-UPnP-BSD.txt',
-        'QuickJS-NG': 'QuickJS-NG-LICENSE.txt',
-        'Android NDK / LLVM': 'android-ndk-NOTICE.txt',
-        'media_kit native build': 'media-native-build-LICENSE.txt',
-        'Noto Sans SC': 'NotoSansCJK-OFL.txt',
-        'LanzouAPI': 'LanzouAPI-LICENSE.txt',
-        '115driver m115 protocol': '115driver.txt',
-        'AndroidLiquidGlass / Backdrop': 'AndroidLiquidGlass-LICENSE.txt',
-      }.entries) {
-        yield LicenseEntryWithLineBreaks([
-          entry.key,
-        ], await rootBundle.loadString('assets/licenses/${entry.value}'));
-      }
-    });
-    MediaKit.ensureInitialized();
-    if (Platform.isWindows) {
-      await windowManager.ensureInitialized();
-      unawaited(
-        windowManager.waitUntilReadyToShow(
-          const WindowOptions(
-            title: '文析助手',
-            size: Size(1100, 780),
-            minimumSize: appWindowMinimumSize,
-            center: true,
-          ),
-          () async {
-            await windowManager.show();
-            await windowManager.focus();
-          },
-        ),
-      );
+  if (arguments.length == 2 && arguments.first == independentPlayerArgument) {
+    runApp(IndependentPlayerApp(endpoint: arguments[1]));
+    return;
+  }
+  LicenseRegistry.addLicense(() async* {
+    for (final entry in {
+      'Gopeed': 'Gopeed-LICENSE.txt',
+      'Kelpie / goed2k ED2K': 'Kelpie-LICENSE.txt',
+      'Kelpie / goed2k notices': 'Kelpie-NOTICE.txt',
+      'ED2K UPnP (BSD)': 'Kelpie-UPnP-BSD.txt',
+      'QuickJS-NG': 'QuickJS-NG-LICENSE.txt',
+      'Android NDK / LLVM': 'android-ndk-NOTICE.txt',
+      'media_kit native build': 'media-native-build-LICENSE.txt',
+      'Noto Sans SC': 'NotoSansCJK-OFL.txt',
+      'LanzouAPI': 'LanzouAPI-LICENSE.txt',
+      '115driver m115 protocol': '115driver.txt',
+      'AndroidLiquidGlass / Backdrop': 'AndroidLiquidGlass-LICENSE.txt',
+    }.entries) {
+      yield LicenseEntryWithLineBreaks([
+        entry.key,
+      ], await rootBundle.loadString('assets/licenses/${entry.value}'));
     }
-    runApp(const _Bootstrap());
-  } catch (error, stack) {
-    DiagnosticLog.active ??= DiagnosticLog.open(null);
-    DiagnosticLog.error('app.bootstrap_failed', error, stack, fatal: true);
-    runApp(
-      MaterialApp(
-        theme: appTheme(Brightness.light),
-        builder: (context, child) => WindowsWindowTheme(child: child!),
-        home: StartupFailurePage(error),
+  });
+  runApp(const AppBootstrap());
+}
+
+Future<void> _initializeRuntime() async {
+  await DiagnosticRuntime.start();
+  MediaKit.ensureInitialized();
+  if (Platform.isWindows) {
+    await windowManager.ensureInitialized();
+    unawaited(
+      windowManager.waitUntilReadyToShow(
+        const WindowOptions(
+          title: '文析助手',
+          size: Size(1100, 780),
+          minimumSize: appWindowMinimumSize,
+          center: true,
+        ),
+        () async {
+          await windowManager.show();
+          await windowManager.focus();
+        },
       ),
     );
   }
 }
 
-class _Bootstrap extends StatefulWidget {
-  const _Bootstrap();
+class AppBootstrap extends StatefulWidget {
+  const AppBootstrap({super.key, this.initializeRuntime, this.servicesLoader});
+  final Future<void> Function()? initializeRuntime;
+  final Future<AppServices> Function()? servicesLoader;
   @override
-  State<_Bootstrap> createState() => _BootstrapState();
+  State<AppBootstrap> createState() => _BootstrapState();
 }
 
-class _BootstrapState extends State<_Bootstrap> {
+class _BootstrapState extends State<AppBootstrap> {
+  bool _runtimeInitialized = false;
   late Future<AppServices> services = _startServices();
   Future<AppServices> _startServices() {
     final pending = loadServices();
@@ -116,10 +119,40 @@ class _BootstrapState extends State<_Bootstrap> {
   }
 
   Future<AppServices> loadServices() async {
+    final startup = Stopwatch()..start();
     try {
-      return await AppServices.open();
+      // Prefer a loading frame, but a retained Android engine can initialize
+      // without a surface. Screen-off recovery/retries must not await vsync.
+      final binding = WidgetsBinding.instance;
+      var submittedFrame = false;
+      if (binding.framesEnabled) {
+        submittedFrame = await binding.endOfFrame
+            .then((_) => true)
+            .timeout(const Duration(milliseconds: 500), onTimeout: () => false);
+      } else {
+        await Future<void>.delayed(Duration.zero);
+      }
+      final firstFrameMs = startup.elapsedMilliseconds;
+      if (!_runtimeInitialized) {
+        await (widget.initializeRuntime ?? _initializeRuntime)();
+        _runtimeInitialized = true;
+      }
+      DiagnosticLog.event(
+        submittedFrame ? 'app.startup_frame' : 'app.startup_without_frame',
+        fields: {'elapsedMs': firstFrameMs},
+      );
+      DiagnosticLog.event(
+        'app.runtime_ready',
+        fields: {'elapsedMs': startup.elapsedMilliseconds},
+      );
+      return await (widget.servicesLoader ?? AppServices.open)();
     } catch (error, stack) {
-      DiagnosticLog.error('app.services_failed', error, stack, fatal: true);
+      DiagnosticLog.error(
+        _runtimeInitialized ? 'app.services_failed' : 'app.bootstrap_failed',
+        error,
+        stack,
+        fatal: true,
+      );
       rethrow;
     }
   }
@@ -137,7 +170,9 @@ class _BootstrapState extends State<_Bootstrap> {
         home: state.hasError
             ? StartupFailurePage(
                 state.error!,
-                onRetry: () => setState(() => services = _startServices()),
+                onRetry: () => setState(() {
+                  services = _startServices();
+                }),
               )
             : const StartupLoadingPage(),
       );
@@ -161,6 +196,7 @@ class AsterLinkApp extends StatelessWidget {
     builder: (context, _) {
       final settings = services.settings;
       return MaterialApp(
+        navigatorKey: FloatingPlaybackManager.of(services.store).navigatorKey,
         title: '文析助手',
         debugShowCheckedModeBanner: false,
         locale: const Locale('zh', 'CN'),
@@ -171,12 +207,16 @@ class AsterLinkApp extends StatelessWidget {
           fontFamily: fontFamily,
           palette: settings.themePalette,
           glassStyle: settings.glassStyle,
+          glassControls: settings.glassControls,
+          glassLowPower: settings.glassLowPower,
         ),
         darkTheme: appTheme(
           Brightness.dark,
           fontFamily: fontFamily,
           palette: settings.themePalette,
           glassStyle: settings.glassStyle,
+          glassControls: settings.glassControls,
+          glassLowPower: settings.glassLowPower,
         ),
         themeAnimationDuration:
             (MediaQuery.maybeDisableAnimationsOf(context) ??
@@ -197,7 +237,7 @@ class AsterLinkApp extends StatelessWidget {
           percent: settings.fontScalePercent,
           child: WindowsWindowTheme(
             enabled: services.platformFeatures,
-            child: child!,
+            child: FloatingPlaybackHost(store: services.store, child: child!),
           ),
         ),
         home: SearchSecurityHost(
@@ -226,6 +266,7 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell>
     with WindowListener, TrayListener, WidgetsBindingObserver {
   late int selected = widget.initialTab;
+  final _visitedTabs = <int>{};
   final parseKey = GlobalKey<ParsePageState>();
   final _windowVisibility = AsyncGate();
   bool trayReady = false, closing = false;
@@ -237,6 +278,14 @@ class _MainShellState extends State<MainShell>
       widget.services.settings.hideResourceNavigation;
   double _pageSwipeDistance = 0;
   static const titles = ['分享解析', '资源', '网盘列表', '传输管理', '我的'];
+
+  Widget _retainedTab(int index, Widget Function() builder) {
+    if (index == selected) _visitedTabs.add(index);
+    return TickerMode(
+      enabled: index == selected,
+      child: _visitedTabs.contains(index) ? builder() : const SizedBox.shrink(),
+    );
+  }
 
   List<int> get _navigationTabs =>
       AppNavigation.visibleIndices(hideResources: _hideResourceNavigation);
@@ -291,6 +340,7 @@ class _MainShellState extends State<MainShell>
     widget.services.store.addListener(_navigationSettingsChanged);
     if (widget.services.downloadNavigation.value > 0) selected = 3;
     widget.services.downloadNavigation.addListener(_showDownloads);
+    widget.services.browserReturnNavigation.addListener(_returnToBrowser);
     widget.services.resourceNavigation.addListener(_showResources);
     widget.services.lanNavigation.addListener(_showLan);
     widget.services.transferTab.addListener(_transferTabChanged);
@@ -391,10 +441,13 @@ class _MainShellState extends State<MainShell>
         if (request.kind == ExternalOpenKind.error) {
           message(context, request.message);
         } else if (request.kind == ExternalOpenKind.play) {
+          final controller = widget.externalPlayerBuilder == null
+              ? externalPlayback(widget.services, request)
+              : null;
           final page =
               widget.externalPlayerBuilder?.call(request) ??
               PlayerPage(
-                externalPlayback(widget.services, request),
+                controller!,
                 subtitleDirectory: Directory(
                   '${widget.services.cacheDirectory.path}/playback-subtitles',
                 ),
@@ -403,7 +456,11 @@ class _MainShellState extends State<MainShell>
             Navigator.push<void>(
               context,
               MaterialPageRoute(builder: (_) => page),
-            ),
+            ).whenComplete(() {
+              if (controller != null) {
+                widget.services.finishPlaybackInBackground(controller.close());
+              }
+            }),
           );
           await WidgetsBinding.instance.endOfFrame;
         } else {
@@ -479,6 +536,34 @@ class _MainShellState extends State<MainShell>
     Navigator.of(context).popUntil((route) => route.isFirst);
     setState(() => selected = 3);
     DiagnosticLog.event('ui.tab', fields: {'tab': 'downloads'});
+  }
+
+  bool _returningToBrowser = false;
+  Future<void> _returnToBrowser() async {
+    final target = widget.services.browserReturn.value;
+    if (!mounted || target == null || _returningToBrowser) return;
+    _returningToBrowser = true;
+    FocusManager.instance.primaryFocus?.unfocus();
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    setState(() => selected = 0);
+    try {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(
+          builder: (_) => BrowserPage(
+            widget.services,
+            target.session,
+            initialItems: target.items,
+            initialCursor: target.cursor,
+            initialTrail: target.trail,
+            initialScrollOffset: target.scrollOffset,
+            initialSearchText: target.searchText,
+            poolPreview: target.poolPreview,
+          ),
+        ),
+      );
+    } finally {
+      _returningToBrowser = false;
+    }
   }
 
   void _showResources() {
@@ -667,6 +752,7 @@ class _MainShellState extends State<MainShell>
     widget.services.sharedText.removeListener(_shared);
     widget.services.store.removeListener(_navigationSettingsChanged);
     widget.services.downloadNavigation.removeListener(_showDownloads);
+    widget.services.browserReturnNavigation.removeListener(_returnToBrowser);
     widget.services.resourceNavigation.removeListener(_showResources);
     widget.services.lanNavigation.removeListener(_showLan);
     widget.services.transferTab.removeListener(_transferTabChanged);
@@ -1032,40 +1118,55 @@ class _MainShellState extends State<MainShell>
                                 child: IndexedStack(
                                   index: selected,
                                   children: [
-                                    ParsePage(
-                                      widget.services,
-                                      key: parseKey,
-                                      active: selected == 0,
-                                      resourceActive: selected == 1,
+                                    TickerMode(
+                                      enabled: selected == 0,
+                                      child: ParsePage(
+                                        widget.services,
+                                        key: parseKey,
+                                        active: selected == 0,
+                                        resourceActive: selected == 1,
+                                      ),
                                     ),
-                                    ResourceHomePage(
-                                      widget.services,
-                                      active: selected == 1,
-                                      onOpen: (hit) async {
-                                        final parser = parseKey.currentState;
-                                        if (parser != null) {
-                                          await parser.openResource(hit);
-                                        }
-                                      },
+                                    _retainedTab(
+                                      1,
+                                      () => ResourceHomePage(
+                                        widget.services,
+                                        active: selected == 1,
+                                        onOpen: (hit) async {
+                                          final parser = parseKey.currentState;
+                                          if (parser != null) {
+                                            await parser.openResource(hit);
+                                          }
+                                        },
+                                      ),
                                     ),
-                                    CloudPage(
-                                      widget.services,
-                                      onParseShare: () {
-                                        setState(() => selected = 0);
-                                        WidgetsBinding.instance
-                                            .addPostFrameCallback((_) {
-                                              if (mounted && selected == 0) {
-                                                parseKey.currentState?.focus
-                                                    .requestFocus();
-                                              }
-                                            });
-                                      },
+                                    _retainedTab(
+                                      2,
+                                      () => CloudPage(
+                                        widget.services,
+                                        onParseShare: () {
+                                          setState(() => selected = 0);
+                                          WidgetsBinding.instance
+                                              .addPostFrameCallback((_) {
+                                                if (mounted && selected == 0) {
+                                                  parseKey.currentState?.focus
+                                                      .requestFocus();
+                                                }
+                                              });
+                                        },
+                                      ),
                                     ),
-                                    TransfersPage(
-                                      widget.services,
-                                      active: selected == 3,
+                                    _retainedTab(
+                                      3,
+                                      () => TransfersPage(
+                                        widget.services,
+                                        active: selected == 3,
+                                      ),
                                     ),
-                                    MinePage(widget.services),
+                                    _retainedTab(
+                                      4,
+                                      () => MinePage(widget.services),
+                                    ),
                                   ],
                                 ),
                               ),

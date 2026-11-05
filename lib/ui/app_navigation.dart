@@ -125,7 +125,10 @@ class AppNavigation extends StatelessWidget {
       final solid = highContrast || appearance.glassStyle == GlassStyle.solid;
       return ClipRect(
         child: BackdropFilter(
-          enabled: !solid,
+          enabled:
+              !solid &&
+              !appearance.glassLowPower &&
+              TickerMode.valuesOf(context).enabled,
           filter: ui.ImageFilter.blur(
             sigmaX: appearance.blurSigma,
             sigmaY: appearance.blurSigma,
@@ -133,7 +136,11 @@ class AppNavigation extends StatelessWidget {
           child: Material(
             key: const Key('navigation-rail-surface'),
             color: appearance.glassColor.withValues(
-              alpha: solid ? 1 : appearance.glassOpacity,
+              alpha: solid
+                  ? 1
+                  : appearance.glassLowPower
+                  ? .86
+                  : appearance.glassOpacity,
             ),
             child: Container(
               width: 88,

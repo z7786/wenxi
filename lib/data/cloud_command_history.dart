@@ -31,7 +31,7 @@ class CloudCommandHistoryEntry {
   };
 }
 
-/// Original command text stays in the encrypted local store. Whitespace and
+/// Original command text stays in the app's private local store. Whitespace and
 /// Unicode must survive unchanged because command signatures use the raw text.
 class CloudCommandHistory {
   const CloudCommandHistory(this.store);

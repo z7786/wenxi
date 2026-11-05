@@ -28,6 +28,9 @@ class StartupRecovery {
   LocalStateKey get _localKey =>
       localKey ?? LocalStateKey(failure.directory, storage);
   static const _snapshots = [
+    'state-v2.json',
+    'state-v2.json.bak',
+    'state-v2.json.tmp',
     'state-v1.enc',
     'state-v1.enc.bak',
     'state-v1.enc.tmp',
@@ -127,11 +130,6 @@ class StartupRecovery {
         16,
       ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(),
     };
-    final key = CryptoBox.random(32);
-    final localKey = _localKey;
-    final envelope = password == null
-        ? null
-        : await localKey.prepareRecovery(key, password);
     final archiveRoot = Directory(p.join(directory.path, 'state-recovery'));
     await archiveRoot.create(recursive: true);
     final archive = await archiveRoot.createTemp('saved-');
@@ -146,10 +144,10 @@ class StartupRecovery {
       require(listEquals(bytes, await copy.readAsBytes()), '原数据保存失败，已停止恢复');
       originals.add(name);
     }
-    final next = File(p.join(archive.path, 'replacement.enc'));
-    final encrypted = await compute(_sealRecovery, (key, jsonEncode(data)));
-    await next.writeAsBytes(encrypted, flush: true);
-    require(listEquals(encrypted, await next.readAsBytes()), '恢复数据写入失败，原文件未修改');
+    final next = File(p.join(archive.path, 'replacement.json'));
+    final bytes = await compute(encodePlainState, data);
+    await next.writeAsBytes(bytes, flush: true);
+    require(listEquals(bytes, await next.readAsBytes()), '恢复数据写入失败，原文件未修改');
     var snapshotsChanged = false;
     try {
       snapshotsChanged = true;
@@ -159,18 +157,15 @@ class StartupRecovery {
           await old.rename(p.join(archive.path, 'retired-$name'));
         }
       }
-      // The existing startup repair can finish this snapshot if the app stops
-      // after saving the new key but before the final rename.
+      // Startup repair can finish the pending snapshot after a process loss.
       final pending = await next.rename(
-        p.join(directory.path, 'state-v1.enc.tmp'),
+        p.join(directory.path, 'state-v2.json.tmp'),
       );
-      if (envelope != null) await localKey.installRecovery(envelope);
-      await localKey.saveFresh(key);
-      await pending.rename(p.join(directory.path, 'state-v1.enc'));
+      await pending.rename(p.join(directory.path, 'state-v2.json'));
       final reopened = await StateStore.open(
         directory,
         storage: storage,
-        localKey: localKey,
+        localKey: _localKey,
       );
       try {
         require(jsonEncode(reopened.data) == jsonEncode(data), '恢复数据保存校验失败');
@@ -197,14 +192,9 @@ class StartupRecovery {
           }
         }
       } catch (_) {
-        throw const AppException('恢复未完成，原加密文件已单独保存。请导出故障日志，暂勿卸载或清除数据');
+        throw const AppException('恢复未完成，原数据文件已单独保存。请导出故障日志，暂勿卸载或清除数据');
       }
       Error.throwWithStackTrace(error, stack);
-    } finally {
-      key.fillRange(0, key.length, 0);
     }
   }
 }
-
-Uint8List _sealRecovery((Uint8List, String) input) =>
-    CryptoBox.seal(input.$1, utf8.encode(input.$2));

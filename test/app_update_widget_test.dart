@@ -25,6 +25,7 @@ void main() {
     bool force = false,
     Size size = const Size(393, 852),
     double scale = 1,
+    String notes = '更新说明',
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;
@@ -40,7 +41,7 @@ void main() {
           update.version,
           update.build,
           update.downloadUrl,
-          '更新说明',
+          notes,
           force: force,
           inAppDownloadUrl: update.inAppDownloadUrl,
           inAppPasscode: update.inAppPasscode,
@@ -303,6 +304,47 @@ void main() {
         'error': '网络错误，请重试或选择浏览器更新',
       });
       await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final force in [false, true]) {
+    scenario('Long release notes keep update controls visible (force=$force)', (
+      tester,
+    ) async {
+      final notes = List.generate(
+        80,
+        (i) => '第 ${i + 1} 项：修复问题并优化使用体验。',
+      ).join('\n');
+      await render(
+        tester,
+        size: const Size(320, 740),
+        scale: 1.6,
+        force: force,
+        notes: notes,
+      );
+      expect(tester.takeException(), isNull);
+      expect(inApp.hitTestable(), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('control-download-update')).hitTestable(),
+        findsOneWidget,
+      );
+      final scroll = find.ancestor(
+        of: find.text(notes),
+        matching: find.byType(SingleChildScrollView),
+      );
+      await tester.drag(scroll, const Offset(0, -250));
+      await tester.pumpAndSettle();
+      expect(inApp.hitTestable(), findsOneWidget);
+      await tester.tap(inApp);
+      await tester.pumpAndSettle();
+      expect(f.downloads.tasks, hasLength(1));
+      f.downloads.change(f.downloads.tasks.single.id, {
+        'status': 'failed',
+        'error': List.filled(20, '网络错误，请重试或选择浏览器更新。').join('\n'),
+      });
+      await tester.pumpAndSettle();
+      expect(inApp.hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
   }

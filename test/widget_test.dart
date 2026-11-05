@@ -620,7 +620,7 @@ void main() {
       tester.view.physicalSize = const Size(320, 700);
       await changeTextScale(tester, 1.8);
       expect(tester.takeException(), isNull);
-      for (final title in ['下载保存目录', '导出加密备份', '日志与故障排查']) {
+      for (final title in ['下载保存目录', '导出备份', '日志与故障排查']) {
         await tester.scrollUntilVisible(
           find.text(title),
           240,
@@ -1131,40 +1131,40 @@ void main() {
       'Bravo.txt',
       'Charlie.txt',
     ]);
-    for (final (label, folders, files, direction) in [
+    for (final (label, folders, files) in [
       (
-        '名称',
+        '名称 · 倒序',
         ['B-folder', 'A-folder'],
         ['Charlie.txt', 'Bravo.txt', 'Alpha.txt'],
-        '↓ 降序',
       ),
       (
-        '大小',
+        '大小 · 正序',
         ['A-folder', 'B-folder'],
         ['Bravo.txt', 'Charlie.txt', 'Alpha.txt'],
-        '↑ 升序',
       ),
       (
-        '大小',
+        '大小 · 倒序',
         ['B-folder', 'A-folder'],
         ['Alpha.txt', 'Charlie.txt', 'Bravo.txt'],
-        '↓ 降序',
       ),
       (
-        '时间',
+        '时间 · 正序',
         ['A-folder', 'B-folder'],
         ['Alpha.txt', 'Charlie.txt', 'Bravo.txt'],
-        '↑ 升序',
       ),
       (
-        '时间',
+        '时间 · 倒序',
         ['B-folder', 'A-folder'],
         ['Bravo.txt', 'Charlie.txt', 'Alpha.txt'],
-        '↓ 降序',
       ),
     ]) {
       await tester.tap(find.byTooltip('排序'));
       await tester.pumpAndSettle();
+      for (final key in ['名称', '大小', '时间']) {
+        for (final direction in ['正序', '倒序']) {
+          expect(find.text('$key · $direction'), findsOneWidget);
+        }
+      }
       // Settings now persist in the fixture's real event loop. Await the save
       // before checking the rendered order or selecting the next sort key.
       await tester.tap(find.text(label));
@@ -1174,7 +1174,7 @@ void main() {
       expectOrder([...folders, ...files]);
       await tester.tap(find.byTooltip('排序'));
       await tester.pumpAndSettle();
-      expect(find.text(direction), findsOneWidget);
+      expect(find.text(label), findsOneWidget);
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
     }

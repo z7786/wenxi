@@ -39,6 +39,7 @@ import 'data/legacy_import.dart';
 import 'data/state_store.dart';
 import 'domain/auth.dart';
 import 'domain/models.dart';
+import 'domain/browser_return.dart';
 import 'domain/settings.dart';
 import 'download/download_manager.dart';
 import 'download/mobile_data_download_guard.dart';
@@ -51,6 +52,7 @@ import 'download/download_shutdown.dart';
 import 'download/download_overlay.dart';
 import 'download/transfer_http.dart';
 import 'platform/file_access.dart';
+import 'playback/floating_playback.dart';
 import 'platform/download_network.dart';
 import 'platform/app_update_installer.dart';
 import 'platform/clipboard_links.dart';
@@ -420,6 +422,9 @@ class AppServices extends ChangeNotifier {
   final accountNeedsLogin = <CloudPlatform>{};
   final sharedText = ValueNotifier<String?>(null);
   final downloadNavigation = ValueNotifier<int>(0);
+  final browserReturn = ValueNotifier<BrowserReturnTarget?>(null);
+  final browserReturnNavigation = ValueNotifier<int>(0);
+  final _browserReturnCaptures = <Object, BrowserReturnTarget? Function()>{};
   final resourceNavigation = ValueNotifier<int>(0);
   final lanNavigation = ValueNotifier<int>(0);
   final guestDownloadNotice = ValueNotifier<bool>(false);
@@ -444,6 +449,12 @@ class AppServices extends ChangeNotifier {
 
   void requestDownloadManager() {
     if (!_closed) {
+      for (final capture in _browserReturnCaptures.values.toList().reversed) {
+        final target = capture();
+        if (target == null) continue;
+        browserReturn.value = target;
+        break;
+      }
       transferTab.value = 0;
       downloadNavigation.value++;
     }
@@ -455,6 +466,23 @@ class AppServices extends ChangeNotifier {
       downloadNavigation.value++;
     }
   }
+
+  void requestBrowserReturn() {
+    if (!_closed && browserReturn.value != null) {
+      browserReturnNavigation.value++;
+      browserReturn.value = null;
+    }
+  }
+
+  void registerBrowserReturn(
+    Object owner,
+    BrowserReturnTarget? Function() capture,
+  ) {
+    _browserReturnCaptures[owner] = capture;
+  }
+
+  void unregisterBrowserReturn(Object owner) =>
+      _browserReturnCaptures.remove(owner);
 
   void requestResourceSearch() {
     if (!_closed) resourceNavigation.value++;
@@ -475,6 +503,27 @@ class AppServices extends ChangeNotifier {
   );
   String? migrationError;
   bool _closed = false;
+  final _playbackCleanups = <Future<void>>{};
+
+  /// Returning from a player should restore its caller immediately, while
+  /// shutdown still waits for bookmarks, native teardown and source leases.
+  void finishPlaybackInBackground(Future<void> cleanup) {
+    late final Future<void> pending;
+    pending = cleanup
+        .catchError((Object error, StackTrace stack) {
+          DiagnosticLog.error('player.cleanup_failed', error, stack);
+        })
+        .whenComplete(() => _playbackCleanups.remove(pending));
+    _playbackCleanups.add(pending);
+    unawaited(pending);
+  }
+
+  Future<void> _settlePlaybackCleanups() async {
+    while (_playbackCleanups.isNotEmpty) {
+      await Future.wait(_playbackCleanups.toList());
+    }
+  }
+
   late final _webHost = WindowsWebViewHost(
     primaryFolder: p.join(dataDirectory.path, 'webview'),
     recoveryFolder: p.join(
@@ -487,6 +536,7 @@ class AppServices extends ChangeNotifier {
   AppSettings get settings => AppSettings.fromJson(store.data.obj('settings'));
 
   static Future<AppServices> open() async {
+    final startup = Stopwatch()..start();
     Directory data, cache, destination;
     NativeTransport transport;
     if (Platform.isAndroid) {
@@ -520,8 +570,14 @@ class AppServices extends ChangeNotifier {
         ),
       );
     }
-    await data.create(recursive: true);
-    await cache.create(recursive: true);
+    await Future.wait([
+      data.create(recursive: true),
+      cache.create(recursive: true),
+    ]);
+    DiagnosticLog.event(
+      'app.storage_ready',
+      fields: {'elapsedMs': startup.elapsedMilliseconds},
+    );
     final lock = await File(
       p.join(data.path, 'instance.lock'),
     ).open(mode: FileMode.append);
@@ -532,7 +588,6 @@ class AppServices extends ChangeNotifier {
       throw const AppException('文析助手已在运行，请打开已有窗口');
     }
     try {
-      final startup = Stopwatch()..start();
       DiagnosticLog.event('app.state_read_start');
       final store = await StateStore.open(data);
       DiagnosticLog.event(
@@ -549,6 +604,10 @@ class AppServices extends ChangeNotifier {
         transport: transport,
         files: PlatformFileAccess(transport, destination),
         instanceLock: lock,
+      );
+      DiagnosticLog.event(
+        'app.services_created',
+        fields: {'elapsedMs': startup.elapsedMilliseconds},
       );
       await result.initialize();
       DiagnosticLog.event(
@@ -570,13 +629,14 @@ class AppServices extends ChangeNotifier {
     // Entry refresh starts after MainShell's first frame. Cached search rules
     // are verified synchronously and remote updates share this store's write
     // gate; neither should compete with local account/queue initialization.
+    final startup = Stopwatch()..start();
     if (platformFeatures && Platform.isWindows) {
       windowsExternalOpenChannel.setMethodCallHandler((call) async {
         if (call.method == 'externalOpenAvailable') {
           await externalOpens.refresh();
         }
       });
-      await externalOpens.refresh();
+      _readExternalOpensInBackground();
     }
     if (platformFeatures && Platform.isAndroid) {
       await importLegacy();
@@ -628,10 +688,18 @@ class AppServices extends ChangeNotifier {
           await downloads.discardInterrupted();
         }
       });
-      await externalOpens.refresh();
+      _readExternalOpensInBackground();
     }
     await vault.initializeAccounts();
+    DiagnosticLog.event(
+      'app.accounts_ready',
+      fields: {'elapsedMs': startup.elapsedMilliseconds},
+    );
     await uploads.initialize();
+    DiagnosticLog.event(
+      'app.uploads_ready',
+      fields: {'elapsedMs': startup.elapsedMilliseconds},
+    );
     await downloads.initialize();
     if (platformFeatures && Platform.isAndroid) {
       final recoveryExpected = await nativeChannel.invokeMethod<bool>(
@@ -651,6 +719,16 @@ class AppServices extends ChangeNotifier {
     }
     store.addListener(_changed);
     _changed();
+  }
+
+  void _readExternalOpensInBackground() {
+    // Incoming files are delivered through the inbox's listener when ready.
+    // Optional platform input cannot hold startup or sticky download recovery.
+    unawaited(
+      externalOpens.refresh().catchError((Object error, StackTrace stack) {
+        DiagnosticLog.error('app.external_input_failed', error, stack);
+      }),
+    );
   }
 
   Future<void> importLegacy() async {
@@ -721,21 +799,31 @@ class AppServices extends ChangeNotifier {
       );
       if (vault.activeAccountId(platform) == owner &&
           vault.credential(platform)?.updatedAt == credential!.updatedAt) {
-        if (owner != null) {
-          await vault.updateAccountNickname(
-            platform,
-            owner,
-            credential.updatedAt,
-            account.nickname,
-          );
-        }
-        if (vault.activeAccountId(platform) != owner ||
-            vault.credential(platform)?.updatedAt != credential.updatedAt) {
-          return;
-        }
         accounts[platform] = account;
         accountErrors.remove(platform);
         accountNeedsLogin.remove(platform);
+        if (owner != null) {
+          // Quota display is ready. Nickname persistence validates this exact
+          // account/revision again when the queued transaction actually runs.
+          unawaited(
+            vault
+                .updateAccountNickname(
+                  platform,
+                  owner,
+                  credential.updatedAt,
+                  account.nickname,
+                )
+                .then<void>((_) {})
+                .catchError((Object error, StackTrace stack) {
+                  DiagnosticLog.error(
+                    'cloud.nickname_save_failed',
+                    error,
+                    stack,
+                    fields: {'platform': platform.name},
+                  );
+                }),
+          );
+        }
       }
     } catch (e, stack) {
       DiagnosticLog.error(
@@ -816,6 +904,8 @@ class AppServices extends ChangeNotifier {
     required String mode,
     required AppPalette palette,
     required GlassStyle glassStyle,
+    bool? glassControls,
+    bool? glassLowPower,
     BackgroundSettings? background,
     bool? hideResourceNavigation,
   }) async {
@@ -825,6 +915,8 @@ class AppServices extends ChangeNotifier {
         'theme': mode,
         'themePalette': palette.name,
         'glassStyle': glassStyle.name,
+        'glassControls': ?glassControls,
+        'glassLowPower': ?glassLowPower,
         if (background != null) 'background': background.toJson(),
         'hideResourceNavigation': ?hideResourceNavigation,
       }).toJson();
@@ -844,6 +936,7 @@ class AppServices extends ChangeNotifier {
     CloudPlatform platform, {
     String? view,
     String? sort,
+    bool? ascending,
     bool? searchSubfolders,
   }) => store.change((draft) {
     require(view == null || ['list', 'grid'].contains(view), '显示方式无效');
@@ -854,11 +947,13 @@ class AppServices extends ChangeNotifier {
       view: view ?? previous.view,
       sort: sort ?? previous.sort,
       searchSubfolders: searchSubfolders ?? previous.searchSubfolders,
-      ascending: sort == null
-          ? previous.ascending
-          : sort == previous.sort
-          ? !previous.ascending
-          : true,
+      ascending:
+          ascending ??
+          (sort == null
+              ? previous.ascending
+              : sort == previous.sort
+              ? !previous.ascending
+              : true),
     );
     draft['settings'] = current.update({
       'browserDisplays': {
@@ -909,6 +1004,32 @@ class AppServices extends ChangeNotifier {
       );
     }
   });
+
+  /// Call after a valid result has been accepted for display. Once opened,
+  /// the history belongs to that result even if its route is closed quickly.
+  void rememberInBackground(
+    ParsedLink link, {
+    String? title,
+    int? itemCount,
+    String? commandText,
+  }) {
+    unawaited(
+      remember(
+        link,
+        title: title,
+        itemCount: itemCount,
+        commandText: commandText,
+      ).catchError((Object error, StackTrace stack) {
+        DiagnosticLog.error(
+          'parse.history_save_failed',
+          error,
+          stack,
+          fields: {'platform': link.platform?.name},
+        );
+      }),
+    );
+  }
+
   Future<WebViewEnvironment?> webEnvironment() async {
     if (!Platform.isWindows) return null;
     return _webHost.get();
@@ -956,8 +1077,10 @@ class AppServices extends ChangeNotifier {
   };
   Future<void> close() async {
     if (_closed) return;
+    await FloatingPlaybackManager.maybeOf(store)?.close();
     resourceSearch.dispose();
     mobileDataDownloads.close();
+    await _settlePlaybackCleanups();
     await cloud.publicPasswords.close();
     await sources.close();
     await parserRules.close();
@@ -980,6 +1103,9 @@ class AppServices extends ChangeNotifier {
       windowsExternalOpenChannel.setMethodCallHandler(null);
     }
     downloadNavigation.dispose();
+    browserReturn.dispose();
+    browserReturnNavigation.dispose();
+    _browserReturnCaptures.clear();
     resourceNavigation.dispose();
     lanNavigation.dispose();
     transferTab.dispose();

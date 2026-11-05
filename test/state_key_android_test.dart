@@ -3,9 +3,9 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'legacy_state_fixture.dart';
 import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
-import 'package:asterlink/data/backup.dart';
 import 'package:asterlink/data/startup_recovery.dart';
 import 'package:asterlink/data/state_key.dart';
 import 'package:asterlink/data/state_store.dart';
@@ -65,7 +65,8 @@ void main() {
   late bool nativeBroken;
   late int nativeCalls;
   LocalStateKey keys() => LocalStateKey(directory, legacy, nativeAndroid: true);
-  Future<StateStore> open() => StateStore.open(directory, localKey: keys());
+  Future<StateStore> open() =>
+      LegacyStateFixture.open(directory, localKey: keys());
   File file(String name) => File('${directory.path}/$name');
   File keyFile(String namespace, {bool copy = false}) => file(
     '${LocalStateKey.privateDirectoryName}/$namespace/'
@@ -83,7 +84,7 @@ void main() {
   );
   Future<Uint8List> seedLegacy({bool namespaced = false}) async {
     final localKey = LocalStateKey(directory, legacy, nativeAndroid: false);
-    final old = await StateStore.open(directory, localKey: localKey);
+    final old = await LegacyStateFixture.open(directory, localKey: localKey);
     try {
       await old.put('favorite', 'old');
       await old.put('favorite', 'latest');
@@ -137,7 +138,7 @@ void main() {
         CloudPlatform.baidu,
         Credential('备份账号', {'primary': 'BDUSS=fixture-only'}),
       );
-      backup = await BackupRepository(source).create(password);
+      backup = await LegacyBackupFixture(source).create(password);
     } finally {
       source.dispose();
     }
@@ -705,7 +706,9 @@ void main() {
       try {
         final pointer = await file(LocalStateKey.locationName).readAsBytes();
         final encrypted = await file('state-v1.enc').readAsBytes();
-        await BackupRepository(initial).exportTo(password, (_) async => true);
+        await LegacyBackupFixture(
+          initial,
+        ).exportTo(password, (_) async => true);
         expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
         expect(await file('state-v1.enc').readAsBytes(), encrypted);
         await initial.put('favorite', 'after-export');
@@ -738,7 +741,7 @@ void main() {
       final first = await open();
       final pointer = await file(LocalStateKey.locationName).readAsBytes();
       final key = (await keys().read()).keys.single;
-      await BackupRepository(first).restore(backup, password);
+      await LegacyBackupFixture(first).restore(backup, password);
       await first.put('after-import', true);
       first.dispose();
       expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
@@ -797,7 +800,7 @@ void main() {
         );
         next.dispose();
       }
-      expect((await location()).str('backend'), LocalStateKey.privateBackend);
+      expect(await file('state-v2.json').exists(), isTrue);
       expect(nativeCalls, calls);
       expect(legacy.reads, 0);
       expect(legacy.writes, 0);
@@ -823,7 +826,7 @@ void main() {
         expect(next.data['favorite'], isNull);
         next.dispose();
       }
-      expect((await location()).str('backend'), LocalStateKey.privateBackend);
+      expect(await file('state-v2.json').exists(), isTrue);
       expect(nativeCalls, 0);
       expect(legacy.reads, reads);
       expect(legacy.writes, writes);
@@ -834,7 +837,7 @@ void main() {
     'failed replacement rolls back snapshot, pointer and recovery envelope',
     () async {
       final first = await open();
-      await BackupRepository(first).restore(backup, password);
+      await LegacyBackupFixture(first).restore(backup, password);
       first.dispose();
       final originals = {
         for (final name in [
@@ -845,7 +848,7 @@ void main() {
           name: await file(name).readAsBytes(),
       };
       await losePrivateRecords();
-      final blocker = Directory(file('${LocalStateKey.locationName}.tmp').path);
+      final blocker = Directory(file('state-v2.json.tmp').path);
       await blocker.create();
       await expectLater(
         recovery().reinitialize(),

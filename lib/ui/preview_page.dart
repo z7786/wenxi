@@ -225,6 +225,10 @@ class _PreviewPageState extends State<PreviewPage> {
   void dispose() {
     scope.cancel();
     progress.dispose();
+    final player = playback;
+    if (player != null) {
+      widget.services.finishPlaybackInBackground(player.close());
+    }
     final current = spec;
     unawaited(
       () async {
@@ -237,26 +241,28 @@ class _PreviewPageState extends State<PreviewPage> {
   @override
   Widget build(BuildContext context) {
     if (playback != null) {
+      final player = playback!, services = widget.services;
+      final accountId = session.accountId;
       return PlayerPage(
-        playback!,
-        confirmDownload: () => confirmBaiduDownload(
-          context,
-          widget.services,
-          playback!.current.platform,
-          session: playback!.current.source?.cloud?.session,
+        player,
+        confirmDownload: (playerContext) => confirmBaiduDownload(
+          playerContext,
+          services,
+          player.current.platform,
+          session: player.current.source?.cloud?.session,
         ),
         onAuthorizeUcTv: session.platform == CloudPlatform.uc
-            ? () => openUcTvAuthorization(
-                context,
-                widget.services,
-                accountId: session.accountId,
+            ? (playerContext) => openUcTvAuthorization(
+                playerContext,
+                services,
+                accountId: accountId,
               )
             : null,
         subtitleDirectory: Directory(
           '${widget.services.cacheDirectory.path}/playback-subtitles',
         ),
         onDownload: (source) async {
-          await widget.services.downloads.enqueue(source);
+          await services.downloads.enqueue(source);
         },
       );
     }

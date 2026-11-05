@@ -9,6 +9,7 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/playback.dart';
 import 'package:asterlink/domain/torrent.dart';
 import 'package:asterlink/platform/native_engine.dart';
+import 'package:asterlink/playback/media_backend.dart';
 import 'package:asterlink/playback/torrent_playback.dart';
 import 'support.dart';
 
@@ -156,7 +157,7 @@ void main() {
                   backend = TorrentMediaBackend(
                     services.engine,
                     video: false,
-                    player: player,
+                    delegate: MediaKitBackend(video: false, player: player),
                   ),
             );
             // Independent teardown callbacks preserve the original assertion

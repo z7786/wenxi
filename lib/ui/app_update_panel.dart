@@ -127,58 +127,83 @@ class _AppUpdatePanelState extends State<AppUpdatePanel> {
         ? '重试下载'
         : '继续下载';
     return Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 16),
-        if (task != null) ...[
-          Text(
-            task.spec.fileName,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 13),
-          ),
-          const SizedBox(height: 8),
-          LinearProgressIndicator(
-            value: task.total > 0 ? task.progress : 0,
-            borderRadius: BorderRadius.circular(4),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            completed
-                ? (zip ? '下载完成，请打开文件夹解压更新' : '下载完成，可以安装更新')
-                : '${task.total > 0 ? '${(task.progress * 100).toStringAsFixed(1)}% · ' : ''}'
-                      '${formatBytes(task.downloaded)} / ${task.total > 0 ? formatBytes(task.total) : '大小待获取'}'
-                      '${task.speed > 0 ? ' · ${formatBytes(task.speed)}/s' : ''}',
-            style: TextStyle(
-              fontSize: 12,
-              height: 1.5,
-              color: secondary(context),
+        if (task != null || error?.isNotEmpty == true)
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: (MediaQuery.sizeOf(context).height * .22).clamp(
+                48,
+                180,
+              ),
+            ),
+            child: SingleChildScrollView(
+              key: const ValueKey('control-update-status-scroll'),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (task != null) ...[
+                    Text(
+                      task.spec.fileName,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(
+                      value: task.total > 0 ? task.progress : 0,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      completed
+                          ? (zip ? '下载完成，请打开文件夹解压更新' : '下载完成，可以安装更新')
+                          : '${task.total > 0 ? '${(task.progress * 100).toStringAsFixed(1)}% · ' : ''}'
+                                '${formatBytes(task.downloaded)} / ${task.total > 0 ? formatBytes(task.total) : '大小待获取'}'
+                                '${task.speed > 0 ? ' · ${formatBytes(task.speed)}/s' : ''}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.5,
+                        color: secondary(context),
+                      ),
+                    ),
+                    if (!completed && task.phase.isNotEmpty)
+                      Text(
+                        task.phase,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: secondary(context),
+                        ),
+                      ),
+                    if (active && task.total > 0)
+                      Text(
+                        '剩余 ${formatBytes((task.total - task.downloaded).clamp(0, task.total))}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: secondary(context),
+                        ),
+                      ),
+                    const SizedBox(height: 10),
+                  ],
+                  if (error?.isNotEmpty == true) ...[
+                    Text(
+                      error!,
+                      key: const ValueKey('control-in-app-error'),
+                      style: TextStyle(
+                        fontSize: 13,
+                        height: 1.5,
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                ],
+              ),
             ),
           ),
-          if (!completed && task.phase.isNotEmpty)
-            Text(
-              task.phase,
-              style: TextStyle(fontSize: 12, color: secondary(context)),
-            ),
-          if (active && task.total > 0)
-            Text(
-              '剩余 ${formatBytes((task.total - task.downloaded).clamp(0, task.total))}',
-              style: TextStyle(fontSize: 12, color: secondary(context)),
-            ),
-          const SizedBox(height: 10),
-        ],
-        if (error?.isNotEmpty == true) ...[
-          Text(
-            error!,
-            key: const ValueKey('control-in-app-error'),
-            style: TextStyle(
-              fontSize: 13,
-              height: 1.5,
-              color: Theme.of(context).colorScheme.error,
-            ),
-          ),
-          const SizedBox(height: 10),
-        ],
+        const SizedBox(height: 8),
         FilledButton.icon(
           key: const ValueKey('control-in-app-update'),
           onPressed: busy || active

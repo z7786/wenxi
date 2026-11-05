@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:crypto/crypto.dart';
 import '../core/crypto_box.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
@@ -17,6 +18,25 @@ const backupSecretKeys = {
   'xunlei.peer_id',
   'xunlei.device_sign',
 };
+
+Uint8List encodePlainBackup(Json payload) => Uint8List.fromList(
+  utf8.encode(
+    const JsonEncoder.withIndent('  ').convert({
+      'format': 'asterlink-backup-v2',
+      'sha256': sha256.convert(utf8.encode(jsonEncode(payload))).toString(),
+      'data': payload,
+    }),
+  ),
+);
+
+bool isPlainBackup(Uint8List bytes) {
+  try {
+    return asJson(jsonDecode(utf8.decode(bytes))).str('format') ==
+        'asterlink-backup-v2';
+  } catch (_) {
+    return false;
+  }
+}
 
 Uint8List encryptBackup((Json, String) input) {
   final salt = CryptoBox.random(16);
@@ -48,6 +68,22 @@ Json decryptBackup((Uint8List, String) input) {
   } catch (_) {
     throw const AppException('不是有效的文析助手备份文件');
   }
+  if (envelope.str('format') == 'asterlink-backup-v2') {
+    require(envelope['data'] is Map, '备份文件已损坏');
+    final payload = envelope.obj('data');
+    require(
+      envelope.str('sha256') ==
+          sha256.convert(utf8.encode(jsonEncode(payload))).toString(),
+      '备份文件已损坏',
+    );
+    require(
+      {'com.asterlink.app', 'com.wenxi.app'}.contains(payload.str('package')),
+      '备份文件不属于当前应用',
+    );
+    require(payload.integer('schema', 1) == 1, '此备份版本暂不支持');
+    return payload;
+  }
+  require(input.$2.length >= 6, '备份密码至少需要 6 位');
   require(
     {'asterlink-backup-v1', 'wenxi-backup-v1'}.contains(envelope.str('format')),
     '不是有效的文析助手备份文件',
@@ -98,7 +134,6 @@ class BackupRepository {
     String password, {
     bool includeBackgroundImages = false,
   }) async {
-    require(password.length >= 6, '备份密码至少需要 6 位');
     final credentials = store.data.obj('credentials'),
         secrets = store.data.obj('secrets');
     final vault = Vault(store);
@@ -118,61 +153,57 @@ class BackupRepository {
     if (images == null) {
       settings['background'] = background.withoutImages().toJson();
     }
-    final bytes = await compute(encryptBackup, (
-      {
-        'schema': 1,
-        'package': 'com.asterlink.app',
-        'createdAt': DateTime.now().millisecondsSinceEpoch,
-        'settings': settings,
-        'backgroundImages': ?images,
-        'credentials': [
-          for (final p in CloudPlatform.values)
-            if (credentials[p.key] != null)
-              {'platform': p.key, 'credential': credentials[p.key]},
-        ],
-        'secrets': {
-          for (final k in backupSecretKeys)
-            if (secrets[k] != null) k: secrets[k],
-        },
-        'cloudAccounts': [
-          for (final account in profiles)
-            {
-              'id': account.id,
-              'platform': account.platform.key,
-              'name': account.customName,
-              'nameIsCustom': account.customName.isNotEmpty,
-              'credential': vault
-                  .credentialFor(account.platform, account.id)!
-                  .toJson(),
-              'secrets': vault.withAccount(
-                account.platform,
-                account.id,
-                () => {
-                  for (final key in backupSecretKeys)
-                    if (Vault.accountSecret(account.platform, key) &&
-                        vault.secret(key) != null)
-                      key: vault.secret(key),
-                },
-              ),
-            },
-        ],
-        'activeCloudAccounts': {
-          for (final account in profiles)
-            if (account.active) account.platform.key: account.id,
-        },
-        'cloudFavorites': store.data.list('cloudFavorites'),
-        'cloudFavoriteSort': CloudFavoriteSort.fromName(
-          store.data.str('cloudFavoriteSort'),
-        ).name,
+    final bytes = await compute(encodePlainBackup, {
+      'schema': 1,
+      'package': 'com.asterlink.app',
+      'createdAt': DateTime.now().millisecondsSinceEpoch,
+      'settings': settings,
+      'backgroundImages': ?images,
+      'credentials': [
+        for (final p in CloudPlatform.values)
+          if (credentials[p.key] != null)
+            {'platform': p.key, 'credential': credentials[p.key]},
+      ],
+      'secrets': {
+        for (final k in backupSecretKeys)
+          if (secrets[k] != null) k: secrets[k],
       },
-      password,
-    ));
+      'cloudAccounts': [
+        for (final account in profiles)
+          {
+            'id': account.id,
+            'platform': account.platform.key,
+            'name': account.customName,
+            'nameIsCustom': account.customName.isNotEmpty,
+            'credential': vault
+                .credentialFor(account.platform, account.id)!
+                .toJson(),
+            'secrets': vault.withAccount(
+              account.platform,
+              account.id,
+              () => {
+                for (final key in backupSecretKeys)
+                  if (Vault.accountSecret(account.platform, key) &&
+                      vault.secret(key) != null)
+                    key: vault.secret(key),
+              },
+            ),
+          },
+      ],
+      'activeCloudAccounts': {
+        for (final account in profiles)
+          if (account.active) account.platform.key: account.id,
+      },
+      'cloudFavorites': store.data.list('cloudFavorites'),
+      'cloudFavoriteSort': CloudFavoriteSort.fromName(
+        store.data.str('cloudFavoriteSort'),
+      ).name,
+    });
     require(bytes.length <= 16 * 1024 * 1024, '备份文件过大，请取消携带背景图后重试');
     return bytes;
   }
 
-  /// Install local recovery only after the destination confirms the export.
-  /// Cancelling a picker or failing to write must keep the previous password.
+  /// Exported v2 backups are plain data; v1 imports still accept their password.
   Future<bool> exportTo(
     String password,
     Future<bool> Function(Uint8List bytes) save, {
@@ -184,16 +215,10 @@ class BackupRepository {
     );
     RequestScope.checkpoint();
     if (!await save(bytes)) return false;
-    try {
-      await store.protectRecovery(password);
-    } catch (_) {
-      throw const AppException('备份文件已导出，但本机密码恢复保护未能保存。请保管好备份文件，稍后重新导出以建立保护。');
-    }
     return true;
   }
 
   Future<int> restore(Uint8List bytes, String password) async {
-    require(password.length >= 6, '备份密码至少需要 6 位');
     final payload = await compute(decryptBackup, (bytes, password));
     // Parse everything before the single commit. Wrong password/partial payloads
     // cannot leave a half-restored set of credentials and settings.

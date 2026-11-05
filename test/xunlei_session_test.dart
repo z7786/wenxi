@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
-import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/providers/xunlei_login.dart';
@@ -598,29 +597,26 @@ void main() {
   );
 
   test(
-    'Encrypted restart keeps the password and can renew without a login page',
+    'Plain-state restart keeps the password and can renew without a login page',
     () async {
       final directory = await Directory.systemTemp.createTemp(
         'asterlink-xunlei-auto-login-',
       );
       addTearDown(() => directory.delete(recursive: true));
-      final key = CryptoBox.random(32);
-      final store = await StateStore.open(directory, testKey: key);
+      final store = await StateStore.open(directory);
       final f = XunleiLoginFixture(store: store);
       await f.submit();
       await store.flush();
-      for (final entry
-          in await directory
-              .list()
-              .where((e) => e is File)
-              .cast<File>()
-              .toList()) {
-        final raw = latin1.decode(await entry.readAsBytes());
-        expect(raw, isNot(contains(xunleiTestUsername)));
-        expect(raw, isNot(contains('SamplePassword')));
-        expect(raw, isNot(contains('signed-access')));
-      }
-      final reopened = await StateStore.open(directory, testKey: key);
+      expect(store.file!.path, endsWith('state-v2.json'));
+      final snapshot = StateStore.memory(
+        decodePlainState(await store.file!.readAsBytes()),
+      );
+      addTearDown(snapshot.dispose);
+      final saved = Vault(snapshot).credential(_p)!;
+      expect(saved.field('username'), xunleiTestUsername);
+      expect(saved.field('password'), xunleiTestPassword);
+      expect(saved.field('accessToken'), 'signed-access');
+      final reopened = await StateStore.open(directory);
       final next = XunleiLoginFixture(store: reopened);
       next.acceptedTokens.remove('signed-access');
       next.intercept = (r) => r.uri.path == '/v1/auth/signin/token'

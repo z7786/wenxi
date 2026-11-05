@@ -114,6 +114,25 @@ void main() {
     },
   );
 
+  test('Startup announcements accept and cache mini-program buttons', () {
+    final source = controlJson(
+      noticeId: 'mini-program',
+      buttonText: '打开微信小程序',
+      buttonUrl: 'weixin://dl/business/?t=example-ticket',
+    );
+    (source['announcement'] as Map)['content'] =
+        '活动详情\n\n![图片](https://images.example.test/notice.png)';
+    final config = RemoteControlConfig.fromJson(source);
+    final restored = RemoteControlConfig.fromJson(config.toJson());
+    expect(restored.announcement!.buttonUrl, config.announcement!.buttonUrl);
+    expect(restored.announcement!.contentKey, config.announcement!.contentKey);
+    expect(restored.announcement!.content, config.announcement!.content);
+    (source['announcement'] as Map)['buttonUrl'] = 'weixin://dl/scan/';
+    final rejected = RemoteControlDocument.parse(source, previous: config);
+    expect(rejected.issues.single.path, 'announcement.buttonUrl');
+    expect(rejected.config.announcement, same(config.announcement));
+  });
+
   test('Update policies remain independent for Android and Windows', () {
     final json = controlJson(androidBuild: 50, windowsBuild: 51, force: true);
     (json['updates'] as Map)['windows']['force'] = false;

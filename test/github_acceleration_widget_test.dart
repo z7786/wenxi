@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,7 +8,51 @@ import 'package:asterlink/app_services.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/github_acceleration.dart';
 import 'package:asterlink/ui/github_acceleration_page.dart';
+import 'package:asterlink/platform/native_engine.dart';
+import 'package:asterlink/core/json.dart';
 import 'support.dart';
+
+class _GitHubNative extends FakeNative {
+  final probes = <Json>[];
+  final stops = <String>[];
+  bool brokenRange = false;
+  bool noRange = false;
+  bool errorPage = false;
+  @override
+  Future<Object?> call(String method, [Json args = const {}]) async {
+    if (method == 'httpProbeStart') {
+      probes.add(args);
+      return null;
+    }
+    if (method == 'httpProbeStatus') {
+      if (probes.last.str('url').endsWith('/COPYING')) {
+        return brokenRange
+            ? {'status': 'error', 'errorKind': 'content'}
+            : {
+                'status': 'done',
+                'code': noRange ? 200 : 206,
+                'body': base64Encode(
+                  utf8.encode(
+                    '\n Note that the only valid version of the GPL as far as this project',
+                  ),
+                ),
+              };
+      }
+      return {
+        'status': 'done',
+        'code': 200,
+        'body': base64Encode(
+          utf8.encode(errorPage ? '<html>error</html>' : 'Hello World!\n'),
+        ),
+      };
+    }
+    if (method == 'httpProbeStop') {
+      stops.add(args.str('id'));
+      return null;
+    }
+    return super.call(method, args);
+  }
+}
 
 void main() {
   Future<void> waitFor(WidgetTester tester, bool Function() ready) async {
@@ -25,6 +70,7 @@ void main() {
   Future<AppServices> render(
     WidgetTester tester, {
     Future<void> Function(GitHubAcceleration)? testConnection,
+    NativeTransport? transport,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(393, 852);
@@ -38,7 +84,7 @@ void main() {
         store: StateStore.memory(),
         dataDirectory: directory,
         cacheDirectory: Directory(p.join(directory.path, 'cache')),
-        transport: FakeNative(),
+        transport: transport ?? FakeNative(),
         files: FakeFiles(Directory(p.join(directory.path, 'saved'))),
         http: FakeHttp(),
         platformFeatures: false,
@@ -161,4 +207,83 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  for (final brokenRange in [false, true]) {
+    testWidgets(
+      'Native file and range tests ${brokenRange ? 'reject a broken mirror' : 'pass with correct downloaded contents'}',
+      (tester) async {
+        final native = _GitHubNative()..brokenRange = brokenRange;
+        final services = await render(tester, transport: native);
+        final button = find.byKey(const Key('github-acceleration-test'));
+        await tester.ensureVisible(button);
+        await tester.tap(button);
+        await waitFor(
+          tester,
+          () => find
+              .byKey(const Key('github-acceleration-result'))
+              .evaluate()
+              .isNotEmpty,
+        );
+        expect(native.probes.map((p) => p.str('url')), [
+          services.settings.githubAcceleration.urlFor(
+            GitHubAcceleration.testUrl,
+          ),
+          services.settings.githubAcceleration.urlFor(
+            GitHubAcceleration.rangeTestUrl,
+          ),
+        ]);
+        expect(native.stops.length, 2);
+        expect(native.begins, isEmpty);
+        expect(
+          find.textContaining(brokenRange ? '测试失败' : '分段校验通过'),
+          findsOneWidget,
+        );
+        if (brokenRange) expect(find.textContaining('连接成功'), findsNothing);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'A mirror ignoring Range reports file availability without claiming range support',
+    (tester) async {
+      final native = _GitHubNative()..noRange = true;
+      await render(tester, transport: native);
+      final button = find.byKey(const Key('github-acceleration-test'));
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await waitFor(
+        tester,
+        () => find
+            .byKey(const Key('github-acceleration-result'))
+            .evaluate()
+            .isNotEmpty,
+      );
+      expect(find.textContaining('文件可下载；当前地址未返回分段响应'), findsOneWidget);
+      expect(find.textContaining('分段校验通过'), findsNothing);
+      expect(native.stops.length, 2);
+      expect(native.begins, isEmpty);
+    },
+  );
+
+  testWidgets('An HTTP 200 error page still fails the file test', (
+    tester,
+  ) async {
+    final native = _GitHubNative()..errorPage = true;
+    await render(tester, transport: native);
+    final button = find.byKey(const Key('github-acceleration-test'));
+    await tester.ensureVisible(button);
+    await tester.tap(button);
+    await waitFor(
+      tester,
+      () => find
+          .byKey(const Key('github-acceleration-result'))
+          .evaluate()
+          .isNotEmpty,
+    );
+    expect(find.textContaining('返回内容不是测试文件'), findsOneWidget);
+    expect(find.textContaining('连接成功'), findsNothing);
+    expect(native.stops.length, 1);
+    expect(native.begins, isEmpty);
+  });
 }

@@ -1,31 +1,15 @@
 import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../data/remote_control_service.dart';
 import '../data/app_update_service.dart';
 import 'app_update_panel.dart';
 import '../diagnostics/app_log.dart';
 import '../domain/remote_control.dart';
 import 'common.dart';
-
-typedef RemoteLinkLauncher = Future<bool> Function(Uri url);
-
-Future<void> openRemoteLink(
-  BuildContext context,
-  Uri url, {
-  RemoteLinkLauncher? launcher,
-}) async {
-  try {
-    final safe = httpsUri(url.toString());
-    final opened = launcher != null
-        ? await launcher(safe)
-        : await launchUrl(safe, mode: LaunchMode.externalApplication);
-    if (!opened && context.mounted) message(context, '无法打开链接，请检查系统默认浏览器');
-  } catch (_) {
-    if (context.mounted) message(context, '无法打开链接，请检查系统默认浏览器');
-  }
-}
+import 'announcement_markdown.dart';
+import 'remote_links.dart';
+export 'remote_links.dart';
 
 class _DialogActivity extends ChangeNotifier {
   bool showing = false;
@@ -266,9 +250,13 @@ Future<void> showRemoteAnnouncement(
                     ),
                   ),
                 if (current != null)
-                  SelectableText(
+                  AnnouncementMarkdown(
                     current.content,
-                    style: const TextStyle(fontSize: 14, height: 1.65),
+                    linkLauncher: launcher,
+                    imageWidth: (MediaQuery.sizeOf(context).width - 128).clamp(
+                      1.0,
+                      472.0,
+                    ),
                   )
                 else if (control.errorForSection('announcement') == null)
                   const Text('暂无公告'),
@@ -346,7 +334,7 @@ Future<void> showRemoteAnnouncement(
   );
   final url = choice?.openLink == true ? choice?.notice?.buttonUrl : null;
   if (url != null && context.mounted) {
-    await openRemoteLink(context, url, launcher: launcher);
+    await openAnnouncementLink(context, url, launcher: launcher);
   }
 }
 
@@ -493,49 +481,49 @@ class _UpdateDialogState extends State<_UpdateDialog> {
                   ),
                 ),
               ],
-              if (widget.updater case final updater?)
-                AppUpdatePanel(
-                  key: ValueKey(updater.keyFor(update)),
-                  updater: updater,
-                  control: widget.control,
-                  update: update,
-                  openDownloads: () {
-                    if (widget.control.requiredUpdate != null) return;
-                    _finish(_UpdateAction.later, update);
-                    updater.openDownloads();
-                  },
-                ),
             ],
           ),
           actions: [
-            if (update.force) ...[
-              TextButton(
-                key: const ValueKey('control-recheck-update'),
-                onPressed: widget.control.checking
-                    ? null
-                    : () => widget.control.refresh(force: true),
-                child: Text(widget.control.checking ? '正在检查…' : '重新检查'),
-              ),
-              download,
-            ] else
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  OverflowBar(
-                    alignment: MainAxisAlignment.end,
-                    overflowAlignment: OverflowBarAlignment.end,
-                    spacing: 8,
-                    overflowSpacing: 8,
-                    children: [
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (widget.updater case final updater?)
+                  AppUpdatePanel(
+                    key: ValueKey(updater.keyFor(update)),
+                    updater: updater,
+                    control: widget.control,
+                    update: update,
+                    openDownloads: () {
+                      if (widget.control.requiredUpdate != null) return;
+                      _finish(_UpdateAction.later, update);
+                      updater.openDownloads();
+                    },
+                  ),
+                OverflowBar(
+                  alignment: MainAxisAlignment.end,
+                  overflowAlignment: OverflowBarAlignment.end,
+                  spacing: 8,
+                  overflowSpacing: 8,
+                  children: [
+                    if (update.force)
+                      TextButton(
+                        key: const ValueKey('control-recheck-update'),
+                        onPressed: widget.control.checking
+                            ? null
+                            : () => widget.control.refresh(force: true),
+                        child: Text(widget.control.checking ? '正在检查…' : '重新检查'),
+                      )
+                    else
                       TextButton(
                         key: const ValueKey('control-update-later'),
                         onPressed: () => _finish(_UpdateAction.later, update),
                         child: const Text('暂不更新'),
                       ),
-                      download,
-                    ],
-                  ),
+                    download,
+                  ],
+                ),
+                if (!update.force) ...[
                   const SizedBox(height: 4),
                   Align(
                     alignment: Alignment.center,
@@ -552,7 +540,8 @@ class _UpdateDialogState extends State<_UpdateDialog> {
                     ),
                   ),
                 ],
-              ),
+              ],
+            ),
           ],
         ),
       );

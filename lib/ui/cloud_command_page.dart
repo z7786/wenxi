@@ -9,6 +9,7 @@ import '../data/http.dart';
 import '../diagnostics/app_log.dart';
 import '../domain/auth.dart';
 import '../domain/models.dart';
+import '../domain/c139_passcode.dart';
 import 'browser_page.dart';
 import 'cloud_command_history_sheet.dart';
 import 'common.dart';
@@ -52,6 +53,9 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
     platform = CloudCommandResolver.platforms.contains(saved)
         ? saved!
         : CloudPlatform.quark;
+    if (C139Passcode.parse(widget.initialText) != null) {
+      platform = CloudPlatform.c139;
+    }
     input.text = widget.initialText;
   }
 
@@ -200,7 +204,11 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
           context: context,
           builder: (context) => AlertDialog(
             title: Text('${selected.shortName}需要登录'),
-            content: const Text('已解析出口令对应的分享，登录后继续打开文件列表。'),
+            content: Text(
+              selected == CloudPlatform.c139
+                  ? '移动云盘口令需要使用本 App 内登录账号的授权信息。请先登录移动云盘，再继续解析、下载或转存。'
+                  : '已解析出口令对应的分享，登录后继续打开文件列表。',
+            ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context, false),
@@ -214,7 +222,13 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
           ),
         );
         checkpoint();
-        if (proceed != true) throw const AccountLoginRequired('尚未完成登录，口令已保留');
+        if (proceed != true) {
+          throw AccountLoginRequired(
+            selected == CloudPlatform.c139
+                ? '请先在本 App 登录移动云盘后再解析，口令已保留'
+                : '尚未完成登录，口令已保留',
+          );
+        }
         if (!mounted) return;
         await openLogin(context, services, selected);
         checkpoint();
@@ -259,12 +273,11 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
             },
           );
       shareCheckpoint();
-      await services.remember(
+      services.rememberInBackground(
         link,
         title: result.$1.title,
         itemCount: result.$2.length,
         commandText: text,
-        canCommit: () => current(run) && !scope.token.isCancelled,
       );
       shareCheckpoint();
       request = null;
@@ -306,7 +319,9 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
   @override
   Widget build(BuildContext context) {
     final paper = Theme.of(context).colorScheme.surface;
-    final help = '请从${platform.shortName}复制口令或完整分享文案，保留原有内容';
+    final help = platform == CloudPlatform.c139
+        ? '请复制完整移动云盘口令或分享文案。解析、下载和转存使用本 App 内登录的移动云盘账号，请先登录。'
+        : '请从${platform.shortName}复制口令或完整分享文案，保留原有内容';
     return PopScope(
       canPop: !working,
       onPopInvokedWithResult: (didPop, _) {
@@ -349,7 +364,7 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
                             SizedBox(
                               width: largeText
                                   ? bounds.maxWidth
-                                  : (bounds.maxWidth - 20) / 3,
+                                  : (bounds.maxWidth - 10) / 2,
                               child: Semantics(
                                 selected: platform == item,
                                 button: true,

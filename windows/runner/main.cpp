@@ -9,7 +9,11 @@
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
-  HANDLE single_instance = ::CreateMutexW(nullptr, FALSE, L"Local\\AsterLink.Flutter.v1");
+  const auto launch_arguments = GetCommandLineArguments();
+  const bool player_window = launch_arguments.size() == 2 &&
+      launch_arguments[0] == "--asterlink-player-window";
+  HANDLE single_instance = player_window ? nullptr :
+      ::CreateMutexW(nullptr, FALSE, L"Local\\AsterLink.Flutter.v1");
   if (single_instance != nullptr && ::GetLastError() == ERROR_ALREADY_EXISTS) {
     HWND existing = ::FindWindowW(nullptr, L"\u6587\u6790\u52a9\u624b");
     const auto request = DownloadLaunchArgument(GetCommandLineArguments());
@@ -57,8 +61,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
-  Win32Window::Size size(1280, 720);
-  if (!window.Create(L"\u6587\u6790\u52a9\u624b", origin, size)) {
+  Win32Window::Size size(player_window ? 480 : 1280, player_window ? 330 : 720);
+  if (!window.Create(player_window ? L"视频小窗" : L"\u6587\u6790\u52a9\u624b", origin, size)) {
     NativeDiagnostics::Instance().Record("windows.window_create_failed", 0, 0, 0);
     return EXIT_FAILURE;
   }

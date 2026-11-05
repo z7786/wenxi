@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/backup.dart';
@@ -414,7 +415,7 @@ void main() {
   );
 
   test(
-    'Share favorites retain codes, refresh roots and survive encrypted backup',
+    'Share favorites retain codes, refresh roots and survive backup',
     () async {
       final store = StateStore.memory(),
           vault = Vault(store),
@@ -476,7 +477,7 @@ void main() {
   );
 
   test(
-    'Encrypted backup restores every account, selected owner, secrets and favorites',
+    'Plain backup restores every account, selected owner, secrets and favorites',
     () async {
       final store = StateStore.memory(),
           vault = Vault(store),
@@ -504,7 +505,8 @@ void main() {
       );
       await vault.activate(p, second);
       final bytes = await BackupRepository(store).create('fixture-password');
-      expect(utf8.decode(bytes), isNot(contains('fixture-device-A')));
+      expect(isPlainBackup(bytes), isTrue);
+      expect(utf8.decode(bytes), contains('fixture-device-A'));
       final restored = StateStore.memory(), restoredVault = Vault(restored);
       expect(
         await BackupRepository(restored).restore(bytes, 'fixture-password'),
@@ -530,8 +532,15 @@ void main() {
         'fixture-password-A',
       );
       final before = jsonEncode(restored.data);
+      final corrupt = asJson(jsonDecode(utf8.decode(bytes)));
+      corrupt['data'] = {
+        ...corrupt.obj('data'),
+        'settings': {'theme': 'Dark'},
+      };
       await expectLater(
-        BackupRepository(restored).restore(bytes, 'wrong-password'),
+        BackupRepository(
+          restored,
+        ).restore(Uint8List.fromList(utf8.encode(jsonEncode(corrupt))), ''),
         throwsA(isA<AppException>()),
       );
       expect(jsonEncode(restored.data), before);

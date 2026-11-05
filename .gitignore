@@ -80,6 +80,7 @@ native/.tools/
 /*-backup-*.json
 /logo/
 /releases/
+/dist/
 /caiiliao/
 /演示截图/
 /tool/demo/
@@ -98,6 +99,9 @@ native/.tools/
 /5.com/
 /.claude/
 /tool/password_updater/
+/tool/DISK_CLEANUP_PANEL.md
+/tool/disk_cleanup_panel.py
+/tool/run_disk_cleanup_panel.cmd
 /启动密码更新器.cmd
 /tool/source_runner.dart
 /tool/build-source-runtime.ps1

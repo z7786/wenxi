@@ -454,7 +454,7 @@ class AnnouncementDetailPage extends StatelessWidget {
                     alignment: Alignment.centerLeft,
                     child: FilledButton.icon(
                       key: const Key('announcement-detail-link'),
-                      onPressed: () => openRemoteLink(
+                      onPressed: () => openAnnouncementLink(
                         context,
                         message.buttonUrl!,
                         launcher: linkLauncher,

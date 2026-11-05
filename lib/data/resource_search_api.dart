@@ -9,6 +9,7 @@ import '../core/crypto_box.dart';
 import 'search_security.dart';
 import 'client_search_engine.dart';
 import '../domain/backend_endpoints.dart';
+import '../diagnostics/app_log.dart';
 import 'client_search_host.dart';
 
 abstract interface class ResourceDiscoveryApi {
@@ -90,7 +91,16 @@ class HttpResourceSearchApi
             16,
           ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
     if (store != null && saved != _clientId) {
-      await store!.change((data) => data['resourceClientId'] = _clientId);
+      final identity = _clientId!;
+      unawaited(
+        store!
+            .change<void>((data) {
+              data['resourceClientId'] = identity;
+            })
+            .catchError((Object error, StackTrace stack) {
+              DiagnosticLog.error('search.identity_save_failed', error, stack);
+            }),
+      );
     }
     return _clientId!;
   }

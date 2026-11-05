@@ -5,6 +5,19 @@ import '../core/json.dart';
 
 const appWindowMinimumSize = Size(720, 520);
 
+Size desktopPipWindowSize(double aspectRatio) {
+  final ratio = aspectRatio.isFinite && aspectRatio > 0
+      ? aspectRatio.clamp(.25, 4).toDouble()
+      : 16 / 9;
+  final width = math.min(ratio < 1 ? 270.0 : 480.0, 540 * ratio);
+  return Size(width, width / ratio);
+}
+
+Size desktopPipMinimumSize(double aspectRatio) {
+  final size = desktopPipWindowSize(aspectRatio);
+  return Size(math.min(240, size.width), math.min(135, size.height));
+}
+
 class _WindowSnapshot {
   _WindowSnapshot({
     required this.fullscreen,
@@ -54,8 +67,8 @@ class WindowsPipWindow {
       }
       // After unmaximizing, these are the user's normal window bounds.
       previous.bounds = await windowManager.getBounds();
-      await windowManager.setMinimumSize(const Size(240, 160));
-      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      await windowManager.setMinimumSize(desktopPipMinimumSize(_aspectRatio));
+      await windowManager.setAsFrameless();
       await windowManager.setMaximizable(false);
       await windowManager.setResizable(true);
       await windowManager.setAspectRatio(_aspectRatio);

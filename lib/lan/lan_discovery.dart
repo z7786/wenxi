@@ -55,6 +55,10 @@ extension _LanDiscovery on LanService {
             final previous = _peers[peer.id];
             final fresh = previous == null;
             if (fresh && _peers.length >= 128) continue;
+            final endpoints = _peerEndpoints.putIfAbsent(peer.id, () => []);
+            endpoints.remove(peer.base);
+            endpoints.insert(0, peer.base);
+            if (endpoints.length > 8) endpoints.removeLast();
             final paired = _peerSessions[peer.id];
             if (paired != null && paired.expires.isAfter(clock())) {
               if (peer.address != paired.base.host) {
