@@ -59,15 +59,11 @@ with captured.open('wb') as output:
             process.wait()
 
 # Open two real playback processes through the same protocol used by the app.
-# A small local Y4M fixture exercises decoding without an external cloud account.
+# An original H.264 fixture exercises decoding without an external cloud account.
 progress = {}
 with tempfile.TemporaryDirectory(prefix='asterlink-playback-') as temporary:
-    movie = Path(temporary) / 'sample.y4m'
-    with movie.open('wb') as output:
-        output.write(b'YUV4MPEG2 W160 H90 F30:1 Ip A1:1 C420jpeg\n')
-        frame = bytes([100]) * (160 * 90) + bytes([128]) * (160 * 90 // 2)
-        for _ in range(360):
-            output.write(b'FRAME\n' + frame)
+    movie = root / 'tool/fixtures/macos-playback.mp4'
+    assert movie.is_file()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):

@@ -117,6 +117,13 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
           bufferSize: 16 * 1024 * 1024,
         ),
       );
+      if (Platform.environment['ASTERLINK_MACOS_SMOKE'] == '1') {
+        subscriptions.add(
+          decoder.stream.error.listen(
+            (error) => debugPrint('Playback error: $error'),
+          ),
+        );
+      }
       for (final stream in <Stream<Object?>>[
         decoder.stream.position,
         decoder.stream.playing,
