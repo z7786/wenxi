@@ -17,6 +17,7 @@ Future<void> main() async {
   app.main(const []);
   final folder = await getApplicationSupportDirectory();
   final report = File('${folder.path}/ios-smoke.json');
+  var stage = 'startup';
   try {
     // Verify the ordinary bootstrap before replacing the page with a video.
     final deadline = DateTime.now().add(const Duration(seconds: 45));
@@ -35,6 +36,7 @@ Future<void> main() async {
       await Future<void>.delayed(const Duration(milliseconds: 300));
     }
     require(ready, 'Normal iOS startup did not reach its main frame');
+    stage = 'quickjs';
     final bridge = SourceJsBridge();
     try {
       bridge.start({
@@ -61,6 +63,7 @@ Future<void> main() async {
       bridge.close();
     }
     final transport = IOSGopeedTransport();
+    stage = 'download';
     final version = asJson(await transport.call('version'));
     require(
       version.boolean('ed2k') && version.boolean('parserHttp2'),
@@ -126,7 +129,8 @@ Future<void> main() async {
             payload.length == bytes.length && payload[12345] == bytes[12345],
             'Download contents mismatch',
           );
-          movie = Platform.environment['ASTERLINK_IOS_SMOKE_MOVIE'];
+          final documents = await getApplicationDocumentsDirectory();
+          movie = '${documents.path}/ios-smoke.mp4';
           break;
         }
         await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -139,6 +143,7 @@ Future<void> main() async {
       await transport.dispose();
       await server.close(force: true);
     }
+    stage = 'playback';
     final player = Player();
     final video = VideoController(player);
     runApp(
@@ -168,12 +173,15 @@ Future<void> main() async {
           'positionMs': player.state.position.inMilliseconds,
         }),
       );
+      await Future<void>.delayed(const Duration(seconds: 3));
     } finally {
       await player.dispose();
     }
   } catch (error, stack) {
     DiagnosticLog.error('ios.smoke_failed', error, stack);
-    await report.writeAsString(jsonEncode({'error': error.toString()}));
+    await report.writeAsString(
+      jsonEncode({'stage': stage, 'error': error.toString()}),
+    );
     rethrow;
   }
 }

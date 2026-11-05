@@ -1,6 +1,5 @@
 """Launch the simulator app and verify startup, native downloads and decoding."""
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -26,8 +25,7 @@ try:
     fixture.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(root / 'tool/fixtures/macos-playback.mp4', fixture)
     sim('launch', '--terminate-running-process', '--stdout=' + str(local / 'ios-stdout.log'),
-        '--stderr=' + str(local / 'ios-stderr.log'), device, 'com.asterlink.app',
-        env={**os.environ, 'SIMCTL_CHILD_ASTERLINK_IOS_SMOKE_MOVIE': str(fixture)})
+        '--stderr=' + str(local / 'ios-stderr.log'), device, 'com.asterlink.app')
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         reports = list(container.rglob('ios-smoke.json'))
