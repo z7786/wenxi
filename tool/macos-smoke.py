@@ -136,7 +136,8 @@ with tempfile.TemporaryDirectory(prefix='asterlink-playback-') as temporary:
                     player.wait()
             server.shutdown()
             server.server_close()
-    if not playback_passed:
-        print((root / '.local/macos-playback.log').read_text(errors='replace')[-8000:])
+            output.flush()
+            if not playback_passed:
+                print((root / '.local/macos-playback.log').read_text(errors='replace')[-8000:])
 
 print('macOS smoke passed: native helper, free disk space, startup, two independent windows and video decoding')

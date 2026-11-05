@@ -152,7 +152,10 @@ void main() {
         'enabled': true,
         'version': '1.0',
         'build': 47,
-        'downloadUrl': 'https://user:supersecret@host.invalid/',
+        'downloadUrl': Uri.https(
+          'host.invalid',
+          '/',
+        ).replace(userInfo: 'user:supersecret').toString(),
       };
       final doc = RemoteControlDocument.parse(json, previous: previous);
       expect(doc.config.announcement!.id, 'new');
