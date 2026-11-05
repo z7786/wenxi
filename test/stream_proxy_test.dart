@@ -654,6 +654,48 @@ void main() {
   );
 
   test(
+    'Interrupting a blocked demux read retains its partial origin body for the replacement',
+    () async {
+      expect(await proxy.start(), isTrue);
+      final release = Completer<void>();
+      origin.firstPacketBytes = 1024;
+      origin.bodyRemainderBarrier = release.future;
+      final old = read(
+        0,
+        origin.bytes.length - 1,
+      ).then<Object>((value) => value, onError: (Object error) => error);
+      try {
+        await until(() => (proxy.diagnosticFields['servedBytes'] as int) > 0);
+        proxy.setPaused(true);
+        final firstRequests = origin.calls
+            .where((range) => range.$1 == 0 && range.$2 > 1023)
+            .length;
+        final received = proxy.diagnosticFields['receivedBytes'];
+        proxy.prepareSeek();
+        proxy.interruptReadForSeek();
+        expect(
+          await old.timeout(const Duration(seconds: 2)),
+          isA<HttpException>(),
+        );
+        expect(proxy.diagnosticFields['receivedBytes'], received);
+        final replacement = read(512, origin.bytes.length - 1);
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        release.complete();
+        proxy.setPaused(false);
+        expect(await replacement, origin.bytes.sublist(512));
+        expect(
+          origin.calls.where((range) => range.$1 == 0 && range.$2 > 1023),
+          hasLength(firstRequests),
+        );
+        expect(failures, isEmpty);
+      } finally {
+        if (!release.isCompleted) release.complete();
+        proxy.setPaused(false);
+      }
+    },
+  );
+
+  test(
     'A failed speculative segment followed by a seek does not report a playback failure',
     () async {
       expect(await proxy.start(), isTrue);
@@ -1302,7 +1344,7 @@ void main() {
   );
 
   test(
-    'A cached seek preserves the existing stream when mpv makes no replacement request',
+    'A cached seek preserves the existing stream when the decoder makes no replacement request',
     () async {
       expect(await proxy.start(), isTrue);
       final gate = Completer<void>();

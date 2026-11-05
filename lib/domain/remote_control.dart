@@ -6,7 +6,7 @@ import 'models.dart';
 part 'remote_control_parser.dart';
 
 /// Remote configuration only controls the features declared in this schema.
-/// Remote text is displayed as plain text and links are opened by user action.
+/// Announcements support Markdown; links are opened only by user action.
 class RemoteControlConfig {
   const RemoteControlConfig({
     this.revision = 0,
@@ -160,6 +160,67 @@ Uri httpsUri(String value) {
   }
   return uri;
 }
+
+/// Only announcement buttons may use WeChat's mini-program protocol. Update,
+/// service and image addresses retain their HTTPS-only validation.
+Uri announcementButtonUri(String value) {
+  final uri = Uri.tryParse(value);
+  if (uri?.scheme == 'https') return httpsUri(value);
+  Never invalid() => throw const FormatException('公告按钮需要有效的 HTTPS 地址或微信小程序链接');
+  if (value.isEmpty ||
+      value.length > 2048 ||
+      RegExp(r'[\s\x00-\x1f\x7f\\]').hasMatch(value) ||
+      uri == null ||
+      uri.scheme != 'weixin' ||
+      uri.host != 'dl' ||
+      uri.path != '/business/' ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort ||
+      uri.hasFragment) {
+    invalid();
+  }
+  final params = uri.queryParametersAll;
+  if (params.values.any(
+    (values) =>
+        values.length != 1 ||
+        RegExp(r'[\s\x00-\x1f\x7f\\]').hasMatch(values.single),
+  )) {
+    invalid();
+  }
+  String parameter(String name) => params[name]?.single ?? '';
+  bool only(Set<String> keys) => params.keys.every(keys.contains);
+  bool queryText(String text, int limit) =>
+      text.length <= limit &&
+      RegExp(r"^[A-Za-z0-9!#$&'()*+,/:;=?@\-._~%`]*$").hasMatch(text);
+  if (params.containsKey('t')) {
+    if (!only({'t', 'cq'}) ||
+        parameter('t').isEmpty ||
+        !queryText(parameter('cq'), 256)) {
+      invalid();
+    }
+  } else {
+    // Plain schemes also require the publisher to enable this capability in
+    // WeChat's mini-program console; an arbitrary original ID is not a link.
+    if (!only({'appid', 'path', 'query', 'env_version'}) ||
+        !RegExp(r'^wx[0-9a-fA-F]{16}$').hasMatch(parameter('appid')) ||
+        !RegExp(r'^[A-Za-z0-9_./-]+$').hasMatch(parameter('path')) ||
+        !queryText(parameter('query'), 512) ||
+        (parameter('env_version').isNotEmpty &&
+            !{
+              'release',
+              'trial',
+              'develop',
+            }.contains(parameter('env_version')))) {
+      invalid();
+    }
+  }
+  return uri;
+}
+
+bool isWeChatMiniProgramLink(Uri uri) =>
+    uri.scheme == 'weixin' ||
+    (uri.scheme == 'https' &&
+        {'wxaurl.cn', 'wxmpurl.cn'}.contains(uri.host.toLowerCase()));
 
 /// Service roots may include a deployment subdirectory. Public configuration
 /// carries only the address; API credentials and rule verification stay local.

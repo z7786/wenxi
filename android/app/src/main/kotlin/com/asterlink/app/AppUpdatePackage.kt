@@ -6,28 +6,39 @@ import android.content.pm.PackageManager
 import android.content.pm.Signature
 import android.net.Uri
 import android.os.Build
+import android.provider.OpenableColumns
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
 
 class AppUpdatePackage(private val context: Context) {
     @Suppress("DEPRECATION")
     fun prepare(path: String, expectedVersion: String, expectedBuild: Long): String {
-        val folder = File(context.cacheDir, "app_updates").apply { mkdirs() }
-        if (!folder.isDirectory) throw IOException("无法创建安装包缓存，请检查存储空间")
+        val folder = updateFolder(context)
         val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
         folder.listFiles()?.filter { it.name.startsWith("update-") && it.extension == "apk" && it.lastModified() < cutoff }
             ?.forEach { it.delete() }
         val copy = File.createTempFile("update-", ".apk", folder)
         try {
             val uri = Uri.parse(path)
+            val expectedSize = when {
+                File(path).isAbsolute -> File(path).length()
+                uri.scheme == "file" -> File(requireNotNull(uri.path)).length()
+                else -> runCatching {
+                    context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                        val column = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (column >= 0 && cursor.moveToFirst() && !cursor.isNull(column)) cursor.getLong(column) else null
+                    }
+                }.getOrNull()
+            }
             val input = when {
                 File(path).isAbsolute -> FileInputStream(File(path))
                 uri.scheme == "content" -> context.contentResolver.openInputStream(uri)
                 uri.scheme == "file" -> FileInputStream(File(requireNotNull(uri.path)))
                 else -> null
             } ?: throw IOException("无法读取下载的安装包")
-            input.use { source -> copy.outputStream().use { target -> source.copyTo(target) } }
+            copyPackage(input, copy, expectedSize)
             val pm = context.packageManager
             val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
             val candidate = pm.getPackageArchiveInfo(copy.absolutePath, flags)
@@ -42,6 +53,35 @@ class AppUpdatePackage(private val context: Context) {
     }
 
     companion object {
+        internal fun updateFolder(context: Context): File {
+            // OEM installers may delegate scanning to a process that cannot traverse private cache paths.
+            val roots = listOfNotNull(context.externalCacheDir, context.cacheDir)
+            for (root in roots) {
+                val folder = File(root, "app_updates")
+                if (runCatching { (folder.isDirectory || folder.mkdirs()) && folder.canWrite() }.getOrDefault(false)) return folder
+            }
+            throw IOException("无法创建安装包缓存，请检查存储空间")
+        }
+
+        internal fun copyPackage(input: java.io.InputStream, copy: File, expectedSize: Long?) {
+            try {
+                val bytes = input.use { source ->
+                    FileOutputStream(copy).use { target ->
+                        val count = source.copyTo(target)
+                        target.flush()
+                        target.fd.sync()
+                        count
+                    }
+                }
+                if (bytes <= 0 || (expectedSize != null && expectedSize > 0 && bytes != expectedSize)) {
+                    throw IOException("安装包不完整，请重新下载")
+                }
+            } catch (error: Exception) {
+                copy.delete()
+                throw error
+            }
+        }
+
         @Suppress("DEPRECATION")
         private fun code(info: PackageInfo): Long =
             if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()

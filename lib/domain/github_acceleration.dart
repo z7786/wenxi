@@ -13,6 +13,8 @@ class GitHubAcceleration {
   };
   static const testUrl =
       'https://raw.githubusercontent.com/octocat/Hello-World/master/README';
+  static const rangeTestUrl =
+      'https://raw.githubusercontent.com/git/git/master/COPYING';
 
   String get label => switch (mode) {
     'custom' => '自定义代理',
@@ -113,6 +115,21 @@ class GitHubAcceleration {
     }
     final url = urlFor(spec.url, spec.headers);
     return url == spec.url ? spec : spec.copyWith(url: url);
+  }
+
+  List<DownloadSpec> downloadCandidates(DownloadSpec spec) {
+    final preferred = apply(spec);
+    if (preferred.url == spec.url || !permits(spec.url, spec.headers)) {
+      return [preferred];
+    }
+    return [
+      for (final url in {
+        preferred.url,
+        spec.url,
+        for (final prefix in presets.values) '$prefix${spec.url}',
+      })
+        url == spec.url ? spec : spec.copyWith(url: url),
+    ];
   }
 
   Json toJson() => {'mode': mode, 'customUrl': customUrl};

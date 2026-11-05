@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../app_services.dart';
+import '../data/backup.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
 import '../domain/download_retries.dart';
@@ -151,7 +152,7 @@ class MinePage extends StatelessWidget {
         context: context,
         builder: (context) => StatefulBuilder(
           builder: (context, update) => AlertDialog(
-            title: const Text('导出加密备份'),
+            title: const Text('导出备份'),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -184,17 +185,10 @@ class MinePage extends StatelessWidget {
       if (choice == null || !context.mounted) return;
       includeImages = choice;
     }
-    final password = await askText(
-      context,
-      '设置备份密码',
-      hint: '至少 6 位；导出成功后也可用于恢复本机数据访问',
-      secret: true,
-    );
-    if (password == null || !context.mounted) return;
     final exported = await busy(
       context,
       () => services.backup.exportTo(
-        password,
+        '',
         (bytes) => context.mounted
             ? _saveBytes(
                 bytes,
@@ -203,10 +197,10 @@ class MinePage extends StatelessWidget {
             : Future.value(false),
         includeBackgroundImages: includeImages,
       ),
-      label: '正在导出备份并建立恢复保护…',
+      label: '正在导出备份…',
     );
     if (exported == true && context.mounted) {
-      message(context, '备份已导出，并建立本机密码恢复保护');
+      message(context, '备份已导出，请妥善保管，文件包含账号登录信息');
     }
   }
 
@@ -226,25 +220,24 @@ class MinePage extends StatelessWidget {
       return;
     }
     if (!context.mounted ||
-        !await confirm(
-          context,
-          '恢复备份',
-          '备份中的账号和设置将覆盖本机对应项目，下载文件不会被删除。\n'
-              '导入成功后，此备份密码也可用于恢复本机数据访问，请妥善保管。',
-        ) ||
+        !await confirm(context, '恢复备份', '备份中的账号和设置将覆盖本机对应项目，下载文件不会被删除。') ||
         !context.mounted) {
       return;
     }
-    final password = await askText(context, '输入备份密码', secret: true);
+    final bytes = await file.readAsBytes();
+    if (!context.mounted) return;
+    final password = isPlainBackup(bytes)
+        ? ''
+        : await askText(context, '输入旧备份密码', secret: true);
     if (password == null || !context.mounted) return;
     final count = await busy(
       context,
-      () async => services.backup.restore(await file.readAsBytes(), password),
+      () => services.backup.restore(bytes, password),
       label: '正在验证并恢复备份…',
     );
     if (count != null && context.mounted) {
       await services.downloads.settingsChanged();
-      if (context.mounted) message(context, '已恢复 $count 个账号及下载设置，并建立密码恢复保护');
+      if (context.mounted) message(context, '已恢复 $count 个账号及下载设置');
     }
   }
 
@@ -670,7 +663,7 @@ class MinePage extends StatelessWidget {
     _tile(
       context,
       CupertinoIcons.lock_shield,
-      '导出加密备份',
+      '导出备份',
       '保存账号与应用设置',
       () => _export(context),
     ),

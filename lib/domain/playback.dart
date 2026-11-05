@@ -23,6 +23,9 @@ const playbackFolderFields = {
   'subtitleBackgroundOpacity',
   'fit',
   'aspectRatio',
+  'videoScale',
+  'videoOffsetX',
+  'videoOffsetY',
 };
 
 const playbackAspectRatios = <String, double>{
@@ -115,6 +118,7 @@ double finiteRange(double value, double fallback, double min, double max) =>
 class PlaybackPreferences {
   const PlaybackPreferences({
     this.rate = 1,
+    this.boostRate = 2,
     this.volume = 100,
     this.autoNext = true,
     this.autoRotate = true,
@@ -127,6 +131,18 @@ class PlaybackPreferences {
     this.subtitleBackgroundOpacity = .5,
     this.fit = PlaybackFit.contain,
     this.aspectRatio = 0,
+    this.videoScale = 1,
+    this.videoOffsetX = 0,
+    this.videoOffsetY = 0,
+    this.controlsScale = 1,
+    this.showResolution = true,
+    this.showCastButton = true,
+    this.showSpeedButton = true,
+    this.showPlaylistButton = true,
+    this.showNextButton = true,
+    this.showLockButton = true,
+    this.showScreenshotButton = true,
+    this.panelLayout = 'auto',
     this.connections = 8,
     this.driveConnections = const {},
     this.segmentSizeMiB = 4,
@@ -134,7 +150,7 @@ class PlaybackPreferences {
     this.skipIntroSeconds = 0,
     this.skipOutroSeconds = 0,
   });
-  final double rate, volume, subtitleSize, subtitleBottom;
+  final double rate, boostRate, volume, subtitleSize, subtitleBottom;
   final SubtitleBackground subtitleBackground;
   final int subtitleBackgroundColor;
   final double subtitleBackgroundOpacity;
@@ -148,6 +164,15 @@ class PlaybackPreferences {
   final bool autoNext, autoRotate, resume, subtitles, hardwareAcceleration;
   final PlaybackFit fit;
   final double aspectRatio;
+  final double videoScale, videoOffsetX, videoOffsetY, controlsScale;
+  final bool showResolution,
+      showCastButton,
+      showSpeedButton,
+      showPlaylistButton,
+      showNextButton,
+      showLockButton,
+      showScreenshotButton;
+  final String panelLayout;
   final int connections;
   final Map<String, int> driveConnections;
   final int segmentSizeMiB, skipIntroSeconds, skipOutroSeconds;
@@ -168,9 +193,16 @@ class PlaybackPreferences {
 
   static const rates = [.5, .75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
   static const minRate = .25, maxRate = 4.0;
+  static const minBoostRate = 1.25, maxBoostRate = 4.0;
   static const minSubtitleSize = 14.0, maxSubtitleSize = 120.0;
   factory PlaybackPreferences.fromJson(Json value) => PlaybackPreferences(
     rate: finiteRange(value.number('rate', 1), 1, minRate, maxRate),
+    boostRate: finiteRange(
+      value.number('boostRate', 2),
+      2,
+      minBoostRate,
+      maxBoostRate,
+    ),
     volume: finiteRange(value.number('volume', 100), 100, 0, 100),
     connections: value
         .integer('connections', 8)
@@ -228,6 +260,20 @@ class PlaybackPreferences {
       (fit) => fit.name == value.str('fit'),
       orElse: () => PlaybackFit.contain,
     ),
+    videoScale: finiteRange(value.number('videoScale', 1), 1, .5, 3),
+    videoOffsetX: finiteRange(value.number('videoOffsetX'), 0, -1, 1),
+    videoOffsetY: finiteRange(value.number('videoOffsetY'), 0, -1, 1),
+    controlsScale: finiteRange(value.number('controlsScale', 1), 1, .8, 1.4),
+    showResolution: value.boolean('showResolution', true),
+    showCastButton: value.boolean('showCastButton', true),
+    showSpeedButton: value.boolean('showSpeedButton', true),
+    showPlaylistButton: value.boolean('showPlaylistButton', true),
+    showNextButton: value.boolean('showNextButton', true),
+    showLockButton: value.boolean('showLockButton', true),
+    showScreenshotButton: value.boolean('showScreenshotButton', true),
+    panelLayout: {'auto', 'side', 'bottom'}.contains(value.str('panelLayout'))
+        ? value.str('panelLayout')
+        : 'auto',
     aspectRatio:
         value.number('aspectRatio').isFinite &&
             value.number('aspectRatio') >= .1 &&
@@ -237,6 +283,7 @@ class PlaybackPreferences {
   );
   Json toJson() => {
     'rate': rate,
+    'boostRate': boostRate,
     'volume': volume,
     'autoNext': autoNext,
     'autoRotate': autoRotate,
@@ -249,6 +296,18 @@ class PlaybackPreferences {
     'subtitleBackgroundOpacity': subtitleBackgroundOpacity,
     'fit': fit.name,
     'aspectRatio': aspectRatio,
+    'videoScale': videoScale,
+    'videoOffsetX': videoOffsetX,
+    'videoOffsetY': videoOffsetY,
+    'controlsScale': controlsScale,
+    'showResolution': showResolution,
+    'showCastButton': showCastButton,
+    'showSpeedButton': showSpeedButton,
+    'showPlaylistButton': showPlaylistButton,
+    'showNextButton': showNextButton,
+    'showLockButton': showLockButton,
+    'showScreenshotButton': showScreenshotButton,
+    'panelLayout': panelLayout,
     'connections': connections,
     'driveConnections': driveConnections,
     'segmentSizeMiB': segmentSizeMiB,
@@ -258,6 +317,7 @@ class PlaybackPreferences {
   };
   PlaybackPreferences copyWith({
     double? rate,
+    double? boostRate,
     double? volume,
     double? subtitleSize,
     double? subtitleBottom,
@@ -270,6 +330,18 @@ class PlaybackPreferences {
     bool? subtitles,
     PlaybackFit? fit,
     double? aspectRatio,
+    double? videoScale,
+    double? videoOffsetX,
+    double? videoOffsetY,
+    double? controlsScale,
+    bool? showResolution,
+    bool? showCastButton,
+    bool? showSpeedButton,
+    bool? showPlaylistButton,
+    bool? showNextButton,
+    bool? showLockButton,
+    bool? showScreenshotButton,
+    String? panelLayout,
     int? connections,
     Map<String, int>? driveConnections,
     int? segmentSizeMiB,
@@ -279,6 +351,7 @@ class PlaybackPreferences {
   }) => PlaybackPreferences.fromJson({
     ...toJson(),
     'rate': rate ?? this.rate,
+    'boostRate': boostRate ?? this.boostRate,
     'volume': volume ?? this.volume,
     'subtitleSize': subtitleSize ?? this.subtitleSize,
     'subtitleBottom': subtitleBottom ?? this.subtitleBottom,
@@ -293,6 +366,18 @@ class PlaybackPreferences {
     'subtitles': subtitles ?? this.subtitles,
     'fit': (fit ?? this.fit).name,
     'aspectRatio': aspectRatio ?? this.aspectRatio,
+    'videoScale': videoScale ?? this.videoScale,
+    'videoOffsetX': videoOffsetX ?? this.videoOffsetX,
+    'videoOffsetY': videoOffsetY ?? this.videoOffsetY,
+    'controlsScale': controlsScale ?? this.controlsScale,
+    'showResolution': showResolution ?? this.showResolution,
+    'showCastButton': showCastButton ?? this.showCastButton,
+    'showSpeedButton': showSpeedButton ?? this.showSpeedButton,
+    'showPlaylistButton': showPlaylistButton ?? this.showPlaylistButton,
+    'showNextButton': showNextButton ?? this.showNextButton,
+    'showLockButton': showLockButton ?? this.showLockButton,
+    'showScreenshotButton': showScreenshotButton ?? this.showScreenshotButton,
+    'panelLayout': panelLayout ?? this.panelLayout,
     'connections': connections ?? this.connections,
     'driveConnections': driveConnections ?? this.driveConnections,
     'segmentSizeMiB': segmentSizeMiB ?? this.segmentSizeMiB,
@@ -300,6 +385,18 @@ class PlaybackPreferences {
     'skipIntroSeconds': skipIntroSeconds ?? this.skipIntroSeconds,
     'skipOutroSeconds': skipOutroSeconds ?? this.skipOutroSeconds,
   });
+
+  PlaybackPreferences withLayout(PlaybackPreferences layout) => copyWith(
+    controlsScale: layout.controlsScale,
+    showResolution: layout.showResolution,
+    showCastButton: layout.showCastButton,
+    showSpeedButton: layout.showSpeedButton,
+    showPlaylistButton: layout.showPlaylistButton,
+    showNextButton: layout.showNextButton,
+    showLockButton: layout.showLockButton,
+    showScreenshotButton: layout.showScreenshotButton,
+    panelLayout: layout.panelLayout,
+  );
 }
 
 class PlaybackBookmark {

@@ -129,6 +129,15 @@ class GitHubLink {
   const GitHubLink(this.owner, this.repo, this.route, this.tail);
   final String owner, repo, route;
   final List<String> tail;
+  static bool isRawFile(Uri uri) =>
+      uri.scheme == 'https' &&
+      uri.port == 443 &&
+      uri.userInfo.isEmpty &&
+      (uri.host == 'raw.githubusercontent.com' ||
+          uri.host == 'github.com' &&
+              uri.pathSegments.length >= 5 &&
+              uri.pathSegments[2] == 'raw') &&
+      parse(uri)?.route == 'blob';
   bool get isReleaseAsset =>
       route == 'releases' &&
       (tail.length >= 3 && tail.first == 'download' ||

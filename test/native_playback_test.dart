@@ -170,6 +170,29 @@ void main() {
           expect(player.state.position.inSeconds, lessThan(8));
         },
       );
+      test('Pause bypasses a blocked native control queue', () async {
+        await open();
+        await backend.play();
+        await until(() => player.state.position.inMilliseconds > 200);
+        final native = player.platform as NativePlayer;
+        final entered = Completer<void>(), release = Completer<void>();
+        final queued = NativePlayer.lock.synchronized(() async {
+          entered.complete();
+          await release.future;
+        });
+        await entered.future;
+        try {
+          await backend.pause().timeout(const Duration(seconds: 2));
+          expect(player.state.playing, isFalse);
+          expect(await native.getProperty('pause'), 'yes');
+        } finally {
+          release.complete();
+          await queued;
+        }
+        await backend.play();
+        expect(player.state.playing, isTrue);
+      });
+
       test(
         'Loads external UTF-8 captions, applies sync offsets and disables subtitles',
         () async {

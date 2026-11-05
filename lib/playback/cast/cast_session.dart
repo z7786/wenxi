@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:media_kit/media_kit.dart';
+import 'package:asterlink/playback/playback_state.dart';
 import '../../core/json.dart';
 import '../../domain/models.dart';
 import '../external_stream.dart';
@@ -115,7 +115,12 @@ class CastSession extends ChangeNotifier {
             await _seek(position);
           } on CastSoapException catch (retry) {
             if (!retry.unsupported && retry.code != 701) rethrow;
-            warning = '电视未能恢复进度，可稍后拖动进度条或使用遥控器';
+            if (retry.unsupported) {
+              seekSupported = false;
+              warning = '电视不支持拖动进度，将从头播放';
+            } else {
+              warning = '电视未能恢复进度，可稍后拖动进度条或使用遥控器';
+            }
             _state = _state.copyWith(position: Duration.zero);
           }
         } else if (e.unsupported) {

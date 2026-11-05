@@ -131,7 +131,9 @@ void main() {
     );
   }
 
-  for (final platform in CloudCommandResolver.platforms) {
+  for (final platform in CloudCommandResolver.platforms.where(
+    (p) => p != CloudPlatform.c139,
+  )) {
     test(
       '${platform.key} only contacts the selected provider and returns a reusable share',
       () async {
@@ -163,7 +165,9 @@ void main() {
     );
   }
 
-  for (final platform in CloudCommandResolver.platforms) {
+  for (final platform in CloudCommandResolver.platforms.where(
+    (p) => p != CloudPlatform.c139,
+  )) {
     test(
       '${platform.key} sends new formats without a local character filter',
       () async {

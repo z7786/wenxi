@@ -26,6 +26,7 @@ class _ShareConnector extends CloudConnector {
   @override
   final CloudPlatform platform;
   final opened = <ParsedLink>[];
+  final openCredentials = <Credential?>[];
   int lists = 0;
   int downloads = 0;
   Credential? downloadCredential;
@@ -38,6 +39,7 @@ class _ShareConnector extends CloudConnector {
     Credential? credential,
   ) async {
     opened.add(link);
+    openCredentials.add(credential);
     await openBarrier;
     if (failure != null) throw failure!;
     if (requiredCode != null && link.passcode != requiredCode) {
@@ -114,6 +116,33 @@ class _ResourceBaiduConnector extends BaiduConnector {
   ];
 }
 
+class _QueuedStateStore extends ChangeNotifier implements StateStore {
+  _QueuedStateStore(this.delegate) {
+    delegate.addListener(notifyListeners);
+  }
+  final StateStore delegate;
+  final _writes = AsyncGate();
+  Future<void>? barrier;
+  @override
+  Json get data => delegate.data;
+  @override
+  Future<T> change<T>(
+    T Function(Json draft) edit, {
+    String? recoveryPassword,
+  }) => _writes.run(() async {
+    await barrier;
+    return delegate.change(edit, recoveryPassword: recoveryPassword);
+  });
+  @override
+  Future<void> put(String key, Object? value) => change((draft) {
+    draft[key] = value;
+  });
+  @override
+  Future<void> flush() => _writes.run(delegate.flush);
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late AppServices services;
@@ -124,6 +153,7 @@ void main() {
     WidgetTester tester, {
     bool loggedIn = true,
     TargetPlatform? platform,
+    StateStore Function(StateStore)? storeFactory,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(430, 960);
@@ -131,14 +161,16 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     services = AppServices(
       controlEnabled: false,
-      store: StateStore.memory({
-        'credentials': {
-          if (loggedIn)
-            'Quark': Credential('fixture', {
-              'primary': '__pus=a; __puus=b',
-            }, updatedAt: 1).toJson(),
-        },
-      }),
+      store: (storeFactory ?? (store) => store)(
+        StateStore.memory({
+          'credentials': {
+            if (loggedIn)
+              'Quark': Credential('fixture', {
+                'primary': '__pus=a; __puus=b',
+              }, updatedAt: 1).toJson(),
+          },
+        }),
+      ),
       dataDirectory: Directory('parse-fixture'),
       cacheDirectory: Directory('parse-fixture/cache'),
       transport: FakeNative(),
@@ -197,6 +229,62 @@ void main() {
       }
     });
   }
+
+  scenario(
+    'Raw GitHub files open direct download without requesting repository APIs',
+    (tester) async {
+      await render(tester, loggedIn: false);
+      const raw =
+          'https://raw.githubusercontent.com/qist/tvbox/master/xiaosa/api.json';
+      await enter(tester, raw);
+      await start(tester);
+      final url = tester.widget<TextField>(
+        find.byKey(const Key('direct-download-url')),
+      );
+      expect(url.controller!.text, raw);
+      expect(find.byType(BrowserPage), findsNothing);
+      expect((services.cleanups.http as FakeHttp).calls, isEmpty);
+      await tester.tap(find.widgetWithText(TextButton, '取消'));
+      await tester.pumpAndSettle();
+    },
+  );
+
+  scenario(
+    'Ready files open while a previous download write is still pending',
+    (tester) async {
+      late _QueuedStateStore store;
+      await render(
+        tester,
+        storeFactory: (delegate) => store = _QueuedStateStore(delegate),
+      );
+      final gate = Completer<void>();
+      store.barrier = gate.future;
+      final downloadWrite = store.put('fixture-download-progress', 1);
+      try {
+        await enter(tester);
+        await start(tester);
+        expect(find.byType(BrowserPage), findsOneWidget);
+        expect(find.text('第一集.mp4'), findsOneWidget);
+        expect(services.store.data.list('history'), isEmpty);
+        Navigator.of(tester.element(find.byType(BrowserPage))).pop();
+        await tester.pumpAndSettle();
+        // A successful browse must still be remembered after leaving its page.
+        await tester.tap(find.byTooltip('清空输入'));
+        await tester.pump();
+      } finally {
+        gate.complete();
+        await downloadWrite;
+        await tester.pumpAndSettle();
+        await services.store.flush();
+      }
+      expect(
+        services.store.data.list('history').single.str('fileName'),
+        '旅行视频合集',
+      );
+      expect(connector.lists, 1);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   scenario(
     'resource parse chooser cancellation leaves input and account state untouched',
@@ -509,6 +597,32 @@ void main() {
       expect(services.store.data.list('history'), isEmpty);
     },
   );
+
+  for (final loggedIn in [false, true]) {
+    scenario('Tianyi share opens before login (stored account: $loggedIn)', (
+      tester,
+    ) async {
+      await render(tester, loggedIn: false);
+      if (loggedIn) {
+        await services.vault.putCredential(
+          CloudPlatform.tianyi,
+          Credential('fixture', {
+            'primary': 'COOKIE_LOGIN_USER=expired',
+          }, updatedAt: 1),
+        );
+      }
+      final provider = _ShareConnector(CloudPlatform.tianyi);
+      services.cloud.connectors[CloudPlatform.tianyi] = provider;
+      await enter(tester, 'https://cloud.189.cn/t/Zf6nIrbIrUv2');
+      await start(tester);
+      expect(find.byType(BrowserPage), findsOneWidget);
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(provider.opened, hasLength(1));
+      expect(provider.lists, 1);
+      expect(provider.openCredentials.single != null, loggedIn);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   for (final platform in [CloudPlatform.quark, CloudPlatform.uc]) {
     scenario(

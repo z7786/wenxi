@@ -114,7 +114,9 @@ class _TorrentPageState extends State<TorrentPage> {
         setState(() => _error = e is AppException ? e.message : '无法开始播放，请重试');
       }
     } finally {
-      await controller?.close();
+      if (controller != null) {
+        widget.services.finishPlaybackInBackground(controller.close());
+      }
       if (mounted) setState(() => _playing = false);
     }
   }

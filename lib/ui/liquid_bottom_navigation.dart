@@ -69,7 +69,9 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _reduceMotion = MediaQuery.disableAnimationsOf(context);
+    _reduceMotion =
+        MediaQuery.disableAnimationsOf(context) ||
+        AppAppearance.of(context).glassLowPower;
     if (_reduceMotion) {
       _position.value =
           _dragIndex ?? (_pressedIndex ?? widget.selectedIndex).toDouble();
@@ -113,6 +115,7 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
       _dragIndex = null;
       _gesture = null;
     });
+    _touch.value = null;
     if (_reduceMotion) {
       _press.value = 0;
       _glow.value = 0;
@@ -155,9 +158,7 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
     final highContrast = MediaQuery.highContrastOf(context);
     final appearance = AppAppearance.of(context);
     final solid = highContrast || appearance.glassStyle == GlassStyle.solid;
-    final glassColor = appearance.glassColor.withValues(
-      alpha: solid ? 1 : appearance.glassOpacity,
-    );
+    final flatSelection = solid || appearance.glassLowPower;
     final shadowColor = Color.lerp(
       dark ? Colors.black : colors.onSurface,
       colors.primary,
@@ -166,6 +167,12 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
     final rtl = Directionality.of(context) == TextDirection.rtl;
     final count = widget.destinations.length;
     final active = themeAccent(context);
+    final selectionColor = flatSelection
+        ? Color.alphaBlend(
+            active.withValues(alpha: dark ? .18 : .08),
+            colors.surface,
+          )
+        : appearance.lensColor;
     final foreground = highContrast || appearance.glassStyle == GlassStyle.clear
         ? colors.onSurface
         : colors.onSurfaceVariant;
@@ -232,6 +239,75 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                 if (_gesture == gesture) _finish();
               }
 
+              final selectionLens = AnimatedBuilder(
+                key: const Key('navigation-selection'),
+                animation: Listenable.merge([_position, _press, _dragEmphasis]),
+                builder: (context, _) {
+                  // Glass samples the tabs; opaque selection paints below them.
+                  // The optical layer never owns pointer events.
+                  final position = _position.value.clamp(
+                    -.035,
+                    count - 1 + .035,
+                  );
+                  final physical = rtl ? count - 1 - position : position;
+                  final stretch = _reduceMotion || solid
+                      ? 0.0
+                      : (_position.velocity.abs() * .003).clamp(0.0, .055);
+                  final pressed = _reduceMotion || solid
+                      ? 0.0
+                      : _press.value * .035;
+                  final drag = _reduceMotion || solid
+                      ? 0.0
+                      : Curves.easeOutCubic.transform(_dragEmphasis.value);
+                  final lensScale = 1 + drag * (78 / 56 - 1);
+                  final progress = solid ? 0.0 : _press.value;
+                  return Positioned(
+                    left: 4 + physical * tabWidth,
+                    top: 4,
+                    bottom: 4,
+                    width: tabWidth,
+                    child: IgnorePointer(
+                      child: Transform(
+                        key: const Key('navigation-lens-transform'),
+                        alignment: Alignment.center,
+                        transform: Matrix4.diagonal3Values(
+                          lensScale + pressed + stretch,
+                          lensScale + pressed - stretch * .4,
+                          1,
+                        ),
+                        child: LiquidGlassSurface(
+                          borderRadius: BorderRadius.circular(height),
+                          tint: selectionColor,
+                          opacity: flatSelection
+                              ? 1
+                              : .10 * (1 - progress) + .03 * progress,
+                          blurSigma: 0,
+                          refractionHeight: 10 * progress,
+                          refractionAmount: 14 * progress,
+                          dispersion: .24 * progress,
+                          // A tab lens can be almost circular on a phone. Let
+                          // refraction define its rim instead of a white ring.
+                          highlight: 0,
+                          shadow: progress * .65,
+                          child: DecoratedBox(
+                            key: const Key('navigation-lens'),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(height),
+                              border: highContrast
+                                  ? Border.all(
+                                      color: active.withValues(alpha: .5),
+                                      width: .8,
+                                    )
+                                  : null,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              );
+
               return MouseRegion(
                 onHover: (event) {
                   if (_pointer != null) return;
@@ -242,7 +318,10 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                   );
                 },
                 onExit: (_) {
-                  if (_pointer == null) _glow.reverse();
+                  if (_pointer == null) {
+                    _touch.value = null;
+                    _glow.reverse();
+                  }
                 },
                 child: Listener(
                   onPointerDown: (event) {
@@ -319,7 +398,7 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                             color: shadowColor.withValues(
                               alpha: dark ? .14 : .055,
                             ),
-                            blurRadius: 16,
+                            blurRadius: appearance.glassLowPower ? 0 : 16,
                             offset: const Offset(0, 4),
                             blurStyle: BlurStyle.outer,
                           ),
@@ -335,9 +414,14 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                                 animation: _press,
                                 builder: (context, _) => LiquidGlassSurface(
                                   borderRadius: BorderRadius.circular(height),
-                                  opacity: solid ? 1 : appearance.glassOpacity,
+                                  opacity: solid
+                                      ? 1
+                                      : appearance.glassLowPower
+                                      ? .86
+                                      : appearance.glassOpacity,
                                   refractionHeight: 24,
                                   refractionAmount: 24,
+                                  dispersion: .24,
                                   highlight: 1 + _press.value * .2,
                                   shadow: 0,
                                   child: DecoratedBox(
@@ -357,23 +441,9 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                                 ),
                               ),
                             ),
-                            Positioned.fill(
-                              child: IgnorePointer(
-                                child: RepaintBoundary(
-                                  child: CustomPaint(
-                                    key: const Key(
-                                      'navigation-touch-highlight',
-                                    ),
-                                    painter: _NavigationHighlightPainter(
-                                      _touch,
-                                      _glow,
-                                      dark,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
+                            if (flatSelection) selectionLens,
                             Padding(
+                              key: const Key('navigation-tabs'),
                               padding: const EdgeInsets.all(4),
                               child: Row(
                                 children: [
@@ -432,98 +502,24 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                                 ],
                               ),
                             ),
-                            AnimatedBuilder(
-                              animation: Listenable.merge([
-                                _position,
-                                _press,
-                                _dragEmphasis,
-                              ]),
-                              builder: (context, _) {
-                                // Paint the moving lens after the tabs so the
-                                // backdrop includes their actual icons/labels.
-                                // The optical layer never owns pointer events.
-                                final position = _position.value.clamp(
-                                  -.035,
-                                  count - 1 + .035,
-                                );
-                                final physical = rtl
-                                    ? count - 1 - position
-                                    : position;
-                                final stretch = _reduceMotion || solid
-                                    ? 0.0
-                                    : (_position.velocity.abs() * .003).clamp(
-                                        0.0,
-                                        .055,
-                                      );
-                                final pressed = _reduceMotion || solid
-                                    ? 0.0
-                                    : _press.value * .035;
-                                final drag = _reduceMotion || solid
-                                    ? 0.0
-                                    : Curves.easeOutCubic.transform(
-                                        _dragEmphasis.value,
-                                      );
-                                final lensScale = 1 + drag * (78 / 56 - 1);
-                                final progress = solid ? 0.0 : _press.value;
-                                return Positioned(
-                                  left: 4 + physical * tabWidth,
-                                  top: 4,
-                                  bottom: 4,
-                                  width: tabWidth,
-                                  child: IgnorePointer(
-                                    child: Transform(
+                            if (!flatSelection) selectionLens,
+                            if (!flatSelection)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: RepaintBoundary(
+                                    child: CustomPaint(
                                       key: const Key(
-                                        'navigation-lens-transform',
+                                        'navigation-touch-highlight',
                                       ),
-                                      alignment: Alignment.center,
-                                      transform: Matrix4.diagonal3Values(
-                                        lensScale + pressed + stretch,
-                                        lensScale + pressed - stretch * .4,
-                                        1,
-                                      ),
-                                      child: LiquidGlassSurface(
-                                        borderRadius: BorderRadius.circular(
-                                          height,
-                                        ),
-                                        tint: solid
-                                            ? glassColor
-                                            : appearance.lensColor,
-                                        opacity: solid
-                                            ? 1
-                                            : .10 * (1 - progress) +
-                                                  .03 * progress,
-                                        blurSigma: 0,
-                                        refractionHeight: 10 * progress,
-                                        refractionAmount: 14 * progress,
-                                        dispersion: .20 * progress,
-                                        highlight: progress,
-                                        shadow: progress * .65,
-                                        child: DecoratedBox(
-                                          key: const Key('navigation-lens'),
-                                          decoration: BoxDecoration(
-                                            borderRadius: BorderRadius.circular(
-                                              height,
-                                            ),
-                                            color: solid
-                                                ? appearance.lensColor
-                                                      .withValues(alpha: 1)
-                                                : null,
-                                            border: highContrast
-                                                ? Border.all(
-                                                    color: active.withValues(
-                                                      alpha: .5,
-                                                    ),
-                                                    width: .8,
-                                                  )
-                                                : null,
-                                          ),
-                                        ),
+                                      painter: _NavigationHighlightPainter(
+                                        _touch,
+                                        _glow,
+                                        dark,
                                       ),
                                     ),
                                   ),
-                                );
-                              },
-                            ),
+                                ),
+                              ),
                           ],
                         ),
                       ),
@@ -568,7 +564,8 @@ class _NavigationTabContentState extends State<_NavigationTabContent>
     super.didUpdateWidget(oldWidget);
     if (widget.selected &&
         !oldWidget.selected &&
-        !MediaQuery.disableAnimationsOf(context)) {
+        !MediaQuery.disableAnimationsOf(context) &&
+        !AppAppearance.of(context).glassLowPower) {
       _lift.forward(from: 0);
     }
   }
@@ -581,7 +578,9 @@ class _NavigationTabContentState extends State<_NavigationTabContent>
 
   @override
   Widget build(BuildContext context) {
-    final reduce = MediaQuery.disableAnimationsOf(context);
+    final reduce =
+        MediaQuery.disableAnimationsOf(context) ||
+        AppAppearance.of(context).glassLowPower;
     return TweenAnimationBuilder<Color?>(
       tween: ColorTween(end: widget.color),
       duration: reduce ? Duration.zero : const Duration(milliseconds: 180),
@@ -655,19 +654,17 @@ class _NavigationHighlightPainter extends CustomPainter {
       Radius.circular(size.height / 2),
     );
     final highlight = Colors.white.withValues(
-      alpha: visibility.value * (dark ? .09 : .26),
+      alpha: visibility.value * (dark ? .16 : .20),
     );
     final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2
       ..shader = ui.Gradient.radial(point, size.height * 1.45, [
         highlight,
         Colors.white.withValues(alpha: 0),
       ]);
     canvas.save();
     canvas.clipRRect(shape);
-    canvas.drawRRect(shape, paint);
-    paint
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.3;
     canvas.drawRRect(shape, paint);
     canvas.restore();
   }

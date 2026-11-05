@@ -21,6 +21,8 @@ class CtfileConnector extends CloudConnector {
   CtfileConnector(this.http) : _web = CtfileWeb(http);
   final JsonHttp http;
   final CtfileWeb _web;
+  final _shareAccess = <String, String>{};
+  final _shareChallenges = <String, CtfileCaptchaChallenge>{};
   static const rest = 'https://rest.ctfile.com/v1';
   static const web = 'https://webapi.ctfile.com';
   static const headers = {
@@ -39,11 +41,21 @@ class CtfileConnector extends CloudConnector {
     final code = data.integer('code', -1);
     final message = data
         .str('message')
+        .ifEmpty(data.str('msg'))
         .ifEmpty(data.obj('file').str('message'));
     if (code == 401) {
       throw AccountLoginRequired(message.ifEmpty('城通登录已过期，请重新登录'));
     }
-    if (code == 423) throw AppException(message.ifEmpty('请输入正确的城通分享访问密码'));
+    if (code == 423) {
+      final kind = data
+          .obj('data')
+          .str('error_type')
+          .ifEmpty(data.obj('file').str('error_type'));
+      if (kind.startsWith('captcha_')) {
+        throw const AppException('此城通分享需要安全验证，请重新解析分享链接');
+      }
+      throw AppException(message.ifEmpty('请输入正确的城通分享访问密码'));
+    }
     require(
       response.successful && code == 200,
       message.ifEmpty(code < 0 ? '城通响应缺少状态码，请稍后重试' : '城通请求失败（$code）'),
@@ -311,7 +323,16 @@ class CtfileConnector extends CloudConnector {
     throw const AppException('城通目录过大，请分目录浏览');
   }
 
-  Future<Json> _shareInfo(ParsedLink link, {String? parent}) async {
+  String _shareKey(ParsedLink link) =>
+      '${LinkParser.shareId(platform, link.url)}/${link.passcode ?? ''}';
+
+  Future<Json> _shareInfo(
+    ParsedLink link, {
+    String? parent,
+    CtfileCaptchaProof? proof,
+    String? accessPass,
+  }) async {
+    RequestScope.checkpoint();
     final id = LinkParser.shareId(platform, link.url);
     require(id != null, '无法识别城通分享链接');
     final parts = id!.split('/');
@@ -319,11 +340,58 @@ class CtfileConnector extends CloudConnector {
     final category = kind[0];
     final queryParameters = Uri.parse(link.url).queryParameters;
     final subfolder = parent ?? queryParameters['d'];
+    final key = _shareKey(link);
+    Json verified = {};
+    var grant = _shareAccess[key] ?? accessPass ?? '';
+    if (proof != null || grant.isNotEmpty) {
+      if (proof != null) {
+        final challenge = _shareChallenges[key];
+        require(
+          challenge != null && proof.belongsTo(challenge),
+          '城通分享验证码已变化，请重新解析验证',
+        );
+        _shareChallenges.remove(key);
+      }
+      final response = await http.get(
+        query('https://urlapi.ctfile.com/api/v2/resource', {
+          'kind': category == 'f'
+              ? 'file'
+              : category == 'd'
+              ? 'dir'
+              : 'share',
+          'id': parts.last,
+          'folder_id': subfolder == null ? '0' : _number(subfolder, 'd'),
+          'fk': queryParameters['fk'] ?? '',
+          'passcode': link.passcode ?? '',
+          'type_id': '0',
+          if (grant.isNotEmpty) 'access_pass': grant,
+          ...?proof?.fields,
+        }),
+        headers,
+      );
+      RequestScope.checkpoint();
+      final result = response.json;
+      if (result.integer('code') == 423 &&
+          result.obj('data').str('error_type').startsWith('captcha_')) {
+        _shareAccess.remove(key);
+        _shareVerification(key, result.obj('data'));
+      }
+      final data = _checked(response).obj('data');
+      verified = data.obj('file');
+      require(verified.isNotEmpty, '城通分享验证响应不完整');
+      grant = data.str('access_pass').ifEmpty(grant);
+      require(grant.isNotEmpty, '城通未返回分享验证凭据，请重新验证');
+      if (_shareAccess.length >= 64) {
+        _shareAccess.remove(_shareAccess.keys.first);
+      }
+      _shareAccess[key] = grant;
+    }
     final params = <String, Object?>{
       'path': kind,
       category: parts.last,
       'passcode': link.passcode ?? '',
       'url': link.url,
+      if (grant.isNotEmpty) 'access_pass': grant,
       if (category != 'f' && subfolder != null)
         'folder_id': _number(subfolder, 'd'),
       if (category != 'f' && queryParameters.containsKey('fk'))
@@ -334,11 +402,37 @@ class CtfileConnector extends CloudConnector {
         : category == 'd'
         ? 'getdir.php'
         : 'getshare.php';
-    final data = _checked(
-      await http.get(query('$web/$endpoint', params), headers),
-    );
+    final response = await http.get(query('$web/$endpoint', params), headers);
+    RequestScope.checkpoint();
+    final raw = response.json;
+    if (raw.integer('code') == 423 &&
+        raw.obj('file').str('error_type').startsWith('captcha_')) {
+      _shareAccess.remove(key);
+      _shareVerification(key, raw.obj('file'));
+    }
+    final data = _checked(response);
     require(data['file'] is Map, '城通分享响应不完整');
-    return data.obj('file');
+    return {
+      ...data.obj('file'),
+      if (grant.isNotEmpty) 'access_pass': grant,
+      if (verified.integer('file_size_bytes') > 0)
+        'file_size_bytes': verified.integer('file_size_bytes'),
+    };
+  }
+
+  Never _shareVerification(String key, Json info) {
+    final type = info.str('captcha_type');
+    require({'altcha', 'turnstile'}.contains(type), '城通分享验证方式暂不支持，请在官网打开此链接');
+    final challenge = CtfileCaptchaChallenge(
+      type,
+      share: true,
+      message: '此城通分享需要安全验证，完成后将继续解析',
+    );
+    if (_shareChallenges.length >= 64) {
+      _shareChallenges.remove(_shareChallenges.keys.first);
+    }
+    _shareChallenges[key] = challenge;
+    throw CtfileShareVerificationRequired(challenge);
   }
 
   CloudFile _sharedFile(Json info, String parent, {String token = ''}) {
@@ -348,7 +442,11 @@ class CtfileConnector extends CloudConnector {
     return CloudFile(
       id: id,
       name: name,
-      size: info.integer('file_size', info.integer('size')),
+      size: info.integer(
+        'file_size_bytes',
+        info.integer('file_size', info.integer('size')),
+      ),
+      modifiedAt: info.str('file_time'),
       parentId: parent,
       token: token,
     );
@@ -357,9 +455,11 @@ class CtfileConnector extends CloudConnector {
   @override
   Future<BrowseSession> openShare(
     ParsedLink link,
-    Credential? credential,
-  ) async {
-    final info = await _shareInfo(link);
+    Credential? credential, {
+    CtfileCaptchaProof? proof,
+    String? accessPass,
+  }) async {
+    final info = await _shareInfo(link, proof: proof, accessPass: accessPass);
     final single = LinkParser.shareId(platform, link.url)!.startsWith('f');
     final root = single ? 'd0' : 'd${_number(info.str('folder_id', '0'), 'd')}';
     return BrowseSession(
@@ -370,7 +470,12 @@ class CtfileConnector extends CloudConnector {
           .ifEmpty(info.str('folder_name').ifEmpty('城通分享')),
       rootId: root,
       sourceLink: link,
-      metadata: {'single': '$single', 'info': jsonEncode(info)},
+      metadata: {
+        'single': '$single',
+        'info': jsonEncode(info),
+        if (info.str('access_pass').isNotEmpty)
+          'ctfileAccessPass': info.str('access_pass'),
+      },
     );
   }
 
@@ -518,7 +623,12 @@ class CtfileConnector extends CloudConnector {
                   LinkParser.parse(f.token).firstOrNull?.passcode ??
                   original.passcode,
             );
-      final info = await _shareInfo(link);
+      final info = await _shareInfo(
+        link,
+        accessPass: s.meta('ctfileAccessPass').isEmpty
+            ? null
+            : s.meta('ctfileAccessPass'),
+      );
       final fresh = _sharedFile(info, f.parentId);
       require(
         fresh.id == f.id && (f.size <= 0 || fresh.size == f.size),

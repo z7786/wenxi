@@ -12,12 +12,16 @@ import 'cast/dlna.dart' show castMimeType;
 /// the local server, including requests for HLS playlists, keys and segments.
 /// Third-party players use loopback; TV sessions bind a selected LAN interface.
 class ExternalPlaybackStream {
-  ExternalPlaybackStream(this.source) : lanAddress = null, _files = null;
+  ExternalPlaybackStream(this.source)
+    : lanAddress = null,
+      _files = null,
+      _client = _newClient(source);
   ExternalPlaybackStream.lan(
     this.source, {
     required InternetAddress this.lanAddress,
     LanFiles? files,
-  }) : _files = files ?? LanFiles();
+  }) : _files = files ?? LanFiles(),
+       _client = _newClient(source);
 
   final DownloadSpec source;
   final InternetAddress? lanAddress;
@@ -36,11 +40,20 @@ class ExternalPlaybackStream {
   final _paths = <Uri, String>{};
   final _handlers = <Future<void>>{};
   final _requests = <HttpClientRequest>{};
-  final _client = HttpClient()
-    ..autoUncompress = false
-    ..connectionTimeout = const Duration(seconds: 15)
-    ..idleTimeout = const Duration(seconds: 20)
-    ..maxConnectionsPerHost = 8;
+  final _responses = <HttpResponse>{};
+  final _bodies = <StreamIterator<List<int>>>{};
+  final HttpClient _client;
+  static HttpClient _newClient(DownloadSpec source) {
+    final limit = source.maxPlaybackConnections;
+    return HttpClient()
+      ..autoUncompress = false
+      ..connectionTimeout = const Duration(seconds: 15)
+      ..idleTimeout = const Duration(seconds: 20)
+      ..maxConnectionsPerHost = limit != null && limit > 0
+          ? limit.clamp(1, 8)
+          : 8;
+  }
+
   HttpServer? _server;
   bool _closed = false;
   Future<void>? _closing;
@@ -100,6 +113,14 @@ class ExternalPlaybackStream {
             path: '/$_token/local/video',
           ).toString();
     server.listen((request) {
+      _responses.add(request.response);
+      // Track responses so shutdown can interrupt a blocked downstream flush.
+      unawaited(
+        request.response.done.then<void>(
+          (_) => _responses.remove(request.response),
+          onError: (Object _) => _responses.remove(request.response),
+        ),
+      );
       final task = _serve(request);
       _handlers.add(task);
       unawaited(task.whenComplete(() => _handlers.remove(task)));
@@ -137,7 +158,7 @@ class ExternalPlaybackStream {
             'accept-encoding',
           }.contains(entry.key.toLowerCase()) &&
           (_sameOrigin(Uri.parse(source.url), url) ||
-              !_credentials.contains(entry.key.toLowerCase())))
+              !_originHeaders.contains(entry.key.toLowerCase())))
         entry.key: entry.value,
   };
 
@@ -146,8 +167,10 @@ class ExternalPlaybackStream {
     'authorization',
     'proxy-authorization',
   };
+  // Source Host overrides can select a delivery route. A different origin
+  // needs its own URL-derived Host, just as it must not receive account headers.
+  static const _originHeaders = {'host', ..._credentials};
   static const _hopHeaders = {
-    'host',
     'connection',
     'keep-alive',
     'transfer-encoding',
@@ -161,6 +184,28 @@ class ExternalPlaybackStream {
   bool _playlist(Uri uri, HttpClientResponse response) =>
       uri.path.toLowerCase().endsWith('.m3u8') ||
       (response.headers.contentType?.mimeType.contains('mpegurl') ?? false);
+
+  // Null means a fragmented prefix could still become an HLS signature.
+  // Only inspect a bounded prefix so ordinary video bytes stream immediately.
+  static bool? _playlistPrefix(List<int> bytes) {
+    final prefix = bytes.take(128).toList(growable: false);
+    var index = 0;
+    if (prefix.isNotEmpty && prefix.first == 0xef) {
+      for (final byte in const [0xef, 0xbb, 0xbf]) {
+        if (index >= prefix.length) return null;
+        if (prefix[index++] != byte) return false;
+      }
+    }
+    while (index < prefix.length &&
+        const {9, 10, 11, 12, 13, 32}.contains(prefix[index])) {
+      index++;
+    }
+    for (final byte in '#EXTM3U'.codeUnits) {
+      if (index >= prefix.length) return null;
+      if (prefix[index++] != byte) return false;
+    }
+    return true;
+  }
 
   Future<(HttpClientResponse, Uri, HttpClientRequest)> _fetch(
     HttpRequest downstream,
@@ -342,15 +387,22 @@ class ExternalPlaybackStream {
           ? gzip.decoder.bind(response)
           : response;
       body = StreamIterator(payload.timeout(const Duration(seconds: 60)));
+      _bodies.add(body);
       final hasFirst = await body.moveNext();
-      final first = hasFirst ? body.current : const <int>[];
-      if (ok &&
-          (encoding == null || encoding == 'identity') &&
-          utf8
-              .decode(first.take(128).toList(), allowMalformed: true)
-              .trimLeft()
-              .startsWith('#EXTM3U')) {
-        playlist = true;
+      var first = hasFirst ? body.current : const <int>[];
+      if (ok && !playlist && (encoding == null || encoding == 'identity')) {
+        var detected = _playlistPrefix(first);
+        if (detected == null && hasFirst) {
+          final prefix = BytesBuilder(copy: false)..add(first);
+          while (detected == null &&
+              prefix.length < 128 &&
+              await body.moveNext()) {
+            prefix.add(body.current);
+            detected = _playlistPrefix(prefix.toBytes());
+          }
+          first = prefix.takeBytes();
+        }
+        playlist = detected == true;
       }
       if (playlist) {
         final bytes = BytesBuilder(copy: false)..add(first);
@@ -360,7 +412,9 @@ class ExternalPlaybackStream {
           require(bytes.length <= 4 * 1024 * 1024, '播放列表过大');
         }
         final data = bytes.takeBytes();
-        final rewritten = utf8.encode(_rewrite(utf8.decode(data), resolved));
+        final rewritten = utf8.encode(
+          _rewrite(utf8.decode(data).trimLeft(), resolved),
+        );
         request.response.headers.removeAll(HttpHeaders.contentEncodingHeader);
         request.response.headers.removeAll(HttpHeaders.contentRangeHeader);
         request.response.headers.removeAll(HttpHeaders.acceptRangesHeader);
@@ -374,7 +428,7 @@ class ExternalPlaybackStream {
         request.response.contentLength = response.contentLength;
         if (hasFirst) request.response.add(first);
         await request.response.flush();
-        while (await body.moveNext()) {
+        while (!_closed && await body.moveNext()) {
           request.response.add(body.current);
           await request.response.flush();
         }
@@ -390,6 +444,7 @@ class ExternalPlaybackStream {
       try {
         await body?.cancel();
       } catch (_) {}
+      _bodies.remove(body);
       try {
         await request.response.close();
       } catch (_) {}
@@ -453,8 +508,17 @@ class ExternalPlaybackStream {
     for (final request in _requests.toList()) {
       request.abort();
     }
+    for (final response in _responses.toList()) {
+      response.deadline = Duration.zero;
+    }
+    final cancels = _bodies.toList().map((body) async {
+      try {
+        await body.cancel();
+      } catch (_) {}
+    }).toList();
     _client.close(force: true);
     await _server?.close(force: true);
+    await Future.wait(cancels);
     await Future.wait(_handlers.toList());
     _resources.clear();
     _paths.clear();

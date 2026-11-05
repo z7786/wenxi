@@ -1,6 +1,7 @@
 package gopeed
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,60 @@ import (
 	"testing"
 	"time"
 )
+
+func TestHTTPProbeBoundedBodyValidation(t *testing.T) {
+	for _, mode := range []string{"valid", "wrong-range", "expanded-range", "error-page", "partial-body", "full-sample", "encoded-range"} {
+		t.Run(mode, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Range") != "bytes=0-63" || r.Header.Get("Accept-Encoding") != "identity" {
+					t.Error("body probe does not use download range headers")
+				}
+				body := "Hello World!\n"
+				if mode == "error-page" {
+					body = strings.Repeat("x", 65)
+					w.Write([]byte(body))
+					return
+				}
+				if mode == "full-sample" {
+					w.Write([]byte(strings.Repeat("a", 1000)))
+					return
+				}
+				end := len(body) - 1
+				if mode == "wrong-range" {
+					end++
+				}
+				if mode == "expanded-range" {
+					body = strings.Repeat("x", 65)
+				}
+				if mode == "encoded-range" {
+					w.Header().Set("Content-Encoding", "gzip")
+				}
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/13", end))
+				if mode == "partial-body" {
+					w.Header().Set("Content-Length", "13")
+					body = "a"
+				}
+				w.WriteHeader(http.StatusPartialContent)
+				w.Write([]byte(body))
+			}))
+			defer server.Close()
+			input, _ := json.Marshal(httpProbeInput{ID: "body-test", URL: server.URL, ReadLimit: 64, SampleOnly: mode == "full-sample"})
+			if err := StartHttpProbe(string(input)); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { StopHttpProbe("body-test") })
+			result := waitProbeTest(t, "body-test")
+			if mode == "valid" || mode == "full-sample" {
+				body, err := base64.StdEncoding.DecodeString(result.Body)
+				if result.Status != "done" || err != nil || mode == "valid" && string(body) != "Hello World!\n" || mode == "full-sample" && len(body) != 64 {
+					t.Fatalf("valid body not read: %+v", result)
+				}
+			} else if result.Status != "error" || mode == "partial-body" && result.ErrorKind != "network" || mode != "partial-body" && result.ErrorKind != "content" {
+				t.Fatalf("invalid body accepted or mislabeled: %+v", result)
+			}
+		})
+	}
+}
 
 func startProbeTest(t *testing.T, id, address string) {
 	t.Helper()

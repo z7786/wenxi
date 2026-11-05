@@ -132,6 +132,7 @@ void main() {
     double scale = 1,
     bool dark = false,
     RemoteLinkLauncher? launcher,
+    Uri? buttonUrl,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;
@@ -159,6 +160,8 @@ void main() {
               content: content,
               publishedAt: DateTime.utc(2026, 10, 10),
               pinned: true,
+              buttonText: buttonUrl == null ? '' : '打开微信小程序',
+              buttonUrl: buttonUrl,
             ),
             linkLauncher: launcher,
           ),
@@ -220,6 +223,27 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('Mini-program button dispatches only when tapped', (
+    tester,
+  ) async {
+    final opened = <Uri>[];
+    final target = Uri.parse('weixin://dl/business/?t=example-ticket');
+    await render(
+      tester,
+      '点击下方按钮进入活动小程序。',
+      buttonUrl: target,
+      launcher: (url) async {
+        opened.add(url);
+        return true;
+      },
+    );
+    expect(opened, isEmpty);
+    await tester.tap(find.byKey(const Key('announcement-detail-link')));
+    await tester.pumpAndSettle();
+    expect(opened, [target]);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'Raw HTML and local or embedded image URLs never load a resource',
     (tester) async {
@@ -256,6 +280,7 @@ void main() {
           await render(
             tester,
             '![界面截图](https://images.example.test/$status.png)',
+            buttonUrl: Uri.parse('weixin://dl/business/?t=example-ticket'),
           );
           for (var i = 0; i < 40; i++) {
             final loaded = status == 200
@@ -286,6 +311,24 @@ void main() {
             expect(find.text('界面截图'), findsOneWidget);
           }
           expect(tester.takeException(), isNull);
+          if (status == 200 &&
+              const bool.fromEnvironment('ANNOUNCEMENT_CAPTURE_PREVIEWS')) {
+            final boundary = tester.renderObject<RenderRepaintBoundary>(
+              find.byKey(const Key('markdown-capture')),
+            );
+            await tester.runAsync(() async {
+              final picture = await boundary.toImage(pixelRatio: 1);
+              final data = await picture.toByteData(
+                format: ui.ImageByteFormat.png,
+              );
+              final file = File(
+                '.local/announcements-review/image-mini-program.png',
+              );
+              await file.parent.create(recursive: true);
+              await file.writeAsBytes(data!.buffer.asUint8List());
+              picture.dispose();
+            });
+          }
           await tester.pumpWidget(const SizedBox());
         } finally {
           debugNetworkImageHttpClientProvider = null;

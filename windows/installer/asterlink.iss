@@ -83,6 +83,15 @@ Name: "webview2"; Description: "安装网页登录组件（Microsoft WebView2，
 Source: "{#RuntimeDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#WebView2Setup}"; Flags: dontcopy
 
+[InstallDelete]
+; Retired MDK runtime files from previous installations.
+Type: files; Name: "{app}\fvp.dll"
+Type: files; Name: "{app}\mdk.dll"
+Type: files; Name: "{app}\mdk-braw.dll"
+Type: files; Name: "{app}\mdk-r3d.dll"
+Type: files; Name: "{app}\ffmpeg-9.dll"
+Type: files; Name: "{app}\libass.dll"
+
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExe}"
 Name: "{group}\卸载{#AppName}"; Filename: "{uninstallexe}"; WorkingDir: "{app}"

@@ -11,6 +11,22 @@ import 'package:asterlink/playback/cast/cast_session.dart';
 import 'package:asterlink/playback/cast/dlna.dart';
 import 'cast_support.dart';
 
+class _SeekRetryClient extends DlnaClient {
+  int seeks = 0;
+  @override
+  Future<Map<String, String>> transport(
+    CastDevice device,
+    String actionName, [
+    Map<String, String> args = const {},
+  ]) async {
+    if (actionName == 'Seek') {
+      seeks++;
+      throw CastSoapException('fixture seek failure', seeks == 1 ? 701 : 710);
+    }
+    return super.transport(device, actionName, args);
+  }
+}
+
 void main() {
   test(
     'SSDP validates status, sender, LAN location and case-insensitive headers',
@@ -208,6 +224,42 @@ void main() {
       await session.close();
       expect(tv.events.last, 'Stop');
       expect(platform.events, ['active:true', 'active:false']);
+    },
+  );
+
+  test(
+    'unsupported Seek after the TV readiness retry disables further seek controls',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final client = _SeekRetryClient();
+      final session = CastSession(
+        tv.device,
+        const DownloadSpec(
+          url: 'https://example.invalid/video.mp4',
+          fileName: 'movie.mp4',
+        ),
+        client: client,
+        platform: TestCastPlatform(),
+        pollInterval: const Duration(days: 1),
+      );
+      addTearDown(session.close);
+      await session.start(
+        title: 'Movie',
+        position: const Duration(seconds: 40),
+        duration: tv.duration,
+      );
+      expect(client.seeks, 2);
+      expect(session.connected, isTrue);
+      expect(session.seekSupported, isFalse);
+      expect(session.warning, contains('不支持拖动进度'));
+      expect(session.state.position, Duration.zero);
+      await expectLater(
+        session.seek(const Duration(seconds: 20)),
+        throwsA(isA<AppException>()),
+      );
+      expect(client.seeks, 2);
     },
   );
 

@@ -96,9 +96,11 @@ void main() {
             '过期昵称',
           );
           await services.refreshAccount(platform);
+          await services.store.flush();
           expect(vault.profiles(platform).single.name, '测试账号');
           await vault.renameAccount(platform, id, '家庭备份');
           await services.refreshAccount(platform);
+          await services.store.flush();
           expect(vault.profiles(platform).single.name, '家庭备份');
           expect(vault.profiles(platform).single.nickname, '测试账号');
           expect(vault.credential(platform)!.updatedAt, original.updatedAt);

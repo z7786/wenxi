@@ -152,6 +152,60 @@ void main() {
   );
 
   test(
+    'Zoom is remembered per folder while layout applies globally and legacy defaults remain usable',
+    () async {
+      final state = StateStore.memory({
+        'playbackPreferences': {'rate': 1.25},
+      });
+      addTearDown(state.dispose);
+      final history = PlaybackStore(state);
+      final old = history.preferencesFor('show-a');
+      expect(old.videoScale, 1);
+      expect(old.controlsScale, 1);
+      expect(old.showSpeedButton && old.showPlaylistButton, isTrue);
+      await history.saveEffectivePreferences(
+        'show-a',
+        old.copyWith(
+          videoScale: 1.75,
+          videoOffsetX: -.2,
+          videoOffsetY: .4,
+          controlsScale: 1.4,
+          showResolution: false,
+          showCastButton: false,
+          showSpeedButton: false,
+          showPlaylistButton: false,
+          showNextButton: false,
+          showLockButton: false,
+          panelLayout: 'bottom',
+        ),
+        old,
+      );
+      final reopenedState = StateStore.memory(state.data);
+      addTearDown(reopenedState.dispose);
+      final reopened = PlaybackStore(reopenedState);
+      final sameFolder = reopened.preferencesFor('show-a');
+      final otherFolder = reopened.preferencesFor('show-b');
+      expect(sameFolder.videoScale, 1.75);
+      expect(sameFolder.videoOffsetX, -.2);
+      expect(sameFolder.videoOffsetY, .4);
+      expect(otherFolder.videoScale, 1);
+      expect(otherFolder.videoOffsetX, 0);
+      expect(otherFolder.videoOffsetY, 0);
+      for (final value in [sameFolder, otherFolder]) {
+        expect(value.rate, 1.25);
+        expect(value.controlsScale, 1.4);
+        expect(value.showResolution, isFalse);
+        expect(value.showCastButton, isFalse);
+        expect(value.showSpeedButton, isFalse);
+        expect(value.showPlaylistButton, isFalse);
+        expect(value.showNextButton, isFalse);
+        expect(value.showLockButton, isFalse);
+        expect(value.panelLayout, 'bottom');
+      }
+    },
+  );
+
+  test(
     'episode order sorts natural digits, padded digits and Chinese episode numbers',
     () {
       final episodes = [

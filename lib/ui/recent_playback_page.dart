@@ -31,7 +31,9 @@ Future<void> openRecentPlayback(
     return candidate!;
   }, label: '正在恢复播放…');
   if (controller == null || !context.mounted) {
-    await candidate?.close();
+    if (candidate != null) {
+      services.finishPlaybackInBackground(candidate!.close());
+    }
     return;
   }
   try {
@@ -40,15 +42,15 @@ Future<void> openRecentPlayback(
       MaterialPageRoute(
         builder: (_) => PlayerPage(
           controller,
-          confirmDownload: () => confirmBaiduDownload(
-            context,
+          confirmDownload: (playerContext) => confirmBaiduDownload(
+            playerContext,
             services,
             controller.current.platform,
             session: controller.current.source?.cloud?.session,
           ),
           onAuthorizeUcTv: controller.current.platform == CloudPlatform.uc
-              ? () => openUcTvAuthorization(
-                  context,
+              ? (playerContext) => openUcTvAuthorization(
+                  playerContext,
                   services,
                   accountId:
                       controller.current.source?.cloud?.session.accountId,
@@ -70,7 +72,7 @@ Future<void> openRecentPlayback(
       ),
     );
   } finally {
-    await controller.close();
+    services.finishPlaybackInBackground(controller.close());
   }
 }
 

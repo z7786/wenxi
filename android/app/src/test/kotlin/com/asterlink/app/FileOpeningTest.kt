@@ -5,6 +5,8 @@ import android.content.ContentProvider
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.ResolveInfo
 import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
@@ -56,9 +58,32 @@ class FileOpeningTest {
         assertEquals(FileOpening.APK_MIME, launched.type)
         assertEquals(uri, launched.data)
         assertEquals(uri, launched.clipData!!.getItemAt(0).uri)
+        assertTrue(launched.clipData!!.description.hasMimeType(FileOpening.APK_MIME))
+        assertNotEquals(0, launched.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
         assertNotEquals(0, launched.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION)
         assertEquals(0, launched.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         assertEquals(listOf<FileOpenFailure?>(null), results)
+    }
+
+    @Test fun installerReceivesAnExplicitReadGrantForItsScanner() {
+        val installer = "oem.package.installer"
+        val granted = mutableListOf<Pair<String, Uri>>()
+        val wrapper = object : android.content.ContextWrapper(context) {
+            override fun grantUriPermission(toPackage: String, uri: Uri, modeFlags: Int) {
+                assertEquals(Intent.FLAG_GRANT_READ_URI_PERMISSION, modeFlags)
+                granted.add(toPackage to uri)
+            }
+        }
+        val intent = FileOpening.readableIntent(FileOpening.OpenFile(uri, FileOpening.APK_MIME), false)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        @Suppress("DEPRECATION")
+        shadowOf(context.packageManager).addResolveInfoForIntent(intent, ResolveInfo().apply {
+            activityInfo = ActivityInfo().apply { packageName = installer; name = "InstallerActivity" }
+        })
+        opener = FileOpening(wrapper, { activity }, { true })
+        opener.open(uri.toString(), "app.apk", false, results::add)
+        assertEquals(listOf(installer to uri), granted)
+        assertEquals(uri, shadowOf(activity).nextStartedActivity.data)
     }
 
     @Test fun grantingUnknownSourcesContinuesTheSameInstallExactlyOnce() {

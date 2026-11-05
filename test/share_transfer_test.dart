@@ -39,6 +39,9 @@ class _TransferFixture {
   late final Future<void> Function(DownloadCleanup) delegateStage;
   final staged = <DownloadCleanup>[];
   bool failTransfer = false, mismatch = false, emptyFolder = false;
+  bool failCommandDetails = false;
+  bool directSave = false;
+  int commandDetails = 0;
   int polls = 0;
   String folder = '', folderName = '';
   Future<void> stage(DownloadCleanup value) async {
@@ -61,18 +64,21 @@ class _TransferFixture {
           },
     updatedAt: revision,
   );
-  BrowseSession get share => BrowseSession(
-    platform: platform,
-    mode: BrowseMode.share,
-    title: 'share',
-    rootId: 'share-root',
-    metadata: const {
-      'shareKey': 'key',
-      'passcode': 'a123',
-      'linkId': 'link',
-      'password': 'a123',
-    },
-  );
+  BrowseSession get share => shareWithId('link');
+  BrowseSession shareWithId(String linkId, {bool command = false}) =>
+      BrowseSession(
+        platform: platform,
+        mode: BrowseMode.share,
+        title: 'share',
+        rootId: 'share-root',
+        metadata: {
+          'shareKey': 'key',
+          'passcode': 'a123',
+          'linkId': linkId,
+          if (command) 'linkCode': 'b9gaLFbe4PUz',
+          'password': 'a123',
+        },
+      );
   CloudFile get file => CloudFile(
     id: platform == CloudPlatform.pan123 ? '42' : 'source-file',
     name: 'example.zip',
@@ -93,6 +99,26 @@ class _TransferFixture {
   });
   HttpResult respond(RecordedRequest r) {
     final path = r.uri.path;
+    if (path.endsWith('/getOutLinkGeneral')) {
+      commandDetails++;
+      expect(r.headers['Authorization'], credential().field('authorization'));
+      final plain = C139Protocol.decrypt(r.body as String);
+      final body = asJson(jsonDecode(plain)).obj('getOutLinkGeneralReq');
+      expect(body, {
+        'account': '13800000000',
+        'linkCode': 'b9gaLFbe4PUz',
+        'linkCodeType': 1,
+        'passwd': 'a123',
+        'isPasswd': 0,
+      });
+      return ok({
+        'getOutLinkGeneralResp': {
+          'outLinkGeneral': [
+            {'linkID': failCommandDetails ? '' : 'resolved-command-share'},
+          ],
+        },
+      });
+    }
     if (path.endsWith('/upload_request') || path.endsWith('/file/create')) {
       folder = platform == CloudPlatform.pan123 ? '900' : 'temporary-folder';
       folderName = r.json.str(
@@ -131,13 +157,19 @@ class _TransferFixture {
       });
     }
     if (path.endsWith('/createOuterLinkBatchOprTask')) {
-      expect(staged, hasLength(1));
+      expect(staged, hasLength(directSave ? 0 : 1));
       final body = asJson(jsonDecode(C139Protocol.decrypt(r.body as String)));
+      final request = body.obj('createOuterLinkBatchOprTaskReq');
+      expect(
+        request.str('linkID'),
+        commandDetails > 0 ? 'resolved-command-share' : 'link',
+      );
+      expect(request.obj('taskInfo').str('linkID'), request.str('linkID'));
       expect(
         body
             .obj('createOuterLinkBatchOprTaskReq')
             .obj('taskInfo')['newCatalogID'],
-        folder,
+        directSave ? 'chosen-directory' : folder,
       );
       expect(
         body
@@ -234,6 +266,68 @@ class _TransferFixture {
 }
 
 void main() {
+  test(
+    'Mobile command save resolves its share ID and writes only to the chosen directory',
+    () async {
+      final fixture = _TransferFixture(CloudPlatform.c139)..directSave = true;
+      final connector = fixture.repository.connector(CloudPlatform.c139);
+      await connector.saveShare(
+        fixture.shareWithId('', command: true),
+        [fixture.file],
+        'chosen-directory',
+        fixture.credential(),
+      );
+      expect(fixture.commandDetails, 1);
+      expect(fixture.polls, 2);
+      expect(fixture.staged, isEmpty);
+      expect(fixture.folder, isEmpty);
+    },
+  );
+
+  test(
+    'Mobile command from an old directory resolves its real share ID before download transfer',
+    () async {
+      final fixture = _TransferFixture(CloudPlatform.c139);
+      await fixture.vault.putCredential(
+        CloudPlatform.c139,
+        fixture.credential(),
+      );
+      final spec = await fixture.repository.prepare(
+        fixture.shareWithId('', command: true),
+        fixture.file,
+      );
+      expect(fixture.commandDetails, 1);
+      expect(fixture.polls, 2);
+      expect(fixture.staged, hasLength(1));
+      expect(spec.url, 'https://cdn.example/selected?signature=retained');
+      expect(spec.cleanup, same(fixture.staged.single));
+      expect(fixture.http.calls.first.uri.path, endsWith('/getOutLinkGeneral'));
+    },
+  );
+
+  test(
+    'Missing mobile command details never create a temporary folder or transfer',
+    () async {
+      final fixture = _TransferFixture(CloudPlatform.c139)
+        ..failCommandDetails = true;
+      await fixture.vault.putCredential(
+        CloudPlatform.c139,
+        fixture.credential(),
+      );
+      await expectLater(
+        fixture.repository.prepare(
+          fixture.shareWithId('', command: true),
+          fixture.file,
+        ),
+        throwsA(isA<AppException>()),
+      );
+      expect(fixture.commandDetails, 1);
+      expect(fixture.staged, isEmpty);
+      expect(fixture.folder, isEmpty);
+      expect(fixture.http.calls, hasLength(1));
+    },
+  );
+
   for (final platform in [CloudPlatform.pan123, CloudPlatform.c139]) {
     test(
       '${platform.key} transfers selected share file then fetches personal link and retains cleanup until release',

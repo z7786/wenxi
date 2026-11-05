@@ -12,11 +12,14 @@ abstract class PlaybackDevice extends ChangeNotifier {
   bool get supportsOrientation => false;
   bool get supportsPip;
   bool get supportsDesktopPip => false;
+  bool get supportsIndependentPlayerWindows => false;
   bool get supportsExternalPlayer => false;
   WindowsExternalPlayer? get windowsExternalPlayer => null;
   bool get supportsBrightness;
+  bool get supportsSystemVolume => false;
   bool get inPip;
   double get brightness;
+  double get systemVolume => 100;
   Stream<String> get actions;
   Future<void> start({required bool video});
   Future<void> update({
@@ -29,6 +32,7 @@ abstract class PlaybackDevice extends ChangeNotifier {
     bool controlsVisible = true,
   });
   Future<void> setBrightness(double value);
+  Future<double> setSystemVolume(double value) async => systemVolume;
   Future<void> fullscreen(bool enabled);
   Future<bool> enterPip();
   Future<void> exitPip() async {}
@@ -70,17 +74,26 @@ class NativePlaybackDevice extends PlaybackDevice {
   bool _fullscreen = false, _previousWindowsFullscreen = false;
   bool _video = false;
   double _brightness = .5;
+  double _systemVolume = 100;
+  bool _supportsSystemVolume = false;
+  final _volumeGate = AsyncGate();
   String _lastUpdate = '';
   @override
   bool get supportsPip => _supportsPip;
   @override
   bool get supportsDesktopPip => _windows && _supportsPip;
   @override
+  bool get supportsIndependentPlayerWindows => _windows;
+  @override
   bool get supportsBrightness => _android;
+  @override
+  bool get supportsSystemVolume => _android && _supportsSystemVolume;
   @override
   bool get inPip => _windows ? _windowsPip.active : _inPip;
   @override
   double get brightness => _brightness;
+  @override
+  double get systemVolume => _systemVolume;
   @override
   Stream<String> get actions => _actions.stream;
   Future<T?> _invoke<T>(String name, [Json arguments = const {}]) =>
@@ -100,18 +113,43 @@ class NativePlaybackDevice extends PlaybackDevice {
           notifyListeners();
         } else if (call.method == 'action') {
           _actions.add(args.str('action'));
+        } else if (call.method == 'volume') {
+          _readSystemVolume(args);
         }
       });
       final values = asJson(await _invoke<Object?>('begin', {'video': video}));
       if (_closed) return;
       _supportsPip = values.boolean('pip');
-      _brightness = values.number('brightness', .5).clamp(.05, 1).toDouble();
+      _brightness = values.number('brightness', .5).clamp(0, 1).toDouble();
+      _readSystemVolume(values);
     } else if (_windows) {
       _previousWindowsFullscreen = await windowManager.isFullScreen();
       _supportsPip = video;
     }
     if (!_closed) notifyListeners();
   }
+
+  void _readSystemVolume(Json values) {
+    final supported = values.boolean('systemVolumeSupported');
+    final value = values.number('systemVolume', double.nan);
+    if (!value.isFinite) return;
+    final volume = value.clamp(0, 100).toDouble();
+    if (_supportsSystemVolume == supported && _systemVolume == volume) return;
+    _supportsSystemVolume = supported;
+    _systemVolume = volume;
+    if (!_closed) notifyListeners();
+  }
+
+  @override
+  Future<double> setSystemVolume(double value) => _volumeGate.run(() async {
+    if (_closed || !_started || !supportsSystemVolume) return _systemVolume;
+    require(value.isFinite, '音量数值无效');
+    final result = asJson(
+      await _invoke<Object?>('volume', {'value': value.clamp(0, 100)}),
+    );
+    if (!_closed) _readSystemVolume(result);
+    return _systemVolume;
+  });
 
   @override
   Future<void> update({
@@ -158,7 +196,7 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   Future<void> setBrightness(double value) async {
     if (_closed || !supportsBrightness) return;
-    _brightness = value.clamp(.05, 1).toDouble();
+    _brightness = value.clamp(0, 1).toDouble();
     await _invoke<void>('brightness', {'value': _brightness});
     if (!_closed) notifyListeners();
   }

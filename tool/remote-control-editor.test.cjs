@@ -8,7 +8,8 @@ const vm = require('node:vm');
 
 const root = resolve(__dirname, '..');
 const html = readFileSync(resolve(root, '远程配置编辑器.html'), 'utf8');
-const context = vm.createContext({ URL, TextEncoder, TextDecoder, AbortController, setTimeout, clearTimeout });
+const context = vm.createContext({ URL, TextEncoder, TextDecoder, AbortController, setTimeout, clearTimeout, atob });
+vm.runInContext(html.match(/<script id="markdown-vendor">([\s\S]*?)<\/script>/)[1], context);
 const script = html.match(/<script id="config-core">([\s\S]*?)<\/script>/)[1];
 vm.runInContext(script, context);
 const C = context.WenxiConfig;
@@ -31,6 +32,22 @@ test('Optional in-app update fields roundtrip and count as changed publication c
   assert.ok(C.validate(changed).some(e => e.path === 'updates.android.inAppDownloadUrl'));
 });
 const issue = (value, path) => assert.ok(C.validate(value).some(e => e.path === path), `Expected validation error at ${path}`);
+
+test('announcement mini-program targets validate without relaxing updates or images', () => {
+  const config = C.template();
+  config.announcement = {enabled:true,title:'活动',content:'![图片](https://example.test/banner.png)',
+    buttonText:'打开微信小程序',buttonUrl:'weixin://dl/business/?t=example-ticket'};
+  valid(config);
+  assert.equal(C.https(config.announcement.buttonUrl),false);
+  assert.equal(C.announcementLink(config.announcement.buttonUrl),true);
+  assert.match(C.markdown(config.announcement.content),/<img/);
+  assert.doesNotMatch(C.markdown('![本机](file:///C:/private.png)\n\n<script>alert(1)</script>'),/<(?:img|script)\b/);
+  config.announcement.buttonUrl = 'weixin://dl/scan/';
+  issue(config,'announcement.buttonUrl');
+  config.updates.android = {...config.updates.android,enabled:true,version:'1',build:100,
+    downloadUrl:'weixin://dl/business/?t=example-ticket'};
+  issue(config,'updates.android.downloadUrl');
+});
 
 test('both embedded scripts parse and the single HTML has no remote dependencies', () => {
   for (const [, id, source] of html.matchAll(/<script id="([^"]+)">([\s\S]*?)<\/script>/g)) {
@@ -244,10 +261,10 @@ test('enabled sections require their essential fields', () => {
   for (const path of ['announcement.title', 'announcement.content', 'updates.windows.version', 'updates.windows.build', 'updates.windows.downloadUrl', 'help.url']) issue(config, path);
 });
 
-test('notice ID is no longer an editable or required field; today preview stays local', () => {
+test('notice ID is no longer an editable or required field; week preview stays local', () => {
   assert.doesNotMatch(html, /data-path="announcement\.id"|id="new-notice-id"/);
   assert.match(html, /id="preview-hide-today"/);
-  assert.match(html, /今天不再显示/);
+  assert.match(html, /7天不再显示/);
   const config = C.template();
   delete config.announcement.id;
   config.announcement.enabled = true;

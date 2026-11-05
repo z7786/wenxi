@@ -55,8 +55,8 @@ android {
                 abiFilters.clear()
                 abiFilters.add("arm64-v8a")
             }
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

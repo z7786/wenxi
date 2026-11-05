@@ -10,6 +10,8 @@ import '../data/state_store.dart';
 import '../domain/links.dart';
 import '../domain/models.dart' show LinkKind;
 import '../download/download_activity.dart';
+import '../platform/windows_lan.dart';
+import 'lan_addresses.dart';
 import 'lan_datagrams.dart';
 import 'lan_files.dart';
 import 'lan_models.dart';
@@ -61,7 +63,7 @@ class LanService extends ChangeNotifier {
     Future<List<String>> Function()? addresses,
     DateTime Function()? clock,
   }) : bindAddress = bindAddress ?? InternetAddress.anyIPv4,
-       _addresses = addresses ?? _localAddresses,
+       _addresses = addresses ?? localLanAddresses,
        clock = clock ?? DateTime.now {
     _inbox.addAll(
       store.data.list('lanInbox').map(LanInboxItem.fromJson).take(100),
@@ -80,6 +82,7 @@ class LanService extends ChangeNotifier {
   final _serviceZone = Zone.current;
   final _shares = <String, LanShare>{}, _peers = <String, LanPeer>{};
   final _sessions = <String, _LanSession>{};
+  final _peerEndpoints = <String, List<Uri>>{};
   final _peerSessions =
       <String, ({String token, Uri base, DateTime expires})>{};
   final _attempts = <String, List<DateTime>>{};
@@ -177,15 +180,6 @@ class LanService extends ChangeNotifier {
     }
   });
 
-  static Future<List<String>> _localAddresses() async => [
-    for (final nic in await NetworkInterface.list(
-      type: InternetAddressType.IPv4,
-    ))
-      for (final address in nic.addresses)
-        if (!address.isLoopback && isLanAddress(address.address))
-          address.address,
-  ];
-
   Uri base([String? address]) {
     require(running && addresses.isNotEmpty, '请先开启设备互联');
     require(address == null || addresses.contains(address), '局域网地址已变化，请刷新');
@@ -200,6 +194,15 @@ class LanService extends ChangeNotifier {
     deviceId: id,
     code: connectionCode,
   ).encode();
+
+  Future<void> allowIncomingConnections() async {
+    require(running, '请先开启设备互联');
+    await allowWindowsLanConnections(
+      port,
+      discoveryPort == 0 ? lanDiscoveryPort : discoveryPort,
+    );
+    await refreshDevices();
+  }
 
   Future<void> rename(String value) async {
     final next = value.trim();
@@ -343,7 +346,10 @@ class LanService extends ChangeNotifier {
     } on AppException {
       rethrow;
     } catch (_) {
-      throw const AppException('无法连接对方，请检查是否处于同一局域网且已开启设备互联');
+      throw const AppException(
+        '无法连接对方，请确认处于同一局域网且已开启设备互联。'
+        '连接电脑时，请在电脑端允许文析助手通过 Windows 防火墙',
+      );
     } finally {
       finished = true;
       request?.abort();
@@ -366,6 +372,10 @@ class LanService extends ChangeNotifier {
   Future<void> connect(LanPeer peer, String code) async {
     await start();
     require(RegExp(r'^\d{6}$').hasMatch(code), '请输入对方设备显示的 6 位连接码');
+    peer = await _findPeerEndpoint(peer.id, [
+      peer.base,
+      ...?_peerEndpoints[peer.id],
+    ]);
     final replySession = lanId();
     final result = await _json(
       peer.base.replace(path: '/v1/pair'),
@@ -403,10 +413,46 @@ class LanService extends ChangeNotifier {
   }
 
   Future<LanPeer> connectQr(LanConnectionQr qr) async {
-    final peer = await findDevice(qr.address.toString());
-    require(peer.id == qr.deviceId, '二维码对应的设备已变化，请重新扫描对方的连接二维码');
+    await start();
+    final peer = await _findPeerEndpoint(qr.deviceId, [
+      qr.address,
+      if (_peers[qr.deviceId] case final known?) known.base,
+      ...?_peerEndpoints[qr.deviceId],
+    ]);
     await connect(peer, qr.code);
-    return peer;
+    return _peers[peer.id] ?? peer;
+  }
+
+  Future<LanPeer> _findPeerEndpoint(
+    String deviceId,
+    List<Uri> endpoints,
+  ) async {
+    AppException? lastError;
+    final remaining = endpoints.toSet().toList(), tried = <Uri>{};
+    while (remaining.isNotEmpty && tried.length < 8) {
+      final endpoint = remaining.removeAt(0);
+      if (!tried.add(endpoint)) continue;
+      RequestScope.checkpoint();
+      try {
+        final peer = await findDevice(endpoint.toString());
+        require(
+          peer.id == deviceId && peer.id != id && peer.port == endpoint.port,
+          '连接地址对应的设备已变化，请重新扫描或发现设备',
+        );
+        _peers[peer.id] = peer;
+        _changed();
+        return peer;
+      } on AppException catch (error) {
+        RequestScope.checkpoint();
+        lastError = error;
+        for (final alternate in _peerEndpoints[deviceId] ?? const <Uri>[]) {
+          if (!tried.contains(alternate) && !remaining.contains(alternate)) {
+            remaining.add(alternate);
+          }
+        }
+      }
+    }
+    throw lastError ?? const AppException('暂未发现可连接的设备地址，请刷新后重试');
   }
 
   Future<LanPeer> connectCode(String code) async {
@@ -417,7 +463,7 @@ class LanService extends ChangeNotifier {
     // Submit a pairing code only to the selected device.
     final peer = peers.single;
     await connect(peer, code);
-    return peer;
+    return _peers[peer.id] ?? peer;
   }
 
   String _session(LanPeer peer) {
@@ -628,6 +674,7 @@ class LanService extends ChangeNotifier {
       (key, peer) =>
           now.difference(peer.lastSeen).inSeconds > 15 && !connected(peer),
     );
+    _peerEndpoints.removeWhere((id, _) => !_peers.containsKey(id));
     _sessions.removeWhere((key, session) => session.expires.isBefore(now));
     _peerSessions.removeWhere((key, session) => !session.expires.isAfter(now));
     _attempts.removeWhere(
@@ -657,6 +704,7 @@ class LanService extends ChangeNotifier {
     }
     _shares.clear();
     _peers.clear();
+    _peerEndpoints.clear();
     _peerSessions.clear();
     _sessions.clear();
     await _server?.close(force: true);

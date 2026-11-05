@@ -123,6 +123,7 @@ void main() {
       late DownloadManager manager;
       late Process process;
       var refreshes = 0;
+      var managerDisposed = false;
 
       Future<void> openManager() async {
         transport = DesktopGopeedTransport(
@@ -156,7 +157,15 @@ void main() {
             });
           },
         );
+        managerDisposed = false;
         await manager.initialize();
+      }
+
+      Future<void> closeManager() async {
+        if (managerDisposed) return;
+        await manager.close();
+        manager.dispose();
+        managerDisposed = true;
       }
 
       DownloadSpec spec({bool empty = false}) => DownloadSpec(
@@ -200,8 +209,7 @@ void main() {
       });
       tearDown(() async {
         if (!server.secondSegment.isCompleted) server.secondSegment.complete();
-        await manager.close();
-        manager.dispose();
+        await closeManager();
         await server.server.close(force: true);
         await root.delete(recursive: true);
         HttpOverrides.global = null;
@@ -240,32 +248,44 @@ void main() {
           final paused = manager.task(id)!;
           expect(paused.status, DownloadStatus.paused, reason: paused.error);
           expect(paused.downloaded, inExclusiveRange(0, server.bytes.length));
-          await manager.close();
-          manager.dispose();
-          for (final file in Directory(
-            p.join(root.path, 'native'),
-          ).listSync(recursive: true).whereType<File>()) {
+          await closeManager();
+          final checkpoints = Directory(p.join(root.path, 'native'))
+              .listSync(recursive: true)
+              .whereType<File>()
+              .where((file) => p.basename(file.path) == 'gopeed.db')
+              .toList();
+          expect(checkpoints, isNotEmpty);
+          for (final file in checkpoints) {
             final raw = utf8.decode(
               await file.readAsBytes(),
               allowMalformed: true,
             );
+            expect(raw, contains('asterlink-storage-format'));
             expect(
-              raw.contains('local-fixture-secret'),
-              isFalse,
+              raw,
+              contains('local-fixture-secret=only-tests'),
               reason: p.basename(file.path),
             );
             expect(
-              raw.contains(server.url('file')),
-              isFalse,
+              raw,
+              contains(server.url('file')),
               reason: p.basename(file.path),
             );
           }
-          expect(
-            utf8
-                .decode(await store.file!.readAsBytes(), allowMalformed: true)
-                .contains('local-fixture-secret'),
-            isFalse,
+          final persisted = decodePlainState(await store.file!.readAsBytes());
+          final saved = DownloadTask.fromJson(
+            persisted
+                .list('tasks')
+                .map(asJson)
+                .singleWhere((task) => task.str('id') == id),
           );
+          expect(saved.status, DownloadStatus.paused);
+          expect(saved.downloaded, paused.downloaded);
+          expect(
+            saved.spec.headers['Cookie'],
+            'local-fixture-secret=only-tests',
+          );
+          expect(saved.spec.url, server.url('file'));
           server.expireOriginal = true;
           server.ranges.clear();
           await openManager();

@@ -14,6 +14,7 @@ String lanzouFolderPage({
   String title = '示例文件夹',
   bool password = false,
   String children = '',
+  String paginationScript = '',
 }) =>
     '''<html><head><title>蓝奏云</title></head><body>
 <div class="user-title">$title</div>
@@ -27,6 +28,7 @@ var folder_id = $fid;
 // data:{'lx':99,'fid':999,'t':'decoy','k':'decoy'}
 \$.ajax({url:'/filemoreajax.php',data:{'lx':2,'fid':folder_id,'pg':pg,
   't':folder_time,'k':folder_key,'pwd':pwd}});
+$paginationScript
 </script></body></html>''';
 
 class LanzouFolderFixture extends LanzouFixture {

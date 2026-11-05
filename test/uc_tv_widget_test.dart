@@ -94,7 +94,7 @@ void main() {
                             'test-fixture/subtitles',
                           ),
                           device: FakePlaybackDevice(),
-                          onAuthorizeUcTv: () =>
+                          onAuthorizeUcTv: (_) =>
                               openUcTvAuthorization(context, services),
                         ),
                       ),

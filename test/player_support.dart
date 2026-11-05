@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:media_kit/media_kit.dart';
+import 'package:flutter/widgets.dart';
+import 'package:asterlink/playback/playback_state.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/playback_store.dart';
@@ -56,6 +57,16 @@ class FakePlaybackBackend extends PlaybackBackend {
   bool hardwareAcceleration = true, failHardwareOpen = false, failOpen = false;
   bool sourceFailure = false;
   bool screenshotSupported = false, nativeSubtitles = false;
+  bool videoSurface = false;
+  BoxFit? lastFit;
+  double? lastAspectRatio;
+  @override
+  Widget? buildVideo({required BoxFit fit, double? aspectRatio}) {
+    lastFit = fit;
+    lastAspectRatio = aspectRatio;
+    return videoSurface ? const ColoredBox(color: Color(0xff2468ac)) : null;
+  }
+
   Uint8List? screenshotBytes;
   final captures = <bool>[];
   Future<void>? screenshotBarrier;
@@ -63,6 +74,33 @@ class FakePlaybackBackend extends PlaybackBackend {
   bool get supportsScreenshot => screenshotSupported;
   @override
   bool get rendersSubtitlesNatively => nativeSubtitles;
+  final subtitlePresentations =
+      <
+        ({
+          double size,
+          double? width,
+          double height,
+          double bottom,
+          int? backgroundColor,
+        })
+      >[];
+  @override
+  Future<void> setSubtitlePresentation({
+    required double size,
+    double? width,
+    required double height,
+    required double bottom,
+    int? backgroundColor,
+  }) async {
+    subtitlePresentations.add((
+      size: size,
+      width: width,
+      height: height,
+      bottom: bottom,
+      backgroundColor: backgroundColor,
+    ));
+  }
+
   @override
   Future<Uint8List?> screenshot({bool includeSubtitles = false}) async {
     captures.add(includeSubtitles);
@@ -86,6 +124,7 @@ class FakePlaybackBackend extends PlaybackBackend {
   }
 
   final rates = <double>[], volumes = <double>[], seeks = <Duration>[];
+  Future<void>? rateBarrier;
   double subtitleDelay = 0, audioDelay = 0;
   int subtitleChanges = 0;
   @override
@@ -154,6 +193,7 @@ class FakePlaybackBackend extends PlaybackBackend {
 
   @override
   Future<void> setRate(double value) async {
+    await rateBarrier;
     rates.add(value);
     emit(_state.copyWith(rate: value));
   }
@@ -205,6 +245,7 @@ class PlaybackFixture {
   PlaybackFixture({
     int count = 3,
     Json? data,
+    StateStore? sharedStore,
     List<CloudPlatform>? platforms,
     bool renewable = false,
     bool prepareAhead = false,
@@ -217,8 +258,9 @@ class PlaybackFixture {
     List<PlaybackSubtitle> Function(PlaybackEntry)? subtitlesFor,
     Future<File> Function(PlaybackEntry, PlaybackSubtitle, RequestScope)?
     readSubtitle,
-  }) : store = StateStore.memory(data) {
-    history = PlaybackStore(store);
+    PlaybackStore Function(StateStore)? historyFactory,
+  }) : store = sharedStore ?? StateStore.memory(data) {
+    history = historyFactory?.call(store) ?? PlaybackStore(store);
     entries =
         suppliedEntries ??
         List.generate(
@@ -319,11 +361,19 @@ class FakePlaybackDevice extends PlaybackDevice {
   @override
   bool supportsDesktopPip = false;
   @override
+  bool supportsIndependentPlayerWindows = false;
+  @override
   bool supportsOrientation = false;
   @override
   bool supportsPip = true;
   @override
   bool supportsBrightness = true;
+  @override
+  bool supportsSystemVolume = false;
+  @override
+  double systemVolume = 60;
+  final systemVolumes = <double>[];
+  Future<void>? systemVolumeBarrier;
   @override
   bool inPip = false;
   @override
@@ -374,6 +424,21 @@ class FakePlaybackDevice extends PlaybackDevice {
   }
 
   @override
+  Future<double> setSystemVolume(double value) async {
+    await systemVolumeBarrier;
+    if (finished) return systemVolume;
+    systemVolumes.add(value);
+    systemVolume = (value.clamp(0, 100) / 10).round() * 10.0;
+    notifyListeners();
+    return systemVolume;
+  }
+
+  void changeSystemVolume(double value) {
+    systemVolume = value;
+    notifyListeners();
+  }
+
+  @override
   Future<void> fullscreen(bool enabled) async {
     full = enabled;
     calls.add('fullscreen:$enabled');
@@ -387,7 +452,14 @@ class FakePlaybackDevice extends PlaybackDevice {
   }
 
   @override
-  Future<bool> queryPip() async => inPip;
+  Future<bool> queryPip() async {
+    pipQueries++;
+    await queryPipBarrier;
+    return inPip;
+  }
+
+  int pipQueries = 0;
+  Future<void>? queryPipBarrier;
   @override
   Future<void> exitPip() async => leavePip();
   @override

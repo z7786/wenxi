@@ -8,30 +8,10 @@ import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/backup.dart';
 import 'package:asterlink/data/startup_recovery.dart';
+import 'package:asterlink/data/state_key.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
 import 'support.dart';
-
-class _FailFirstKeyWrite extends FlutterSecureStorage {
-  bool failed = false;
-  @override
-  Future<void> write({
-    required String key,
-    required String? value,
-    AppleOptions? iOptions,
-    AndroidOptions? aOptions,
-    LinuxOptions? lOptions,
-    WebOptions? webOptions,
-    AppleOptions? mOptions,
-    WindowsOptions? wOptions,
-  }) async {
-    await super.write(key: key, value: value);
-    if (key.startsWith(StateStore.keyName) && value != null && !failed) {
-      failed = true;
-      throw PlatformException(code: 'fixture-write-failed');
-    }
-  }
-}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -39,6 +19,18 @@ void main() {
   late Map<String, List<int>> original;
   late StateRecoveryRequired failure;
   late Uint8List backup;
+  LocalStateKey keys([
+    FlutterSecureStorage storage = StateStore.secureStorage,
+  ]) => LocalStateKey(
+    directory,
+    storage,
+    nativeAndroid: false,
+    windowsFiles: false,
+  );
+  Future<StateStore> open() => StateStore.open(directory, localKey: keys());
+  StartupRecovery recovery([
+    FlutterSecureStorage storage = StateStore.secureStorage,
+  ]) => StartupRecovery(failure, storage: storage, localKey: keys(storage));
   setUpAll(() async {
     final source = StateStore.memory();
     await Vault(source).putCredential(
@@ -46,7 +38,10 @@ void main() {
       Credential('备份账号', {'primary': 'BDUSS=fixture'}),
     );
     await source.put('settings', {'theme': 'Dark'});
-    backup = await BackupRepository(source).create('fixture-password');
+    backup = encryptBackup((
+      decryptBackup((await BackupRepository(source).create(''), '')),
+      'fixture-password',
+    ));
     source.dispose();
   });
   setUp(() async {
@@ -83,7 +78,7 @@ void main() {
     'missing key is recoverable, leaves snapshots intact and creates no key',
     () async {
       await expectLater(
-        StateStore.open(directory),
+        open(),
         throwsA(
           isA<StateRecoveryRequired>().having(
             (e) => e.cause,
@@ -112,7 +107,7 @@ void main() {
     'wrong backup password leaves all files and secure keys unchanged',
     () async {
       await expectLater(
-        StartupRecovery(failure).restore(backup, 'wrong-password'),
+        recovery().restore(backup, 'wrong-password'),
         throwsA(isA<AppException>()),
       );
       await expectOriginals();
@@ -142,7 +137,7 @@ void main() {
         'fixture-password',
       ));
       await expectLater(
-        StartupRecovery(failure).restore(bad, 'fixture-password'),
+        recovery().restore(bad, 'fixture-password'),
         throwsA(isA<AppException>()),
       );
       await expectOriginals();
@@ -154,11 +149,9 @@ void main() {
   );
 
   test(
-    'backup recovery preserves original ciphertext and reopens accounts with a fresh key',
+    'backup recovery archives ciphertext and reopens plain accounts without a key',
     () async {
-      final result = await StartupRecovery(
-        failure,
-      ).restore(backup, 'fixture-password');
+      final result = await recovery().restore(backup, 'fixture-password');
       expect(result.accounts, 1);
       for (final entry in original.entries) {
         expect(
@@ -166,7 +159,7 @@ void main() {
           entry.value,
         );
       }
-      final reopened = await StateStore.open(directory);
+      final reopened = await open();
       expect(
         Vault(reopened).credential(CloudPlatform.baidu)?.primary,
         'BDUSS=fixture',
@@ -183,11 +176,11 @@ void main() {
         'untouched',
       );
       final activeBytes = await File(
-        '${directory.path}/state-v1.enc',
+        '${directory.path}/state-v2.json',
       ).readAsBytes();
       expect(
         utf8.decode(activeBytes, allowMalformed: true),
-        isNot(contains('BDUSS=fixture')),
+        contains('BDUSS=fixture'),
       );
       reopened.dispose();
     },
@@ -204,8 +197,8 @@ void main() {
         '${engine.path}/data',
       ).writeAsString('old encrypted engine data');
       await File('${cache.path}/video.mp4').writeAsString('existing download');
-      final result = await StartupRecovery(failure).reinitialize();
-      final reopened = await StateStore.open(directory);
+      final result = await recovery().reinitialize();
+      final reopened = await open();
       expect(reopened.data.obj('credentials'), isEmpty);
       expect(reopened.data.boolean('legacyImported'), isTrue);
       expect(
@@ -222,19 +215,22 @@ void main() {
       );
       await reopened.put('new-setting', true);
       reopened.dispose();
-      final again = await StateStore.open(directory);
+      final again = await open();
       expect(again.data.boolean('new-setting'), isTrue);
       again.dispose();
     },
   );
 
   test(
-    'write failure after saving key rolls back every snapshot and previous key',
+    'plain replacement write failure rolls back every snapshot and permits retry',
     () async {
+      final blocker = Directory('${directory.path}/state-v2.json.tmp');
+      await blocker.create();
       await expectLater(
-        StartupRecovery(failure, storage: _FailFirstKeyWrite()).reinitialize(),
-        throwsA(isA<PlatformException>()),
+        recovery().reinitialize(),
+        throwsA(isA<FileSystemException>()),
       );
+      await blocker.delete();
       await expectOriginals();
       expect(
         await StateStore.secureStorage.read(key: StateStore.keyName),
@@ -245,8 +241,8 @@ void main() {
         'untouched',
       );
       // A failed attempt must release the instance lock and allow retry.
-      await StartupRecovery(failure).reinitialize();
-      (await StateStore.open(directory)).dispose();
+      await recovery().reinitialize();
+      (await open()).dispose();
     },
   );
 
@@ -256,8 +252,8 @@ void main() {
       final oldDatabase = File('${directory.path}/gopeed/old.db');
       await oldDatabase.parent.create();
       await oldDatabase.writeAsString('encrypted with the missing old key');
-      await StartupRecovery(failure).reinitialize();
-      final reopened = await StateStore.open(directory);
+      await recovery().reinitialize();
+      final reopened = await open();
       final native = FakeNative();
       final services = AppServices(
         store: reopened,
@@ -277,7 +273,7 @@ void main() {
         await services.engine.begin({'id': 'recovered-download'});
         expect(native.started, isTrue);
         expect(native.begins.single.str('id'), 'recovered-download');
-        expect(services.vault.secret('flutter.gopeed.key'), isNotNull);
+        expect(services.vault.secret('flutter.gopeed.key'), isNull);
         expect(
           await oldDatabase.readAsString(),
           'encrypted with the missing old key',
@@ -297,7 +293,7 @@ void main() {
         value: 'invalid-base64!',
       );
       await expectLater(
-        StateStore.open(directory),
+        open(),
         throwsA(
           isA<StateRecoveryRequired>().having(
             (e) => e.cause,
@@ -306,14 +302,14 @@ void main() {
           ),
         ),
       );
-      final result = await StartupRecovery(failure).reinitialize();
+      final result = await recovery().reinitialize();
       final values = await StateStore.secureStorage.readAll();
       expect(values[StateStore.keyName], 'invalid-base64!');
       expect(
         await File('${result.archive.path}/state-v1.enc').readAsBytes(),
         original['state-v1.enc'],
       );
-      (await StateStore.open(directory)).dispose();
+      (await open()).dispose();
     },
   );
 
@@ -333,7 +329,7 @@ void main() {
         );
         await primary.writeAsBytes(bytes);
         await expectLater(
-          StartupRecovery(failure).reinitialize(),
+          recovery().reinitialize(),
           throwsA(isA<AppException>()),
         );
         expect(await primary.readAsBytes(), bytes);
@@ -351,7 +347,7 @@ void main() {
       final outcomes = await Future.wait(
         List.generate(2, (_) async {
           try {
-            await StartupRecovery(failure).reinitialize();
+            await recovery().reinitialize();
             return true;
           } on AppException {
             return false;
@@ -359,7 +355,7 @@ void main() {
         }),
       );
       expect(outcomes.where((value) => value), hasLength(1));
-      (await StateStore.open(directory)).dispose();
+      (await open()).dispose();
     },
   );
 
@@ -379,10 +375,10 @@ void main() {
         key: StateStore.keyName,
         value: base64Encode(key),
       );
-      final reopened = await StateStore.open(directory);
+      final reopened = await open();
       expect(reopened.data.boolean('restored'), isTrue);
       reopened.dispose();
-      final again = await StateStore.open(directory);
+      final again = await open();
       expect(again.data.boolean('restored'), isTrue);
       again.dispose();
     },

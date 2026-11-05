@@ -98,7 +98,7 @@ class AnnouncementFeed {
           publishedAt: _date(_text(row, 'publishedAt', 40)),
           pinned: _flag(row, 'pinned', fallback: false),
           buttonText: button,
-          buttonUrl: link.isEmpty ? null : httpsUri(link),
+          buttonUrl: link.isEmpty ? null : announcementButtonUri(link),
         );
         valid++;
         if (keys.add(message.contentKey)) messages.add(message);

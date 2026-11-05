@@ -255,4 +255,35 @@ void main() {
       },
     );
   }
+
+  test(
+    'A released decoder saves its last progress and waits for an explicit decoder choice',
+    () async {
+      await fixture.controller.start();
+      final backend = fixture.current;
+      const position = Duration(seconds: 395);
+      backend.emit(backend.state.copyWith(position: position));
+      backend
+        ..failure = PlaybackFailure.fromLog(
+          'hevc_mediacodec: Failed to dequeue output buffer (status=-542398533)',
+        )
+        ..fail();
+      await until(
+        () =>
+            fixture.history.bookmark(fixture.entries.first.key)?.position ==
+            position,
+      );
+      expect(fixture.preparations, 1);
+      expect(backend.state.playing, isFalse);
+      expect(fixture.controller.error, contains('硬件解码器'));
+      expect(fixture.controller.preferences.hardwareAcceleration, isTrue);
+      expect(fixture.leases[backend.openedSource!.url], 1);
+      await fixture.controller.setHardwareAcceleration(false);
+      expect(backend.closed, isTrue);
+      expect(fixture.current.hardwareAcceleration, isFalse);
+      expect(fixture.current.openedStart, position);
+      expect(fixture.controller.error, isEmpty);
+      expect(fixture.leases[backend.openedSource!.url], 0);
+    },
+  );
 }

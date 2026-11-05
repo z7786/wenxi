@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
@@ -8,6 +9,7 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/http.dart';
+import 'package:asterlink/data/http_retry.dart';
 import 'package:asterlink/data/providers/tianyi.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/diagnostics/redaction.dart';
@@ -36,6 +38,14 @@ const _file = CloudFile(
 );
 const _signedUrl =
     'https://download.example.test/video?sign=a%2bb&name=%e4%b8%ad&key=1&key=2';
+const _largeVideo = CloudFile(
+  id: '623463190579123491',
+  name: '演示大视频.MKV',
+  size: 63964203701,
+  parentId: '723463190579123488',
+  hashType: 'md5',
+  hashValue: _md5,
+);
 Credential _credential([
   int revision = 1,
   String cookie = 'COOKIE_LOGIN_USER=original; keep=a=b',
@@ -103,6 +113,38 @@ AccountLoginService _login(Vault vault, TianyiConnector connector) =>
       webAuthenticators: {_platform: connector.authenticate},
     );
 
+String _signature(Map<String, Object?> values) {
+  final pairs = values.entries.map((e) => '${e.key}=${e.value}').toList()
+    ..sort();
+  return md5.convert(utf8.encode(pairs.join('&'))).toString();
+}
+
+void _expectMobileRequest(RecordedRequest r) {
+  expect(r.method, 'GET');
+  expect(r.uri.host, 'api.cloud.189.cn');
+  expect(r.headers['Accept'], 'application/json;charset=UTF-8');
+  expect(r.headers['Sign-Type'], '1');
+  expect(r.headers['Timestamp'], matches(r'^\d{13}$'));
+  expect(r.headers['X-Request-ID'], matches(r'^[0-9a-f]{32}$'));
+  expect(r.headers['Origin'], 'https://h5.cloud.189.cn');
+  expect(r.headers['Referer'], 'https://h5.cloud.189.cn/share.html');
+  expect(r.headers['User-Agent'], contains('Android'));
+  expect(r.headers['User-Agent'], contains('Mobile'));
+  expect(r.uri.queryParameters.containsKey('noCache'), isFalse);
+  expect(
+    r.headers.keys.map((key) => key.toLowerCase()),
+    isNot(anyOf(contains('cookie'), contains('browser-id'))),
+  );
+  expect(
+    r.headers['Signature'],
+    _signature({
+      ...r.uri.queryParameters,
+      'AccessToken': r.headers['AccessToken'],
+      'Timestamp': r.headers['Timestamp'],
+    }),
+  );
+}
+
 class _Transfer {
   _Transfer({bool retryReads = false}) {
     http = FakeHttp(respond);
@@ -113,13 +155,11 @@ class _Transfer {
       outbox,
       retryWait: retryReads ? (_) async {} : null,
     );
-    final original = repository.connector(_platform) as TianyiConnector;
     connector = TianyiConnector(
       retryReads ? repository.http : http,
       store: vault,
       taskDelay: Duration.zero,
       maxTaskPolls: 3,
-      stageCleanup: original.stageCleanup,
     );
     repository.connectors[_platform] = connector;
   }
@@ -131,11 +171,32 @@ class _Transfer {
   late final TianyiConnector connector;
   String folderName = '';
   final pollCounts = <String, int>{};
-  bool wrongSize = false, wrongHash = false, empty = false;
   bool shareDirect = false;
+  bool mobileDirect = false;
+  CloudFile file = _file;
+  int exchanges = 0;
   Json? completedTask;
   FutureOr<HttpResult?> Function(RecordedRequest)? override;
   Future<void> initialize() => vault.putCredential(_platform, _credential());
+  Future<void> saveShare() => repository.saveShare(_share(), [_file], '900');
+
+  Future<DownloadCleanup> historicalCleanup({bool retained = false}) async {
+    folderName = 'AsterLink临时转存_00000000-0000-4000-8000-000000000000';
+    final cleanup = DownloadCleanup(
+      url: '',
+      action: {
+        'kind': 'temporary-folder',
+        'platform': _platform.key,
+        'folderId': '900',
+        'name': folderName,
+        'accountRevision': 1,
+      },
+    );
+    await outbox.stage(cleanup, accountId: vault.accountId(_platform));
+    if (retained) outbox.retain(cleanup);
+    return cleanup;
+  }
+
   Future<HttpResult> respond(RecordedRequest r) async {
     final replacement = await override?.call(r);
     if (replacement != null) return replacement;
@@ -149,11 +210,7 @@ class _Transfer {
         final type = p.str('type');
         expect(r.method, 'POST');
         if (type == 'SHARE_SAVE') {
-          expect(
-            outbox.pendingCount,
-            1,
-            reason: 'cleanup is persisted before any transfer',
-          );
+          expect(outbox.pendingCount, 0);
           expect(p['targetFolderId'], '900');
           expect(p['shareId'], '123456');
           expect(p['copyType'], '1');
@@ -174,36 +231,74 @@ class _Transfer {
           'subTaskCount': 1,
         });
       case '/api/open/file/listFiles.action':
-        expect(p['folderId'], '900');
-        if (empty) {
-          return _ok({
-            'fileListAO': {'count': 0, 'fileListSize': 0},
-          });
+        if (p['folderId'] == '-11') {
+          return _listing(
+            [],
+            folders: [
+              {'id': '900', 'name': folderName},
+            ],
+          );
         }
-        return _listing([
-          {
-            ..._row('901', _file.name, wrongSize ? 43 : 42),
-            if (wrongHash) 'md5': 'ffffffffffffffffffffffffffffffff',
-          },
-        ]);
+        throw StateError(
+          'Downloads must not inspect a personal transfer folder',
+        );
       case '/api/open/file/getFileDownloadUrl.action':
         if (p.containsKey('shareId')) {
           expect(p['shareId'], '123456');
-          expect(p['fileId'], _file.id);
+          expect(p['fileId'], file.id);
           expect(p['dt'], '1');
           expect(r.headers['Cookie'], contains('share_123456=a1B2'));
           return shareDirect
               ? _ok({'fileDownloadUrl': _signedUrl})
               : jsonResponse({'res_code': 'FileTooLarge'}, 400);
         }
-        expect(
-          p['fileId'],
-          '901',
-          reason: 'transferred downloads use the verified personal ID',
-        );
-        expect(p['dt'], '1');
+        expect(p['fileId'], file.id);
+        expect(p.containsKey('dt'), isFalse);
         expect(p.containsKey('shareId'), isFalse);
         return _ok({'fileDownloadUrl': _signedUrl});
+      case '/api/portal/v2/getUserBriefInfo.action':
+        expect(r.headers['Cookie'], vault.credential(_platform)!.primary);
+        return _ok({'sessionKey': 'mobile-session'});
+      case '/api/open/oauth2/getAccessTokenBySsKey.action':
+        expect(p['sessionKey'], 'mobile-session');
+        expect(r.headers['AppKey'], '600100422');
+        expect(r.headers.containsKey('AccessToken'), isFalse);
+        expect(
+          r.headers['Signature'],
+          _signature({
+            'sessionKey': 'mobile-session',
+            'AppKey': '600100422',
+            'Timestamp': r.headers['Timestamp'],
+          }),
+        );
+        return _ok({'accessToken': 'mobile-access-${++exchanges}'});
+      case '/open/file/getFileDownloadUrl.action':
+        _expectMobileRequest(r);
+        expect(r.headers['AccessToken'], 'mobile-access-$exchanges');
+        expect(p['fileId'], file.id);
+        expect(p.containsKey('familyId'), isFalse);
+        if (p.containsKey('shareId')) {
+          expect(p['shareId'], '123456');
+          expect(p['dt'], '1');
+        } else {
+          expect(p.containsKey('dt'), isFalse);
+        }
+        return mobileDirect
+            ? _ok({'fileDownloadUrl': _signedUrl})
+            : jsonResponse({'res_code': 'FileTooLarge'}, 400);
+      case '/api/portal/getNewVlcVideoPlayUrl.action':
+        expect(p['fileId'], file.id);
+        expect(p['type'], '4');
+        expect(p['shareId'], '123456');
+        expect(r.headers['Cookie'], contains('share_123456=a1B2'));
+        return _ok({
+          'success': true,
+          'normal': {},
+          'transcode': {
+            'code': 2,
+            'url': 'https://download.example.test/transcoded.m3u8',
+          },
+        });
       default:
         throw StateError('Unexpected request ${r.uri.path}');
     }
@@ -223,14 +318,17 @@ void main() {
           request.uri.path.endsWith('/checkBatchTask.action') && ++polls == 1
           ? const HttpResult(503, '<html>unavailable</html>')
           : null;
-      final spec = await fixture.repository.prepare(_share(), _file);
-      expect(spec.url, _signedUrl);
+      await ReadRetryScope(
+        retries: 1,
+        checkpoint: RequestScope.checkpoint,
+        wait: (_) async {},
+      ).run(fixture.saveShare);
       expect(polls, 3);
       expect(
         fixture.http.calls.where(
           (r) => r.uri.path.endsWith('/createFolder.action'),
         ),
-        hasLength(1),
+        isEmpty,
       );
       expect(
         fixture.http.calls.where(
@@ -708,6 +806,86 @@ void main() {
       expect(files.map((f) => f.id), ['101', '102']);
       expect(http.calls, hasLength(2));
     });
+    for (final stage in ['getShareInfoByCodeV2', 'listShareDir']) {
+      test(
+        'Public $stage requires login only after an explicit rejection',
+        () async {
+          final http = FakeHttp((r) {
+            final authenticated = (r.headers['Cookie'] ?? '').contains(
+              'COOKIE_LOGIN_USER=original',
+            );
+            if (r.uri.path.contains(stage) && !authenticated) {
+              return jsonResponse({'res_code': 'UserNotLogin'});
+            }
+            if (r.uri.path.contains('getShareInfo')) {
+              return _ok({
+                'fileId': '100',
+                'isFolder': true,
+                'shareId': '123456',
+              });
+            }
+            return _listing([_row()]);
+          });
+          final connector = _connector(http);
+          final session = await connector.openShare(
+            _share().sourceLink!.withPasscode(''),
+            _credential(),
+          );
+          await connector.list(session, session.rootId, _credential());
+          final calls = http.calls
+              .where((r) => r.uri.path.contains(stage))
+              .toList();
+          expect(calls, hasLength(2));
+          expect(
+            calls.first.headers['Cookie'] ?? '',
+            isNot(contains('COOKIE_LOGIN_USER')),
+          );
+          expect(
+            calls.last.headers['Cookie'],
+            contains('COOKIE_LOGIN_USER=original'),
+          );
+          expect(
+            http.calls.where((r) => r.uri.path.contains('getUserInfo')),
+            isEmpty,
+          );
+        },
+      );
+    }
+    test(
+      'Public login requirement without an account returns a useful login prompt',
+      () async {
+        final http = FakeHttp(
+          (_) => jsonResponse({'res_code': 'UserNotLogin'}),
+        );
+        await expectLater(
+          _connector(http).openShare(_share().sourceLink!, null),
+          throwsA(
+            isA<AccountLoginRequired>().having(
+              (e) => e.message,
+              'prompt',
+              contains('先登录天翼'),
+            ),
+          ),
+        );
+        expect(http.calls, hasLength(1));
+      },
+    );
+    test('Public share failures never retry with a saved account', () async {
+      for (final code in ['ShareCanceled', 'ShareAccessCodeError']) {
+        final http = FakeHttp((r) {
+          expect(
+            r.headers['Cookie'] ?? '',
+            isNot(contains('COOKIE_LOGIN_USER')),
+          );
+          return jsonResponse({'res_code': code});
+        });
+        await expectLater(
+          _connector(http).openShare(_share().sourceLink!, _credential()),
+          throwsA(isA<AppException>()),
+        );
+        expect(http.calls, hasLength(1));
+      }
+    });
     for (final (label, data) in <(String, Json)>[
       ('missing list', {}),
       (
@@ -817,6 +995,681 @@ void main() {
       },
     );
 
+    for (final folder in [false, true]) {
+      for (final video in [false, true]) {
+        test(
+          'Mobile direct download uses the original ${folder ? 'folder child' : 'shared file'} ID for a large ${video ? 'video' : 'archive'}',
+          () async {
+            final file = video
+                ? _largeVideo
+                : CloudFile(
+                    id: _largeVideo.id,
+                    name: '大型文件.zip',
+                    size: _largeVideo.size,
+                    hashType: 'md5',
+                    hashValue: _md5,
+                  );
+            final f = _Transfer()
+              ..file = file
+              ..mobileDirect = true;
+            await f.initialize();
+            final spec = await f.repository.prepare(
+              _share(folder: folder),
+              file,
+            );
+            expect(spec.url, _signedUrl);
+            expect(spec.fileName, file.name);
+            expect(spec.expectedSize, file.size);
+            expect(spec.checksumType, 'md5');
+            expect(spec.checksumValue, _md5);
+            expect(spec.cleanup, isNull);
+            expect(spec.source!['file'], file.toJson());
+            expect(spec.headers['User-Agent'], contains('Android'));
+            expect(spec.headers['Referer'], 'https://h5.cloud.189.cn/');
+            expect(
+              spec.headers.keys.map((key) => key.toLowerCase()),
+              isNot(
+                anyOf(
+                  contains('cookie'),
+                  contains('access-token'),
+                  contains('accesstoken'),
+                  contains('signature'),
+                  contains('browser-id'),
+                ),
+              ),
+            );
+            expect(f.folderName, isEmpty);
+            expect(f.pollCounts, isEmpty);
+            expect(f.outbox.pendingCount, 0);
+            expect(f.http.calls, hasLength(4));
+          },
+        );
+      }
+    }
+
+    test('Folder collection downloads child files without transfer', () async {
+      final f = _Transfer()
+        ..file = _largeVideo
+        ..mobileDirect = true;
+      await f.initialize();
+      f.override = (r) {
+        if (r.uri.path == '/api/open/share/listShareDir.action') {
+          final parent = _params(r).str('shareDirFileId');
+          if (parent == '100') {
+            return _listing(
+              [],
+              folders: [
+                {'id': '200', 'name': '子目录'},
+              ],
+            );
+          }
+          expect(parent, '200');
+          return _listing([
+            _row(_largeVideo.id, _largeVideo.name, _largeVideo.size),
+          ]);
+        }
+        return null;
+      };
+      final session = _share(folder: true);
+      final selected = await f.repository.collect(session, const [
+        CloudFile(id: '100', name: '资源', isDirectory: true),
+      ]);
+      expect(selected, hasLength(1));
+      expect(selected.single.$1.id, _largeVideo.id);
+      expect(selected.single.$2, '资源/子目录');
+      final spec = await f.repository.prepare(session, selected.single.$1);
+      expect(spec.url, _signedUrl);
+      expect(spec.expectedSize, _largeVideo.size);
+      expect(spec.cleanup, isNull);
+      expect(f.folderName, isEmpty);
+      expect(f.outbox.pendingCount, 0);
+    });
+
+    test(
+      'A restricted personal file receives a mobile direct link without share parameters',
+      () async {
+        final f = _Transfer()
+          ..file = _largeVideo
+          ..mobileDirect = true;
+        await f.initialize();
+        f.override = (r) =>
+            r.uri.path == '/api/open/file/getFileDownloadUrl.action'
+            ? jsonResponse({'errorCode': 'FileTooLarge'}, 400)
+            : null;
+        final spec = await f.repository.prepare(_personal, _largeVideo);
+        expect(spec.url, _signedUrl);
+        expect(spec.expectedSize, _largeVideo.size);
+        expect(spec.checksumValue, _md5);
+        expect(spec.headers['User-Agent'], contains('Android'));
+        expect(spec.cleanup, isNull);
+        expect(f.http.calls, hasLength(4));
+        expect(f.folderName, isEmpty);
+        expect(f.pollCounts, isEmpty);
+        expect(f.outbox.pendingCount, 0);
+      },
+    );
+
+    for (final status in [429, 503]) {
+      test(
+        'A mobile HTTP $status retry repeats only the download read',
+        () async {
+          final f = _Transfer(retryReads: true)..mobileDirect = true;
+          await f.initialize();
+          var requests = 0;
+          f.override = (r) =>
+              r.uri.host == 'api.cloud.189.cn' && ++requests == 1
+              ? HttpResult(status, '<html>temporarily unavailable</html>')
+              : null;
+          final spec = await f.repository.prepare(_share(), _file);
+          expect(spec.url, _signedUrl);
+          expect(requests, 2);
+          expect(f.exchanges, 1);
+          expect(f.http.calls, hasLength(5));
+          expect(f.pollCounts, isEmpty);
+          expect(f.outbox.pendingCount, 0);
+        },
+      );
+    }
+
+    test(
+      'Expired mobile tokens refresh once and keep the original share ID',
+      () async {
+        final f = _Transfer()..mobileDirect = true;
+        await f.initialize();
+        f.override = (r) => r.headers['AccessToken'] == 'mobile-access-1'
+            ? jsonResponse({'errorCode': 'AccessTokenHasExpired'}, 400)
+            : null;
+        expect((await f.repository.prepare(_share(), _file)).url, _signedUrl);
+        expect(f.exchanges, 2);
+        final requests = f.http.calls.where(
+          (r) => r.uri.host == 'api.cloud.189.cn',
+        );
+        expect(requests, hasLength(2));
+        for (final request in requests) {
+          _expectMobileRequest(request);
+          expect(request.uri.queryParameters['fileId'], _file.id);
+          expect(request.uri.queryParameters['shareId'], '123456');
+        }
+        expect(
+          requests.map((r) => r.headers['X-Request-ID']).toSet(),
+          hasLength(2),
+        );
+        expect(f.outbox.pendingCount, 0);
+      },
+    );
+
+    test(
+      'Repeated rejected mobile tokens stop without transfer or preview',
+      () async {
+        final f = _Transfer();
+        await f.initialize();
+        f.override = (r) => r.uri.host == 'api.cloud.189.cn'
+            ? jsonResponse({'errorCode': 'InvalidAccessToken'}, 400)
+            : null;
+        await expectLater(
+          f.repository.prepare(_share(), _file),
+          _message('下载授权已失效'),
+        );
+        expect(f.exchanges, 2);
+        expect(
+          f.http.calls.where((r) => r.uri.host == 'api.cloud.189.cn'),
+          hasLength(2),
+        );
+        expect(f.pollCounts, isEmpty);
+        expect(f.outbox.pendingCount, 0);
+      },
+    );
+
+    test(
+      'Rotated cookies discard the cached mobile token without changing download ownership',
+      () async {
+        final f = _Transfer()..mobileDirect = true;
+        await f.initialize();
+        final first = await f.repository.prepare(_share(), _file);
+        final old = f.vault.credential(_platform)!;
+        await f.vault.replaceCredential(
+          _platform,
+          old,
+          old.withFields({
+            'primary': 'COOKIE_LOGIN_USER=renewed',
+          }, preserveRevision: true),
+        );
+        final second = await f.repository.prepare(_share(), _file);
+        expect(first.url, second.url);
+        expect(
+          first.source!['accountRevision'],
+          second.source!['accountRevision'],
+        );
+        expect(f.exchanges, 2);
+        expect(f.outbox.pendingCount, 0);
+      },
+    );
+
+    for (final code in [
+      'ShareAccessCodeError',
+      'PermissionDenied',
+      'InvalidDeviceStatus',
+    ]) {
+      test(
+        'Mobile $code does not fall through to preview or transfer',
+        () async {
+          final f = _Transfer();
+          await f.initialize();
+          f.override = (r) => r.uri.host == 'api.cloud.189.cn'
+              ? jsonResponse({'errorCode': code}, 400)
+              : null;
+          await expectLater(
+            f.repository.prepare(_share(), _file),
+            throwsA(isA<AppException>()),
+          );
+          expect(f.http.calls, hasLength(4));
+          expect(f.folderName, isEmpty);
+          expect(f.outbox.pendingCount, 0);
+        },
+      );
+    }
+
+    for (final stage in [
+      'getUserBriefInfo',
+      'getAccessTokenBySsKey',
+      'mobile-download',
+    ]) {
+      for (final cancel in [false, true]) {
+        test(
+          '${cancel ? 'Cancellation' : 'Account replacement'} during $stage discards the late mobile link',
+          () async {
+            final f = _Transfer()..mobileDirect = true;
+            final scope = RequestScope();
+            await f.initialize();
+            f.override = (r) async {
+              final matches = stage == 'mobile-download'
+                  ? r.uri.host == 'api.cloud.189.cn'
+                  : r.uri.path.endsWith('/$stage.action');
+              if (matches) {
+                if (cancel) {
+                  scope.cancel();
+                } else {
+                  await f.vault.putCredential(_platform, _credential(2));
+                }
+              }
+              return null;
+            };
+            await expectLater(
+              scope.run(() => f.repository.prepare(_share(), _file)),
+              _message(cancel ? '取消' : '账号已变化'),
+            );
+            expect(f.folderName, isEmpty);
+            expect(f.outbox.pendingCount, 0);
+          },
+        );
+      }
+    }
+
+    for (final folder in [false, true]) {
+      test(
+        'A large ${folder ? 'folder-shared' : 'single-shared'} MKV uses the verified original video URL without transfer',
+        () async {
+          final f = _Transfer()..file = _largeVideo;
+          await f.initialize();
+          f.override = (r) {
+            if (r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action') {
+              expect(_params(r)['fileId'], _largeVideo.id);
+              expect(_params(r)['type'], '4');
+              expect(_params(r)['shareId'], '123456');
+              expect(_params(r)['dt'], folder ? '1' : null);
+              expect(r.headers['Cookie'], contains('share_123456=a1B2'));
+              return _ok({
+                'success': true,
+                'normal': {'url': _signedUrl.replaceAll('&', '&amp;')},
+                'transcode': {
+                  'code': 2,
+                  'url': 'https://download.example.test/lower-quality.m3u8',
+                },
+              });
+            }
+            if (r.uri.host == 'download.example.test') {
+              expect(r.url, _signedUrl);
+              expect(r.headers['Range'], 'bytes=0-511');
+              expect(
+                r.headers.keys.map((key) => key.toLowerCase()),
+                isNot(anyOf(contains('cookie'), contains('browser-id'))),
+              );
+              return HttpResult(206, 'original video bytes', {
+                'content-range': ['bytes 0-511/${_largeVideo.size}'],
+                'content-length': ['512'],
+                'content-type': ['video/x-matroska'],
+              });
+            }
+            return null;
+          };
+          final spec = await f.repository.prepare(
+            _share(folder: folder),
+            _largeVideo,
+          );
+          expect(spec.url, _signedUrl);
+          expect(spec.fileName, _largeVideo.name);
+          expect(spec.expectedSize, _largeVideo.size);
+          expect(spec.checksumType, 'md5');
+          expect(spec.checksumValue, _md5);
+          expect(spec.cleanup, isNull);
+          expect(f.folderName, isEmpty);
+          expect(f.outbox.pendingCount, 0);
+          expect(f.http.calls, hasLength(6));
+        },
+      );
+    }
+
+    test(
+      'A size-restricted personal video tries the mobile link before its original video without share parameters',
+      () async {
+        final http = FakeHttp((r) {
+          if (r.uri.host == 'download.example.test') {
+            expect(r.url, _signedUrl);
+            expect(r.headers['Range'], 'bytes=0-511');
+            expect(r.headers.containsKey('Cookie'), isFalse);
+            return HttpResult(200, 'original video bytes', {
+              'content-length': ['${_largeVideo.size}'],
+              'content-type': ['application/octet-stream'],
+            });
+          }
+          expect(_params(r).containsKey('dt'), isFalse);
+          expect(_params(r).containsKey('shareId'), isFalse);
+          if (r.uri.path == '/api/portal/v2/getUserBriefInfo.action') {
+            return _ok({'sessionKey': 'personal-session'});
+          }
+          if (r.uri.path == '/api/open/oauth2/getAccessTokenBySsKey.action') {
+            return _ok({'accessToken': 'personal-access'});
+          }
+          if (r.uri.path == '/open/file/getFileDownloadUrl.action') {
+            _expectMobileRequest(r);
+            expect(_params(r)['fileId'], _largeVideo.id);
+            return jsonResponse({'res_code': 'FileTooLarge'}, 400);
+          }
+          expect(r.headers['Cookie'], _credential().primary);
+          if (r.uri.path == '/api/open/file/getFileDownloadUrl.action') {
+            return jsonResponse({'res_code': 'FileTooLarge'}, 400);
+          }
+          expect(r.uri.path, '/api/portal/getNewVlcVideoPlayUrl.action');
+          expect(_params(r)['fileId'], _largeVideo.id);
+          expect(_params(r)['type'], '2');
+          return _ok({
+            'success': true,
+            'normal': {'url': _signedUrl},
+          });
+        });
+        final spec = await _connector(
+          http,
+        ).download(_personal, _largeVideo, _credential());
+        expect(spec.url, _signedUrl);
+        expect(spec.expectedSize, _largeVideo.size);
+        expect(spec.checksumValue, _md5);
+        expect(http.calls, hasLength(6));
+      },
+    );
+
+    for (final (name, response) in <(String, HttpResult)>[
+      (
+        'a different file length',
+        HttpResult(206, 'bytes', {
+          'content-range': ['bytes 0-511/1000'],
+        }),
+      ),
+      ('an unknown file length', const HttpResult(206, 'bytes')),
+      (
+        'a playlist',
+        HttpResult(200, '#EXTM3U\n', {
+          'content-length': ['${_file.size}'],
+        }),
+      ),
+      (
+        'an HTML notice',
+        HttpResult(200, '<html>notice</html>', {
+          'content-length': ['${_file.size}'],
+          'content-type': ['text/html; charset=utf-8'],
+        }),
+      ),
+      ('an expired CDN link', const HttpResult(403, 'Forbidden')),
+    ]) {
+      test(
+        'Original video fallback rejects $name without transferring the file',
+        () async {
+          final f = _Transfer();
+          await f.initialize();
+          f.override = (r) {
+            if (r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action') {
+              return _ok({
+                'success': true,
+                'normal': {'url': 'https://download.example.test/original'},
+              });
+            }
+            if (r.uri.host == 'download.example.test') return response;
+            return null;
+          };
+          await expectLater(
+            f.repository.prepare(_share(), _file),
+            _message('文件大小限制'),
+          );
+          expect(f.folderName, isEmpty);
+          expect(f.pollCounts, isEmpty);
+          expect(f.outbox.pendingCount, 0);
+        },
+      );
+    }
+
+    test(
+      'An unsupported video preview cannot trigger an automatic transfer',
+      () async {
+        final f = _Transfer();
+        await f.initialize();
+        f.override = (r) =>
+            r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action'
+            ? _ok({'success': false})
+            : null;
+        await expectLater(
+          f.repository.prepare(_share(), _file),
+          _message('文件大小限制'),
+        );
+        expect(f.folderName, isEmpty);
+        expect(f.pollCounts, isEmpty);
+        expect(f.outbox.pendingCount, 0);
+      },
+    );
+
+    for (final url in [
+      'javascript:alert(1)',
+      'https://user:password@example.test/file',
+    ]) {
+      test(
+        'An invalid optional video address is rejected without transfer: $url',
+        () async {
+          final f = _Transfer();
+          await f.initialize();
+          f.override = (r) =>
+              r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action'
+              ? _ok({
+                  'success': true,
+                  'normal': {'url': url},
+                })
+              : null;
+          await expectLater(
+            f.repository.prepare(_share(), _file),
+            _message('文件大小限制'),
+          );
+          expect(
+            f.http.calls.every(
+              (r) => {'cloud.189.cn', 'api.cloud.189.cn'}.contains(r.uri.host),
+            ),
+            isTrue,
+          );
+          expect(f.pollCounts, isEmpty);
+          expect(f.outbox.pendingCount, 0);
+        },
+      );
+    }
+
+    for (final status in [429, 503]) {
+      test(
+        'A temporary video endpoint HTTP $status response stops after one optional attempt without transfer',
+        () async {
+          final f = _Transfer(retryReads: true);
+          await f.initialize();
+          f.override = (r) =>
+              r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action'
+              ? HttpResult(status, '<html>temporarily unavailable</html>')
+              : null;
+          await expectLater(
+            f.repository.prepare(_share(), _file),
+            _message('文件大小限制'),
+          );
+          expect(
+            f.http.calls.where(
+              (r) => r.uri.path.contains('getNewVlcVideoPlayUrl'),
+            ),
+            hasLength(1),
+          );
+          expect(f.pollCounts, isEmpty);
+          expect(f.outbox.pendingCount, 0);
+        },
+      );
+    }
+
+    test(
+      'A video endpoint size restriction cannot start an automatic transfer',
+      () async {
+        final f = _Transfer();
+        await f.initialize();
+        f.override = (r) =>
+            r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action'
+            ? jsonResponse({'errorCode': 'FileTooLarge'}, 400)
+            : null;
+        await expectLater(
+          f.repository.prepare(_share(), _file),
+          _message('文件大小限制'),
+        );
+        expect(f.pollCounts, isEmpty);
+        expect(f.outbox.pendingCount, 0);
+      },
+    );
+
+    for (final atCdn in [false, true]) {
+      test(
+        'A ${atCdn ? 'CDN probe' : 'video endpoint'} timeout cannot trigger transfer',
+        () async {
+          final f = _Transfer(retryReads: true);
+          await f.initialize();
+          f.override = (r) {
+            if (r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action') {
+              if (!atCdn) {
+                throw const HttpRequestFailure(
+                  '连接超时',
+                  kind: 'receiveTimeout',
+                  retryable: true,
+                );
+              }
+              return _ok({
+                'success': true,
+                'normal': {'url': _signedUrl},
+              });
+            }
+            if (r.uri.host == 'download.example.test') {
+              throw const HttpRequestFailure(
+                '连接超时',
+                kind: 'receiveTimeout',
+                retryable: true,
+              );
+            }
+            return null;
+          };
+          await expectLater(
+            f.repository.prepare(_share(), _file),
+            _message('文件大小限制'),
+          );
+          expect(
+            f.http.calls.where((r) => r.uri.host == 'download.example.test'),
+            hasLength(atCdn ? 1 : 0),
+          );
+          expect(f.pollCounts, isEmpty);
+          expect(f.outbox.pendingCount, 0);
+        },
+      );
+    }
+
+    test(
+      'A size-restricted archive fails without transfer or video probing',
+      () async {
+        final f = _Transfer();
+        await f.initialize();
+        const archive = CloudFile(id: '101', name: '文件.zip', size: 42);
+        await expectLater(
+          f.repository.prepare(_share(), archive),
+          _message('文件大小限制'),
+        );
+        expect(f.outbox.pendingCount, 0);
+        expect(f.folderName, isEmpty);
+        expect(
+          f.http.calls.any((r) => r.uri.path.contains('getNewVlcVideoPlayUrl')),
+          isFalse,
+        );
+      },
+    );
+
+    for (final (code, message) in [
+      ('ShareAccessCodeError', '访问码错误'),
+      ('InvalidSessionKey', '登录已失效'),
+      ('PermissionDenied', 'PermissionDenied'),
+    ]) {
+      test(
+        'A video endpoint $code response cannot trigger a transfer',
+        () async {
+          final f = _Transfer();
+          await f.initialize();
+          f.override = (r) =>
+              r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action'
+              ? jsonResponse({'errorCode': code, 'success': false}, 400)
+              : null;
+          await expectLater(
+            f.repository.prepare(_share(), _file),
+            _message(message),
+          );
+          expect(f.folderName, isEmpty);
+          expect(f.outbox.pendingCount, 0);
+          expect(f.http.calls, hasLength(5));
+        },
+      );
+    }
+
+    test(
+      'A canceled original-video probe cannot return a URL or create a transfer',
+      () async {
+        final f = _Transfer(), scope = RequestScope();
+        await f.initialize();
+        f.override = (r) {
+          if (r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action') {
+            return _ok({
+              'success': true,
+              'normal': {'url': _signedUrl},
+            });
+          }
+          if (r.uri.host == 'download.example.test') {
+            scope.cancel();
+            return HttpResult(206, 'bytes', {
+              'content-range': ['bytes 0-511/${_file.size}'],
+            });
+          }
+          return null;
+        };
+        await expectLater(
+          scope.run(() => f.repository.prepare(_share(), _file)),
+          _message('取消'),
+        );
+        expect(f.http.calls, hasLength(6));
+        expect(f.outbox.pendingCount, 0);
+      },
+    );
+
+    test(
+      'An account change during an original-video probe rejects the stale URL',
+      () async {
+        final f = _Transfer();
+        await f.initialize();
+        f.override = (r) async {
+          if (r.uri.path == '/api/portal/getNewVlcVideoPlayUrl.action') {
+            return _ok({
+              'success': true,
+              'normal': {'url': _signedUrl},
+            });
+          }
+          if (r.uri.host == 'download.example.test') {
+            await f.vault.putCredential(_platform, _credential(2));
+            return HttpResult(206, 'bytes', {
+              'content-range': ['bytes 0-511/${_file.size}'],
+            });
+          }
+          return null;
+        };
+        await expectLater(
+          f.repository.prepare(_share(), _file),
+          _message('账号已变化'),
+        );
+        expect(f.http.calls, hasLength(6));
+        expect(f.outbox.pendingCount, 0);
+      },
+    );
+
+    test(
+      'Size limits from non-download operations do not describe a download restriction',
+      () async {
+        final http = FakeHttp(
+          (_) => jsonResponse({'errorCode': 'FileTooLarge'}, 400),
+        );
+        final result = _connector(
+          http,
+        ).rename(_personal, _file, '更名.mp4', _credential());
+        await expectLater(result, _message('当前操作触发文件大小限制'));
+        expect(http.calls, hasLength(1));
+      },
+    );
+
     test(
       'A rejected share access code never creates a transfer as fallback',
       () async {
@@ -835,7 +1688,7 @@ void main() {
     );
 
     test(
-      'InsufficientStorageSpace during required transfer reports account capacity',
+      'InsufficientStorageSpace during an explicit share save reports account capacity',
       () async {
         final f = _Transfer()
           ..completedTask = {
@@ -846,11 +1699,8 @@ void main() {
             'errorCode': 'InsufficientStorageSpace',
           };
         await f.initialize();
-        await expectLater(
-          f.repository.prepare(_share(), _file),
-          _message('网盘空间不足'),
-        );
-        expect(f.outbox.pendingCount, 1);
+        await expectLater(f.saveShare(), _message('网盘空间不足'));
+        expect(f.outbox.pendingCount, 0);
         expect(
           f.http.calls.where(
             (r) => r.uri.path.endsWith('/createBatchTask.action'),
@@ -902,30 +1752,22 @@ void main() {
       },
     );
     test(
-      'Share size restriction falls back to transfer and retains cleanup until release',
+      'A historical temporary folder retains cleanup until its download releases it',
       () async {
         final f = _Transfer();
         await f.initialize();
-        final spec = await f.repository.prepare(_share(), _file);
-        expect(f.folderName, matches(r'^AsterLink临时转存_[0-9a-f-]{36}$'));
-        expect(f.pollCounts['SHARE_SAVE'], 2);
-        expect(spec.url, _signedUrl);
-        expect(spec.fileName, _file.name);
-        expect(spec.source!['accountRevision'], 1);
-        expect(spec.cleanup!.action!['folderId'], '900');
-        expect(
-          encoded(spec.cleanup!.toJson()),
-          isNot(contains('COOKIE_LOGIN_USER')),
-        );
-        await f.outbox.ready(spec.cleanup);
+        final cleanup = await f.historicalCleanup(retained: true);
+        expect(cleanup.action!['folderId'], '900');
+        expect(encoded(cleanup.toJson()), isNot(contains('COOKIE_LOGIN_USER')));
+        await f.outbox.ready(cleanup);
         await f.outbox.drain();
         expect(
           f.pollCounts.containsKey('DELETE'),
           isFalse,
           reason: 'active download holds a lease',
         );
-        await f.outbox.release(spec.cleanup);
-        await f.outbox.ready(spec.cleanup);
+        await f.outbox.release(cleanup);
+        await f.outbox.ready(cleanup);
         await f.outbox.drain();
         expect(f.pollCounts['DELETE'], 2);
         expect(f.outbox.pendingCount, 0);
@@ -975,71 +1817,43 @@ void main() {
       ),
     ]) {
       test(
-        '$name during size-restricted transfer never produces a download URL and keeps cleanup retryable',
+        '$name during an explicit share save never reports success or requests a download link',
         () async {
           final f = _Transfer()..completedTask = status;
           await f.initialize();
-          await expectLater(
-            f.repository.prepare(_share(), _file),
-            throwsA(isA<AppException>()),
-          );
+          await expectLater(f.saveShare(), throwsA(isA<AppException>()));
           expect(
-            f.http.calls.any(
-              (r) =>
-                  r.uri.path.contains('getFileDownloadUrl') &&
-                  !r.uri.queryParameters.containsKey('shareId'),
-            ),
+            f.http.calls.any((r) => r.uri.path.contains('getFileDownloadUrl')),
             isFalse,
           );
-          expect(f.outbox.pendingCount, 1);
-          expect(
-            asJson(f.store.data.obj('cleanups').values.single).boolean('ready'),
-            isTrue,
-          );
-          final before = f.http.calls.length;
-          await f.outbox.drain();
-          expect(f.http.calls.length, greaterThan(before));
-          expect(
-            f.outbox.pendingCount,
-            1,
-            reason: 'failed asynchronous DELETE is not acknowledged',
-          );
-        },
-      );
-    }
-    for (final mismatch in ['size', 'hash', 'missing']) {
-      test(
-        '$mismatch after transfer cannot download an unverified target',
-        () async {
-          final f = _Transfer()
-            ..wrongSize = mismatch == 'size'
-            ..wrongHash = mismatch == 'hash'
-            ..empty = mismatch == 'missing';
-          await f.initialize();
-          await expectLater(
-            f.repository.prepare(_share(), _file),
-            throwsA(isA<AppException>()),
-          );
-          expect(
-            f.http.calls.any(
-              (r) =>
-                  r.uri.path.contains('getFileDownloadUrl') &&
-                  !r.uri.queryParameters.containsKey('shareId'),
-            ),
-            isFalse,
-          );
-          expect(f.outbox.pendingCount, 1);
+          expect(f.outbox.pendingCount, 0);
+          expect(f.folderName, isEmpty);
         },
       );
     }
     test(
-      'Account switch pauses cleanup instead of deleting from the replacement account',
+      'A failed historical asynchronous DELETE keeps cleanup retryable',
+      () async {
+        final f = _Transfer()..completedTask = {'taskStatus': -1};
+        await f.initialize();
+        final cleanup = await f.historicalCleanup();
+        await f.outbox.ready(cleanup);
+        await f.outbox.drain();
+        expect(f.outbox.pendingCount, 1);
+        expect(f.pollCounts['DELETE'], 1);
+        expect(
+          asJson(f.store.data.obj('cleanups').values.single).boolean('ready'),
+          isTrue,
+        );
+      },
+    );
+    test(
+      'Account switch pauses historical cleanup instead of deleting from the replacement account',
       () async {
         final f = _Transfer();
         await f.initialize();
-        final spec = await f.repository.prepare(_share(), _file);
-        await f.outbox.release(spec.cleanup);
-        await f.outbox.ready(spec.cleanup);
+        final cleanup = await f.historicalCleanup();
+        await f.outbox.ready(cleanup);
         await f.vault.putCredential(_platform, _credential(2));
         final before = f.http.calls.length;
         await f.outbox.drain();
@@ -1048,7 +1862,7 @@ void main() {
       },
     );
     test(
-      'Canceling during folder creation still journals the owned temporary folder',
+      'Canceling an explicit folder creation cannot trigger an automatic transfer or cleanup',
       () async {
         final f = _Transfer(), scope = RequestScope();
         await f.initialize();
@@ -1057,19 +1871,23 @@ void main() {
           return null;
         };
         await expectLater(
-          scope.run(() => f.repository.prepare(_share(), _file)),
+          scope.run(
+            () => f.connector.createFolder(
+              _personal,
+              '-11',
+              '新目录',
+              _credential(),
+            ),
+          ),
           _message('取消'),
         );
-        expect(f.http.calls, hasLength(2));
-        expect(f.outbox.pendingCount, 1);
-        expect(
-          asJson(f.store.data.obj('cleanups').values.single).boolean('ready'),
-          isTrue,
-        );
+        expect(f.http.calls, hasLength(1));
+        expect(f.outbox.pendingCount, 0);
+        expect(f.pollCounts, isEmpty);
       },
     );
     test(
-      'Account switch during folder creation journals old ownership and submits no transfer',
+      'Account switch during an explicit folder creation submits no transfer',
       () async {
         final f = _Transfer();
         await f.initialize();
@@ -1080,14 +1898,12 @@ void main() {
           return null;
         };
         await expectLater(
-          f.repository.prepare(_share(), _file),
+          f.connector.createFolder(_personal, '-11', '新目录', _credential()),
           _message('账号已变化'),
         );
-        expect(f.http.calls, hasLength(2));
-        final payload = asJson(
-          f.store.data.obj('cleanups').values.single,
-        ).obj('payload');
-        expect(payload.obj('action')['accountRevision'], 1);
+        expect(f.http.calls, hasLength(1));
+        expect(f.outbox.pendingCount, 0);
+        expect(f.pollCounts, isEmpty);
       },
     );
     test(

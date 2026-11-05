@@ -66,6 +66,7 @@ class _UiLan extends LanService {
     : super(store: store, files: _UiFiles(), discoveryEnabled: false);
   bool live = false;
   int starts = 0;
+  int allowedIncoming = 0;
   bool paired = false, failSend = false;
   final sent = <({String peerId, String text})>[];
   final invitations = <({String peerId, LanShare share})>[];
@@ -111,6 +112,11 @@ class _UiLan extends LanService {
 
   @override
   Future<void> refreshDevices() async {}
+  @override
+  Future<void> allowIncomingConnections() async {
+    allowedIncoming++;
+  }
+
   @override
   bool connected(LanPeer peer) =>
       paired && peer.id == peerId || pairedIds.contains(peer.id);
@@ -528,6 +534,11 @@ void main() {
           platform: TargetPlatform.windows,
           size: const Size(1080, 760),
         );
+        final allow = find.byKey(const Key('lan-allow-incoming'));
+        expect(allow, findsOneWidget);
+        await tester.tap(allow);
+        await tester.pumpAndSettle();
+        expect(lan.allowedIncoming, 1);
         final inlineQr = find.byKey(const Key('lan-inline-qr'));
         final code = find.byKey(const Key('lan-local-code'));
         expect(inlineQr, findsOneWidget);

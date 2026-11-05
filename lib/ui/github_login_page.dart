@@ -150,7 +150,7 @@ class _GitHubLoginPageState extends State<GitHubLoginPage> {
             ),
             const SizedBox(height: 16),
             Text(
-              '令牌加密保存在本机，仅发送到 GitHub 官方接口。公开仓库可直接在解析页粘贴链接，无需登录。',
+              '令牌保存在本机应用私有目录，仅发送到 GitHub 官方接口。公开仓库可直接在解析页粘贴链接，无需登录。',
               style: TextStyle(
                 fontSize: 12,
                 height: 1.6,

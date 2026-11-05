@@ -15,6 +15,14 @@
       "publishedAt": "2026-10-09T18:00:00+08:00",
       "buttonText": "前往反馈",
       "buttonUrl": "https://github.com/z7786/wenxi/issues"
+    },
+    {
+      "id": "notice-mini-program-example",
+      "title": "图片与小程序按钮示例",
+      "content": "请将图片地址和微信跳转链接换成真实值后再启用。\n\n![活动图片](https://example.com/notice.png)",
+      "enabled": false,
+      "buttonText": "打开微信小程序",
+      "buttonUrl": "weixin://dl/business/?t=REPLACE_WITH_REAL_TICKET"
     }
   ]
 }

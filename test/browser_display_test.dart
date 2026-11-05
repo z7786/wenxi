@@ -295,7 +295,7 @@ void main() {
     for (final ascending in [true, false]) {
       await tester.tap(find.byTooltip('排序'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('时间'));
+      await tester.tap(find.text(ascending ? '时间 · 正序' : '时间 · 倒序'));
       await tester.pumpAndSettle();
       expectOrder([
         'Folder',
@@ -386,7 +386,7 @@ void main() {
       for (final ascending in [true, false]) {
         await tester.tap(find.byTooltip('排序'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('时间'));
+        await tester.tap(find.text(ascending ? '时间 · 正序' : '时间 · 倒序'));
         await tester.pumpAndSettle();
         expectOrder(ascending: ascending);
       }
@@ -444,7 +444,7 @@ void main() {
       for (final ascending in [true, false]) {
         await tester.tap(find.byTooltip('排序'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('时间'));
+        await tester.tap(find.text(ascending ? '时间 · 正序' : '时间 · 倒序'));
         await tester.pumpAndSettle();
         final dated = [
           'D early.txt',
@@ -501,7 +501,7 @@ void main() {
       ]);
       await tester.tap(find.byTooltip('排序'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('名称'));
+      await tester.tap(find.text('名称 · 倒序'));
       await tester.pumpAndSettle();
       expectOrder([
         '第2季',
@@ -557,7 +557,7 @@ void main() {
           ]);
           await tester.tap(find.byTooltip('排序'));
           await tester.pumpAndSettle();
-          await tester.tap(find.text('名称'));
+          await tester.tap(find.text('名称 · 倒序'));
           await tester.pumpAndSettle();
           expectOrder([
             '资料',
@@ -730,11 +730,11 @@ void main() {
       await setView(tester, '大图标');
       await tester.tap(find.byTooltip('排序'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('大小'));
+      await tester.tap(find.text('大小 · 正序'));
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('排序'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('大小'));
+      await tester.tap(find.text('大小 · 倒序'));
       await tester.pumpAndSettle();
       final grid = tester.widget<GridView>(find.byType(GridView));
       expect(grid.semanticChildCount, 6);
@@ -743,12 +743,20 @@ void main() {
       expect(find.byType(GridView), findsOneWidget);
       await tester.tap(find.byTooltip('排序'));
       await tester.pumpAndSettle();
-      expect(find.text('↓ 降序'), findsOneWidget);
+      for (final field in ['名称', '大小', '时间']) {
+        for (final direction in ['正序', '倒序']) {
+          expect(find.text('$field · $direction'), findsOneWidget);
+        }
+      }
+      expect(
+        value.services.settings.browserDisplayFor(CloudPlatform.tianyi).ascending,
+        isFalse,
+      );
       expect(
         value.services.settings.browserDisplayFor(CloudPlatform.tianyi).sort,
         'size',
       );
-      await tester.tap(find.text('大小'));
+      await tester.tap(find.text('大小 · 正序'));
       await tester.pumpAndSettle();
       expect(find.text('已选 1 项'), findsNothing);
       expect(tester.takeException(), isNull);

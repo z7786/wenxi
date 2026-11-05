@@ -3,7 +3,7 @@ import '../core/json.dart';
 import '../domain/models.dart';
 import 'state_store.dart';
 
-/// Search terms stay in the encrypted local store, scoped to their account.
+/// Search terms stay in the app's private local store, scoped to their account.
 class CloudSearchHistory {
   const CloudSearchHistory(this.store);
   final StateStore store;

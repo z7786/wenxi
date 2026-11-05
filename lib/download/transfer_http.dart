@@ -174,7 +174,10 @@ class TransferHttp {
     return uri;
   }
 
-  Map<String, String> headers(Map<String, String> source) => {
+  Map<String, String> headers(Map<String, String> source) =>
+      normalizedHeaders(source);
+
+  static Map<String, String> normalizedHeaders(Map<String, String> source) => {
     for (final e in source.entries)
       if (!{
         'range',

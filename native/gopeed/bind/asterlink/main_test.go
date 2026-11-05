@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -140,7 +139,7 @@ func assertPayload(t *testing.T, state snapshot, want []byte) {
 	}
 }
 
-func TestHTTPConnectionsHeadersAndEncryptedState(t *testing.T) {
+func TestHTTPConnectionsHeadersAndPlainState(t *testing.T) {
 	storage, _, _ := openTestCore(t)
 	f := serveFile(t, 4*1024*1024, 50*time.Millisecond)
 	startFile(t, "parallel", f.server.URL+"/file", 64, 0)
@@ -153,8 +152,14 @@ func TestHTTPConnectionsHeadersAndEncryptedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(raw, []byte("test-cookie")) || bytes.Contains(raw, []byte(f.server.URL)) {
-		t.Fatal("credential or signed URL written in plaintext")
+	if !bytes.Contains(raw, []byte("test-cookie")) || !bytes.Contains(raw, []byte(f.server.URL)) {
+		t.Fatal("plain state did not retain request headers and source URL")
+	}
+	if err = Close(); err != nil {
+		t.Fatal(err)
+	}
+	if StorageFormat(storage) != "plain" {
+		t.Fatal("new storage requires a legacy key")
 	}
 }
 func TestSmallFilesDoNotUse512Requests(t *testing.T) {
@@ -371,7 +376,7 @@ func TestInvalidPathAndConnectionsRejected(t *testing.T) {
 		}
 	}
 }
-func TestEncryptedStorageAuthentication(t *testing.T) {
+func TestPlainStorageReopensWithoutAnyKey(t *testing.T) {
 	dir := t.TempDir()
 	store, err := newEncryptedStorage(dir, bytes.Repeat([]byte{3}, 32))
 	if err != nil {
@@ -386,13 +391,13 @@ func TestEncryptedStorageAuthentication(t *testing.T) {
 	if err = store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	other, err := newEncryptedStorage(dir, bytes.Repeat([]byte{4}, 32))
+	other, err := newEncryptedStorage(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer other.Close()
 	var value map[string]string
-	if _, err = other.Get("task", "one", &value); err == nil || !strings.Contains(err.Error(), "decrypt") {
-		t.Fatal("wrong key accepted")
+	if found, readErr := other.Get("task", "one", &value); readErr != nil || !found || value["secret"] != "test-secret" {
+		t.Fatalf("plain state not retained: %v %v %v", found, readErr, value)
 	}
 }

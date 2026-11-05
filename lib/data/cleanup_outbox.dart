@@ -57,19 +57,54 @@ class CleanupOutbox {
             c is Map &&
             cleanupKey(DownloadCleanup.fromJson(asJson(c))) == key;
       });
-  Future<void> reconcile({bool recoverOrphans = false}) => store.change((
-    draft,
-  ) {
+  Set<String> _usedKeys(Json draft) => {
+    ..._leases.keys,
+    for (final task in draft.list('tasks'))
+      if (!{'completed', 'cancelled'}.contains(task.str('status')) &&
+          task.obj('spec')['cleanup'] is Map)
+        cleanupKey(DownloadCleanup.fromJson(task.obj('spec').obj('cleanup'))),
+  };
+
+  bool _needsReconcile(Json draft, {required bool recoverOrphans}) {
+    final raw = draft['cleanups'];
+    if (raw != null && raw is! Map) return true;
+    if (!recoverOrphans) return false;
+    final candidates = draft
+        .obj('cleanups')
+        .entries
+        .where((entry) => !asJson(entry.value).boolean('ready'));
+    if (candidates.isEmpty) return false;
+    final used = _usedKeys(draft);
+    return candidates.any((entry) => !used.contains(entry.key));
+  }
+
+  Future<void> reconcile({bool recoverOrphans = false}) {
+    if (!_needsReconcile(store.data, recoverOrphans: recoverOrphans)) {
+      return Future.value();
+    }
+    return store.change(
+      (draft) => reconcileInDraft(draft, recoverOrphans: recoverOrphans),
+    );
+  }
+
+  /// Startup queue repair can mark orphans in the same atomic snapshot.
+  void reconcileInDraft(Json draft, {bool recoverOrphans = false}) {
     final entries = draft.obj('cleanups');
+    if (draft['cleanups'] != null && draft['cleanups'] is! Map) {
+      draft['cleanups'] = entries;
+    }
+    if (entries.isEmpty || !recoverOrphans) return;
+    final used = _usedKeys(draft);
     for (final e in entries.entries.toList()) {
       final item = asJson(e.value);
       // Leases protect previews and the gap between resolution and queue insertion.
-      if (!_used(draft, e.key) && (recoverOrphans || item.boolean('ready'))) {
+      if (!item.boolean('ready') && !used.contains(e.key)) {
         entries[e.key] = {...item, 'ready': true};
       }
     }
     draft['cleanups'] = entries;
-  });
+  }
+
   Future<void> ready(DownloadCleanup? cleanup) async {
     if (cleanup == null) return;
     final key = cleanupKey(cleanup);

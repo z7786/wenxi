@@ -4,21 +4,27 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 type httpProbeInput struct {
-	ID      string            `json:"id"`
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers"`
+	ID         string            `json:"id"`
+	URL        string            `json:"url"`
+	Headers    map[string]string `json:"headers"`
+	ReadLimit  int               `json:"readLimit,omitempty"`
+	SampleOnly bool              `json:"sampleOnly,omitempty"`
 }
 
 type httpProbeResult struct {
@@ -28,6 +34,8 @@ type httpProbeResult struct {
 	HLSPath   bool              `json:"hlsPath,omitempty"`
 	ErrorKind string            `json:"errorKind,omitempty"`
 	Retryable bool              `json:"retryable,omitempty"`
+	Body      string            `json:"body,omitempty"`
+	Host      string            `json:"host,omitempty"`
 }
 
 type httpProbeJob struct {
@@ -52,7 +60,7 @@ func probeURI(value string) (*url.URL, error) {
 // download or persisting its signed URL. Polling keeps native control responsive.
 func StartHttpProbe(value string) error {
 	var input httpProbeInput
-	if len(value) > 64*1024 || json.Unmarshal([]byte(value), &input) != nil || !safeID.MatchString(input.ID) {
+	if len(value) > 64*1024 || json.Unmarshal([]byte(value), &input) != nil || !safeID.MatchString(input.ID) || input.ReadLimit < 0 || input.ReadLimit > 64*1024 {
 		return errors.New("invalid HTTP probe")
 	}
 	if _, err := probeURI(input.URL); err != nil {
@@ -103,7 +111,11 @@ func performHTTPProbe(ctx context.Context, input httpProbeInput, client *http.Cl
 	for key, value := range input.Headers {
 		req.Header.Set(key, value)
 	}
-	req.Header.Set("Range", "bytes=0-0")
+	probeBytes := 1
+	if input.ReadLimit > 0 {
+		probeBytes = input.ReadLimit
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", probeBytes-1))
 	req.Header.Del("If-Range")
 	req.Header.Set("Accept-Encoding", "identity")
 	response, err := client.Do(req)
@@ -124,8 +136,36 @@ func performHTTPProbe(ctx context.Context, input httpProbeInput, client *http.Cl
 		return httpProbeResult{Status: "error", ErrorKind: kind, Retryable: retryable}
 	}
 	defer response.Body.Close()
+	var body []byte
+	if input.ReadLimit > 0 && response.StatusCode >= 200 && response.StatusCode < 300 {
+		if encoding := response.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
+			return httpProbeResult{Status: "error", ErrorKind: "content"}
+		}
+		limit := int64(input.ReadLimit) + 1
+		if input.SampleOnly && response.StatusCode == http.StatusOK {
+			limit = int64(input.ReadLimit)
+		}
+		body, err = io.ReadAll(io.LimitReader(response.Body, limit))
+		if err != nil {
+			return httpProbeResult{Status: "error", ErrorKind: "network", Retryable: true}
+		}
+		if (len(body) == 0 && !input.SampleOnly) || len(body) > input.ReadLimit {
+			return httpProbeResult{Status: "error", ErrorKind: "content"}
+		}
+		if response.StatusCode == http.StatusPartialContent {
+			match := regexp.MustCompile(`^bytes 0-(\d+)/(\d+)$`).FindStringSubmatch(response.Header.Get("Content-Range"))
+			if len(match) != 3 {
+				return httpProbeResult{Status: "error", ErrorKind: "content"}
+			}
+			end, e1 := strconv.ParseInt(match[1], 10, 64)
+			total, e2 := strconv.ParseInt(match[2], 10, 64)
+			if e1 != nil || e2 != nil || end+1 != int64(len(body)) || total <= end || end != min(total, int64(input.ReadLimit))-1 {
+				return httpProbeResult{Status: "error", ErrorKind: "content"}
+			}
+		}
+	}
 	// A server ignoring Range must not make this probe download its whole body.
-	if response.StatusCode == http.StatusPartialContent {
+	if input.ReadLimit == 0 && response.StatusCode == http.StatusPartialContent {
 		if _, err := io.CopyN(io.Discard, response.Body, 1); err != nil {
 			return httpProbeResult{Status: "error", ErrorKind: "network", Retryable: true}
 		}
@@ -137,7 +177,7 @@ func performHTTPProbe(ctx context.Context, input httpProbeInput, client *http.Cl
 		}
 	}
 	hls := strings.HasSuffix(strings.ToLower(req.URL.Path), ".m3u8") || strings.HasSuffix(strings.ToLower(response.Request.URL.Path), ".m3u8")
-	return httpProbeResult{Status: "done", Code: response.StatusCode, Headers: headers, HLSPath: hls}
+	return httpProbeResult{Status: "done", Code: response.StatusCode, Headers: headers, HLSPath: hls, Body: base64.StdEncoding.EncodeToString(body), Host: response.Request.URL.Hostname()}
 }
 
 func HttpProbeStatus(id string) (string, error) {

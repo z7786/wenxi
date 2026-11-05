@@ -84,7 +84,7 @@ func Open(storageDir, cacheDir, encodedKey string) (err error) {
 	outputfile.Clear()
 	key, err := base64.StdEncoding.DecodeString(encodedKey)
 	if err != nil || len(key) != 32 {
-		return errors.New("invalid download storage key")
+		key = nil
 	}
 	storage, err := newEncryptedStorage(storageDir, key)
 	for i := range key {

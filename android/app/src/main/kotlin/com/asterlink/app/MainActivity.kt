@@ -3,6 +3,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.os.Bundle
+import android.view.KeyEvent
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import java.util.UUID
@@ -58,6 +59,7 @@ class MainActivity : FlutterActivity() {
         host.analytics.resume(this)
     }
     override fun onPause() {
+        host.playback.paused(this)
         host.bridge.fileOpening.paused()
         host.analytics.pause(this)
         super.onPause()
@@ -73,5 +75,12 @@ class MainActivity : FlutterActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) host.playback.windowFocused(this)
+    }
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val handled = super.dispatchKeyEvent(event)
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_MUTE -> host.playback.volumeKey(this)
+        }
+        return handled
     }
 }

@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
@@ -418,6 +419,7 @@
         <meta-data android:name="UMENG_CHANNEL" android:value="${umengChannel}"/>
     </application>
     <queries>
+        <intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="application/vnd.android.package-archive"/></intent>
         <intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="video/*"/></intent>
         <intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="application/vnd.apple.mpegurl"/></intent>
         <intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="application/x-mpegurl"/></intent>
@@ -425,6 +427,7 @@
         <intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="application/x-matroska"/></intent>
         <intent><action android:name="android.intent.action.VIEW"/><data android:mimeType="application/mp4"/></intent>
         <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent>
+        <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="weixin" android:host="dl"/></intent>
         <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="content"/></intent>
         <intent><action android:name="android.intent.action.PROCESS_TEXT"/><data android:mimeType="text/plain"/></intent>
     </queries>

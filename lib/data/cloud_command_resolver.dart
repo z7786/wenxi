@@ -4,6 +4,7 @@ import '../core/json.dart';
 import '../domain/links.dart';
 import '../domain/models.dart';
 import '../domain/xunlei_kouling.dart';
+import '../domain/c139_passcode.dart';
 import 'http.dart';
 
 class CloudCommandKeys {
@@ -30,14 +31,20 @@ class CloudCommandResolver {
     CloudPlatform.quark,
     CloudPlatform.xunlei,
     CloudPlatform.uc,
+    CloudPlatform.c139,
   ];
   static const maximumLength = 2000;
 
   Future<ParsedLink> resolve(CloudPlatform platform, String text) async {
-    require(platforms.contains(platform), '请选择夸克、迅雷或 UC 网盘');
+    require(platforms.contains(platform), '请选择支持口令的网盘');
     require(text.trim().isNotEmpty, '请先粘贴${platform.shortName}口令');
     require(text.length <= maximumLength, '口令内容过长，请只复制本次分享文案');
     RequestScope.checkpoint();
+    if (platform == CloudPlatform.c139) {
+      final code = C139Passcode.parse(text);
+      require(code != null, '未识别到移动云盘口令，请完整复制分享文案');
+      return code!.toLink(text);
+    }
     if (platform == CloudPlatform.xunlei) return _resolveXunlei(text);
     final body = buildRequest(platform, text, clock().millisecondsSinceEpoch);
     final response = await http.postJsonRead(

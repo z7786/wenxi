@@ -31,6 +31,8 @@ class _AppearancePageState extends State<AppearancePage> {
     return _draft.theme != saved.theme ||
         _draft.themePalette != saved.themePalette ||
         _draft.glassStyle != saved.glassStyle ||
+        _draft.glassControls != saved.glassControls ||
+        _draft.glassLowPower != saved.glassLowPower ||
         _draft.hideResourceNavigation != saved.hideResourceNavigation ||
         _draft.background != saved.background;
   }
@@ -43,6 +45,8 @@ class _AppearancePageState extends State<AppearancePage> {
         mode: _draft.theme,
         palette: _draft.themePalette,
         glassStyle: _draft.glassStyle,
+        glassControls: _draft.glassControls,
+        glassLowPower: _draft.glassLowPower,
         background: _draft.background,
         hideResourceNavigation: _draft.hideResourceNavigation,
       );
@@ -389,7 +393,7 @@ class _AppearancePageState extends State<AppearancePage> {
       Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: Text(
-          '调整底部和侧边导航的透明与模糊效果。未设置背景时，预览使用示例底色。',
+          '统一控制底栏、侧栏，以及开启玻璃效果后的按钮和搜索框。未设置背景时，底栏预览使用示例底色。',
           style: TextStyle(
             fontSize: 12,
             height: 1.6,
@@ -460,6 +464,26 @@ class _AppearancePageState extends State<AppearancePage> {
             ),
           ),
         ),
+      SwitchListTile.adaptive(
+        key: const Key('appearance-glass-controls'),
+        contentPadding: EdgeInsets.zero,
+        title: const Text('按钮与搜索框玻璃效果'),
+        subtitle: const Text('默认关闭，减少解析页和资源页的绘制开销'),
+        value: _draft.glassControls,
+        onChanged: _saving
+            ? null
+            : (value) => _update({'glassControls': value}),
+      ),
+      SwitchListTile.adaptive(
+        key: const Key('appearance-glass-low-power'),
+        contentPadding: EdgeInsets.zero,
+        title: const Text('轻量模式'),
+        subtitle: const Text('保留透明外观，关闭玻璃的实时模糊、折射和按压形变，适合低性能设备'),
+        value: _draft.glassLowPower,
+        onChanged: _saving
+            ? null
+            : (value) => _update({'glassLowPower': value}),
+      ),
     ],
   );
 }

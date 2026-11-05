@@ -20,9 +20,11 @@ class _Io extends HttpOverrides {}
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final executable = gopeedTestExecutable();
-  final library = File(
+  final library = [
+    Platform.environment['ASTERLINK_MPV_LIBRARY'],
+    '.local/player-test/libmpv/libmpv-2.dll',
     'build/windows/x64/runner/Release/libmpv-2.dll',
-  ).absolute.path;
+  ].whereType<String>().where((path) => File(path).existsSync()).firstOrNull;
   group(
     'Real download and player',
     () {
@@ -230,6 +232,6 @@ void main() {
     skip:
         !Platform.isWindows ||
         !File(executable).existsSync() ||
-        !File(library).existsSync(),
+        library == null,
   );
 }

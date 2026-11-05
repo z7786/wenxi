@@ -7,15 +7,20 @@ import 'package:path/path.dart' as p;
 import '../core/crypto_box.dart';
 import '../core/json.dart';
 import '../diagnostics/app_log.dart';
+import '../platform/windows_legacy_state_key.dart';
 
 class StateKeyRead {
   StateKeyRead({this.needsMigration = false});
   final keys = <Uint8List>[];
   final bool needsMigration;
   bool unavailable = false, invalid = false;
+  bool pointerNeedsRepair = false;
+  bool requiresLatestSnapshot = false;
   String? primary, copy;
   bool needsRepair(Uint8List key) =>
-      primary != base64Encode(key) || copy != base64Encode(key);
+      pointerNeedsRepair ||
+      primary != base64Encode(key) ||
+      copy != base64Encode(key);
 }
 
 class _KeyLocation {
@@ -23,7 +28,9 @@ class _KeyLocation {
   final String? namespace;
   final String backend;
   bool get native => backend == LocalStateKey.nativeBackend;
-  bool get privateFiles => backend == LocalStateKey.privateBackend;
+  bool get privateFiles =>
+      backend == LocalStateKey.privateBackend ||
+      backend == LocalStateKey.windowsPrivateBackend;
   Json toJson() => {
     'namespace': namespace,
     if (backend.isNotEmpty) 'backend': backend,
@@ -36,16 +43,32 @@ class StateKeyFallback {
   final _KeyLocation _location;
 }
 
-/// Android keeps two key records in the app's private, non-backed-up directory.
-/// Old Keystore backends are read only to migrate authenticated existing data.
+/// Android and Windows keep two independent key files in the app data directory.
+/// OS stores are read only when migrating authenticated existing data.
 class LocalStateKey {
-  LocalStateKey(this.directory, this.storage, {bool? nativeAndroid})
-    : nativeAndroid = nativeAndroid ?? Platform.isAndroid;
+  LocalStateKey(
+    this.directory,
+    this.storage, {
+    bool? nativeAndroid,
+    bool? windowsFiles,
+    WindowsLegacyStateKey? windowsLegacy,
+  }) : nativeAndroid = nativeAndroid ?? Platform.isAndroid,
+       windowsFiles =
+           windowsFiles ?? (nativeAndroid == null && Platform.isWindows),
+       _windowsLegacy = windowsLegacy;
   final Directory directory;
   final FlutterSecureStorage storage;
   final bool nativeAndroid;
+  final bool windowsFiles;
+  WindowsLegacyStateKey? _windowsLegacy;
+  bool _pointerNeedsRepair = false;
+  bool _usingBackupPointer = false;
+  bool get _fileStorage => nativeAndroid || windowsFiles;
+  String get _privateBackend =>
+      windowsFiles ? windowsPrivateBackend : privateBackend;
   static const nativeBackend = 'android-keystore-aes-v2';
   static const privateBackend = 'android-private-files-v1';
+  static const windowsPrivateBackend = 'windows-private-files-v1';
   static const privateDirectoryName = 'state-keys-private-v1';
   static const name = 'asterlink.flutter.state-key.v1';
   static const locationName = 'state-key-location.json';
@@ -53,6 +76,7 @@ class LocalStateKey {
   static const sidecars = [
     locationName,
     '$locationName.tmp',
+    '$locationName.bak',
     recoveryName,
     '$recoveryName.tmp',
   ];
@@ -69,7 +93,10 @@ class LocalStateKey {
     final value = location['namespace'];
     final backend = location.str('backend');
     require(
-      backend.isEmpty || backend == nativeBackend || backend == privateBackend,
+      backend.isEmpty ||
+          backend == nativeBackend ||
+          backend == privateBackend ||
+          backend == windowsPrivateBackend,
       '本地密钥存储格式不支持',
     );
     require(
@@ -81,11 +108,9 @@ class LocalStateKey {
     return _KeyLocation(value as String?, backend: backend);
   }
 
-  Future<({_KeyLocation active, _KeyLocation? fallback})> _pointer() async {
-    final file = localFile(locationName);
-    if (!await file.exists()) {
-      return (active: const _KeyLocation(null), fallback: null);
-    }
+  Future<({_KeyLocation active, _KeyLocation? fallback})> _readPointer(
+    File file,
+  ) async {
     require(await file.length() <= 1024, '本地密钥位置记录损坏');
     final location = asJson(jsonDecode(await file.readAsString()));
     final active = _parseLocation(location);
@@ -94,10 +119,47 @@ class LocalStateKey {
       try {
         fallback = _parseLocation(asJson(location['fallback']));
       } on AppException {
-        // Optional recovery metadata must not disable a working active store.
+        // Optional recovery metadata cannot disable the active store.
       }
     }
     return (active: active, fallback: fallback);
+  }
+
+  Future<({_KeyLocation active, _KeyLocation? fallback})> _pointer() async {
+    _pointerNeedsRepair = false;
+    _usingBackupPointer = false;
+    final files = [localFile(locationName), localFile('$locationName.bak')];
+    Object? failure;
+    for (final file in files) {
+      if (!await file.exists()) continue;
+      try {
+        final pointer = await _readPointer(file);
+        _usingBackupPointer = file.path != localFile(locationName).path;
+        _pointerNeedsRepair = _usingBackupPointer;
+        if (windowsFiles && !_pointerNeedsRepair) {
+          final copy = localFile('$locationName.bak');
+          try {
+            _pointerNeedsRepair =
+                !await copy.exists() ||
+                await copy.length() > 1024 ||
+                !listEquals(await file.readAsBytes(), await copy.readAsBytes());
+          } on FileSystemException {
+            _pointerNeedsRepair = true;
+          }
+        }
+        return pointer;
+      } on AppException catch (error) {
+        failure = error;
+      } on FormatException catch (error) {
+        failure = error;
+      } on FileSystemException catch (error) {
+        failure = error;
+      }
+    }
+    if (failure == null) {
+      return (active: const _KeyLocation(null), fallback: null);
+    }
+    throw failure;
   }
 
   AndroidOptions _options(String? namespace) => namespace == null
@@ -125,6 +187,13 @@ class LocalStateKey {
           });
           return bytes == null ? null : base64Encode(bytes);
         }
+        if (windowsFiles) {
+          // The plugin deletes its JSON key store when DPAPI fails. Bypass it
+          // even for upgrades and read all historical formats without writes.
+          return await (_windowsLegacy ??= WindowsLegacyStateKey(
+            directory.parent,
+          )).read(key);
+        }
         return await storage.read(key: key, aOptions: _options(namespace));
       } on PlatformException catch (error) {
         if (attempt >= 2) {
@@ -140,11 +209,12 @@ class LocalStateKey {
     final result = StateKeyRead();
     _KeyLocation location;
     try {
-      // An empty Android installation never needs to initialize an OS keystore.
+      // An empty installation never needs to initialize OS key storage.
       // The caller must check for encrypted snapshots and recovery metadata first.
-      if (nativeAndroid &&
+      if (_fileStorage &&
           !readLegacyWithoutPointer &&
-          !await localFile(locationName).exists()) {
+          !await localFile(locationName).exists() &&
+          !await localFile('$locationName.bak').exists()) {
         return result;
       }
       location = (await _pointer()).active;
@@ -158,12 +228,18 @@ class LocalStateKey {
       result.unavailable = true;
       return result;
     }
-    return _readLocation(location);
+    final needsRepair = _pointerNeedsRepair;
+    final saved = await _readLocation(location);
+    saved.pointerNeedsRepair = needsRepair;
+    // A backup pointer may be stale. It must never select an older snapshot
+    // encrypted with another key and replace the current data with that copy.
+    saved.requiresLatestSnapshot = windowsFiles && _usingBackupPointer;
+    return saved;
   }
 
   Future<StateKeyRead> _readLocation(_KeyLocation location) async {
     final result = StateKeyRead(
-      needsMigration: nativeAndroid && !location.privateFiles,
+      needsMigration: _fileStorage && !location.privateFiles,
     );
     final namespace = location.namespace;
     // A pointer to an existing namespace is not a fresh installation, even if
@@ -209,12 +285,37 @@ class LocalStateKey {
   Future<List<StateKeyFallback>> readFallbacks() async {
     try {
       final pointer = await _pointer();
-      final location = pointer.fallback;
-      if (location == null) return [];
-      // Once migrated, even a damaged key file must not access Keystore again.
-      if (pointer.active.privateFiles && !location.privateFiles) return [];
-      final saved = await _readLocation(location);
-      return [for (final key in saved.keys) StateKeyFallback._(key, location)];
+      final locations = [if (pointer.fallback != null) pointer.fallback!];
+      if (windowsFiles) {
+        try {
+          final backup = await _readPointer(localFile('$locationName.bak'));
+          // An interrupted migration can publish the file pointer backup while
+          // the old primary still points at DPAPI. Read the backup independently.
+          for (final location in [backup.active, backup.fallback]) {
+            if (location != null && location.privateFiles) {
+              locations.add(location);
+            }
+          }
+        } on AppException {
+          // A bad backup cannot disable a usable primary or its fallback.
+        } on FormatException {
+          // All candidates still need authentication against the latest data.
+        } on FileSystemException {
+          // Keep reading the locations available from the primary pointer.
+        }
+      }
+      final results = <StateKeyFallback>[];
+      final seen = <String>{};
+      for (final location in locations) {
+        // Once migrated, even damaged key files must not access OS storage again.
+        if (pointer.active.privateFiles && !location.privateFiles) continue;
+        if (!seen.add('${location.backend}/${location.namespace}')) continue;
+        final saved = await _readLocation(location);
+        results.addAll([
+          for (final key in saved.keys) StateKeyFallback._(key, location),
+        ]);
+      }
+      return results;
     } on AppException {
       return [];
     } on FormatException {
@@ -226,7 +327,7 @@ class LocalStateKey {
 
   /// Only call after this exact key decrypts the newest local snapshot.
   Future<void> useFallback(StateKeyFallback fallback) async {
-    if (nativeAndroid || fallback._location.privateFiles) {
+    if (_fileStorage || fallback._location.privateFiles) {
       await _savePrivate(fallback.key);
     } else {
       final previous = (await _pointer()).active;
@@ -235,16 +336,23 @@ class LocalStateKey {
     DiagnosticLog.active?.record('state_key.fallback_restored');
   }
 
-  Future<void> _writePointer(_KeyLocation active, _KeyLocation? fallback) =>
-      writeAtomic(
-        localFile(locationName),
-        utf8.encode(
-          jsonEncode({
-            ...active.toJson(),
-            if (fallback != null) 'fallback': fallback.toJson(),
-          }),
-        ),
-      );
+  Future<void> _writePointer(
+    _KeyLocation active,
+    _KeyLocation? fallback,
+  ) async {
+    final bytes = utf8.encode(
+      jsonEncode({
+        ...active.toJson(),
+        if (fallback != null) 'fallback': fallback.toJson(),
+      }),
+    );
+    // Publish a second pointer only after both key files have been reopened.
+    // An interrupted metadata write can then recover without touching OS keys.
+    if (windowsFiles) {
+      await writeAtomic(localFile('$locationName.bak'), bytes);
+    }
+    await writeAtomic(localFile(locationName), bytes);
+  }
 
   Future<_KeyLocation?> _verifiedPrivatePrevious(Uint8List key) async {
     try {
@@ -325,14 +433,14 @@ class LocalStateKey {
 
   Future<void> save(Uint8List key) async {
     final location = (await _pointer()).active;
-    if (nativeAndroid || location.privateFiles) {
+    if (_fileStorage || location.privateFiles) {
       await _savePrivate(key);
       if (!location.privateFiles) {
         DiagnosticLog.active?.record(
           'state_key.storage_migrated',
           fields: {
             'from': location.backend.isEmpty ? 'legacy' : location.backend,
-            'to': privateBackend,
+            'to': _privateBackend,
           },
         );
       }
@@ -343,7 +451,7 @@ class LocalStateKey {
   }
 
   Future<void> saveForImport(Uint8List key) async {
-    if (nativeAndroid) {
+    if (_fileStorage) {
       final saved = await read();
       if (!saved.needsMigration &&
           !saved.needsRepair(key) &&
@@ -358,7 +466,7 @@ class LocalStateKey {
   /// Old storage is left intact; the pointer switches only after durable writes.
   Future<void> saveFresh(Uint8List key) async {
     require(key.length == 32, '本地密钥格式错误');
-    if (nativeAndroid) {
+    if (_fileStorage) {
       await _savePrivate(key);
       return;
     }
@@ -400,7 +508,7 @@ class LocalStateKey {
       );
     }
     await _writePointer(
-      _KeyLocation(namespace, backend: privateBackend),
+      _KeyLocation(namespace, backend: _privateBackend),
       previous,
     );
   }

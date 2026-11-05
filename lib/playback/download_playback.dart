@@ -10,6 +10,8 @@ import '../domain/playback_source.dart';
 import '../download/download_playback_cache.dart';
 import '../download/download_manager.dart';
 import 'media_backend.dart';
+import 'delegating_backend.dart';
+import 'playback_backend_factory.dart';
 import 'playback_controller.dart';
 import 'playback_sources.dart';
 
@@ -97,14 +99,20 @@ PlaybackController downloadPlayback(
   );
 }
 
-class DownloadMediaBackend extends MediaKitBackend {
+class DownloadMediaBackend extends DelegatingPlaybackBackend {
   DownloadMediaBackend(
     this.downloads,
     this.downloadId, {
-    required super.video,
-    super.hardwareAcceleration,
-    super.downloadCache,
-  }) {
+    required bool video,
+    bool hardwareAcceleration = true,
+    PlaybackCacheReader? downloadCache,
+  }) : super(
+         createPlaybackBackend(
+           video: video,
+           hardwareAcceleration: hardwareAcceleration,
+           downloadCache: downloadCache,
+         ),
+       ) {
     downloads.addListener(_downloadChanged);
   }
   final DownloadManager downloads;

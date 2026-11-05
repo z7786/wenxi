@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_services.dart';
 import '../data/http.dart';
 import '../domain/github_acceleration.dart';
+import '../download/native_http_probe.dart';
 import 'common.dart';
 
 class GitHubAccelerationPage extends StatefulWidget {
@@ -68,6 +69,8 @@ class _GitHubAccelerationPageState extends State<GitHubAccelerationPage> {
     final settings = widget.services.settings.githubAcceleration;
     final scope = _testScope = RequestScope();
     final watch = Stopwatch()..start();
+    var stage = '文件下载';
+    var rangeSupported = true;
     setState(() {
       _testing = true;
       _result = null;
@@ -78,28 +81,44 @@ class _GitHubAccelerationPageState extends State<GitHubAccelerationPage> {
             if (widget.testConnection case final test?) {
               await test(settings);
             } else {
-              final bytes = await widget.services.transfer.limited(
+              await NativeHttpProbe(widget.services.engine).request(
                 settings.urlFor(GitHubAcceleration.testUrl),
                 const {'User-Agent': 'AsterLink-GitHub/1.0'},
-                64,
+                readLimit: 4096,
+                validate: (bytes) =>
+                    utf8.decode(bytes).trim() == 'Hello World!',
               );
-              if (utf8.decode(bytes).trim() != 'Hello World!') {
-                throw const FormatException('Unexpected test file');
-              }
+              stage = '分段';
+              final range = await NativeHttpProbe(widget.services.engine).request(
+                settings.urlFor(GitHubAcceleration.rangeTestUrl),
+                const {'User-Agent': 'AsterLink-GitHub/1.0'},
+                readLimit: 1024,
+                sampleOnly: true,
+                validate: (bytes) => utf8
+                    .decode(bytes, allowMalformed: true)
+                    // COPYING starts with a blank line before its license text.
+                    .trimLeft()
+                    .startsWith('Note that the only valid version of the GPL'),
+              );
+              rangeSupported = range['code'] == 206;
             }
           })
-          .timeout(const Duration(seconds: 15));
+          .timeout(const Duration(seconds: 65));
       if (mounted && revision == _testRevision) {
         setState(() {
           _testPassed = true;
-          _result = '连接成功，测试文件已下载（${watch.elapsedMilliseconds} ms）';
+          _result = rangeSupported
+              ? '连接成功，文件下载及分段校验通过（${watch.elapsedMilliseconds} ms）'
+              : '连接成功，文件可下载；当前地址未返回分段响应（${watch.elapsedMilliseconds} ms）';
         });
       }
-    } catch (_) {
+    } catch (error) {
       if (mounted && revision == _testRevision) {
         setState(() {
           _testPassed = false;
-          _result = '当前地址连接失败，请切换地址或检查网络后重试。';
+          _result = stage == '分段'
+              ? '文件下载校验通过，但分段测试失败：${errorText(error)}。可切换地址后重试。'
+              : '${errorText(error)}。当前地址文件下载测试失败，可切换地址后重试。';
         });
       }
     } finally {
@@ -159,7 +178,7 @@ class _GitHubAccelerationPageState extends State<GitHubAccelerationPage> {
             padding: const EdgeInsets.fromLTRB(18, 20, 18, 28),
             children: [
               Text(
-                '用于 GitHub 公开文件、源码压缩包和应用更新安装包。切换后，新下载和下次继续下载时生效。',
+                '用于 GitHub 公开文件、源码压缩包和应用更新安装包。切换后，新下载和下次继续下载时生效。镜像连接或文件范围异常时，会尝试直连及备用镜像。',
                 style: TextStyle(
                   fontSize: 13,
                   height: 1.6,

@@ -95,6 +95,16 @@ if(NOT EXISTS "${ASTERLINK_GOPEED}")
   message(FATAL_ERROR "Run tool/build-native-windows.ps1 before building Windows.")
 endif()
 install(FILES "${ASTERLINK_GOPEED}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
+
+# A rebuild can reuse the output directory from the retired MDK backend.
+install(CODE "
+  file(REMOVE \"${CMAKE_INSTALL_PREFIX}/fvp.dll\"
+    \"${CMAKE_INSTALL_PREFIX}/mdk.dll\"
+    \"${CMAKE_INSTALL_PREFIX}/mdk-braw.dll\"
+    \"${CMAKE_INSTALL_PREFIX}/mdk-r3d.dll\"
+    \"${CMAKE_INSTALL_PREFIX}/ffmpeg-9.dll\"
+    \"${CMAKE_INSTALL_PREFIX}/libass.dll\")
+  ")
 if(FLUTTER_TARGET_PLATFORM STREQUAL "windows-arm64")
   install(DIRECTORY "${CMAKE_BINARY_DIR}/ANGLE/licenses/"
     DESTINATION "${CMAKE_INSTALL_PREFIX}/licenses" COMPONENT Runtime)

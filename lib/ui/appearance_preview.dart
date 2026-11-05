@@ -6,6 +6,8 @@ import '../domain/settings.dart';
 import 'app_background.dart';
 import 'app_navigation.dart';
 import 'app_theme.dart';
+import 'liquid_glass.dart';
+import 'resource_search_bar.dart';
 
 class AppearancePreview extends StatefulWidget {
   const AppearancePreview({
@@ -46,6 +48,8 @@ class _AppearancePreviewState extends State<AppearancePreview> {
           brightness,
           palette: settings.themePalette,
           glassStyle: settings.glassStyle,
+          glassControls: settings.glassControls,
+          glassLowPower: settings.glassLowPower,
           fontFamily: Theme.of(context).textTheme.bodyMedium?.fontFamily,
         ),
         duration: MediaQuery.disableAnimationsOf(context)
@@ -150,20 +154,31 @@ class _AppearancePreviewState extends State<AppearancePreview> {
                         ),
                         Padding(
                           padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: colors.primary,
-                              borderRadius: BorderRadius.circular(10),
+                          child: LiquidGlassButton(
+                            onPressed: () {},
+                            child: const Text(
+                              '解析链接',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 11),
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                          child: ResourceSearchBar(
+                            buttonKey: const Key('appearance-preview-search'),
+                            onPressed: () => setState(() => selected = 1),
+                            field: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                              ),
                               child: Text(
-                                '解析链接',
-                                textAlign: TextAlign.center,
+                                '搜索资源',
                                 style: TextStyle(
-                                  color: colors.onPrimary,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                  color: colors.onSurfaceVariant,
                                 ),
                               ),
                             ),

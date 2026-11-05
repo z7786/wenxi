@@ -3,12 +3,13 @@ import '../core/json.dart';
 import 'models.dart';
 import 'web_tokens.dart';
 
-/// Uses the same hosted verification widgets as the official login page.
-/// A proof belongs to one request and is consumed by the login endpoint.
+/// Uses the official hosted verification widgets for login and public shares.
+/// A proof belongs to one challenge and is consumed by its official endpoint.
 class CtfileCaptchaChallenge {
   CtfileCaptchaChallenge(
     this.type, {
     this.message = '请完成城通安全验证',
+    this.share = false,
     Map<String, String> imageHeaders = const {},
   }) : state = newId(),
        imageHeaders = Map.unmodifiable(imageHeaders) {
@@ -19,6 +20,7 @@ class CtfileCaptchaChallenge {
   static const origin = 'https://h5.ctfile.com';
   static const restOrigin = 'https://rest.ctfile.com';
   final String type, state, message;
+  final bool share;
   final Map<String, String> imageHeaders;
   bool get isImage => type == 'image';
   String get _source =>
@@ -28,11 +30,11 @@ class CtfileCaptchaChallenge {
     require(!isImage, '请使用图片验证码');
     return Uri.parse('$origin/captcha/$type.html').replace(
       queryParameters: {
-        'source': 'p8',
-        'action': 'login',
+        'source': share ? 'urlweb' : 'p8',
+        'action': share ? 'share_passcode' : 'login',
         'lang': 'zh-hans',
         'theme': 'light',
-        'api': restOrigin,
+        'api': share ? 'https://urlapi.ctfile.com' : restOrigin,
       },
     );
   }
@@ -128,6 +130,11 @@ class CtfileCaptchaChallenge {
     window.__asterCtfileCaptcha = null;
     return message ? JSON.stringify(message) : '';
   })();''';
+}
+
+class CtfileShareVerificationRequired extends AppException {
+  CtfileShareVerificationRequired(this.challenge) : super(challenge.message);
+  final CtfileCaptchaChallenge challenge;
 }
 
 class CtfileCaptchaProof {

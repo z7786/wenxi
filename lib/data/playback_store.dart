@@ -6,19 +6,30 @@ import 'state_store.dart';
 class PlaybackStore {
   PlaybackStore(this.store);
   final StateStore store;
+  static final _pendingBookmarks = Expando<Map<String, PlaybackBookmark>>(
+    'playback.pending',
+  );
   static const historyLimit = 200;
   static const torrentCacheBytes = 16 * 1024 * 1024;
-  List<PlaybackRecord> get recent => [
-    for (final entry in store.data.obj('playbackHistory').entries)
-      if (entry.value is Map)
-        PlaybackRecord(
-          entry.key,
-          PlaybackBookmark.fromJson(asJson(entry.value)),
-        ),
-  ]..sort((a, b) => b.bookmark.updatedAt.compareTo(a.bookmark.updatedAt));
+  List<PlaybackRecord> get recent {
+    final bookmarks = {
+      for (final entry in store.data.obj('playbackHistory').entries)
+        if (entry.value is Map)
+          entry.key: PlaybackBookmark.fromJson(asJson(entry.value)),
+      ...?_pendingBookmarks[store],
+    };
+    final records = [
+      for (final entry in bookmarks.entries)
+        PlaybackRecord(entry.key, entry.value),
+    ]..sort((a, b) => b.bookmark.updatedAt.compareTo(a.bookmark.updatedAt));
+    return records.take(historyLimit).toList();
+  }
+
   PlaybackPreferences get preferences =>
       PlaybackPreferences.fromJson(store.data.obj('playbackPreferences'));
   PlaybackBookmark? bookmark(String key) {
+    final pending = _pendingBookmarks[store]?[key];
+    if (pending != null) return pending;
     final value = store.data.obj('playbackHistory')[key];
     return value is Map ? PlaybackBookmark.fromJson(asJson(value)) : null;
   }
@@ -123,7 +134,27 @@ class PlaybackStore {
           ),
         );
       });
-  Future<void> save(String key, PlaybackBookmark bookmark) => store.change((
+  Future<void> save(String key, PlaybackBookmark bookmark) {
+    // A closing player can return before its durable write finishes. Every
+    // PlaybackStore for this device sees the captured progress during that gap.
+    final previous = this.bookmark(key);
+    final pending = PlaybackBookmark(
+      position: bookmark.position,
+      duration: bookmark.duration,
+      updatedAt: bookmark.updatedAt,
+      completed: bookmark.completed,
+      name: bookmark.name,
+      source: bookmark.source ?? previous?.source,
+    );
+    final bookmarks = _pendingBookmarks[store] ??= {};
+    bookmarks[key] = pending;
+    return _save(key, bookmark).whenComplete(() {
+      // An older completion must not erase the next player's pending progress.
+      if (identical(bookmarks[key], pending)) bookmarks.remove(key);
+    });
+  }
+
+  Future<void> _save(String key, PlaybackBookmark bookmark) => store.change((
     draft,
   ) {
     final history = draft.obj('playbackHistory');
@@ -207,14 +238,21 @@ class PlaybackStore {
     );
   }
 
-  Future<void> remove(String key) => store.change((draft) {
-    draft['playbackHistory'] = draft.obj('playbackHistory')..remove(key);
-    draft['playbackVideoInfo'] = draft.obj('playbackVideoInfo')..remove(key);
-    _pruneTorrents(draft);
-  });
-  Future<void> clearHistory() => store.change((draft) {
-    draft['playbackHistory'] = <String, dynamic>{};
-    draft.remove('playbackVideoInfo');
-    draft.remove('playbackTorrents');
-  });
+  Future<void> remove(String key) {
+    _pendingBookmarks[store]?.remove(key);
+    return store.change((draft) {
+      draft['playbackHistory'] = draft.obj('playbackHistory')..remove(key);
+      draft['playbackVideoInfo'] = draft.obj('playbackVideoInfo')..remove(key);
+      _pruneTorrents(draft);
+    });
+  }
+
+  Future<void> clearHistory() {
+    _pendingBookmarks[store]?.clear();
+    return store.change((draft) {
+      draft['playbackHistory'] = <String, dynamic>{};
+      draft.remove('playbackVideoInfo');
+      draft.remove('playbackTorrents');
+    });
+  }
 }

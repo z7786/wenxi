@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
@@ -65,6 +67,9 @@ class DiagnosticLog extends ChangeNotifier {
   final String session;
   final _memory = <String>[];
   final _recent = <String, DateTime>{};
+  final _pendingLines = <({DateTime day, List<int> bytes})>[];
+  Timer? _flushTimer;
+  int _pendingBytes = 0, _currentBytes = 0;
   File? _current;
   DateTime? _fileDay;
   int _part = 0, _sequence = 0, _suppressed = 0;
@@ -179,6 +184,7 @@ class DiagnosticLog extends ChangeNotifier {
           now.difference(last) >= Duration.zero &&
           now.difference(last) < const Duration(seconds: 3)) {
         _suppressed++;
+        if (flush || level == 'error') this.flush();
         return;
       }
       _recent[fingerprint] = now;
@@ -208,33 +214,79 @@ class DiagnosticLog extends ChangeNotifier {
         _memory.removeAt(0);
       }
       if (directory != null) {
-        try {
-          final bytes = utf8.encode('$line\n');
-          if (_current == null ||
-              !_current!.existsSync() ||
-              _fileDay != DateTime.utc(now.year, now.month, now.day) ||
-              _current!.lengthSync() + bytes.length > maxFileBytes) {
-            _current = File(
-              p.join(directory!.path, 'app-$session-${_part++}.jsonl'),
-            );
-            _fileDay = DateTime.utc(now.year, now.month, now.day);
-            _current!.createSync();
-            _prune();
-          }
-          _current!.writeAsBytesSync(
-            bytes,
-            mode: FileMode.append,
-            flush: flush || level == 'error' || level == 'fatal',
-          );
-          storageError = null;
-        } catch (_) {
-          storageError = '日志写入失败，可能存储空间不足；最近记录暂存在内存中';
+        final bytes = utf8.encode('$line\n');
+        _pendingLines.add((
+          day: DateTime.utc(now.year, now.month, now.day),
+          bytes: bytes,
+        ));
+        _pendingBytes += bytes.length;
+        if (flush || level == 'error' || level == 'fatal') {
+          this.flush();
+        } else if (_pendingBytes >= min(64 * 1024, maxFileBytes)) {
+          _drain(sync: false);
+        } else {
+          _flushTimer ??= Timer(const Duration(milliseconds: 250), () {
+            _drain(sync: false);
+          });
         }
       }
     } catch (_) {
       storageError = '部分诊断信息无法记录';
     } finally {
       _writing = false;
+    }
+  }
+
+  /// Ordinary operation bursts share an append instead of opening/stat-ing a
+  /// file for every event. Critical records drain earlier context in order.
+  void flush() => _drain(sync: true);
+
+  void _drain({required bool sync}) {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    if (_pendingLines.isEmpty) return;
+    final lines = _pendingLines.toList();
+    _pendingLines.clear();
+    _pendingBytes = 0;
+    try {
+      // Refresh metadata once per batch, including externally removed files.
+      final current = _current;
+      if (current != null) {
+        if (current.existsSync()) {
+          _currentBytes = current.lengthSync();
+        } else {
+          _current = null;
+          _currentBytes = 0;
+        }
+      }
+      var index = 0;
+      while (index < lines.length) {
+        final first = lines[index];
+        if (_current == null ||
+            _fileDay != first.day ||
+            _currentBytes + first.bytes.length > maxFileBytes) {
+          _current = File(
+            p.join(directory!.path, 'app-$session-${_part++}.jsonl'),
+          );
+          _fileDay = first.day;
+          _currentBytes = 0;
+          _current!.createSync();
+          _prune();
+        }
+        final batch = BytesBuilder(copy: false);
+        do {
+          batch.add(lines[index++].bytes);
+        } while (index < lines.length &&
+            lines[index].day == first.day &&
+            _currentBytes + batch.length + lines[index].bytes.length <=
+                maxFileBytes);
+        final bytes = batch.takeBytes();
+        _current!.writeAsBytesSync(bytes, mode: FileMode.append, flush: sync);
+        _currentBytes += bytes.length;
+      }
+      storageError = null;
+    } catch (_) {
+      storageError = '日志写入失败，可能存储空间不足；最近记录暂存在内存中';
     }
   }
 
@@ -261,7 +313,10 @@ class DiagnosticLog extends ChangeNotifier {
       // Never prune the new active file just because its mtime ties an old one.
       if (file.path == _current?.path && !expired) continue;
       if (expired || all.length > maxFiles) {
-        if (file.path == _current?.path) _current = null;
+        if (file.path == _current?.path) {
+          _current = null;
+          _currentBytes = 0;
+        }
         file.deleteSync();
         all.remove(file);
       }
@@ -269,6 +324,7 @@ class DiagnosticLog extends ChangeNotifier {
   }
 
   Map<String, String> exportFiles() {
+    flush();
     final result = <String, String>{};
     try {
       _prune();
@@ -341,6 +397,7 @@ class DiagnosticLog extends ChangeNotifier {
   }
 
   int get sizeBytes {
+    flush();
     try {
       if (directory == null) {
         return _memory.fold(
@@ -370,11 +427,12 @@ class DiagnosticLog extends ChangeNotifier {
     } catch (_) {
       /* Session markers are advisory, never proof of a crash. */
     }
-    record('lifecycle.$state');
+    record('lifecycle.$state', flush: true);
   }
 
   void setEnabled(bool enabled) {
     if (_closed) return;
+    flush();
     if (directory != null) {
       directory!.createSync(recursive: true);
       final flag = File(p.join(directory!.path, 'disabled'));
@@ -394,12 +452,17 @@ class DiagnosticLog extends ChangeNotifier {
   }
 
   void clear() {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _pendingLines.clear();
+    _pendingBytes = 0;
     for (final file in _files()) {
       file.deleteSync();
     }
     _memory.clear();
     _recent.clear();
     _current = null;
+    _currentBytes = 0;
     _fileDay = null;
     _suppressed = 0;
     previousSessionInterrupted = false;
@@ -420,7 +483,7 @@ class DiagnosticLog extends ChangeNotifier {
 
   void close() {
     if (_closed) return;
-    record('session.close');
+    record('session.close', flush: true);
     _removeMarker();
     _closed = true;
     if (identical(active, this)) active = null;

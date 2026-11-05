@@ -20,6 +20,8 @@ import 'package:asterlink/domain/tianyi_web_login.dart';
 import 'package:asterlink/ui/login_page.dart';
 import 'package:asterlink/ui/guangya_verification_page.dart';
 import 'package:asterlink/ui/ctfile_verification_page.dart';
+import 'package:asterlink/ui/browser_page.dart';
+import 'package:asterlink/ui/parse_page.dart';
 import 'native_login_support.dart';
 import 'support.dart';
 import 'token_cloud_support.dart';
@@ -41,6 +43,46 @@ class _Services extends AppServices {
     if (failInitialization) throw StateError('Fixture WebView unavailable');
     return null;
   }
+}
+
+class _CtfileShareConnector extends CtfileConnector {
+  _CtfileShareConnector() : super(FakeHttp());
+  final challenge = CtfileCaptchaChallenge('altcha', share: true);
+  int opens = 0;
+  CtfileCaptchaProof? received;
+  @override
+  Future<BrowseSession> openShare(
+    ParsedLink link,
+    Credential? credential, {
+    CtfileCaptchaProof? proof,
+    String? accessPass,
+  }) async {
+    opens++;
+    if (proof == null) throw CtfileShareVerificationRequired(challenge);
+    require(proof.belongsTo(challenge), '验证码不属于本次分享');
+    received = proof;
+    return BrowseSession(
+      platform: CloudPlatform.ctfile,
+      mode: BrowseMode.share,
+      title: '城通测试分享',
+      rootId: 'd0',
+      sourceLink: link,
+    );
+  }
+
+  @override
+  Future<List<CloudFile>> list(
+    BrowseSession session,
+    String parentId,
+    Credential? credential,
+  ) async => const [
+    CloudFile(
+      id: 'f965073660',
+      name: '8b103b38.rar',
+      size: 1256561,
+      parentId: 'd0',
+    ),
+  ];
 }
 
 class _Cookies extends PlatformCookieManager {
@@ -1201,6 +1243,127 @@ void main() {
     'event': 'success',
     'token': 'verified-widget-proof-0123456789',
   };
+
+  const ctfileShareUrl =
+      'https://url53.ctfile.com/f/39602953-965073660-1b43c4?p=8761';
+  Future<(GlobalKey<ParsePageState>, _CtfileShareConnector)> parseCtfileShare(
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 960);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final provider = _CtfileShareConnector();
+    services.cloud.connectors[CloudPlatform.ctfile] = provider;
+    final key = GlobalKey<ParsePageState>();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ParsePage(services, key: key)),
+      ),
+    );
+    await tester.pumpAndSettle(
+      const Duration(milliseconds: 100),
+      EnginePhase.sendSemanticsUpdate,
+      const Duration(seconds: 5),
+    );
+    await tester.enterText(
+      find.byKey(const Key('parse-input')),
+      ctfileShareUrl,
+    );
+    await tester.pump();
+    await tester.ensureVisible(find.byKey(const Key('parse-start')));
+    await tester.tap(find.byKey(const Key('parse-start')));
+    await tester.pumpAndSettle(
+      const Duration(milliseconds: 100),
+      EnginePhase.sendSemanticsUpdate,
+      const Duration(seconds: 5),
+    );
+    expect(find.byType(CtfileVerificationPage), findsOneWidget);
+    expect(provider.opens, 1);
+    return (key, provider);
+  }
+
+  Future<void> closeCtfileParse(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    var closed = false;
+    services.close().then((_) => closed = true);
+    for (var attempt = 0; attempt < 100 && !closed; attempt++) {
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+    }
+    expect(closed, isTrue);
+  }
+
+  testWidgets(
+    'Ctfile share resumes parsing after official verification without a parse timeout',
+    (tester) async {
+      final (_, provider) = await parseCtfileShare(tester);
+      expect(
+        platform.views.last.params.initialUrlRequest!.url.toString(),
+        provider.challenge.url.toString(),
+      );
+      await tester.pump(const Duration(seconds: 100));
+      final native = _CtfileController(310, provider.challenge)
+        ..message = ctfileSuccess();
+      final (view, web) = attach(310, instance: native);
+      view.params.onLoadStop!(web, native.url);
+      await tester.pumpAndSettle(
+        const Duration(milliseconds: 100),
+        EnginePhase.sendSemanticsUpdate,
+        const Duration(seconds: 5),
+      );
+      expect(provider.opens, 2);
+      expect(provider.received, isNotNull);
+      expect(find.byType(CtfileVerificationPage), findsNothing);
+      expect(find.byType(BrowserPage), findsOneWidget);
+      expect(find.text('8b103b38.rar'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await closeCtfileParse(tester);
+    },
+  );
+
+  testWidgets(
+    'Cancelling Ctfile share verification preserves the URL and password',
+    (tester) async {
+      final (key, provider) = await parseCtfileShare(tester);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(key.currentState!.input.text, ctfileShareUrl);
+      expect(key.currentState!.code.text, '8761');
+      expect(find.text('已取消安全验证，链接和提取码已保留'), findsOneWidget);
+      expect(find.byType(BrowserPage), findsNothing);
+      expect(provider.opens, 1);
+      expect(tester.takeException(), isNull);
+      await closeCtfileParse(tester);
+    },
+  );
+
+  testWidgets('Changing input while Ctfile verifies discards the old proof', (
+    tester,
+  ) async {
+    final (key, provider) = await parseCtfileShare(tester);
+    const replacement = 'https://url53.ctfile.com/f/39602953-100-abcdef?p=1234';
+    key.currentState!.acceptClipboard(replacement);
+    await tester.pump();
+    final native = _CtfileController(311, provider.challenge)
+      ..message = ctfileSuccess();
+    final (view, web) = attach(311, instance: native);
+    view.params.onLoadStop!(web, native.url);
+    await tester.pumpAndSettle(
+      const Duration(milliseconds: 100),
+      EnginePhase.sendSemanticsUpdate,
+      const Duration(seconds: 5),
+    );
+    expect(provider.opens, 1);
+    expect(provider.received, isNull);
+    expect(key.currentState!.input.text, replacement);
+    expect(key.currentState!.code.text, '1234');
+    expect(find.byType(BrowserPage), findsNothing);
+    expect(tester.takeException(), isNull);
+    await closeCtfileParse(tester);
+  });
 
   Future<void> openCtfileVerification(
     WidgetTester tester,

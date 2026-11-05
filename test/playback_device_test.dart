@@ -11,16 +11,35 @@ void main() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   final calls = <MethodCall>[];
   final nativeCalls = <MethodCall>[];
+  var systemVolume = 60.0;
+  var systemVolumeSupported = true;
   setUp(() {
     calls.clear();
     nativeCalls.clear();
+    systemVolume = 60;
+    systemVolumeSupported = true;
     messenger.setMockMethodCallHandler(nativeChannel, (call) async {
       nativeCalls.add(call);
       return call.method == 'openExternalPlayer' ? true : null;
     });
     messenger.setMockMethodCallHandler(channel, (call) async {
       calls.add(call);
-      if (call.method == 'begin') return {'pip': true, 'brightness': .6};
+      if (call.method == 'begin') {
+        return {
+          'pip': true,
+          'brightness': .6,
+          'systemVolumeSupported': systemVolumeSupported,
+          'systemVolume': systemVolume,
+        };
+      }
+      if (call.method == 'volume') {
+        final requested = (call.arguments['value'] as num).toDouble();
+        systemVolume = (requested / 10).round() * 10.0;
+        return {
+          'systemVolumeSupported': systemVolumeSupported,
+          'systemVolume': systemVolume,
+        };
+      }
       if (call.method == 'enterPip') return true;
       return null;
     });
@@ -29,6 +48,64 @@ void main() {
     messenger.setMockMethodCallHandler(channel, null);
     messenger.setMockMethodCallHandler(nativeChannel, null);
   });
+
+  test(
+    'Android volume uses native media steps and ignores stale session updates',
+    () async {
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      expect(device.supportsSystemVolume, isTrue);
+      expect(device.systemVolume, 60);
+      expect(calls.where((call) => call.method == 'volume'), isEmpty);
+      final session = calls.first.arguments['session'];
+      expect(await device.setSystemVolume(37), 40);
+      expect(calls.last.method, 'volume');
+      expect(calls.last.arguments['value'], 37);
+      expect(calls.last.arguments['session'], session);
+      Future<void> emit(String token, double value) =>
+          messenger.handlePlatformMessage(
+            channel.name,
+            channel.codec.encodeMethodCall(
+              MethodCall('volume', {
+                'session': token,
+                'systemVolumeSupported': true,
+                'systemVolume': value,
+              }),
+            ),
+            (_) {},
+          );
+      await emit('old-player-session', 10);
+      expect(device.systemVolume, 40);
+      await emit(session as String, 80);
+      expect(device.systemVolume, 80);
+      expect(await device.setSystemVolume(140), 100);
+      expect(calls.last.arguments['value'], 100);
+      await device.finish();
+      final count = calls.length;
+      await device.setSystemVolume(0);
+      await emit(session, 0);
+      expect(device.systemVolume, 100);
+      expect(calls.length, count);
+    },
+  );
+
+  test(
+    'Fixed-volume Android devices keep the existing player-volume path',
+    () async {
+      systemVolumeSupported = false;
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      expect(device.supportsSystemVolume, isFalse);
+      await device.setSystemVolume(20);
+      expect(calls.where((call) => call.method == 'volume'), isEmpty);
+    },
+  );
 
   test(
     'Android and Windows expose external playback; Android hands off title and position',

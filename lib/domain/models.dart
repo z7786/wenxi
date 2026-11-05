@@ -73,6 +73,7 @@ enum CloudPlatform {
     guangya,
     aliyun,
     wopan,
+    tianyi,
     quark,
     uc,
     ctfile,
@@ -576,6 +577,15 @@ class DownloadSpec {
   );
 }
 
+/// One directory batch. A cursor requests the next batch of the same listing.
+class CloudFilePage {
+  CloudFilePage(List<CloudFile> files, {this.nextCursor})
+    : files = List.unmodifiable(files);
+  final List<CloudFile> files;
+  final String? nextCursor;
+  bool get hasMore => nextCursor != null;
+}
+
 abstract class CloudConnector {
   CloudPlatform get platform;
   bool canUploadTo(BrowseSession session, String parent) =>
@@ -603,11 +613,23 @@ abstract class CloudConnector {
     CloudSpace space,
     Credential credential,
   ) async => throw const AppException('该网盘暂不支持家庭云');
+
+  /// Complete directory contents for search and recursive download collection.
   Future<List<CloudFile>> list(
     BrowseSession session,
     String parentId,
     Credential? credential,
   );
+  Future<CloudFilePage> listPage(
+    BrowseSession session,
+    String parentId,
+    Credential? credential, {
+    String? cursor,
+  }) async {
+    require(cursor == null, '文件列表分页已失效，请刷新');
+    return CloudFilePage(await list(session, parentId, credential));
+  }
+
   Future<DownloadSpec> download(
     BrowseSession session,
     CloudFile file,

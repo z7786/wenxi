@@ -83,6 +83,82 @@ class TransfersPage extends StatelessWidget {
               ],
             ),
           ),
+          if (tab == 0)
+            ValueListenableBuilder(
+              valueListenable: services.browserReturn,
+              builder: (context, target, _) => target == null
+                  ? const SizedBox.shrink()
+                  : SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 560),
+                            child: Material(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.primaryContainer,
+                              elevation: 4,
+                              shadowColor: Colors.black26,
+                              borderRadius: BorderRadius.circular(18),
+                              child: InkWell(
+                                key: const Key('transfer-return-browser'),
+                                borderRadius: BorderRadius.circular(18),
+                                onTap: services.requestBrowserReturn,
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 10,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        CupertinoIcons.arrow_uturn_left,
+                                        size: 20,
+                                        color: Theme.of(
+                                          context,
+                                        ).colorScheme.onPrimaryContainer,
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            const Text(
+                                              '返回解析目录',
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            Text(
+                                              target.directory,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      const Icon(
+                                        CupertinoIcons.chevron_right,
+                                        size: 16,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
         ],
       ),
     ),

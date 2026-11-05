@@ -3,6 +3,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import '../core/json.dart';
 import '../data/startup_recovery.dart';
+import '../data/backup.dart';
 import '../data/state_store.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
@@ -114,29 +115,33 @@ class _StartupFailurePageState extends State<StartupFailurePage> {
         if (file == null || !mounted) return;
         require(await file.length() <= 16 * 1024 * 1024, '备份文件过大');
         if (!mounted) return;
-        final password = await askText(
-          context,
-          '输入备份密码',
-          secret: true,
-          barrierDismissible: false,
-        );
+        final bytes = await file.readAsBytes();
+        if (!mounted) return;
+        final password = isPlainBackup(bytes)
+            ? ''
+            : await askText(
+                context,
+                '输入旧备份密码',
+                secret: true,
+                barrierDismissible: false,
+              );
         if (password == null || !mounted) return;
         if (!await _confirm(
               '恢复备份',
-              '将恢复备份中的账号、设置和收藏。原加密数据会单独保留，已下载文件不会删除。备份中不包含的记录无法还原。',
+              '将恢复备份中的账号、设置和收藏。原数据会单独保留，已下载文件不会删除。备份中不包含的记录无法还原。',
               '验证并恢复',
             ) ||
             !mounted) {
           return;
         }
         setState(() => _progress = '正在验证备份并恢复…');
-        result = await recovery.restore(await file.readAsBytes(), password);
+        result = await recovery.restore(bytes, password);
         if (!mounted) return;
-        _notice = '已恢复 ${result.accounts} 个账号及备份中的设置和收藏。原加密数据已单独保留。';
+        _notice = '已恢复 ${result.accounts} 个账号及备份中的设置和收藏。原数据已单独保留。';
       } else {
         if (!await _confirm(
               '保留旧数据后重新初始化',
-              '将以全新状态启动，需要重新登录网盘。旧账号、设置、收藏及下载记录不会出现在新界面中。原加密数据和旧任务库会保留，已下载文件不会删除。没有原密钥或备份，无法恢复旧账号和记录。',
+              '将以全新状态启动，需要重新登录网盘。旧账号、设置、收藏及下载记录不会出现在新界面中。原数据和旧任务库会保留，已下载文件不会删除。旧版加密数据仍需原密钥或备份才能恢复。',
               '保留并重新初始化',
             ) ||
             !mounted) {
@@ -145,7 +150,7 @@ class _StartupFailurePageState extends State<StartupFailurePage> {
         setState(() => _progress = '正在保留旧数据并重新初始化…');
         result = await recovery.reinitialize();
         if (!mounted) return;
-        _notice = '重新初始化完成。原加密数据和已下载文件已保留，请进入应用后重新登录网盘。';
+        _notice = '重新初始化完成。原数据和已下载文件已保留，请进入应用后重新登录网盘。';
       }
       _complete = true;
       DiagnosticLog.event(

@@ -390,16 +390,16 @@ class _NativePasswordLoginPageState extends State<NativePasswordLoginPage> {
                           ? _status
                           : switch (platform) {
                               CloudPlatform.pikpak =>
-                                '登录令牌加密保存在本机并自动续期；遇到安全验证可切换网页登录',
+                                '登录令牌保存在本机应用私有目录并自动续期；遇到安全验证可切换网页登录',
                               CloudPlatform.ctfile =>
-                                '支持注册邮箱登录；登录凭据加密保存在本机，过期后请重新登录',
+                                '支持注册邮箱登录；登录凭据保存在本机应用私有目录，过期后请重新登录',
                               CloudPlatform.lanzou =>
-                                '账号密码加密保存在本机，登录失效时可重新登录；遇到安全验证可切换网页登录',
+                                '账号密码保存在本机应用私有目录，登录失效时可重新登录；遇到安全验证可切换网页登录',
                               CloudPlatform.aliyun =>
                                 '账号密码由官方页面验证并加密记住，登录后自动续期',
                               CloudPlatform.guangya =>
-                                '账号密码加密保存在本机，未设置密码可切换短信登录',
-                              _ => '账号密码加密保存在本机，登录失效时自动重登',
+                                '账号密码保存在本机应用私有目录，未设置密码可切换短信登录',
+                              _ => '账号密码保存在本机应用私有目录，登录失效时自动重登',
                             },
                       textAlign: TextAlign.center,
                       style: TextStyle(color: secondary(context), fontSize: 13),

@@ -454,7 +454,9 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         check(!nativeStarted || nativeDirectory == directory.absolutePath) { "请重启应用以切换恢复后的下载记录" }
         check(directory.mkdirs() || directory.isDirectory)
         check(cache.mkdirs() || cache.isDirectory)
-        val key = EngineKeyStore(directory, vault::open).load(args.optString("key"))
+        Seq.setContext(context.applicationContext)
+        val key = if (nativeStarted || Gopeed.storageFormat(directory.absolutePath) == "plain")
+            "" else EngineKeyStore(directory, vault::open).load(args.optString("key"))
         if (!nativeStarted) {
             Seq.setContext(context.applicationContext)
             Gopeed.open(directory.absolutePath, cache.absolutePath, key)

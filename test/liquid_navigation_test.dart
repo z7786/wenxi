@@ -1,6 +1,13 @@
+import 'dart:io';
+import 'dart:ui' as ui;
+
 import 'package:asterlink/ui/app_navigation.dart';
 import 'package:asterlink/download/navigation_transfers.dart';
+import 'package:asterlink/domain/appearance.dart';
+import 'package:asterlink/ui/app_theme.dart';
+import 'package:asterlink/ui/liquid_glass.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,31 +18,41 @@ void main() {
     bool rtl = false,
     double scale = 1,
     bool reduceMotion = true,
+    Brightness brightness = Brightness.light,
+    GlassStyle style = GlassStyle.clear,
+    bool highContrast = false,
     ValueNotifier<NavigationTransferStatus>? transfers,
     ValueChanged<int>? onSelected,
   }) async {
     await tester.binding.setSurfaceSize(const Size(320, 640));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     var selected = 0;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: StatefulBuilder(
-          builder: (context, setState) => MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              textScaler: TextScaler.linear(scale),
-              disableAnimations: reduceMotion,
-            ),
-            child: Directionality(
-              textDirection: rtl ? TextDirection.rtl : TextDirection.ltr,
-              child: Scaffold(
-                body: Text('page-$selected'),
-                bottomNavigationBar: AppNavigation(
-                  selectedIndex: selected,
-                  transfers: transfers,
-                  onSelected: (index) {
-                    onSelected?.call(index);
-                    setState(() => selected = index);
-                  },
+    await tester.runAsync(
+      () => tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme(brightness, glassStyle: style),
+          home: StatefulBuilder(
+            builder: (context, setState) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                textScaler: TextScaler.linear(scale),
+                disableAnimations: reduceMotion,
+                highContrast: highContrast,
+              ),
+              child: Directionality(
+                textDirection: rtl ? TextDirection.rtl : TextDirection.ltr,
+                child: RepaintBoundary(
+                  key: const Key('navigation-capture'),
+                  child: Scaffold(
+                    body: Text('page-$selected'),
+                    bottomNavigationBar: AppNavigation(
+                      selectedIndex: selected,
+                      transfers: transfers,
+                      onSelected: (index) {
+                        onSelected?.call(index);
+                        setState(() => selected = index);
+                      },
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -45,6 +62,140 @@ void main() {
     );
     await tester.pumpAndSettle();
   }
+
+  Future<(int, int)> highlightPixels(WidgetTester tester) async {
+    final highlight = find.byKey(const Key('navigation-touch-highlight'));
+    final painter = tester.widget<CustomPaint>(highlight).painter!;
+    final size = tester.getSize(highlight);
+    return (await tester.runAsync(() async {
+      final recorder = ui.PictureRecorder();
+      painter.paint(Canvas(recorder), size);
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(
+        size.width.ceil(),
+        size.height.ceil(),
+      );
+      try {
+        final pixels = (await image.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        ))!;
+        var rim = 0, interior = 0;
+        for (var y = 0; y < image.height; y++) {
+          for (var x = 0; x < image.width; x++) {
+            final alpha = pixels.getUint8((y * image.width + x) * 4 + 3);
+            if (alpha == 0) continue;
+            if (y >= 5 &&
+                y < image.height - 5 &&
+                x >= 32 &&
+                x < image.width - 32) {
+              interior++;
+            } else {
+              rim++;
+            }
+          }
+        }
+        return (rim, interior);
+      } finally {
+        image.dispose();
+        picture.dispose();
+      }
+    }))!;
+  }
+
+  Future<void> capture(WidgetTester tester, String name) async {
+    final output = Platform.environment['APP_GLASS_PREVIEW_DIR'];
+    if (output == null) return;
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byKey(const Key('navigation-capture')),
+    );
+    await tester.runAsync(() async {
+      final image = await boundary.toImage(pixelRatio: 1);
+      try {
+        final png = (await image.toByteData(format: ui.ImageByteFormat.png))!;
+        final file = File('$output/$name.png');
+        await file.parent.create(recursive: true);
+        await file.writeAsBytes(png.buffer.asUint8List());
+      } finally {
+        image.dispose();
+      }
+    });
+  }
+
+  for (final brightness in Brightness.values) {
+    for (final cancelled in [false, true]) {
+      testWidgets('touch light stays on the rim and clears on release '
+          '($brightness, cancelled: $cancelled)', (tester) async {
+        await render(tester, brightness: brightness, reduceMotion: false);
+        final point = tester.getCenter(
+          find.byKey(const ValueKey('navigation-2')),
+        );
+        final gesture = await tester.startGesture(point);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 180));
+        final pressed = await highlightPixels(tester);
+        expect(pressed.$1, greaterThan(0));
+        expect(pressed.$2, 0, reason: 'No white fill inside the glass.');
+        final lens = tester.widget<LiquidGlassSurface>(
+          find.ancestor(
+            of: find.byKey(const Key('navigation-lens')),
+            matching: find.byType(LiquidGlassSurface),
+          ),
+        );
+        expect(
+          lens.highlight,
+          0,
+          reason: 'No white outline on a circular tab.',
+        );
+        await capture(tester, 'navigation-$brightness-pressed-$cancelled');
+        if (cancelled) {
+          await gesture.cancel();
+        } else {
+          await gesture.up();
+        }
+        await tester.pump();
+        expect(await highlightPixels(tester), (0, 0));
+        await tester.pumpAndSettle();
+        await capture(tester, 'navigation-$brightness-released-$cancelled');
+        expect(find.text(cancelled ? 'page-0' : 'page-2'), findsOneWidget);
+        expect(tester.binding.hasScheduledFrame, isFalse);
+      });
+    }
+  }
+
+  testWidgets('mouse exit clears the touch light immediately', (tester) async {
+    await render(tester, reduceMotion: false);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    await mouse.moveTo(
+      tester.getCenter(find.byKey(const ValueKey('navigation-2'))),
+    );
+    await tester.pumpAndSettle();
+    expect((await highlightPixels(tester)).$1, greaterThan(0));
+    await mouse.moveTo(Offset.zero);
+    await tester.pump();
+    expect(await highlightPixels(tester), (0, 0));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('opaque navigation never overlays a white touch light', (
+    tester,
+  ) async {
+    for (final highContrast in [false, true]) {
+      await render(
+        tester,
+        style: highContrast ? GlassStyle.clear : GlassStyle.solid,
+        highContrast: highContrast,
+      );
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(const ValueKey('navigation-2'))),
+      );
+      await tester.pump();
+      expect(find.byKey(const Key('navigation-touch-highlight')), findsNothing);
+      await gesture.cancel();
+      await tester.pumpAndSettle();
+    }
+  });
 
   testWidgets('tap and drag commit navigation; cancelled drag preserves page', (
     tester,

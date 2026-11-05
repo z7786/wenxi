@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import '../diagnostics/app_log.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../core/json.dart';
@@ -65,6 +66,10 @@ abstract class PlaybackBackend extends ChangeNotifier {
   }
 
   VideoController? get videoController => null;
+  Widget? buildVideo({required BoxFit fit, double? aspectRatio}) => null;
+  Widget? buildSubtitleOverlay() => null;
+  bool get usesSubtitleOverlay => false;
+  String get engineName => 'media_kit / libmpv';
   int get errorRevision;
   PlaybackFailure? get failure => null;
   bool get canRetryWithSoftware => true;
@@ -80,6 +85,7 @@ abstract class PlaybackBackend extends ChangeNotifier {
   Future<void> initialize() async {}
   Future<void> setSubtitlePresentation({
     required double size,
+    double? width,
     required double height,
     required double bottom,
     int? backgroundColor,
@@ -346,7 +352,8 @@ class MediaKitBackend extends PlaybackBackend {
   }
 
   @override
-  bool get canRetryWithSoftware => !_sourceFailure;
+  bool get canRetryWithSoftware =>
+      !_sourceFailure && _failure?.decoderUnavailable != true;
   @override
   bool get rendersSubtitlesNatively =>
       player.platform?.configuration.libass == true;
@@ -463,6 +470,7 @@ class MediaKitBackend extends PlaybackBackend {
   String get streamingDescription => _streamingDescription;
   @override
   Map<String, Object?> get diagnosticFields => {
+    'engine': engineName,
     'transport': _transport,
     'networkTimeoutSeconds': ?_networkTimeoutSeconds,
     'openElapsedMs': ?_openWatch?.elapsedMilliseconds,
@@ -592,6 +600,23 @@ class MediaKitBackend extends PlaybackBackend {
 
   @override
   VideoController? get videoController => _video;
+  @override
+  Widget? buildVideo({required BoxFit fit, double? aspectRatio}) {
+    final video = _video;
+    if (_closing || video == null) return null;
+    return Video(
+      controller: video,
+      controls: NoVideoControls,
+      fit: fit,
+      aspectRatio: aspectRatio,
+      pauseUponEnteringBackgroundMode: false,
+      resumeUponEnteringForegroundMode: false,
+      subtitleViewConfiguration: const SubtitleViewConfiguration(
+        visible: false,
+      ),
+    );
+  }
+
   @override
   int get errorRevision => _errorRevision;
   @override
@@ -835,6 +860,7 @@ class MediaKitBackend extends PlaybackBackend {
   @override
   Future<void> setSubtitlePresentation({
     required double size,
+    double? width,
     required double height,
     required double bottom,
     int? backgroundColor,
@@ -890,7 +916,13 @@ class MediaKitBackend extends PlaybackBackend {
     _metrics.pause(_openWatch?.elapsed ?? Duration.zero);
     _stallMonitor.reset();
     _proxy?.setPaused(true);
-    return player.pause();
+    if (_closing) return Future.value();
+    final native = player.platform;
+    // Do not queue audio pause behind a seek or an external subtitle load.
+    // libmpv serializes native commands; only the Dart control queue is bypassed.
+    return native is NativePlayer
+        ? native.pause(synchronized: false)
+        : player.pause();
   }
 
   @override

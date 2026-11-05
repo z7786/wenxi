@@ -174,12 +174,14 @@ void main() {
       await favorites.open(
         favorites.all.singleWhere((favorite) => favorite.id == 'f2'),
       );
+      await store.flush();
       expect(ids(), ['f3', 'f2', 'f0', 'f1', 'f4']);
       final lastOpened = favorites.all[1].lastOpenedAt;
       expect(lastOpened, greaterThan(0));
       await favorites.open(
         favorites.all.singleWhere((favorite) => favorite.id == 'f4'),
       );
+      await store.flush();
       expect(ids(), ['f3', 'f4', 'f2', 'f0', 'f1']);
       expect(favorites.all[1].lastOpenedAt, greaterThan(lastOpened));
       provider.missing = true;

@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
-import '../core/crypto_box.dart';
 import '../core/json.dart';
 import '../data/state_store.dart';
 
@@ -219,11 +218,7 @@ class GopeedEngine {
     if (!_started || !transport.connected) {
       await storage.create(recursive: true);
       await cache.create(recursive: true);
-      var key = vault.secret('flutter.gopeed.key');
-      if (key == null) {
-        key = base64Encode(CryptoBox.random(32));
-        await vault.putSecret('flutter.gopeed.key', key);
-      }
+      final key = vault.secret('flutter.gopeed.key') ?? '';
       final opened = asJson(
         await transport.call('open', {
           'storageDir': storage.path,
@@ -232,8 +227,7 @@ class GopeedEngine {
           'key': key,
         }),
       );
-      // Android upgrades may retain an older native database key. Keep the
-      // actual key in encrypted state so password recovery protects it too.
+      // Retain the legacy key for compatibility with the archived database.
       final actualKey = opened.str('key');
       if (actualKey.isNotEmpty && actualKey != key) {
         try {

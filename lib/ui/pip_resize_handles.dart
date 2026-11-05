@@ -3,8 +3,13 @@ import 'package:window_manager/window_manager.dart';
 
 /// Native sizing keeps the video aspect ratio and follows Windows cursors.
 class PipResizeHandles extends StatelessWidget {
-  const PipResizeHandles({super.key, required this.onResize});
+  const PipResizeHandles({
+    super.key,
+    required this.onResize,
+    this.showIndicator = true,
+  });
   final void Function(ResizeEdge) onResize;
+  final bool showIndicator;
 
   @override
   Widget build(BuildContext context) =>
@@ -75,7 +80,7 @@ class PipResizeHandles extends StatelessWidget {
           key: ValueKey('pip-resize-${edge.name}'),
           behavior: HitTestBehavior.opaque,
           onPanStart: (_) => onResize(edge),
-          child: edge == ResizeEdge.bottomRight
+          child: showIndicator && edge == ResizeEdge.bottomRight
               ? const Tooltip(
                   message: '拖动边缘或角落调整大小',
                   child: Icon(

@@ -21,6 +21,7 @@ class _Files extends CloudConnector {
   @override
   final CloudPlatform platform;
   final opened = <ParsedLink>[];
+  final openedCredentials = <Credential?>[];
   int reads = 0;
   @override
   Future<BrowseSession> openShare(
@@ -28,6 +29,7 @@ class _Files extends CloudConnector {
     Credential? credential,
   ) async {
     opened.add(link);
+    openedCredentials.add(credential);
     return BrowseSession(
       platform: platform,
       mode: BrowseMode.share,
@@ -189,6 +191,16 @@ void main() {
             find.byKey(const Key('command-input')),
             '新格式 @token_123- ${'a' * 80}',
           );
+        } else if (p == CloudPlatform.c139) {
+          await services.store.put('credentials', {
+            'C139': Credential('fixture-mobile', {
+              'authorization': 'fixture-mobile-authorization',
+            }, updatedAt: 3).toJson(),
+          });
+          await tester.enterText(
+            find.byKey(const Key('command-input')),
+            '移动云盘分享 /*b9gaLFbe4PUz:/ 提取码：A1b2',
+          );
         } else {
           await tester.enterText(
             find.byKey(const Key('command-input')),
@@ -199,10 +211,21 @@ void main() {
         expect(find.byType(BrowserPage), findsOneWidget);
         expect(find.text('测试文档.pdf'), findsOneWidget);
         expect(find.text('解析成功'), findsNothing);
-        final expectedCode = p == CloudPlatform.xunlei ? '1234' : 'A%2B+B';
+        final expectedCode = switch (p) {
+          CloudPlatform.xunlei => '1234',
+          CloudPlatform.c139 => 'A1b2',
+          _ => 'A%2B+B',
+        };
         expect(connectors[p]!.opened.single.passcode, expectedCode);
         expect(connectors[p]!.reads, 1);
-        expect(http.calls, hasLength(1));
+        expect(http.calls, hasLength(p == CloudPlatform.c139 ? 0 : 1));
+        if (p == CloudPlatform.c139) {
+          expect(connectors[p]!.opened.single.shareId, 'b9gaLFbe4PUz');
+          expect(
+            connectors[p]!.openedCredentials.single?.field('authorization'),
+            'fixture-mobile-authorization',
+          );
+        }
         expect(
           services.store.data
               .list('history')
@@ -228,6 +251,54 @@ void main() {
       },
     );
   }
+
+  scenario(
+    'Mobile command requires the app account, preserves input on cancellation and retries with its credential',
+    (tester) async {
+      const command = '/*b9gaLFbe4PUz:/';
+      await render(tester);
+      await tap(tester, find.byKey(const ValueKey('command-provider-C139')));
+      await tester.enterText(find.byKey(const Key('command-input')), command);
+      final start = find.byKey(const Key('command-start'));
+      await tester.ensureVisible(start);
+      await tester.pumpAndSettle();
+      await tester.tap(start);
+      // Parsing waits for this dialog while its progress indicator animates.
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(find.textContaining('本 App 内登录账号的授权信息'), findsOneWidget);
+      expect(find.text('去登录'), findsOneWidget);
+      expect(connectors[CloudPlatform.c139]!.opened, isEmpty);
+      expect(http.calls, isEmpty);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(find.text('请先在本 App 登录移动云盘后再解析，口令已保留'), findsOneWidget);
+      expect(find.text('去登录并继续'), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('command-input')))
+            .controller!
+            .text,
+        command,
+      );
+      expect(services.commandHistory.all, isEmpty);
+      await services.store.put('credentials', {
+        'C139': Credential('app-user', {
+          'authorization': 'app-user-authorization',
+        }, updatedAt: 5).toJson(),
+      });
+      await tap(tester, find.byKey(const Key('command-start')));
+      expect(find.byType(BrowserPage), findsOneWidget);
+      expect(
+        connectors[CloudPlatform.c139]!.openedCredentials.single?.field(
+          'authorization',
+        ),
+        'app-user-authorization',
+      );
+      expect(services.commandHistory.all.single.text, command);
+      expect(http.calls, isEmpty);
+    },
+  );
 
   scenario('Quark short tokens open the share page after manual submission', (
     tester,

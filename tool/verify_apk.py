@@ -138,6 +138,7 @@ def inspect(args):
         abis = {PurePosixPath(info.filename).parts[1] for info in entries}
         check(abis == {'arm64-v8a'}, f'Unexpected ABIs: {abis}')
         names = {PurePosixPath(info.filename).name for info in entries}
+        check(not {'libmdk.so', 'libfvp.so'} & names, 'Removed MDK runtime is still packaged')
         check({'libgojni.so', 'libc++_shared.so', 'libflutter.so', 'libapp.so', 'libmpv.so', 'libumeng-spy.so',
                'libasterlink_js.so'} <= names,
             'A required native library is missing')
@@ -172,6 +173,8 @@ def inspect(args):
             libraries.append({'name': parts[2], 'bytes': info.file_size,
                 'compressedBytes': info.compress_size, 'loadAlignments': alignments, 'needed': needed})
         dex = b''.join(apk.read(n) for n in apk.namelist() if re.fullmatch(r'classes\d*\.dex', n))
+        check(b'Landroidx/media3/' not in dex, 'Removed Media3 runtime is still packaged')
+        check(b'Lcom/asterlink/app/MdkNativeControl;' not in dex, 'Removed MDK lifecycle bridge is still packaged')
         for name in (b'Lgo/Seq;', b'Lcom/asterlink/nativecore/gopeed/Gopeed;', b'Lcom/asterlink/app/NativeBridge;',
                      b'Lcom/asterlink/app/PlaybackBridge;', b'Lcom/asterlink/app/PlaybackActionReceiver;',
                      b'Lcom/asterlink/app/DownloadKeepAlive;', b'Lcom/asterlink/app/DownloadProtection;',

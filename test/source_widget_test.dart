@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,12 +9,15 @@ import 'package:asterlink/data/parser_rules/hub.dart';
 import 'package:asterlink/data/sources/catalog.dart';
 import 'package:asterlink/data/sources/service.dart';
 import 'package:asterlink/domain/downloads.dart';
+import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/ui/app_theme.dart';
+import 'package:asterlink/ui/browser_page.dart';
 import 'package:asterlink/ui/parse_page.dart';
 import 'package:asterlink/ui/source_browser_page.dart';
 import 'source_support.dart';
 import 'support.dart';
+import 'lanzou_folder_support.dart';
 
 class _WidgetSources extends RemoteSources {
   _WidgetSources({required super.hub, required super.directory})
@@ -24,19 +28,26 @@ class _WidgetSources extends RemoteSources {
     sourceTestNow,
   );
   bool overlap = false;
+  bool isReady = true;
+  Future<bool>? refreshBarrier;
+  int refreshCalls = 0;
   @override
-  bool get ready => true;
+  bool get ready => isReady;
   @override
-  List<SourceRelease> get releases => catalog.releases;
+  List<SourceRelease> get releases => ready ? catalog.releases : [];
   @override
   void start() {}
   @override
   Future<void> load() async {}
   @override
-  Future<bool> refresh({bool force = false}) async => false;
+  Future<bool> refresh({bool force = false}) async {
+    refreshCalls++;
+    return await refreshBarrier ?? false;
+  }
+
   @override
   List<SourceRelease> candidates(String url) =>
-      overlap ? [releases.first] : super.candidates(url);
+      ready && overlap ? [releases.first] : super.candidates(url);
 }
 
 class _SourceTransfer extends TransferHttp {
@@ -124,6 +135,65 @@ void main() {
     await waitFor(tester, () => closed);
     await tester.runAsync(() => root.delete(recursive: true));
   }
+
+  testWidgets(
+    'Supported cloud parsing proceeds during a pending source catalog refresh',
+    (tester) async {
+      await prepare(tester);
+      final pending = Completer<bool>();
+      try {
+        sources.isReady = false;
+        sources.refreshBarrier = pending.future;
+        final fixture = LanzouFolderFixture();
+        services.cloud.connectors[CloudPlatform.lanzou] = fixture.connector;
+        await tester.enterText(
+          find.byKey(const Key('parse-input')),
+          lanzouFolderUrl,
+        );
+        await tester.pump();
+        await tester.ensureVisible(find.byKey(const Key('parse-start')));
+        await tester.tap(find.byKey(const Key('parse-start')));
+        await waitFor(
+          tester,
+          () => find.byType(BrowserPage).evaluate().isNotEmpty,
+        );
+        expect(pending.isCompleted, isFalse);
+        expect(sources.refreshCalls, greaterThan(0));
+        expect(find.text('Example & 1.zip'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        pending.complete(false);
+        await finish(tester);
+      }
+    },
+  );
+
+  testWidgets(
+    'Unknown websites still wait for source discovery before choosing a route',
+    (tester) async {
+      await prepare(tester);
+      final pending = Completer<bool>();
+      try {
+        sources.isReady = false;
+        sources.refreshBarrier = pending.future;
+        await tester.ensureVisible(find.byKey(const Key('parse-start')));
+        await tester.tap(find.byKey(const Key('parse-start')));
+        await waitFor(tester, () => sources.refreshCalls > 0);
+        expect(find.text('选择打开方式'), findsNothing);
+        expect(find.byKey(const Key('parse-stage')), findsOneWidget);
+        sources.isReady = true;
+        pending.complete(true);
+        await waitFor(tester, () => find.text('选择打开方式').evaluate().isNotEmpty);
+        expect(find.text('JSON 文件库'), findsOneWidget);
+        await tester.tapAt(const Offset(10, 10));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      } finally {
+        if (!pending.isCompleted) pending.complete(false);
+        await finish(tester);
+      }
+    },
+  );
 
   testWidgets(
     'A previously unknown website opens from a signed source and enters the existing download queue',

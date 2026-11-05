@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/diagnostics/diagnostic_bundle.dart';
 import 'package:asterlink/diagnostics/diagnostic_runtime.dart';
@@ -165,6 +166,111 @@ void main() {
       cleanStart.close();
     });
 
+    test('Ordinary bursts defer disk access and flush in recorded order', () {
+      fakeAsync((time) {
+        log.clear();
+        log.record('seed', flush: true);
+        final file = directory.listSync().whereType<File>().singleWhere(
+          (file) => file.path.endsWith('.jsonl'),
+        );
+        final initial = file.readAsBytesSync();
+        for (var i = 0; i < 30; i++) {
+          log.record('batch.$i');
+        }
+        expect(file.readAsBytesSync(), initial);
+        time.elapse(const Duration(milliseconds: 249));
+        expect(file.readAsBytesSync(), initial);
+        time.elapse(const Duration(milliseconds: 1));
+        final events = file.readAsLinesSync().map(
+          (line) => (jsonDecode(line) as Map)['event'],
+        );
+        expect(events, ['seed', for (var i = 0; i < 30; i++) 'batch.$i']);
+        log.close();
+        expect(time.nonPeriodicTimerCount, 0);
+      });
+    });
+
+    test('Errors persist earlier buffered context before returning', () {
+      fakeAsync((time) {
+        log.clear();
+        log.record('prepare');
+        log.record('open');
+        log.record('decode.failed', level: 'error', error: 'Cookie: private');
+        final file = directory.listSync().whereType<File>().singleWhere(
+          (file) => file.path.endsWith('.jsonl'),
+        );
+        final rows = file
+            .readAsLinesSync()
+            .map((line) => jsonDecode(line) as Map)
+            .toList();
+        expect(rows.map((row) => row['event']), [
+          'prepare',
+          'open',
+          'decode.failed',
+        ]);
+        expect(
+          rows.map((row) => row['seq']),
+          orderedEquals(rows.map((row) => row['seq']).toList()..sort()),
+        );
+        expect(file.readAsStringSync(), isNot(contains('private')));
+        expect(time.nonPeriodicTimerCount, 0);
+      });
+    });
+
+    test(
+      'Clear cancels pending records and later events recreate a removed log',
+      () {
+        fakeAsync((time) {
+          log.clear();
+          log.record('discard');
+          log.clear();
+          time.elapse(const Duration(seconds: 1));
+          expect(
+            directory.listSync().whereType<File>().where(
+              (file) => file.path.endsWith('.jsonl'),
+            ),
+            isEmpty,
+          );
+          log.record('first', flush: true);
+          final file = directory.listSync().whereType<File>().singleWhere(
+            (file) => file.path.endsWith('.jsonl'),
+          );
+          file.deleteSync();
+          log.record('after.removal');
+          time.elapse(const Duration(milliseconds: 250));
+          expect(log.entries().map((entry) => entry.event), ['after.removal']);
+          log.close();
+          expect(time.nonPeriodicTimerCount, 0);
+        });
+      },
+    );
+
+    test('Disable and shutdown drain their pending operation context', () {
+      fakeAsync((time) {
+        log.clear();
+        log.record('before.disable');
+        log.setEnabled(false);
+        expect(time.nonPeriodicTimerCount, 0);
+        log.record('disabled');
+        log.setEnabled(true);
+        log.record('before.close');
+        log.close();
+        expect(time.nonPeriodicTimerCount, 0);
+        final restarted = DiagnosticLog.open(directory);
+        try {
+          final events = restarted.entries().map((entry) => entry.event);
+          expect(
+            events,
+            containsAll(['before.disable', 'before.close', 'session.close']),
+          );
+          expect(events, isNot(contains('disabled')));
+          expect(restarted.previousSessionInterrupted, isFalse);
+        } finally {
+          restarted.close();
+        }
+      });
+    });
+
     test('Deduplicates error storms but always preserves fatal events', () {
       var now = DateTime.now();
       log.close();
@@ -214,6 +320,7 @@ void main() {
       'Skips an interrupted final write without leaking its raw contents',
       () {
         log.record('complete.entry');
+        log.flush();
         final file = directory.listSync().whereType<File>().firstWhere(
           (f) => f.path.endsWith('.jsonl'),
         );

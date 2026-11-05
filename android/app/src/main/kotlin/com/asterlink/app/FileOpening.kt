@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -123,6 +124,19 @@ class FileOpening(
     }
 
     private fun launch(intent: Intent) {
+        if (intent.action == Intent.ACTION_VIEW && intent.type == APK_MIME) {
+            // Keep the installer separate from the app task during an in-place update.
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val uri = intent.data
+            if (uri?.scheme == "content") {
+                // Some OEM installers forward the URI to their scanner without propagating the intent grant.
+                @Suppress("DEPRECATION")
+                val handlers = context.packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                for (name in handlers.mapNotNull { it.activityInfo?.packageName }.distinct()) {
+                    runCatching { context.grantUriPermission(name, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                }
+            }
+        }
         val current = activity()
         if (current != null) current.startActivity(intent)
         else context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -146,7 +160,7 @@ class FileOpening(
             val intent = if (share) Intent(Intent.ACTION_SEND).setType(file.mime).putExtra(Intent.EXTRA_STREAM, file.uri)
                 else Intent(Intent.ACTION_VIEW).setDataAndType(file.uri, file.mime)
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            intent.clipData = ClipData.newRawUri("文析助手文件", file.uri)
+            intent.clipData = ClipData("文析助手文件", arrayOf(file.mime), ClipData.Item(file.uri))
             return intent
         }
 

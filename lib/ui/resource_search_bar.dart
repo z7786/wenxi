@@ -57,6 +57,7 @@ class ResourceSearchBar extends StatelessWidget {
         saturation: 1.03,
         highlight: .20,
         shadow: 0,
+        enabled: appearance.glassControls,
         child: Padding(
           padding: const EdgeInsets.all(6),
           child: large

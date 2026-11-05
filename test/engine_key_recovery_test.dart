@@ -5,7 +5,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/backup.dart';
-import 'package:asterlink/data/startup_recovery.dart';
 import 'package:asterlink/data/state_key.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/platform/native_engine.dart';
@@ -64,7 +63,7 @@ void main() {
   });
 
   test(
-    'native key migration survives password recovery and process restart',
+    'legacy native key survives plain-state restart without system keys',
     () async {
       final store = await openStore();
       final generation = List.filled(32, 'a').join();
@@ -79,22 +78,10 @@ void main() {
       await first.transport.dispose();
       store.dispose();
 
-      final pointer = asJson(
-        jsonDecode(
-          await keys().localFile(LocalStateKey.locationName).readAsString(),
-        ),
+      expect(
+        await keys().localFile(LocalStateKey.locationName).exists(),
+        isFalse,
       );
-      for (final name in ['primary.bin', 'copy.bin']) {
-        await File(
-          '${root.path}/${LocalStateKey.privateDirectoryName}/'
-          '${pointer.str('namespace')}/$name',
-        ).delete();
-      }
-      final recovery = StartupRecovery(
-        StateRecoveryRequired(root, StateRecoveryCause.missingKey),
-        localKey: keys(),
-      );
-      await recovery.unlock(password);
       final recovered = await openStore();
       expect(Vault(recovered).secret('flutter.gopeed.key'), nativeKey);
       final restarted = engine(recovered);

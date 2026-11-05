@@ -38,6 +38,8 @@ class AppSettings {
     this.theme = 'System',
     this.themePalette = AppPalette.blue,
     this.glassStyle = GlassStyle.clear,
+    this.glassControls = false,
+    this.glassLowPower = false,
     this.background = const BackgroundSettings(),
     this.hideResourceNavigation = false,
     this.fontScalePercent = 100,
@@ -62,6 +64,7 @@ class AppSettings {
   final String theme;
   final AppPalette themePalette;
   final GlassStyle glassStyle;
+  final bool glassControls, glassLowPower;
   final BackgroundSettings background;
   final bool hideResourceNavigation;
   final int fontScalePercent;
@@ -152,6 +155,8 @@ class AppSettings {
     'theme': theme,
     'themePalette': themePalette.name,
     'glassStyle': glassStyle.name,
+    'glassControls': glassControls,
+    'glassLowPower': glassLowPower,
     'background': background.toJson(),
     'hideResourceNavigation': hideResourceNavigation,
     'fontScalePercent': fontScalePercent,
@@ -185,6 +190,8 @@ class AppSettings {
         : 'System',
     themePalette: AppPalette.parse(j['themePalette']),
     glassStyle: GlassStyle.parse(j['glassStyle']),
+    glassControls: j.boolean('glassControls'),
+    glassLowPower: j.boolean('glassLowPower'),
     background: BackgroundSettings.fromJson(j.obj('background')),
     hideResourceNavigation: j.boolean('hideResourceNavigation'),
     fontScalePercent: j

@@ -19,18 +19,24 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
     required this.glassOpacity,
     required this.blurSigma,
     required this.lensColor,
+    this.glassControls = false,
+    this.glassLowPower = false,
   });
 
   factory AppAppearance.resolve(
     AppPalette palette,
     GlassStyle style,
-    Brightness brightness,
-  ) {
+    Brightness brightness, {
+    bool glassControls = false,
+    bool glassLowPower = false,
+  }) {
     final dark = brightness == Brightness.dark;
     final colors = palette.colors(dark);
     return AppAppearance(
       palette: palette,
       glassStyle: style,
+      glassControls: glassControls,
+      glassLowPower: glassLowPower,
       glassColor: Color(colors.glass),
       glassOpacity: switch (style) {
         GlassStyle.clear => .40,
@@ -53,6 +59,7 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
 
   final AppPalette palette;
   final GlassStyle glassStyle;
+  final bool glassControls, glassLowPower;
   final Color glassColor, lensColor;
   final double glassOpacity, blurSigma;
 
@@ -61,6 +68,8 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
       other is AppAppearance &&
       palette == other.palette &&
       glassStyle == other.glassStyle &&
+      glassControls == other.glassControls &&
+      glassLowPower == other.glassLowPower &&
       glassColor == other.glassColor &&
       lensColor == other.lensColor &&
       glassOpacity == other.glassOpacity &&
@@ -70,6 +79,8 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
   int get hashCode => Object.hash(
     palette,
     glassStyle,
+    glassControls,
+    glassLowPower,
     glassColor,
     lensColor,
     glassOpacity,
@@ -90,6 +101,8 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
   AppAppearance copyWith({
     AppPalette? palette,
     GlassStyle? glassStyle,
+    bool? glassControls,
+    bool? glassLowPower,
     Color? glassColor,
     double? glassOpacity,
     double? blurSigma,
@@ -97,6 +110,8 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
   }) => AppAppearance(
     palette: palette ?? this.palette,
     glassStyle: glassStyle ?? this.glassStyle,
+    glassControls: glassControls ?? this.glassControls,
+    glassLowPower: glassLowPower ?? this.glassLowPower,
     glassColor: glassColor ?? this.glassColor,
     glassOpacity: glassOpacity ?? this.glassOpacity,
     blurSigma: blurSigma ?? this.blurSigma,
@@ -109,6 +124,8 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
     return AppAppearance(
       palette: t < .5 ? palette : other.palette,
       glassStyle: t < .5 ? glassStyle : other.glassStyle,
+      glassControls: t < .5 ? glassControls : other.glassControls,
+      glassLowPower: t < .5 ? glassLowPower : other.glassLowPower,
       glassColor: Color.lerp(glassColor, other.glassColor, t)!,
       glassOpacity: lerpDouble(glassOpacity, other.glassOpacity, t)!,
       blurSigma: lerpDouble(blurSigma, other.blurSigma, t)!,
@@ -122,6 +139,8 @@ ThemeData appTheme(
   String? fontFamily,
   AppPalette palette = AppPalette.blue,
   GlassStyle glassStyle = GlassStyle.clear,
+  bool glassControls = false,
+  bool glassLowPower = false,
 }) {
   final dark = brightness == Brightness.dark;
   final windows = defaultTargetPlatform == TargetPlatform.windows;
@@ -149,7 +168,15 @@ ThemeData appTheme(
     useMaterial3: true,
     brightness: brightness,
     colorScheme: colors,
-    extensions: [AppAppearance.resolve(palette, glassStyle, brightness)],
+    extensions: [
+      AppAppearance.resolve(
+        palette,
+        glassStyle,
+        brightness,
+        glassControls: glassControls,
+        glassLowPower: glassLowPower,
+      ),
+    ],
     fontFamily: resolvedFont,
     fontFamilyFallback: fallbackFonts,
     scaffoldBackgroundColor: surface,
