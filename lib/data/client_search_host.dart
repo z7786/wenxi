@@ -153,7 +153,7 @@ class ClientSearchHost {
         }
         return null;
       }
-      require(io.Platform.isWindows, '此来源需要独立网页搜索环境');
+      require(io.Platform.isWindows || io.Platform.isMacOS, '此来源需要独立网页搜索环境');
       browserTransport = args.str('transport') == 'curl';
       if (!browserTransport &&
           session.readyUntil?.isAfter(DateTime.now()) == true) {
@@ -207,15 +207,18 @@ class ClientSearchHost {
     final uri = source.checkedUrl(args.str('url'));
     if (_browser != null) return;
     final ready = Completer<InAppWebViewController>();
-    require(io.Platform.isWindows, '此来源需要独立网页搜索环境');
-    _browserDirectory = await io.Directory.systemTemp.createTemp(
-      'asterlink-search-browser-',
-    );
-    final env = await WebViewEnvironment.create(
-      settings: WebViewEnvironmentSettings(
-        userDataFolder: _browserDirectory!.path,
-      ),
-    );
+    require(io.Platform.isWindows || io.Platform.isMacOS, '此来源需要独立网页搜索环境');
+    WebViewEnvironment? env;
+    if (io.Platform.isWindows) {
+      _browserDirectory = await io.Directory.systemTemp.createTemp(
+        'asterlink-search-browser-',
+      );
+      env = await WebViewEnvironment.create(
+        settings: WebViewEnvironmentSettings(
+          userDataFolder: _browserDirectory!.path,
+        ),
+      );
+    }
     _ownedEnvironment = env;
     final browser = HeadlessInAppWebView(
       webViewEnvironment: env,

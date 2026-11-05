@@ -11,6 +11,8 @@ import '../domain/downloads.dart';
 import '../domain/models.dart' show CloudPlatform;
 import '../download/completed_files.dart';
 import '../platform/file_access.dart';
+import '../platform/desktop_actions.dart';
+import '../platform/desktop_platform.dart';
 import '../playback/playback_sources.dart';
 import '../playback/torrent_playback.dart';
 import '../playback/download_playback.dart';
@@ -994,7 +996,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                     label: done
                         ? unavailable
                               ? '查看文件异常'
-                              : Platform.isWindows &&
+                              : isDesktopPlatform &&
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? '播放视频'
@@ -1007,7 +1009,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                     icon: done
                         ? unavailable
                               ? CupertinoIcons.exclamationmark_circle
-                              : Platform.isWindows &&
+                              : isDesktopPlatform &&
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? CupertinoIcons.play_rectangle
@@ -1086,11 +1088,12 @@ class _DownloadsPageState extends State<DownloadsPage>
       );
       return;
     }
-    if (Platform.isWindows && (reveal || (!play && kind != FileKind.video))) {
+    if ((Platform.isWindows || Platform.isMacOS) &&
+        (reveal || (!play && kind != FileKind.video))) {
       await busy(
         context,
-        () => widget.services.windows.revealFile(path),
-        label: '打开资源管理器…',
+        () => revealDesktopFile(path, widget.services.windows),
+        label: Platform.isMacOS ? '在访达中显示…' : '打开资源管理器…',
       );
       return;
     }
@@ -1282,7 +1285,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                         ListTile(
                           leading: const Icon(CupertinoIcons.folder),
                           title: Text(
-                            Platform.isWindows &&
+                            isDesktopPlatform &&
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                                 ? '播放视频'
@@ -1291,23 +1294,23 @@ class _DownloadsPageState extends State<DownloadsPage>
                                 : '打开文件',
                           ),
                           subtitle:
-                              Platform.isWindows &&
+                              isDesktopPlatform &&
                                   !{
                                     FileKind.video,
                                     FileKind.text,
                                   }.contains(fileKind(task.spec.fileName))
-                              ? const Text('在资源管理器中定位')
+                              ? Text(Platform.isMacOS ? '在访达中显示' : '在资源管理器中定位')
                               : null,
                           onTap: () => Navigator.pop(context, 'open'),
                         ),
-                        if (Platform.isWindows &&
+                        if (isDesktopPlatform &&
                             fileKind(task.spec.fileName) == FileKind.audio)
                           ListTile(
                             leading: const Icon(CupertinoIcons.play_rectangle),
                             title: const Text('播放音频'),
                             onTap: () => Navigator.pop(context, 'play'),
                           ),
-                        if (Platform.isWindows &&
+                        if (isDesktopPlatform &&
                             {
                               FileKind.video,
                               FileKind.text,

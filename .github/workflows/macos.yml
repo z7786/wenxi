@@ -1,0 +1,79 @@
+name: Build macOS ARM64 test app
+on:
+  workflow_dispatch:
+    inputs:
+      official:
+        description: Include the existing client parsing and search configuration.
+        type: boolean
+        default: true
+  push:
+    branches: ['codex/macos-arm64-*']
+  pull_request:
+    branches: [main, master]
+    paths: ['macos/**', 'lib/**', 'native/**', 'vendor_plugins/**', 'tool/**', 'pubspec*', '.github/workflows/macos.yml']
+permissions:
+  contents: read
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    environment: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.official)) && 'release' || '' }}
+    timeout-minutes: 60
+    env:
+      PUB_HOSTED_URL: https://pub.flutter-io.cn
+      FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
+      GOPROXY: https://proxy.golang.org,direct
+      GOTOOLCHAIN: go1.24.7
+      ASTERLINK_CONTROL_URL: ${{ secrets.ASTERLINK_CONTROL_URL || vars.ASTERLINK_CONTROL_URL }}
+      ASTERLINK_GITHUB_REPO: ${{ vars.ASTERLINK_GITHUB_REPO || github.repository }}
+      ASTERLINK_APPLICATION_ID: ${{ vars.ASTERLINK_APPLICATION_ID }}
+      UMENG_APPKEY: ${{ secrets.UMENG_APPKEY }}
+      UMENG_CHANNEL: ${{ vars.UMENG_CHANNEL || 'github' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Verify source and configure macOS
+        run: |
+          test "$(uname -m)" = arm64
+          python tool/check_public_files.py --staged
+          dart tool/sync_version.dart --check
+          flutter config --no-enable-swift-package-manager
+      - name: Prepare existing client configuration
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.official)
+        env:
+          ASTERLINK_CLIENT_DEFINES_JSON: ${{ secrets.ASTERLINK_CLIENT_DEFINES_JSON }}
+        run: |
+          test "$ASTERLINK_APPLICATION_ID" = com.asterlink.app
+          test -n "$ASTERLINK_CONTROL_URL"
+          python tool/prepare-ci-release.py
+      - name: Build macOS client
+        shell: pwsh
+        run: ./tool/build-macos.ps1
+      - name: Test macOS account, playback, update and script compatibility
+        env:
+          ASTERLINK_JS_LIBRARY: ${{ github.workspace }}/native/bin/macos-arm64/libasterlink_js.dylib
+        run: |
+          flutter analyze --no-pub
+          flutter test --no-pub --concurrency=4 test/macos_platform_test.dart test/account_cookie_test.dart test/account_identity_test.dart test/floating_playback_test.dart test/playback_features_test.dart test/playback_device_test.dart test/github_update_test.dart test/app_update_installer_test.dart test/external_player_test.dart test/source_runtime_test.dart
+      - name: Test native download helper
+        working-directory: native/gopeed
+        env:
+          CGO_ENABLED: '0'
+        run: go test -p=1 -mod=vendor -tags nosqlite -ldflags=-checklinkname=0 ./cmd/asterlink ./bind/asterlink ./internal/protocol/http ./internal/btpolicy -count=1 -timeout=600s
+      - name: Inspect, launch and package macOS app
+        run: |
+          python tool/macos-smoke.py --app build/macos/Build/Products/Release/文析助手.app
+          python tool/package-macos.py --app build/macos/Build/Products/Release/文析助手.app
+      - name: Save test installers only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-arm64-test
+          path: .local/macos-release-assets/*
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

@@ -17,6 +17,8 @@ class AppUpdateInstaller {
     final lower = name.toLowerCase();
     return platform == 'android'
         ? lower.endsWith('.apk')
+        : platform == 'macos'
+        ? lower.endsWith('.dmg') || lower.endsWith('.zip')
         : platform == 'windows' &&
               (lower.endsWith('.exe') || lower.endsWith('.zip'));
   }
@@ -25,6 +27,8 @@ class AppUpdateInstaller {
     supportsName(name, platform),
     platform == 'android'
         ? '安卓更新链接必须是单个 APK 安装包'
+        : platform == 'macos'
+        ? 'macOS 更新链接必须是单个 DMG 镜像或 ZIP 压缩包'
         : 'Windows 更新链接必须是单个 EXE 安装包或 ZIP 压缩包',
   );
 
@@ -42,6 +46,33 @@ class AppUpdateInstaller {
       } on PlatformException catch (error) {
         throw AppException(error.message ?? '安装包校验失败，请使用浏览器更新');
       }
+    }
+    if (platform == 'macos') {
+      final input = await File(path).open();
+      try {
+        if (task.spec.fileName.toLowerCase().endsWith('.dmg')) {
+          final length = await input.length();
+          require(length >= 512, '安装镜像不完整，请重新下载');
+          await input.setPosition(length - 512);
+          require(
+            String.fromCharCodes(await input.read(4)) == 'koly',
+            '下载内容不是有效的 DMG 镜像',
+          );
+        } else {
+          final header = await input.read(4);
+          require(
+            header.length == 4 &&
+                header[0] == 0x50 &&
+                header[1] == 0x4b &&
+                header[2] == 3 &&
+                header[3] == 4,
+            '下载内容不是有效的 ZIP 压缩包',
+          );
+        }
+      } finally {
+        await input.close();
+      }
+      return path;
     }
     require(platform == 'windows', '当前平台请使用浏览器更新');
     final input = await File(path).open();
@@ -95,6 +126,9 @@ class AppUpdateInstaller {
       } on PlatformException catch (error) {
         throw AppException(error.message ?? '无法打开系统安装器');
       }
+    } else if (platform == 'macos') {
+      final result = await Process.run('/usr/bin/open', [path]);
+      require(result.exitCode == 0, '无法打开安装镜像，请到下载管理中打开文件');
     } else if (name.toLowerCase().endsWith('.zip')) {
       await windows.revealFile(path);
     } else {

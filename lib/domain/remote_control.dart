@@ -28,7 +28,7 @@ class RemoteControlConfig {
   final String aboutDescription;
   final Uri? parserHubUrl;
   static const defaultAboutDescription =
-      '网盘文件管理与 Gopeed 下载器\nAndroid · Windows';
+      '网盘文件管理与 Gopeed 下载器\nAndroid · Windows · macOS';
   String get aboutText =>
       aboutDescription.isEmpty ? defaultAboutDescription : aboutDescription;
 
@@ -65,7 +65,7 @@ class RemoteControlConfig {
         },
     },
     'updates': {
-      for (final platform in ['android', 'windows'])
+      for (final platform in ['android', 'windows', 'macos'])
         if (updates[platform] case final update?)
           platform: {
             'enabled': true,

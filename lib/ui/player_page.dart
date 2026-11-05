@@ -2174,7 +2174,7 @@ class _PlayerPageState extends State<PlayerPage>
               [
                 '拖动进度条可快速定位播放位置。',
                 '横向滑动调整进度，左侧上下滑动调亮度，右侧调音量；长按加速，按住上滑锁定、下滑取消。',
-                if (Platform.isWindows)
+                if (Platform.isWindows || Platform.isMacOS)
                   '键盘：空格播放/暂停，←/→跳转，↑/↓音量，F 全屏，Esc 返回，M 静音。',
               ].join('\n\n'),
               style: const TextStyle(
@@ -2480,9 +2480,10 @@ class _PlayerPageState extends State<PlayerPage>
         );
         if (opened && executable != null) {
           try {
-            await ExternalPlayerHistory(
-              controller.history.store,
-            ).used(executable);
+            await ExternalPlayerHistory(controller.history.store).used(
+              executable,
+              platform: Platform.isMacOS ? 'macos' : 'windows',
+            );
           } catch (_) {
             // A launched player already owns the stream. A failed preference
             // write must not close that stream or restart internal audio.
@@ -2498,7 +2499,10 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<String?> _chooseWindowsPlayer() async {
-    final history = ExternalPlayerHistory(controller.history.store).windows;
+    final historyStore = ExternalPlayerHistory(controller.history.store);
+    final history = Platform.isMacOS
+        ? historyStore.macos
+        : historyStore.windows;
     final saved = history.firstOrNull ?? '';
     if (history.isNotEmpty) {
       final route = DialogRoute<String>(
@@ -2545,6 +2549,11 @@ class _PlayerPageState extends State<PlayerPage>
       await route.completed;
       if (selected == null || !mounted || _leaving) return null;
       if (selected != 'choose') return selected;
+    }
+    if (Platform.isMacOS && widget.chooseExternalPlayer == null) {
+      return const MethodChannel(
+        'com.asterlink.app/native',
+      ).invokeMethod<String>('selectExternalPlayer');
     }
     final selected =
         await (widget.chooseExternalPlayer?.call() ??

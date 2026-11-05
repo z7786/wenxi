@@ -7,6 +7,7 @@ import '../domain/models.dart';
 import '../domain/playback.dart';
 import 'windows_pip.dart';
 import 'windows_external_player.dart';
+import 'macos_external_player.dart';
 
 abstract class PlaybackDevice extends ChangeNotifier {
   bool get supportsOrientation => false;
@@ -54,16 +55,22 @@ class NativePlaybackDevice extends PlaybackDevice {
   }) : _platform = targetPlatform ?? defaultTargetPlatform,
        _windowsPlayer = windowsExternalPlayer ?? WindowsExternalPlayer();
   final WindowsExternalPlayer _windowsPlayer;
+  final _macosPlayer = MacOSExternalPlayer();
   final TargetPlatform _platform;
   bool get _android => _platform == TargetPlatform.android;
   bool get _windows => _platform == TargetPlatform.windows;
+  bool get _macos => _platform == TargetPlatform.macOS;
+  bool get _desktop => _windows || _macos;
   @override
   bool get supportsOrientation => _android;
   @override
-  bool get supportsExternalPlayer => _android || _windows;
+  bool get supportsExternalPlayer => _android || _desktop;
   @override
-  WindowsExternalPlayer? get windowsExternalPlayer =>
-      _windows ? _windowsPlayer : null;
+  WindowsExternalPlayer? get windowsExternalPlayer => _windows
+      ? _windowsPlayer
+      : _macos
+      ? _macosPlayer
+      : null;
   static const _channel = MethodChannel('com.asterlink.app/playback');
   static const _nativeChannel = MethodChannel('com.asterlink.app/native');
   static NativePlaybackDevice? _handlerOwner;
@@ -83,7 +90,7 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   bool get supportsDesktopPip => _windows && _supportsPip;
   @override
-  bool get supportsIndependentPlayerWindows => _windows;
+  bool get supportsIndependentPlayerWindows => _desktop;
   @override
   bool get supportsBrightness => _android;
   @override
@@ -122,9 +129,9 @@ class NativePlaybackDevice extends PlaybackDevice {
       _supportsPip = values.boolean('pip');
       _brightness = values.number('brightness', .5).clamp(0, 1).toDouble();
       _readSystemVolume(values);
-    } else if (_windows) {
+    } else if (_desktop) {
       _previousWindowsFullscreen = await windowManager.isFullScreen();
-      _supportsPip = video;
+      _supportsPip = _windows && video;
     }
     if (!_closed) notifyListeners();
   }
@@ -206,7 +213,7 @@ class NativePlaybackDevice extends PlaybackDevice {
     if (_closed) return;
     if (_android) {
       await _invoke<void>('fullscreen', {'enabled': enabled});
-    } else if (_windows) {
+    } else if (_desktop) {
       await exitPip();
       await windowManager.setFullScreen(
         enabled ? true : _previousWindowsFullscreen,
@@ -265,7 +272,7 @@ class NativePlaybackDevice extends PlaybackDevice {
       }
       if (_android && _started) await _invoke<void>('end');
       if (_windows) await _windowsPip.exit();
-      if (_windows && _fullscreen) {
+      if (_desktop && _fullscreen) {
         await windowManager.setFullScreen(_previousWindowsFullscreen);
       }
     } finally {
@@ -286,6 +293,7 @@ class NativePlaybackDevice extends PlaybackDevice {
   }) async {
     require(supportsExternalPlayer && !_closed, '当前设备不支持选择第三方播放器');
     if (_windows) return _windowsPlayer.open(url);
+    if (_macos) return _macosPlayer.open(url);
     try {
       return await _nativeChannel.invokeMethod<bool>('openExternalPlayer', {
             'session': _session,

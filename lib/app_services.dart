@@ -58,6 +58,7 @@ import 'platform/app_update_installer.dart';
 import 'platform/clipboard_links.dart';
 import 'platform/external_open.dart';
 import 'platform/native_engine.dart';
+import 'platform/desktop_platform.dart';
 import 'platform/windows_actions.dart';
 import 'platform/windows_webview.dart';
 import 'data/providers/ilanzou.dart';
@@ -274,7 +275,7 @@ class AppServices extends ChangeNotifier {
     );
     transfer = transferHttp ?? TransferHttp();
     final backgroundTransfers =
-        platformFeatures && (Platform.isAndroid || Platform.isWindows);
+        platformFeatures && (Platform.isAndroid || isDesktopPlatform);
     lan =
         lanService ??
         LanService(
@@ -499,7 +500,7 @@ class AppServices extends ChangeNotifier {
   }
 
   final externalOpens = ExternalOpenInbox(
-    channel: Platform.isWindows ? windowsExternalOpenChannel : nativeChannel,
+    channel: isDesktopPlatform ? windowsExternalOpenChannel : nativeChannel,
   );
   String? migrationError;
   bool _closed = false;
@@ -550,7 +551,7 @@ class AppServices extends ChangeNotifier {
       destination = cache;
       transport = AndroidGopeedTransport();
     } else {
-      require(Platform.isWindows, '当前版本支持 Android 和 Windows');
+      require(isDesktopPlatform, '当前版本支持 Android、Windows 和 macOS');
       data = Directory(
         p.join((await getApplicationSupportDirectory()).path, 'AsterLink'),
       );
@@ -564,9 +565,9 @@ class AppServices extends ChangeNotifier {
         ),
       );
       transport = DesktopGopeedTransport(
-        executable: p.join(
-          p.dirname(Platform.resolvedExecutable),
-          'asterlink_gopeed.exe',
+        executable: desktopDownloadExecutable(
+          Platform.resolvedExecutable,
+          Platform.operatingSystem,
         ),
       );
     }
@@ -630,7 +631,7 @@ class AppServices extends ChangeNotifier {
     // are verified synchronously and remote updates share this store's write
     // gate; neither should compete with local account/queue initialization.
     final startup = Stopwatch()..start();
-    if (platformFeatures && Platform.isWindows) {
+    if (platformFeatures && isDesktopPlatform) {
       windowsExternalOpenChannel.setMethodCallHandler((call) async {
         if (call.method == 'externalOpenAvailable') {
           await externalOpens.refresh();
@@ -1099,7 +1100,7 @@ class AppServices extends ChangeNotifier {
     _closed = true;
     clipboard.dispose();
     externalOpens.dispose();
-    if (platformFeatures && Platform.isWindows) {
+    if (platformFeatures && isDesktopPlatform) {
       windowsExternalOpenChannel.setMethodCallHandler(null);
     }
     downloadNavigation.dispose();

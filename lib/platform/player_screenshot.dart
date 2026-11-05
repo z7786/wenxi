@@ -26,7 +26,7 @@ class PlayerScreenshotActions {
   static const _native = MethodChannel('com.asterlink.app/native');
   static const _clipboard = MethodChannel('com.asterlink.app/player_images');
   bool get canShare => Platform.isAndroid || Platform.isIOS;
-  bool get canCopy => Platform.isWindows;
+  bool get canCopy => Platform.isWindows || Platform.isMacOS;
 
   Future<String?> save(Uint8List bytes, String name) async {
     _check(bytes);

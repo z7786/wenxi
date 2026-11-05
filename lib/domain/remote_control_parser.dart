@@ -25,7 +25,7 @@ class ControlConfigIssue {
       for (final p in CloudPlatform.values)
         'clouds.${p.name}': ['enabled', 'message', 'expiresAt'],
       'updates': [],
-      for (final p in ['android', 'windows'])
+      for (final p in ['android', 'windows', 'macos'])
         'updates.$p': [
           'enabled',
           'version',
@@ -210,7 +210,7 @@ class RemoteControlDocument {
     }
 
     final updates = <String, RemoteUpdate>{};
-    for (final platform in ['android', 'windows']) {
+    for (final platform in ['android', 'windows', 'macos']) {
       final key = 'updates.$platform', container = raw['updates'];
       final source = container is Map ? container[platform] : container;
       final update = section<RemoteUpdate?>(
