@@ -2,6 +2,7 @@
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import plistlib
 import subprocess
@@ -113,7 +114,8 @@ with tempfile.TemporaryDirectory(prefix='asterlink-playback-') as temporary:
             for index in range(2):
                 endpoint = f'http://127.0.0.1:{server.server_port}/window{index}'
                 players.append(subprocess.Popen([str(executable), '--asterlink-player-window', endpoint],
-                                                stdout=output, stderr=output))
+                                                stdout=output, stderr=output,
+                                                env={**os.environ, 'ASTERLINK_MACOS_SMOKE': '1'}))
             deadline = time.monotonic() + 35
             while time.monotonic() < deadline:
                 assert all(player.poll() is None for player in players), (
@@ -125,7 +127,7 @@ with tempfile.TemporaryDirectory(prefix='asterlink-playback-') as temporary:
                     break
                 time.sleep(.5)
             else:
-                raise AssertionError('Two independent players did not decode and advance playback')
+                raise AssertionError('Two independent players did not decode and advance playback: ' + str(progress))
         finally:
             for player in players:
                 player.terminate()

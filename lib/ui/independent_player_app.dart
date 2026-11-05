@@ -162,6 +162,8 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
         ),
       );
       setState(() {});
+      await video!.platform.future;
+      if (!mounted || closing) return;
       await decoder.setRate(preferences.rate);
       if (!mounted || closing) return;
       await decoder.setVolume(preferences.volume);
@@ -179,7 +181,12 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
         const Duration(seconds: 5),
         (_) => unawaited(report()),
       );
-    } catch (_) {
+    } catch (failure, stack) {
+      if (Platform.environment['ASTERLINK_MACOS_SMOKE'] == '1') {
+        debugPrint(
+          'Independent playback initialization failed: $failure\n$stack',
+        );
+      }
       if (mounted && !closing) setState(() => error = '小窗播放失败，请关闭后重新打开');
     }
   }
