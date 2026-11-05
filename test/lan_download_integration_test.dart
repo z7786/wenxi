@@ -75,6 +75,7 @@ void main() {
       setUp(() async {
         HttpOverrides.global = _LocalIo();
         root = await Directory.systemTemp.createTemp('aster-lan-engine-');
+        root = Directory(await root.resolveSymbolicLinks());
         destination = p.join(root.path, 'received');
         sources = _ObservedFiles();
         sender = LanService(

@@ -12,7 +12,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [28, 36], manifest = Config.NONE)
+@Config(sdk = [28, 36], manifest = Config.NONE, shadows = [HostAtomicFile::class])
 class EngineKeyStoreTest {
     @get:Rule val temporary = TemporaryFolder()
     private val key = ByteArray(32) { it.toByte() }

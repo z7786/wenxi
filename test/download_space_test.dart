@@ -103,6 +103,7 @@ void main() {
 
     setUp(() async {
       root = await Directory.systemTemp.createTemp('aster-space-test-');
+      root = Directory(await root.resolveSymbolicLinks());
       selected = Directory(p.join(root.path, 'selected-volume'));
       cache = Directory(p.join(root.path, 'system-cache'));
       store = StateStore.memory({
