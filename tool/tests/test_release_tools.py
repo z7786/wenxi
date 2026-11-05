@@ -23,6 +23,7 @@ def load(name, filename):
 public = load('public_files', 'check_public_files.py')
 release = load('release_assets', 'package-release.py')
 settings = load('release_settings', 'prepare-ci-release.py')
+arm64_lock = load('arm64_lock', 'prepare-windows-arm64-lock.py')
 
 BACKEND_ONLY_PATHS = [
     'backend/src/Routes.php', 'wwwroot/5.com/src/Sources.php',
@@ -240,6 +241,64 @@ class ReleaseFilesTest(unittest.TestCase):
             file.write_bytes(b'fixture')
         with self.assertRaises(ValueError):
             release.stage(self.root, 'windows')
+
+    def test_windows_architectures_stage_distinct_runtimes_and_installers(self):
+        for architecture in ('x64', 'arm64'):
+            runtime = self.root / ('build/windows/' + architecture + '/runner/Release')
+            for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so'):
+                file = runtime / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(architecture.encode())
+            installer = self.root / (architecture + '-setup.exe')
+            installer.write_bytes(architecture.encode())
+            output = release.stage(self.root, 'windows', installer, architecture)
+            with zipfile.ZipFile(output / ('asterlink-1.2.3+4-windows-' + architecture + '.zip')) as archive:
+                self.assertEqual(archive.read('asterlink.exe'), architecture.encode())
+            self.assertEqual((output / ('asterlink-1.2.3+4-windows-' + architecture + '-setup.exe')).read_bytes(), architecture.encode())
+        self.assertEqual(release.checksums(output), 4)
+
+    def test_invalid_architecture_is_rejected_before_staging(self):
+        with self.assertRaises(ValueError):
+            release.stage(self.root, 'windows', architecture='../other')
+        self.assertFalse((self.root / '.local').exists())
+
+
+class Arm64LockTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.sdk = self.root / 'sdk'
+        (self.sdk / 'bin/internal').mkdir(parents=True)
+        (self.sdk / 'bin/internal/engine.version').write_text(arm64_lock.ENGINE, encoding='utf-8')
+        self.path = self.root / 'pubspec.lock'
+        self.original = (ROOT / 'pubspec.lock').read_bytes()
+        self.path.write_bytes(self.original)
+
+    def test_only_sdk_companion_blocks_change_and_reapplying_is_stable(self):
+        arm64_lock.prepare(self.root, self.sdk)
+        adapted = self.path.read_bytes()
+        def other_blocks(data):
+            text = data.decode('utf-8').replace('\r\n', '\n')
+            for name in arm64_lock.PACKAGES:
+                text = __import__('re').sub(r'(?m)^  ' + name + r':\n(?:(?:    .*|)\n)+', '', text)
+            return text
+        self.assertEqual(other_blocks(adapted), other_blocks(self.original))
+        arm64_lock.prepare(self.root, self.sdk)
+        self.assertEqual(self.path.read_bytes(), adapted)
+        self.assertIn(b'version: "4.10.1"', adapted)
+
+    def test_wrong_engine_and_package_source_preserve_the_lock(self):
+        (self.sdk / 'bin/internal/engine.version').write_text('other-engine', encoding='utf-8')
+        with self.assertRaises(ValueError):
+            arm64_lock.prepare(self.root, self.sdk)
+        self.assertEqual(self.path.read_bytes(), self.original)
+        (self.sdk / 'bin/internal/engine.version').write_text(arm64_lock.ENGINE, encoding='utf-8')
+        invalid = self.original.replace(b'pub.flutter-io.cn', b'pub.dev')
+        self.path.write_bytes(invalid)
+        with self.assertRaises(ValueError):
+            arm64_lock.prepare(self.root, self.sdk)
+        self.assertEqual(self.path.read_bytes(), invalid)
 
 
 class SigningSettingsTest(unittest.TestCase):

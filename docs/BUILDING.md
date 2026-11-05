@@ -21,7 +21,7 @@ flutter pub get --enforce-lockfile
 
 ## GitHub 自动构建
 
-提交到 `main` 或创建面向 `main` 的 PR 会运行 `CI`，先完成源码检查及 Flutter、原生组件测试，再构建 Android ARM64 和 Windows x64。该流程使用公开配置，安卓构建检查不需要签名密钥。
+提交到 `main` 或创建面向 `main` 的 PR 会运行 `CI`，先完成源码检查及 Flutter、原生组件测试，再构建 Android ARM64、Windows x64 和 Windows ARM64。该流程使用公开配置，安卓构建检查不需要签名密钥。Windows ARM64 使用独立的 Flutter 3.47.9 及固定引擎校验，详情见 [ARM64 构建](WINDOWS-ARM64-BUILD.md)。
 
 正式安装包在仓库的 **Actions → Build signed release → Run workflow** 中选择 `main` 后生成。推送与 `pubspec.yaml` 版本匹配的 `v` 标签也会触发，例如版本 `2.2.0+220` 对应 `v2.2.0+220`。工作流读取 GitHub 的 `release` environment：
 
@@ -34,7 +34,7 @@ flutter pub get --enforce-lockfile
 
 使用私有口令解析、百度取链及解析配置时，额外设置 Secret `ASTERLINK_CLIENT_DEFINES_JSON`。其 JSON 对象以 `baidu-api.defines.json`、`cloud-command.defines.json`、`parser-hub.defines.json` 为键，值为对应本机 `.local/` 文件的 JSON 对象。准备脚本只接受这些文件及已知客户端字段，写入临时构建目录后沿用本机构建的配置校验；不包含后端源码或管理凭据。
 
-构建成功后，在运行详情底部的 **Artifacts** 下载 `release-android`（签名 APK）和 `release-windows`（x64 安装器、便携 ZIP），保留 14 天。工作流只生成并上传构建附件，公开 Release 另行发布。
+构建成功后，在运行详情底部的 **Artifacts** 下载 `release-android`（签名 APK）、`release-windows`（x64 安装器、便携 ZIP）和 `release-windows-arm64`（ARM64 安装器、便携 ZIP），保留 14 天。工作流只生成并上传构建附件，公开 Release 另行发布。
 
 新增 ED2K 需要更新 Gopeed 原生组件。升级已有工作目录时，Android 构建加 `-RebuildNative`（正式入口同样支持该参数），避免沿用旧 AAR；Windows 构建会重建所选架构 helper。源码与验证说明见 [ED2K 下载](ED2K-DOWNLOAD.md)。
 

@@ -15,7 +15,9 @@ def version_of(root):
     return match.group(1)
 
 
-def stage(root, platform, installer=None):
+def stage(root, platform, installer=None, architecture='x64'):
+    if platform not in {'android', 'windows'} or architecture not in {'x64', 'arm64'}:
+        raise ValueError('Unsupported release platform or architecture')
     root = Path(root).resolve()
     version = version_of(root)
     output = root / '.local/release-assets'
@@ -27,7 +29,7 @@ def stage(root, platform, installer=None):
             raise ValueError('APK is missing or a staged asset already exists')
         shutil.copy2(source, destination)
     else:
-        runtime = root / 'build/windows/x64/runner/Release'
+        runtime = root / ('build/windows/' + architecture + '/runner/Release')
         for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so'):
             if not (runtime / name).is_file():
                 raise ValueError('Windows runtime is incomplete')
@@ -40,7 +42,7 @@ def stage(root, platform, installer=None):
                 raise ValueError('Windows runtime contains a link')
             if any(part in {'.local', '.git', 'logs', 'diagnostics'} for part in relative.parts) or path.suffix in {'.jks', '.keystore', '.p12', '.pfx', '.log', '.pdb'}:
                 raise ValueError('Windows runtime contains private or development files')
-        destination = output / ('asterlink-' + version + '-windows-x64.zip')
+        destination = output / ('asterlink-' + version + '-windows-' + architecture + '.zip')
         if destination.exists():
             raise ValueError('A staged Windows asset already exists')
         with zipfile.ZipFile(destination, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
@@ -50,7 +52,7 @@ def stage(root, platform, installer=None):
             source = Path(installer).resolve()
             if not source.is_file() or source.suffix.lower() != '.exe':
                 raise ValueError('Installer must be an existing EXE')
-            target = output / ('asterlink-' + version + '-windows-x64-setup.exe')
+            target = output / ('asterlink-' + version + '-windows-' + architecture + '-setup.exe')
             if target.exists():
                 raise ValueError('A staged installer already exists')
             shutil.copy2(source, target)
@@ -77,12 +79,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--platform', choices=('android', 'windows'))
     parser.add_argument('--installer')
+    parser.add_argument('--architecture', choices=('x64', 'arm64'), default='x64')
     parser.add_argument('--checksums', action='store_true')
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     try:
         if args.platform:
-            stage(root, args.platform, args.installer)
+            stage(root, args.platform, args.installer, args.architecture)
             print('Release assets staged for ' + args.platform)
         if args.checksums:
             print('SHA-256 written for {} assets'.format(checksums(root / '.local/release-assets')))

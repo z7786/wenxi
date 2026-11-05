@@ -59,6 +59,14 @@ Android 与当前 x64 开发环境继续使用 Flutter 3.41.4。切换 SDK 后�
 执行该 SDK 的 `flutter pub get`，避免沿用另一 SDK 的生成配置；无需全局
 升级 Flutter，也无需清理原有下载或账号数据。
 
+GitHub 的 `CI` 与 `Build signed release` 已包含 `windows-arm64` 任务。
+`prepare-ci-windows-arm64.ps1` 从官方存储下载并校验固定引擎和 C++ wrapper，
+检查 runner 的 ARM64 C++ 与 ATL 工具。`build-windows.ps1` 为独立 SDK
+临时调整 intl、matcher、meta、test_api、vector_math 的固定版本及校验值，
+随后仍使用 `--enforce-lockfile`，结束时恢复主锁文件；其他依赖不升级。
+云端额外运行账号、独立小窗、播放和边下边播兼容回归。
+正式附件名称为 `release-windows-arm64`，包含 ARM64 安装器及便携 ZIP。
+
 验证包含 ARM64 PE 文件、AArch64 Dart AOT、随包 DLL 导入及函数解析，
 并执行账号添加、夸克认证和边下边播回归。最终仍需在 Windows ARM64
 电脑上验证实际安装、登录和视频播放。

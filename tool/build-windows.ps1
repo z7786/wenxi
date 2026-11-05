@@ -22,6 +22,8 @@ $savedPubCache = $env:PUB_CACHE
 $savedPath = $env:PATH
 $savedNugetPackages = $env:NUGET_PACKAGES
 $savedNugetHttpCache = $env:NUGET_HTTP_CACHE_PATH
+$lockPath = Join-Path $projectPath 'pubspec.lock'
+$originalLock = if ($Architecture -eq 'arm64') { [IO.File]::ReadAllBytes($lockPath) } else { $null }
 try {
     if (-not $env:PUB_HOSTED_URL) { $env:PUB_HOSTED_URL = 'https://pub.flutter-io.cn' }
     if (-not $env:FLUTTER_STORAGE_BASE_URL) { $env:FLUTTER_STORAGE_BASE_URL = 'https://storage.flutter-io.cn' }
@@ -33,6 +35,10 @@ try {
     $env:PATH = (Split-Path -Parent $nugetPath) + [IO.Path]::PathSeparator + $env:PATH
     $env:NUGET_PACKAGES = Join-Path $projectPath '.local\nuget\packages'
     $env:NUGET_HTTP_CACHE_PATH = Join-Path $projectPath '.local\nuget\http-cache'
+    if ($Architecture -eq 'arm64') {
+        $sdkRoot = Split-Path -Parent (Split-Path -Parent (Get-Command $Flutter -ErrorAction Stop).Source)
+        Invoke-AsterLinkTool -Command 'python' -Arguments @((Join-Path $PSScriptRoot 'prepare-windows-arm64-lock.py'), '--root', $projectPath, '--sdk', $sdkRoot) -Failure 'Pinned ARM64 SDK dependency preparation failed'
+    }
     $windowsArguments = @('build', 'windows', '--release', '--no-pub')
     if ($Architecture -eq 'arm64' -and $env:PROCESSOR_ARCHITECTURE -ne 'ARM64') {
         $helpOutput = @(& $Flutter build windows --help 2>&1)
@@ -49,6 +55,7 @@ try {
         Invoke-AsterLinkTool -Command $Flutter -Arguments ($windowsArguments + $dartDefines) -Failure 'Windows build failed; check the Visual Studio C++ toolchain'
     } finally { Pop-Location }
 } finally {
+    if ($null -ne $originalLock) { [IO.File]::WriteAllBytes($lockPath, $originalLock) }
     $env:PUB_HOSTED_URL = $savedPub
     $env:FLUTTER_STORAGE_BASE_URL = $savedStorage
     $env:TEMP = $savedTemp
