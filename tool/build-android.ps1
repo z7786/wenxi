@@ -40,7 +40,7 @@ try {
     }
     Push-Location -LiteralPath $projectPath
     try {
-        Invoke-AsterLinkTool -Command $Flutter -Arguments @('pub', 'get') -Failure 'Flutter dependencies failed'
+        Invoke-AsterLinkTool -Command $Flutter -Arguments @('pub', 'get', '--enforce-lockfile') -Failure 'Locked Flutter dependencies failed; use the package host recorded in pubspec.lock'
         Invoke-AsterLinkTool -Command $Flutter -Arguments (@('build', 'apk', '--release', '--no-pub', '--target-platform', 'android-arm64') + $dartDefines) -Failure 'Android release build failed'
         & (Join-Path $PSScriptRoot 'normalize-local-properties.ps1')
     } finally { Pop-Location }

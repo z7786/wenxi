@@ -45,7 +45,7 @@ try {
     & (Join-Path $PSScriptRoot 'build-native-windows.ps1') -Go $Go -Architecture $Architecture
     Push-Location -LiteralPath $projectPath
     try {
-        Invoke-AsterLinkTool -Command $Flutter -Arguments @('pub', 'get') -Failure 'Flutter dependencies failed'
+        Invoke-AsterLinkTool -Command $Flutter -Arguments @('pub', 'get', '--enforce-lockfile') -Failure 'Locked Flutter dependencies failed; use the package host recorded in pubspec.lock'
         Invoke-AsterLinkTool -Command $Flutter -Arguments ($windowsArguments + $dartDefines) -Failure 'Windows build failed; check the Visual Studio C++ toolchain'
     } finally { Pop-Location }
 } finally {
