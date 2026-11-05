@@ -35,7 +35,19 @@ for sdk, target in [('iphoneos', 'arm64-apple-ios13.0'),
     modules.mkdir(exist_ok=True)
     (modules / 'module.modulemap').write_text(
         'framework module AsterLinkCore { umbrella header "AsterLinkCore.h" export * }\n')
-    shutil.copy2(library, bundle / 'AsterLinkCore')
+    # Link the C archive into a Mach-O image. Xcode rejects Go archives whose
+    # objects mix old and new Apple platform load commands when packaging them
+    # directly; the SDK linker emits a single platform for the final framework.
+    exports = folder / 'exports.txt'
+    exports.write_text('_AsterLinkCall\n_AsterLinkFree\n')
+    subprocess.run([compiler, '-target', target, '-isysroot', sdk_path,
+                    '-dynamiclib', '-Wl,-all_load', str(library),
+                    '-framework', 'Foundation', '-framework', 'Security',
+                    '-framework', 'CoreFoundation', '-lresolv',
+                    '-Wl,-install_name,@rpath/AsterLinkCore.framework/AsterLinkCore',
+                    '-Wl,-exported_symbols_list,' + str(exports),
+                    '-o', str(bundle / 'AsterLinkCore')], check=True)
+    subprocess.run(['xcrun', 'vtool', '-show-build', str(bundle / 'AsterLinkCore')], check=True)
     (bundle / 'Info.plist').write_bytes(plistlib.dumps({
         'CFBundleIdentifier': 'com.asterlink.core', 'CFBundleExecutable': 'AsterLinkCore',
         'CFBundlePackageType': 'FMWK', 'CFBundleShortVersionString': '1.0.0',
