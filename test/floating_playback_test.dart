@@ -12,6 +12,21 @@ import 'player_support.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  testWidgets('An idle host closes immediately before real-clock cleanup', (
+    tester,
+  ) async {
+    final store = StateStore.memory();
+    final manager = FloatingPlaybackManager.of(store);
+    addTearDown(store.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: FloatingPlaybackHost(store: store, child: const SizedBox()),
+      ),
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(() => manager.close());
+    expect(manager.sessions, isEmpty);
+  });
   setUp(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(

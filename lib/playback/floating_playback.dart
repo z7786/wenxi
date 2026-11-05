@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
@@ -118,10 +119,18 @@ class FloatingPlaybackManager extends ChangeNotifier {
     return task;
   }
 
-  Future<void> close() => _closing ??= _close();
+  Future<void> close() {
+    if (_closing case final closing?) return closing;
+    _closed = true;
+    // An idle host has no decoder or window cleanup to defer. Completing here
+    // also avoids retaining a close scheduled by an already detached host.
+    if (_sessions.isEmpty && _closingTasks.isEmpty) {
+      return _closing = SynchronousFuture<void>(null);
+    }
+    return _closing = _close();
+  }
 
   Future<void> _close() async {
-    _closed = true;
     await Future.wait(_sessions.toList().map(closeSession));
     await Future.wait(_closingTasks.toList());
   }
