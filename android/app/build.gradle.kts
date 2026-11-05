@@ -72,6 +72,11 @@ dependencies {
 }
 
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showCauses = true
+        showStackTraces = true
+    }
     val testHome = rootProject.file("../.local/android-unit-test")
     // Keep SDK test runtimes and their download lock in the project cache.
     systemProperty("user.home", testHome.absolutePath)

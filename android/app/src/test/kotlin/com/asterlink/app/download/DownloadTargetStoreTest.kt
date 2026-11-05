@@ -19,6 +19,7 @@ import android.system.Os
 import android.system.OsConstants
 import android.system.StructStat
 import android.util.AtomicFile
+import com.asterlink.app.HostAtomicFile
 import java.io.File
 import java.io.FileDescriptor
 import java.io.FileNotFoundException
@@ -42,7 +43,7 @@ import org.robolectric.annotation.Implements
 import org.robolectric.shadows.ShadowContentResolver
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [33], manifest = Config.NONE)
+@Config(sdk = [33], manifest = Config.NONE, shadows = [HostAtomicFile::class])
 class DownloadTargetStoreTest {
     private lateinit var context: Context
     private lateinit var provider: Downloads
