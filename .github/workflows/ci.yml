@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [android, windows]
+        target: [android, windows, windows-arm64]
     env:
       PUB_HOSTED_URL: https://pub.flutter-io.cn
       FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
@@ -37,6 +37,10 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           android: ${{ matrix.target == 'android' && 'true' || 'false' }}
+          windows-arm64: ${{ matrix.target == 'windows-arm64' && 'true' || 'false' }}
+      - name: Prepare pinned Windows ARM64 SDK
+        if: matrix.target == 'windows-arm64'
+        run: ./tool/prepare-ci-windows-arm64.ps1
       - name: Install pinned Android SDK components
         if: matrix.target == 'android'
         run: |
@@ -60,5 +64,12 @@ jobs:
           & ./android/gradlew.bat -p android :app:testReleaseUnitTest -Ptarget-platform=android-arm64 --no-daemon
           if ($LASTEXITCODE -ne 0) { throw 'Android unit tests failed.' }
       - name: Build Windows from source
-        if: matrix.target == 'windows'
-        run: ./tool/build-windows.ps1 -BuildConfig config/build.community.json
+        if: matrix.target != 'android'
+        run: |
+          $architecture = if ('${{ matrix.target }}' -eq 'windows-arm64') { 'arm64' } else { 'x64' }
+          ./tool/build-windows.ps1 -Architecture $architecture -BuildConfig config/build.community.json
+          . ./tool/windows-architecture.ps1
+          Assert-AsterLinkWindowsArchitecture -RuntimePath "build/windows/$architecture/runner/Release" -Architecture $architecture
+      - name: Test account and playback compatibility with the ARM64 SDK
+        if: matrix.target == 'windows-arm64'
+        run: flutter test --no-pub --concurrency=4 test/account_cookie_test.dart test/account_identity_test.dart test/floating_playback_test.dart test/playback_features_test.dart test/download_playback_test.dart

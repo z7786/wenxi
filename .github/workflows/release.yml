@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [android, windows]
+        target: [android, windows, windows-arm64]
     env:
       PUB_HOSTED_URL: https://pub.flutter-io.cn
       FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
@@ -62,6 +62,10 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           android: ${{ matrix.target == 'android' && 'true' || 'false' }}
+          windows-arm64: ${{ matrix.target == 'windows-arm64' && 'true' || 'false' }}
+      - name: Prepare pinned Windows ARM64 SDK
+        if: matrix.target == 'windows-arm64'
+        run: ./tool/prepare-ci-windows-arm64.ps1
       - name: Require official release configuration
         run: |
           if ($env:ASTERLINK_APPLICATION_ID -ne 'com.asterlink.app' -or
@@ -78,7 +82,7 @@ jobs:
           ASTERLINK_CLIENT_DEFINES_JSON: ${{ secrets.ASTERLINK_CLIENT_DEFINES_JSON }}
         run: python tool/prepare-ci-release.py --android
       - name: Prepare Windows release settings
-        if: matrix.target == 'windows'
+        if: matrix.target != 'android'
         env:
           ASTERLINK_CLIENT_DEFINES_JSON: ${{ secrets.ASTERLINK_CLIENT_DEFINES_JSON }}
         run: python tool/prepare-ci-release.py
@@ -105,19 +109,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Android unit tests failed.' }
           python tool/package-release.py --platform android
       - name: Build Windows portable package and installer
-        if: matrix.target == 'windows'
+        if: matrix.target != 'android'
         run: |
-          ./tool/build-windows.ps1
+          $architecture = if ('${{ matrix.target }}' -eq 'windows-arm64') { 'arm64' } else { 'x64' }
+          ./tool/build-windows.ps1 -Architecture $architecture
           $setup = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
           Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $setup
           if ((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash -ne '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732') { throw 'Inno Setup checksum mismatch.' }
           $inno = Join-Path $env:RUNNER_TEMP 'inno-6.7.3'
           $install = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="' + $inno + '"')) -Wait -PassThru -WindowStyle Hidden
           if ($install.ExitCode -ne 0) { throw 'Inno Setup installation failed.' }
-          ./tool/build-windows-installer.ps1 -Iscc (Join-Path $inno 'ISCC.exe') -OutputDir .local/release-installer
+          ./tool/build-windows-installer.ps1 -Architecture $architecture -Iscc (Join-Path $inno 'ISCC.exe') -OutputDir .local/release-installer
           $installers = @(Get-ChildItem -LiteralPath .local/release-installer -Filter '*.exe' -File)
           if ($installers.Count -ne 1) { throw 'Expected one installer.' }
-          python tool/package-release.py --platform windows --installer $installers[0].FullName
+          python tool/package-release.py --platform windows --architecture $architecture --installer $installers[0].FullName
+      - name: Test account and playback compatibility with the ARM64 SDK
+        if: matrix.target == 'windows-arm64'
+        run: flutter test --no-pub --concurrency=4 test/account_cookie_test.dart test/account_identity_test.dart test/floating_playback_test.dart test/playback_features_test.dart test/download_playback_test.dart
       - name: Save only release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
