@@ -42,6 +42,7 @@ class Arm64SdkAdapterTest(unittest.TestCase):
     def run_adapter(self):
         return subprocess.run(['pwsh', '-NoProfile', '-File', str(ROOT / 'tool/enable-windows-arm64-sdk.ps1'),
                                '-FlutterRoot', str(self.sdk)], capture_output=True, text=True,
+                              encoding='utf-8', errors='replace',
                               timeout=30, env=dict(os.environ, NO_COLOR='1'))
 
     def test_fresh_sdk_accepts_lf_and_crlf_and_reapplication_keeps_snapshot(self):
