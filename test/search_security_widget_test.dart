@@ -132,9 +132,7 @@ void main() {
           await tester.runAsync(() async {
             final image = await render.toImage(pixelRatio: 1);
             final data = await image.toByteData(format: ui.ImageByteFormat.png);
-            final path = File(
-              'D:/.ls/pan-relay-main/reports/search-security-2026-10-23/app-verification-$name.png',
-            );
+            final path = File('${directory.path}/app-verification-$name.png');
             await path.writeAsBytes(data!.buffer.asUint8List());
             image.dispose();
           });

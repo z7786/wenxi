@@ -117,6 +117,7 @@ void main() {
 
   setUp(() async {
     root = await Directory.systemTemp.createTemp('aster-destination-test-');
+    root = Directory(await root.resolveSymbolicLinks());
     defaults = Directory(p.join(root.path, 'default-downloads'));
     target = Directory(p.join(root.path, 'chosen-downloads'));
     legacyCache = Directory(p.join(root.path, 'old-cache'));

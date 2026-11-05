@@ -33,6 +33,9 @@ jobs:
     needs: [tag, checks]
     runs-on: windows-2022
     environment: release
+    permissions:
+      contents: read
+      actions: write
     timeout-minutes: 75
     strategy:
       fail-fast: false
