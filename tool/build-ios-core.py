@@ -18,17 +18,23 @@ for sdk, target in [('iphoneos', 'arm64-apple-ios13.0'),
     headers.mkdir(parents=True, exist_ok=True)
     sdk_path = subprocess.check_output(['xcrun', '--sdk', sdk, '--show-sdk-path'], text=True).strip()
     compiler = subprocess.check_output(['xcrun', '--sdk', sdk, '--find', 'clang'], text=True).strip()
+    cxx = subprocess.check_output(['xcrun', '--sdk', sdk, '--find', 'clang++'], text=True).strip()
     wrapper = folder / 'clang-ios'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(compiler) + ' -target ' + shlex.quote(target) +
                        ' -isysroot ' + shlex.quote(sdk_path) + ' "$@"\n')
     wrapper.chmod(0o755)
+    cxx_wrapper = folder / 'clangxx-ios'
+    cxx_wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(cxx) + ' -target ' + shlex.quote(target) +
+                           ' -isysroot ' + shlex.quote(sdk_path) + ' "$@"\n')
+    cxx_wrapper.chmod(0o755)
     library = folder / 'libAsterLinkCore.a'
     subprocess.run(['go', 'build', '-mod=vendor', '-tags', 'nosqlite', '-trimpath',
                     '-buildmode=c-archive', '-ldflags=-s -w -checklinkname=0',
                     '-o', str(library), './cmd/ios'], cwd=root / 'native/gopeed',
                    env={**os.environ, 'GOOS': 'ios', 'GOARCH': 'arm64',
-                        'DARWIN_SDK': sdk, 'CGO_ENABLED': '1', 'CC': str(wrapper),
+                        'DARWIN_SDK': sdk, 'CGO_ENABLED': '1', 'CC': str(wrapper), 'CXX': str(cxx_wrapper),
                         'CGO_CFLAGS': '-target ' + target + ' -isysroot ' + shlex.quote(sdk_path),
+                        'CGO_CXXFLAGS': '-target ' + target + ' -isysroot ' + shlex.quote(sdk_path),
                         'CGO_LDFLAGS': '-target ' + target + ' -isysroot ' + shlex.quote(sdk_path)}, check=True)
     (headers / 'AsterLinkCore.h').write_bytes(library.with_suffix('.h').read_bytes())
     modules = bundle / 'Modules'
@@ -43,7 +49,7 @@ for sdk, target in [('iphoneos', 'arm64-apple-ios13.0'),
     subprocess.run([compiler, '-target', target, '-isysroot', sdk_path,
                     '-dynamiclib', '-Wl,-all_load', str(library),
                     '-framework', 'Foundation', '-framework', 'Security',
-                    '-framework', 'CoreFoundation', '-lresolv',
+                    '-framework', 'CoreFoundation', '-framework', 'CFNetwork', '-lresolv', '-lc++',
                     '-Wl,-install_name,@rpath/AsterLinkCore.framework/AsterLinkCore',
                     '-Wl,-exported_symbols_list,' + str(exports),
                     '-o', str(bundle / 'AsterLinkCore')], check=True)
