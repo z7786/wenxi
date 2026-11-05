@@ -10,7 +10,7 @@ class SourceJsBridge {
         libraryPath ?? Platform.environment['ASTERLINK_JS_LIBRARY'];
     final library = override != null
         ? DynamicLibrary.open(override)
-        : Platform.isMacOS
+        : Platform.isMacOS || Platform.isIOS
         ? DynamicLibrary.process()
         : DynamicLibrary.open(
             Platform.isWindows ? 'asterlink_js.dll' : 'libasterlink_js.so',

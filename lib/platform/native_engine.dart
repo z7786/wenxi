@@ -44,6 +44,17 @@ class AndroidGopeedTransport extends NativeTransport {
   }
 }
 
+/// iOS hosts the same core in-process; executable subprocesses are unavailable.
+class IOSGopeedTransport extends AndroidGopeedTransport {
+  @override
+  Future<Object?> call(String method, [Json args = const {}]) async {
+    if (method == 'freeSpace') {
+      return await nativeChannel.invokeMethod<Object?>('freeSpace', args);
+    }
+    return super.call(method, args);
+  }
+}
+
 class DesktopGopeedTransport extends NativeTransport {
   DesktopGopeedTransport({required this.executable, this.launchProcess});
   final String executable;

@@ -550,6 +550,15 @@ class AppServices extends ChangeNotifier {
       cache = Directory(paths.str('cache'));
       destination = cache;
       transport = AndroidGopeedTransport();
+    } else if (Platform.isIOS) {
+      data = Directory(
+        p.join((await getApplicationSupportDirectory()).path, 'AsterLink'),
+      );
+      cache = Directory(p.join(data.path, 'downloads'));
+      destination = Directory(
+        p.join((await getApplicationDocumentsDirectory()).path, 'Downloads'),
+      );
+      transport = IOSGopeedTransport();
     } else {
       require(isDesktopPlatform, '当前版本支持 Android、Windows 和 macOS');
       data = Directory(

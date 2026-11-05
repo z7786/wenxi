@@ -1,0 +1,92 @@
+name: Build iOS unsigned test app
+on:
+  workflow_dispatch:
+    inputs:
+      official:
+        description: Include the existing client parsing and search configuration.
+        type: boolean
+        default: true
+  push:
+    branches: ['codex/ios-build-*']
+permissions:
+  contents: read
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    environment: ${{ (github.event_name == 'push' || inputs.official) && 'release' || '' }}
+    timeout-minutes: 60
+    env:
+      PUB_HOSTED_URL: https://pub.flutter-io.cn
+      FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
+      GOPROXY: https://proxy.golang.org,direct
+      GOTOOLCHAIN: go1.24.7
+      ASTERLINK_CONTROL_URL: ${{ secrets.ASTERLINK_CONTROL_URL || vars.ASTERLINK_CONTROL_URL }}
+      ASTERLINK_GITHUB_REPO: ${{ vars.ASTERLINK_GITHUB_REPO || github.repository }}
+      ASTERLINK_APPLICATION_ID: ${{ vars.ASTERLINK_APPLICATION_ID }}
+      UMENG_APPKEY: ${{ secrets.UMENG_APPKEY }}
+      UMENG_CHANNEL: ${{ vars.UMENG_CHANNEL || 'github' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Cache native iOS compilation
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/Library/Caches/go-build
+          key: ios-arm64-go-1.24.7-${{ hashFiles('native/gopeed/go.sum', 'native/gopeed/**/*.go') }}
+          restore-keys: ios-arm64-go-1.24.7-
+      - name: Verify source and configure iOS
+        run: |
+          test "$(uname -m)" = arm64
+          python tool/check_public_files.py --staged
+          dart tool/sync_version.dart --check
+          flutter config --no-enable-swift-package-manager
+          xcodebuild -version
+      - name: Prepare existing client configuration
+        if: github.event_name == 'push' || inputs.official
+        env:
+          ASTERLINK_CLIENT_DEFINES_JSON: ${{ secrets.ASTERLINK_CLIENT_DEFINES_JSON }}
+        run: |
+          test "$ASTERLINK_APPLICATION_ID" = com.asterlink.app
+          test -n "$ASTERLINK_CONTROL_URL"
+          python tool/prepare-ci-release.py
+      - name: Build unsigned iOS device app
+        shell: pwsh
+        run: ./tool/build-ios.ps1
+      - name: Inspect and package unsigned device app
+        run: python tool/package-ios.py
+      - name: Save unsigned device test package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ios-arm64-unsigned-test
+          path: .local/ios-release-assets/*
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Build iOS simulator smoke app
+        shell: pwsh
+        run: ./tool/build-ios.ps1 -Simulator
+      - name: Test startup, script runtime, download and video playback
+        run: python tool/ios-simulator-smoke.py
+      - name: Analyze and test platform compatibility
+        run: |
+          flutter analyze --no-pub
+          flutter test --no-pub --concurrency=4 test/ios_platform_test.dart test/playback_device_test.dart test/account_identity_test.dart test/download_shutdown_test.dart
+      - name: Save simulator verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ios-simulator-verification
+          path: |
+            .local/ios-*.log
+            .local/ios-*.json
+            .local/ios-*.jsonl
+            .local/ios-smoke.png
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14

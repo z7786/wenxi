@@ -58,11 +58,13 @@ class NativePlaybackDevice extends PlaybackDevice {
   final _macosPlayer = MacOSExternalPlayer();
   final TargetPlatform _platform;
   bool get _android => _platform == TargetPlatform.android;
+  bool get _ios => _platform == TargetPlatform.iOS;
+  bool get _mobile => _android || _ios;
   bool get _windows => _platform == TargetPlatform.windows;
   bool get _macos => _platform == TargetPlatform.macOS;
   bool get _desktop => _windows || _macos;
   @override
-  bool get supportsOrientation => _android;
+  bool get supportsOrientation => _mobile;
   @override
   bool get supportsExternalPlayer => _android || _desktop;
   @override
@@ -92,7 +94,7 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   bool get supportsIndependentPlayerWindows => _desktop;
   @override
-  bool get supportsBrightness => _android;
+  bool get supportsBrightness => _mobile;
   @override
   bool get supportsSystemVolume => _android && _supportsSystemVolume;
   @override
@@ -110,7 +112,7 @@ class NativePlaybackDevice extends PlaybackDevice {
     if (_closed || _started) return;
     _started = true;
     _video = video;
-    if (_android) {
+    if (_mobile) {
       _handlerOwner = this;
       _channel.setMethodCallHandler((call) async {
         final args = asJson(call.arguments);
@@ -173,7 +175,7 @@ class NativePlaybackDevice extends PlaybackDevice {
       _windowsPip.videoSize(width, height);
       return;
     }
-    if (!_android) return;
+    if (!_mobile) return;
     final targetOrientation = _video && orientation != null
         ? orientation
         : playbackOrientation(
@@ -187,6 +189,18 @@ class NativePlaybackDevice extends PlaybackDevice {
     if (_lastUpdate == signature) return;
     _lastUpdate = signature;
     try {
+      if (_ios && targetOrientation != null) {
+        await SystemChrome.setPreferredOrientations(
+          targetOrientation == PlaybackOrientation.landscape
+              ? [
+                  DeviceOrientation.landscapeLeft,
+                  DeviceOrientation.landscapeRight,
+                ]
+              : targetOrientation == PlaybackOrientation.portrait
+              ? [DeviceOrientation.portraitUp]
+              : [],
+        );
+      }
       await _invoke<void>('state', {
         'playing': playing,
         'width': width,
@@ -211,7 +225,12 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   Future<void> fullscreen(bool enabled) async {
     if (_closed) return;
-    if (_android) {
+    if (_mobile) {
+      if (_ios) {
+        await SystemChrome.setEnabledSystemUIMode(
+          enabled ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+        );
+      }
       await _invoke<void>('fullscreen', {'enabled': enabled});
     } else if (_desktop) {
       await exitPip();
@@ -270,7 +289,11 @@ class NativePlaybackDevice extends PlaybackDevice {
           'session': _session,
         });
       }
-      if (_android && _started) await _invoke<void>('end');
+      if (_mobile && _started) await _invoke<void>('end');
+      if (_ios) {
+        await SystemChrome.setPreferredOrientations([]);
+        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      }
       if (_windows) await _windowsPip.exit();
       if (_desktop && _fullscreen) {
         await windowManager.setFullScreen(_previousWindowsFullscreen);
