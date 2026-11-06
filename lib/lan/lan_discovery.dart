@@ -57,10 +57,7 @@ extension _LanDiscovery on LanService {
             final previous = _peers[peer.id];
             final fresh = previous == null;
             if (fresh && _peers.length >= 128) continue;
-            final endpoints = _peerEndpoints.putIfAbsent(peer.id, () => []);
-            endpoints.remove(peer.base);
-            endpoints.insert(0, peer.base);
-            if (endpoints.length > 8) endpoints.removeLast();
+            _rememberPeerEndpoint(peer);
             final paired = _peerSessions[peer.id];
             if (paired != null && paired.expires.isAfter(clock())) {
               if (peer.address != paired.base.host) {
@@ -78,7 +75,7 @@ extension _LanDiscovery on LanService {
               } else if (peer.port != paired.base.port) {
                 // A port change on the paired address means the old listener
                 // has gone. Let discovery expose the new endpoint for pairing.
-                _peerSessions.remove(peer.id);
+                _disconnectPeer(peer.id);
               }
             }
             _peers[peer.id] = peer;
@@ -156,6 +153,7 @@ extension _LanDiscovery on LanService {
     if (discoveryEnabled && _discovery == null) await _startDiscovery();
     _announce(discover: true);
     if (unicastDiscovery) _startUnicastScan();
+    _scheduleHttpDiscovery(immediate: true);
     _changed();
   }
 
@@ -165,8 +163,23 @@ extension _LanDiscovery on LanService {
     if (!running || server != _server) return;
     if (listEquals(current, addresses)) return;
     addresses = current;
+    _httpDiscoveryScope?.cancel();
+    _httpDiscoveryScope = null;
+    _httpProbes.clear();
+    for (final worker in _reverseWorkers.values.toList()) {
+      if (worker.sourceAddress != null &&
+          !addresses.contains(worker.sourceAddress)) {
+        _disconnectPeer(worker.peer.id);
+      }
+    }
+    for (final channel in _reverseChannels.values.toList()) {
+      if (!addresses.contains(channel.localAddress)) {
+        _disconnectPeer(channel.session.id);
+      }
+    }
     _announce(discover: true);
     if (unicastDiscovery) _startUnicastScan();
+    _scheduleHttpDiscovery();
     _changed();
   }
 

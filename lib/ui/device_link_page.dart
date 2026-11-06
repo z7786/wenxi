@@ -1823,7 +1823,10 @@ class _LanReceivePageState extends State<_LanReceivePage> {
         _destination!,
         widget.manifest.directories,
       );
-      final specs = widget.manifest.downloads(widget.origin);
+      final specs = widget.services.lan.prepareDownloads(
+        widget.manifest,
+        widget.origin,
+      );
       await widget.services.store.put('lanDestination', _destination!);
       if (specs.isNotEmpty) {
         await widget.services.downloads.enqueueAll(

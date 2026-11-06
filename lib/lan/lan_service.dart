@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -8,11 +9,13 @@ import '../core/json.dart';
 import '../data/http.dart';
 import '../data/state_store.dart';
 import '../domain/links.dart';
-import '../domain/models.dart' show LinkKind;
+import '../domain/models.dart' show LinkKind, DownloadSpec;
+import '../diagnostics/app_log.dart';
 import '../download/download_activity.dart';
 import '../platform/windows_lan.dart';
 import 'lan_addresses.dart';
 import 'lan_datagrams.dart';
+import 'lan_download_route.dart';
 import 'lan_files.dart';
 import 'lan_models.dart';
 import 'lan_qr.dart';
@@ -20,6 +23,8 @@ import 'lan_unicast_discovery.dart';
 
 part 'lan_server.dart';
 part 'lan_discovery.dart';
+part 'lan_reverse.dart';
+part 'lan_http_discovery.dart';
 
 class LanShare {
   LanShare(this.manifest, this.sources);
@@ -51,6 +56,20 @@ class _LanRequestError extends AppException {
   const _LanRequestError(super.message, this.status);
   final int status;
 }
+
+class _LanConnectionError extends AppException {
+  const _LanConnectionError()
+    : super(
+        '无法连接对方，请确认处于同一局域网且已开启设备互联。'
+        '连接电脑时，请在电脑端允许文析助手通过 Windows 防火墙',
+      );
+}
+
+bool _retryableLanRequest(Object error, String path) =>
+    error is _LanConnectionError ||
+    error is _LanRequestError &&
+        {408, 425, 429, 500, 502, 503, 504}.contains(error.status) &&
+        !(path == '/v1/pair' && error.status == 429);
 
 class LanService extends ChangeNotifier {
   LanService({
@@ -90,9 +109,20 @@ class LanService extends ChangeNotifier {
   final _peerSessions =
       <String, ({String token, Uri base, DateTime expires})>{};
   final _attempts = <String, List<DateTime>>{};
+  final _reverseWorkers = <String, _LanReverseWorker>{};
+  final _reverseChannels = <String, _LanReverseChannel>{};
+  final _reversePending = <String, _LanReverseJob>{};
+  final _forwardedRequests = <String, ({_LanSession session, String token})>{};
+  final _downloadRoutes = <String, _LanForwardedFile>{};
+  final _downloadRouteIds = <String, String>{};
+  final _reversePreferred = <String, DateTime>{};
+  final _reverseCapablePeers = <String>{};
+  final _pairReplies =
+      <String, ({Json reply, String fingerprint, DateTime expires})>{};
   final _inbox = <LanInboxItem>[];
   HttpServer? _server;
   HttpClient? _client;
+  HttpClient? _loopbackClient;
   RawDatagramSocket? _discovery;
   LanDatagrams? _datagrams;
   Timer? _heartbeat, _notifyTimer, _unicastTimer;
@@ -105,6 +135,12 @@ class LanService extends ChangeNotifier {
   bool _refreshingNetwork = false;
   int _networkTicks = 0;
   int _activeRequests = 0;
+  RequestScope? _httpDiscoveryScope;
+  Timer? _httpDiscoveryTimer;
+  DateTime? _lastHttpDiscovery;
+  DateTime? _lastHttpSubnetScan;
+  final _httpProbes = <Uri, RequestScope>{};
+  final _httpSeen = <String, DateTime>{};
   bool get running => _running;
   int get port => _server?.port ?? 0;
   int get discoveryPort => _discovery?.port ?? 0;
@@ -117,6 +153,20 @@ class LanService extends ChangeNotifier {
   LanPeer? senderOf(LanInboxItem item) => _peers[item.senderId];
   List<LanShare> get shares =>
       _shares.values.where((s) => !s.stopped && !s.expired(clock())).toList();
+
+  Json get diagnostics => {
+    'running': running,
+    'interfaces': addresses.length,
+    'peers': _peers.length,
+    'paired': _peerSessions.length,
+    'reverseWorkers': _reverseWorkers.length,
+    'reverseChannels': _reverseChannels.length,
+    'reverseRequests': _reversePending.length,
+    'activeConnections': activeConnections,
+    'httpDiscovery': _httpDiscoveryScope != null,
+    'httpProbes': _httpProbes.length,
+    'udpDiscovery': _discovery != null,
+  };
   bool connected(LanPeer peer) {
     final session = _peerSessions[peer.id];
     return session != null &&
@@ -125,6 +175,10 @@ class LanService extends ChangeNotifier {
   }
 
   Future<void> refreshDevices() => _refreshDevices();
+  List<DownloadSpec> prepareDownloads(LanManifest manifest, Uri origin) =>
+      _prepareDownloads(manifest, origin);
+  Future<DownloadSpec> resolveDownload(DownloadSpec spec) =>
+      _resolveDownload(spec);
   DownloadActivity get activity => !running
       ? const DownloadActivity.idle()
       : DownloadActivity(
@@ -174,6 +228,7 @@ class LanService extends ChangeNotifier {
         networkHint = '自动发现受系统限制，可输入设备地址连接';
       }
       if (discoveryEnabled) await _startDiscovery();
+      if (discoveryEnabled) _scheduleHttpDiscovery();
       _heartbeat = _serviceZone.run(
         () => Timer.periodic(const Duration(seconds: 3), (_) {
           _tick();
@@ -181,6 +236,7 @@ class LanService extends ChangeNotifier {
       );
       await foreground?.call();
       notifyListeners();
+      DiagnosticLog.event('lan.started', fields: diagnostics);
     } catch (_) {
       await _stop();
       rethrow;
@@ -301,6 +357,55 @@ class LanService extends ChangeNotifier {
     String? session,
     HttpClient? client,
     bool invalidateSession = true,
+    bool retry = true,
+    Duration? timeout,
+    int maxBytes = 8 * 1024 * 1024,
+  }) async {
+    final safeToRetry =
+        method == 'GET' ||
+        method == 'POST' &&
+            (body?.str('id').isNotEmpty == true ||
+                body?.str('replySession').isNotEmpty == true);
+    for (var attempt = 0; ; attempt++) {
+      try {
+        return await _jsonOnce(
+          uri,
+          method: method,
+          body: body,
+          session: session,
+          client: client,
+          invalidateSession: invalidateSession,
+          timeout: timeout,
+          maxBytes: maxBytes,
+        );
+      } catch (error) {
+        RequestScope.checkpoint();
+        final transient = _retryableLanRequest(error, uri.path);
+        if (!retry || !safeToRetry || !transient || attempt >= 2) rethrow;
+        DiagnosticLog.event(
+          'lan.request_retry',
+          fields: {
+            'operation': uri.pathSegments.take(2).join('/'),
+            'attempt': attempt + 1,
+            'status': error is _LanRequestError ? error.status : 0,
+          },
+        );
+        await RequestScope.wait(
+          Duration(milliseconds: attempt == 0 ? 200 : 700),
+        );
+      }
+    }
+  }
+
+  Future<Json> _jsonOnce(
+    Uri uri, {
+    String method = 'GET',
+    Json? body,
+    String? session,
+    HttpClient? client,
+    bool invalidateSession = true,
+    Duration? timeout,
+    int maxBytes = 8 * 1024 * 1024,
   }) async {
     require(!_disposed, '设备互联已关闭');
     RequestScope.checkpoint();
@@ -308,15 +413,20 @@ class LanService extends ChangeNotifier {
     HttpClientRequest? request;
     final cancellation = RequestScope.current;
     var finished = false;
-    unawaited(
-      cancellation?.whenCancel.then<void>((_) {
-        if (!finished) request?.abort();
-      }),
-    );
+    final deadline = Timer(timeout ?? const Duration(seconds: 20), () {
+      request?.abort(const _LanConnectionError());
+    });
+    final cancelled = cancellation?.whenCancel.asStream().listen((_) {
+      if (!finished) request?.abort();
+    });
     try {
-      request = await (client ?? _http)
-          .openUrl(method, uri)
-          .timeout(const Duration(seconds: 6));
+      final opening = (client ?? _http).openUrl(method, uri);
+      unawaited(
+        opening.then<void>((lateRequest) {
+          if (finished) lateRequest.abort();
+        }, onError: (Object _, StackTrace _) {}),
+      );
+      request = await opening.timeout(timeout ?? const Duration(seconds: 6));
       RequestScope.checkpoint();
       request.followRedirects = false;
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
@@ -328,18 +438,33 @@ class LanService extends ChangeNotifier {
         request.add(utf8.encode(jsonEncode(body)));
       }
       final response = await request.close().timeout(
-        const Duration(seconds: 12),
+        timeout ?? const Duration(seconds: 12),
       );
       final bytes = BytesBuilder(copy: false);
-      await for (final part in response.timeout(const Duration(seconds: 12))) {
-        require(bytes.length + part.length <= 8 * 1024 * 1024, '设备返回的数据过大');
+      await for (final part in response.timeout(
+        timeout ?? const Duration(seconds: 12),
+      )) {
+        require(bytes.length + part.length <= maxBytes, '设备返回的数据过大');
         bytes.add(part);
       }
-      final data = asJson(jsonDecode(utf8.decode(bytes.takeBytes())));
+      Json data;
+      try {
+        data = asJson(jsonDecode(utf8.decode(bytes.takeBytes())));
+      } on FormatException {
+        if (response.statusCode != 200) {
+          throw _LanRequestError(
+            '设备请求失败（${response.statusCode}）',
+            response.statusCode,
+          );
+        }
+        throw const AppException('设备返回的信息格式无效，请检查对方版本');
+      }
       if ((response.statusCode == 401 || response.statusCode == 403) &&
           session != null &&
           invalidateSession) {
-        _peerSessions.removeWhere((key, value) => value.token == session);
+        for (final entry in _peerSessions.entries.toList()) {
+          if (entry.value.token == session) _disconnectPeer(entry.key);
+        }
         _changed();
       }
       RequestScope.checkpoint();
@@ -353,13 +478,12 @@ class LanService extends ChangeNotifier {
     } on AppException {
       rethrow;
     } catch (_) {
-      throw const AppException(
-        '无法连接对方，请确认处于同一局域网且已开启设备互联。'
-        '连接电脑时，请在电脑端允许文析助手通过 Windows 防火墙',
-      );
+      throw const _LanConnectionError();
     } finally {
       finished = true;
+      deadline.cancel();
       request?.abort();
+      await cancelled?.cancel();
     }
   }
 
@@ -368,10 +492,20 @@ class LanService extends ChangeNotifier {
     final url = lanAddress(
       address,
     ).replace(path: '/v1/info', query: '', fragment: '');
-    final peer = LanPeer.fromJson(await _json(url), url.host, clock());
+    final peer = LanPeer.fromJson(
+      await _json(
+        url,
+        retry: false,
+        timeout: const Duration(seconds: 2),
+        maxBytes: 8192,
+      ),
+      url.host,
+      clock(),
+    );
     require(peer.id != id, '这是当前设备，请输入另一台设备的地址');
     require(peer.port == url.port, '设备地址发生变化，请重新连接');
     _peers[peer.id] = peer;
+    _rememberPeerEndpoint(peer);
     _changed();
     return peer;
   }
@@ -393,6 +527,7 @@ class LanService extends ChangeNotifier {
         'name': name,
         'port': port,
         'replySession': replySession,
+        'reverseTransfer': true,
       },
     );
     final token = result.str('session');
@@ -400,6 +535,7 @@ class LanService extends ChangeNotifier {
     require(result.str('id') == peer.id, '对方设备已变化，请重新发现设备');
     require(running, '设备互联已关闭');
     final expires = clock().add(const Duration(hours: 4));
+    _disconnectPeer(peer.id);
     if (result.boolean('bidirectional')) {
       _sessions.removeWhere(
         (key, value) =>
@@ -416,6 +552,19 @@ class LanService extends ChangeNotifier {
     }
     _peerSessions[peer.id] = (token: token, base: peer.base, expires: expires);
     _peers[peer.id] = peer;
+    _rememberPeerEndpoint(peer, persist: true);
+    if (result.boolean('reverseTransfer') && result.boolean('bidirectional')) {
+      _reverseCapablePeers.add(peer.id);
+      _startReverseWorker(peer, token);
+    }
+    DiagnosticLog.event(
+      'lan.paired',
+      fields: {
+        'peer': DiagnosticLog.reference(peer.id),
+        'bidirectional': result.boolean('bidirectional'),
+        'reverseTransfer': result.boolean('reverseTransfer'),
+      },
+    );
     _changed();
   }
 
@@ -447,6 +596,7 @@ class LanService extends ChangeNotifier {
           '连接地址对应的设备已变化，请重新扫描或发现设备',
         );
         _peers[peer.id] = peer;
+        _rememberPeerEndpoint(peer);
         _changed();
         return peer;
       } on AppException catch (error) {
@@ -479,10 +629,7 @@ class LanService extends ChangeNotifier {
   }
 
   Future<List<LanShareSummary>> remoteShares(LanPeer peer) async {
-    final data = await _json(
-      peer.base.replace(path: '/v1/shares'),
-      session: _session(peer),
-    );
+    final data = await _peerJson(peer, '/v1/shares');
     return data.list('shares').map(LanShareSummary.fromJson).toList();
   }
 
@@ -490,14 +637,16 @@ class LanService extends ChangeNotifier {
     final uri = lanAddress(address);
     final match = RegExp(r'^/s/([a-f0-9]{32})/?$').firstMatch(uri.path);
     require(match != null, '请输入完整的设备互联分享链接');
+    final endpoint = uri.replace(
+      path: '/v1/manifests/${match![1]}',
+      query: '',
+      fragment: '',
+    );
+    final peer = _peerForOrigin(uri);
     final result = LanManifest.fromJson(
-      await _json(
-        uri.replace(
-          path: '/v1/manifests/${match![1]}',
-          query: '',
-          fragment: '',
-        ),
-      ),
+      peer == null
+          ? await _json(endpoint)
+          : await _peerJson(peer, endpoint.path, publicRead: true),
     );
     require(result.token == match[1], '分享信息不匹配');
     return result;
@@ -538,10 +687,10 @@ class LanService extends ChangeNotifier {
     String value, {
     HttpClient? client,
   }) async {
-    final result = await _json(
-      peer.base.replace(path: '/v1/inbox'),
+    final result = await _peerJson(
+      peer,
+      '/v1/inbox',
       method: 'POST',
-      session: _session(peer),
       client: client,
       body: {'id': lanId(), 'kind': kind, 'value': value},
     );
@@ -594,7 +743,7 @@ class LanService extends ChangeNotifier {
 
   Future<String> _shareAddress(LanPeer peer, String session) async {
     final endpoint = peer.base.replace(path: '/v1/shares');
-    final info = await _json(endpoint, session: session);
+    final info = await _peerJson(peer, endpoint.path);
     await _updateAddresses();
     RequestScope.checkpoint();
     require(running && addresses.isNotEmpty, '网络地址已变化，请刷新设备地址并重新连接');
@@ -603,7 +752,7 @@ class LanService extends ChangeNotifier {
       require(isLanAddress(observed), '对方返回的发送地址无效');
       if (!addresses.contains(observed)) {
         if (_peerSessions[peer.id]?.token == session) {
-          _peerSessions.remove(peer.id);
+          _disconnectPeer(peer.id);
           _changed();
         }
         throw const AppException('网络地址已变化，请刷新设备地址并重新连接');
@@ -679,11 +828,16 @@ class LanService extends ChangeNotifier {
     final now = clock();
     _peers.removeWhere(
       (key, peer) =>
-          now.difference(peer.lastSeen).inSeconds > 15 && !connected(peer),
+          now.difference(peer.lastSeen).inSeconds >
+              (_httpSeen.containsKey(key) ? 45 : 15) &&
+          !connected(peer),
     );
+    _httpSeen.removeWhere((key, _) => !_peers.containsKey(key));
     _peerEndpoints.removeWhere((id, _) => !_peers.containsKey(id));
     _sessions.removeWhere((key, session) => session.expires.isBefore(now));
     _peerSessions.removeWhere((key, session) => !session.expires.isAfter(now));
+    _pruneReverseTransfers();
+    _pairReplies.removeWhere((key, value) => !value.expires.isAfter(now));
     _attempts.removeWhere(
       (key, times) =>
           times.isEmpty || now.difference(times.last).inMinutes >= 1,
@@ -697,12 +851,26 @@ class LanService extends ChangeNotifier {
             now.difference(_lastUnicastScan!).inSeconds >= 30)) {
       _startUnicastScan();
     }
+    if (discoveryEnabled &&
+        (_lastHttpDiscovery == null ||
+            now.difference(_lastHttpDiscovery!).inSeconds >= 9)) {
+      _scheduleHttpDiscovery();
+    }
     _changed();
   }
 
   Future<void> stop() => _lifecycle.run(_stop);
   Future<void> _stop() async {
     _running = false;
+    _httpDiscoveryTimer?.cancel();
+    _httpDiscoveryTimer = null;
+    _httpDiscoveryScope?.cancel();
+    _httpDiscoveryScope = null;
+    _httpProbes.clear();
+    _httpSeen.clear();
+    _lastHttpDiscovery = null;
+    _lastHttpSubnetScan = null;
+    _stopReverseTransfers();
     _heartbeat?.cancel();
     _heartbeat = null;
     _notifyTimer?.cancel();
@@ -727,6 +895,8 @@ class LanService extends ChangeNotifier {
     _server = null;
     _client?.close(force: true);
     _client = null;
+    _loopbackClient?.close(force: true);
+    _loopbackClient = null;
     try {
       await files.network(false);
     } catch (_) {}

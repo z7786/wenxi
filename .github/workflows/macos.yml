@@ -1,7 +1,12 @@
-name: Build macOS ARM64 test app
+name: Build macOS test app
 on:
   workflow_dispatch:
     inputs:
+      architecture:
+        description: Target Mac processor.
+        type: choice
+        options: [arm64, x64]
+        default: arm64
       official:
         description: Include the existing client parsing and search configuration.
         type: boolean
@@ -14,14 +19,16 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: macos-${{ github.ref }}
+  group: macos-${{ github.ref }}-${{ inputs.architecture || 'arm64' }}
   cancel-in-progress: true
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.architecture == 'x64' && 'macos-15-intel' || 'macos-15' }}
     environment: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.official)) && 'release' || '' }}
     timeout-minutes: 60
     env:
+      ASTERLINK_MACOS_ARCHITECTURE: ${{ inputs.architecture || 'arm64' }}
+      ASTERLINK_MACOS_MACH_ARCH: ${{ inputs.architecture == 'x64' && 'x86_64' || 'arm64' }}
       PUB_HOSTED_URL: https://pub.dev
       FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
       GOPROXY: https://proxy.golang.org,direct
@@ -40,13 +47,14 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/Library/Caches/go-build
-          key: macos-arm64-go-1.24.7-${{ hashFiles('native/gopeed/go.sum', 'native/gopeed/**/*.go') }}
-          restore-keys: macos-arm64-go-1.24.7-
+          key: macos-${{ env.ASTERLINK_MACOS_ARCHITECTURE }}-go-1.24.7-${{ hashFiles('native/gopeed/go.sum', 'native/gopeed/**/*.go') }}
+          restore-keys: macos-${{ env.ASTERLINK_MACOS_ARCHITECTURE }}-go-1.24.7-
       - name: Verify source and configure macOS
         run: |
-          test "$(uname -m)" = arm64
+          test "$(uname -m)" = "$ASTERLINK_MACOS_MACH_ARCH"
           python tool/check_public_files.py --staged
           dart tool/sync_version.dart --check
+          python -m unittest discover -s tool/tests -p 'test_macos_package.py'
           flutter config --no-enable-swift-package-manager
           python -c "from pathlib import Path; p=Path('pubspec.lock'); p.write_text(p.read_text().replace('https://pub.flutter-io.cn', 'https://pub.dev'))"
       - name: Prepare existing client configuration
@@ -59,14 +67,14 @@ jobs:
           python tool/prepare-ci-release.py
       - name: Build macOS client
         shell: pwsh
-        run: ./tool/build-macos.ps1
+        run: ./tool/build-macos.ps1 -Architecture "$env:ASTERLINK_MACOS_ARCHITECTURE"
       - name: Inspect, launch and package macOS app
         run: |
           python tool/macos-smoke.py --app build/macos/Build/Products/Release/文析助手.app
-          python tool/package-macos.py --app build/macos/Build/Products/Release/文析助手.app
+          python tool/package-macos.py --app build/macos/Build/Products/Release/文析助手.app --architecture "$ASTERLINK_MACOS_ARCHITECTURE"
       - name: Test macOS account, playback, update and script compatibility
         env:
-          ASTERLINK_JS_LIBRARY: ${{ github.workspace }}/native/bin/macos-arm64/libasterlink_js.dylib
+          ASTERLINK_JS_LIBRARY: ${{ github.workspace }}/native/bin/macos-${{ env.ASTERLINK_MACOS_ARCHITECTURE }}/libasterlink_js.dylib
         run: |
           flutter analyze --no-pub
           flutter test --no-pub --concurrency=4 test/macos_platform_test.dart test/account_cookie_test.dart test/account_identity_test.dart test/floating_playback_test.dart test/playback_features_test.dart test/playback_device_test.dart test/github_update_test.dart test/app_update_installer_test.dart test/external_player_test.dart test/system_pip_test.dart test/source_runtime_test.dart
@@ -79,7 +87,7 @@ jobs:
       - name: Save test installers only
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: macos-arm64-test
+          name: macos-${{ env.ASTERLINK_MACOS_ARCHITECTURE }}-test
           path: .local/macos-release-assets/*
           include-hidden-files: true
           if-no-files-found: error

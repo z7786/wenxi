@@ -47,6 +47,7 @@ import 'download/transfer_activity.dart';
 import 'download/navigation_transfers.dart';
 import 'upload/upload_manager.dart';
 import 'lan/lan_service.dart';
+import 'lan/lan_download_route.dart';
 import 'lan/lan_files.dart';
 import 'download/download_shutdown.dart';
 import 'download/download_overlay.dart';
@@ -319,7 +320,9 @@ class AppServices extends ChangeNotifier {
       files: files,
       cleanups: cleanups,
       http: transfer,
-      refreshSource: (spec) => RemoteSources.owns(spec)
+      refreshSource: (spec) => LanDownloadRoute.owns(spec)
+          ? lan.resolveDownload(spec)
+          : RemoteSources.owns(spec)
           ? sources.refreshDownload(spec)
           : cloud.refresh(spec),
       checkNewCloudTask: control.checkCloud,
@@ -1064,6 +1067,7 @@ class AppServices extends ChangeNotifier {
     'remoteControl': control.diagnostics(),
     'parserRules': parserRules.diagnostics(),
     'sources': sources.diagnostics(),
+    'lan': lan.diagnostics,
     'accounts': {
       for (final platform in CloudPlatform.values)
         platform.key: LoginCredentials.stored(

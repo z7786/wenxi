@@ -1,4 +1,4 @@
-"""Inspect a macOS ARM64 app and package a test DMG without operator data."""
+"""Inspect a macOS app and package an ARM64 or Intel x64 test DMG."""
 import argparse
 import hashlib
 import json
@@ -9,12 +9,18 @@ import subprocess
 import tempfile
 
 
-def inspect(app):
+ARCHITECTURES = {'arm64': 'arm64', 'x64': 'x86_64'}
+
+
+def inspect(app, architecture='arm64'):
+    if architecture not in ARCHITECTURES:
+        raise ValueError('Unsupported macOS architecture: ' + architecture)
+    native_architecture = ARCHITECTURES[architecture]
     app = Path(app).resolve()
     metadata = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     root = Path(__file__).resolve().parent.parent
     version = re.search(r'^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$',
-                        (root / 'pubspec.yaml').read_text(), re.M)
+                        (root / 'pubspec.yaml').read_text(encoding='utf-8'), re.M)
     assert metadata['CFBundleShortVersionString'] == version[1]
     assert metadata['CFBundleVersion'] == version[2]
     assert metadata['CFBundleIdentifier'] == 'com.asterlink.app'
@@ -22,7 +28,7 @@ def inspect(app):
     assert helper.is_file()
     executable = app / 'Contents/MacOS' / metadata['CFBundleExecutable']
     for binary in [helper, executable]:
-        assert subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split() == ['arm64']
+        assert subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split() == [native_architecture], str(binary)
     native = []
     for file in app.rglob('*'):
         if not file.is_file():
@@ -36,7 +42,7 @@ def inspect(app):
         if magic not in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'):
             continue
         architectures = subprocess.check_output(['lipo', '-archs', str(file)], text=True).split()
-        assert 'arm64' in architectures, str(relative)
+        assert native_architecture in architectures, str(relative)
         native.append(relative.as_posix())
     assert native and 'Contents/MacOS/asterlink_gopeed' in native
     runtime = app / 'Contents/Frameworks/asterlink_js.framework/asterlink_js'
@@ -45,16 +51,16 @@ def inspect(app):
     for symbol in ['al_js_new', 'al_js_begin', 'al_js_poll', 'al_js_reply', 'al_js_free_text', 'al_js_close']:
         assert '_' + symbol in symbols, 'Missing parser runtime symbol: ' + symbol
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
-    return {'passed': True, 'architecture': 'arm64', 'version': version[1] + '+' + version[2],
+    return {'passed': True, 'architecture': architecture, 'version': version[1] + '+' + version[2],
             'nativeBinaries': native, 'developerIdSigned': False, 'notarized': False}
 
 
-def package(app, output):
-    report = inspect(app)
+def package(app, output, architecture='arm64'):
+    report = inspect(app, architecture)
     app = Path(app).resolve()
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    name = 'asterlink-' + report['version'] + '-macos-arm64-test'
+    name = 'asterlink-' + report['version'] + '-macos-' + architecture + '-test'
     dmg = output / (name + '.dmg')
     archive = output / (name + '.zip')
     assert not dmg.exists() and not archive.exists(), 'Staged package already exists'
@@ -62,8 +68,9 @@ def package(app, output):
         staging = Path(temporary)
         subprocess.run(['ditto', str(app), str(staging / app.name)], check=True)
         (staging / 'Applications').symlink_to('/Applications', target_is_directory=True)
+        processor = 'Intel x64' if architecture == 'x64' else '苹果芯片 ARM64'
         (staging / '安装说明.txt').write_text(
-            '将文析助手拖到 Applications。\n此包用于 macOS 苹果芯片测试，尚未完成 Developer ID 签名和苹果公证。\n',
+            '将文析助手拖到 Applications。\n此包用于 macOS ' + processor + ' 测试，尚未完成 Developer ID 签名和苹果公证。\n',
             encoding='utf-8')
         subprocess.run(['hdiutil', 'create', '-volname', '文析助手', '-srcfolder', str(staging),
                         '-ov', '-format', 'UDZO', str(dmg)], check=True)
@@ -75,14 +82,15 @@ def package(app, output):
     (output / 'SHA256SUMS.txt').write_text(''.join(hashes[name]['sha256'] + '  ' + name + '\n'
                                                for name in sorted(hashes)), encoding='utf-8')
     report['assets'] = hashes
-    report_path = Path(__file__).resolve().parent.parent / '.local/macos-inspection.json'
+    report_path = Path(__file__).resolve().parent.parent / ('.local/macos-' + architecture + '-inspection.json')
     report_path.write_text(json.dumps(report, indent=2), encoding='utf-8')
-    print(json.dumps({'passed': True, 'architecture': 'arm64', 'assets': hashes}, indent=2))
+    print(json.dumps({'passed': True, 'architecture': architecture, 'assets': hashes}, indent=2))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--app', required=True)
     parser.add_argument('--output', default='.local/macos-release-assets')
+    parser.add_argument('--architecture', choices=tuple(ARCHITECTURES), default='arm64')
     args = parser.parse_args()
-    package(args.app, args.output)
+    package(args.app, args.output, args.architecture)

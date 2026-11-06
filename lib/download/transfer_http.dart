@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
 import '../core/json.dart';
+import '../lan/lan_models.dart' show isLanAddress;
 import '../data/http.dart';
 import '../domain/downloads.dart';
 import '../domain/download_network_policy.dart';
@@ -162,7 +163,10 @@ class TransferHttp {
               policy?.client ??
               () => HttpClient()
                 ..idleTimeout = const Duration(seconds: 3)
-                ..userAgent = null,
+                ..userAgent = null
+                ..findProxy = ((uri) => isLanAddress(uri.host)
+                    ? 'DIRECT'
+                    : HttpClient.findProxyFromEnvironment(uri)),
         );
 
   Uri _responseUri(Response<dynamic> response) {
