@@ -64,6 +64,7 @@ class _Session {
   PlayerState? castBookmark;
   PlayerState? pipBookmark;
   Future<void>? closing, retirementPause, retirementSave;
+  Future<void>? pipRestoring;
   Timer? recoveryTimer;
   Duration recoveryPosition = Duration.zero;
   int healthyRecoveryChecks = 0;
@@ -183,6 +184,7 @@ class PlaybackController extends ChangeNotifier {
   bool get remembersFolder => history.remembersFolder(folderKey);
   int index, _generation = 0;
   bool loading = false, closed = false, boosting = false, _background = false;
+  bool _visible = true;
   bool boostLocked = false;
   double? _temporaryBoostRate;
   Future<void>? _boostRateSync;
@@ -218,7 +220,11 @@ class PlaybackController extends ChangeNotifier {
   PlayerState get state {
     final cast = _cast;
     if (cast != null) return cast.state;
-    final value = _pipSession?.state ?? backend?.state ?? const PlayerState();
+    final value =
+        _pipSession?.state ??
+        _session?.pipBookmark ??
+        backend?.state ??
+        const PlayerState();
     return systemVolumeControl != null && _systemVolume != null
         ? value.copyWith(volume: _systemVolume)
         : value;
@@ -1061,7 +1067,10 @@ class PlaybackController extends ChangeNotifier {
   void _onState(_Session session) {
     if (!_current(session)) return;
     _rememberGeometry(session);
-    if (casting || connectingCast || usingSystemPip) {
+    if (casting ||
+        connectingCast ||
+        usingSystemPip ||
+        session.pipBookmark != null) {
       _changed();
       return;
     }
@@ -1325,6 +1334,11 @@ class PlaybackController extends ChangeNotifier {
     if (_externalStream != null) await _stopExternalPlayback();
     _independentBookmark = null;
     if (closed) return;
+    final session = _session;
+    if (session != null && session.pipBookmark != null) {
+      await _restorePipBookmark(session);
+      if (!_current(session) || !_visible) return;
+    }
     _background = false;
     _playWhenReady = true;
     _session?.playRequested = true;
@@ -1731,6 +1745,7 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> background({required bool pictureInPicture}) async {
     if (closed) return;
+    _visible = false;
     _background = !pictureInPicture;
     if (pictureInPicture || casting || connectingCast || _castTarget != null) {
       await saveProgress();
@@ -1740,8 +1755,20 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void foreground() {
+    _visible = true;
     _background = false;
     sleepTimer.checkDeadline();
+    final session = _session;
+    if (session != null && session.pipBookmark != null && !usingSystemPip) {
+      unawaited(
+        _restorePipBookmark(session).catchError((
+          Object error,
+          StackTrace stack,
+        ) {
+          DiagnosticLog.error('player.system_pip_foreground', error, stack);
+        }),
+      );
+    }
   }
 
   Future<bool> openExternalPlayer(

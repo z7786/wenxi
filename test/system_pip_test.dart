@@ -201,6 +201,37 @@ void main() {
   );
 
   test(
+    'closing PiP in the background saves the bookmark and defers mpv frame rendering until foreground',
+    () async {
+      final fixture = PlaybackFixture(count: 1);
+      final controller = fixture.controller, pip = _Pip();
+      addTearDown(controller.close);
+      await controller.start();
+      await controller.enterSystemPip(pip, () async => true);
+      await controller.background(pictureInPicture: true);
+      final seeks = fixture.current.seeks.length;
+      pip.finished = true;
+      pip.emit(pip.state.copyWith(position: const Duration(seconds: 287)));
+      await until(
+        () => !controller.usingSystemPip && fixture.leases.values.single == 1,
+      );
+      await controller.saveProgress();
+      expect(fixture.current.seeks.length, seeks);
+      expect(controller.state.position.inSeconds, 287);
+      expect(controller.state.playing, false);
+      expect(
+        fixture.history.bookmark(controller.current.key)!.position.inSeconds,
+        287,
+      );
+      controller.foreground();
+      await until(() => fixture.current.state.position.inSeconds == 287);
+      expect(controller.state.playing, false);
+      await controller.play();
+      expect(controller.state.position.inSeconds, 287);
+      expect(controller.state.playing, true);
+    },
+  );
+  test(
     'iOS external playback rejects protected and app-local streams before opening another app',
     () async {
       final fixture = PlaybackFixture(count: 1);

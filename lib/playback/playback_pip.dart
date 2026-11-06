@@ -178,20 +178,47 @@ extension PlaybackSystemPip on PlaybackController {
     await _stopSystemPip();
     if (!_current(session)) return;
     final finalState = pip.playback.state;
-    session.pipBookmark = finalState;
-    await session.backend.seek(
-      clampPlaybackPosition(
-        finalState.position,
-        session.backend.state.duration,
-      ),
-    );
-    if (!_current(session)) return;
-    session.positionWasSet = true;
-    session.pipBookmark = null;
+    session.pipBookmark = finalState.copyWith(playing: false);
+    // Seeking a paused mpv video can still render a frame. iOS disallows GPU
+    // work while suspended, so preserve the bookmark until the app is visible.
+    if (_visible) await _restorePipBookmark(session);
     await saveProgress();
-    if (resume && wasPlaying && !sleepTimer.stopped && !_background) {
+    if (resume &&
+        wasPlaying &&
+        !sleepTimer.stopped &&
+        !_background &&
+        _visible) {
       await play();
     }
     _changed();
+  }
+
+  Future<void> _restorePipBookmark(_Session session) async {
+    if (!_current(session) || !_visible || session.pipBookmark == null) return;
+    final running = session.pipRestoring;
+    if (running != null) {
+      await running;
+      return;
+    }
+    final bookmark = session.pipBookmark!;
+    final work = () async {
+      await session.backend.seek(
+        clampPlaybackPosition(
+          bookmark.position,
+          session.backend.state.duration,
+        ),
+      );
+      if (!_current(session)) return;
+      session.positionWasSet = true;
+      if (identical(session.pipBookmark, bookmark)) session.pipBookmark = null;
+      await saveProgress();
+      _changed();
+    }();
+    session.pipRestoring = work;
+    try {
+      await work;
+    } finally {
+      if (identical(session.pipRestoring, work)) session.pipRestoring = null;
+    }
   }
 }

@@ -3,7 +3,7 @@ import UIKit
 
 /// URL schemes open a directly accessible stream in the selected installed app.
 /// App-local proxy URLs are rejected because iOS may suspend their server.
-final class AppleExternalPlayer {
+final class AppleExternalPlayer: NSObject, UIPopoverPresentationControllerDelegate, UIAdaptivePresentationControllerDelegate {
   private var session = ""
   private var result: FlutterResult?
   private weak var chooser: UIAlertController?
@@ -16,7 +16,8 @@ final class AppleExternalPlayer {
           let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
           let host = url.host, !["localhost", "127.0.0.1", "::1"].contains(host.lowercased()),
           url.user == nil, url.password == nil,
-          let parent = AppleDocuments.presenter else {
+          let parent = AppleDocuments.presenter,
+          parent.viewIfLoaded?.window != nil, !parent.isBeingDismissed else {
       result(FlutterError(code: "external", message: "此视频暂时无法交给外部播放器", details: nil)); return
     }
     let players = [
@@ -58,7 +59,9 @@ final class AppleExternalPlayer {
     sheet.popoverPresentationController?.sourceView = parent.view
     sheet.popoverPresentationController?.sourceRect = CGRect(x: parent.view.bounds.midX, y: parent.view.bounds.midY, width: 1, height: 1)
     sheet.popoverPresentationController?.permittedArrowDirections = []
+    sheet.popoverPresentationController?.delegate = self
     parent.present(sheet, animated: true)
+    sheet.presentationController?.delegate = self
   }
 
   private func complete(_ value: Bool) {
@@ -72,5 +75,13 @@ final class AppleExternalPlayer {
     chooser?.dismiss(animated: false)
     complete(false)
     session = ""
+  }
+
+  func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    if chooser === presentationController.presentedViewController { complete(false) }
+  }
+
+  func popoverPresentationControllerDidDismissPopover(_ popoverPresentationController: UIPopoverPresentationController) {
+    if chooser === popoverPresentationController.presentedViewController { complete(false) }
   }
 }
