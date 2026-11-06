@@ -17,7 +17,7 @@ class MacosPackageTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.app = Path(self.temporary.name) / 'AsterLink.app'
+        self.app = (Path(self.temporary.name) / 'AsterLink.app').resolve()
         contents = self.app / 'Contents'
         contents.mkdir(parents=True)
         version = re.search(r'^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$',
