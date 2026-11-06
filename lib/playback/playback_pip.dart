@@ -114,7 +114,8 @@ extension PlaybackSystemPip on PlaybackController {
         _onSystemPip(pip);
       }
       if (!entered && current()) {
-        await session.backend.seek(initial.position);
+        session.pipBookmark = initial.copyWith(playing: false);
+        if (_visible) await _restorePipBookmark(session);
         if (initial.playing && !_background && !sleepTimer.stopped) {
           await play();
         }

@@ -232,6 +232,33 @@ void main() {
     },
   );
   test(
+    'PiP preparation failure while hidden defers mpv seek until foreground',
+    () async {
+      final fixture = PlaybackFixture(count: 1);
+      final controller = fixture.controller;
+      final barrier = Completer<void>();
+      final pip = _Pip()
+        ..supported = false
+        ..prepareBarrier = barrier.future;
+      addTearDown(controller.close);
+      await controller.start();
+      await controller.seek(const Duration(seconds: 168));
+      final entering = controller.enterSystemPip(pip, () async => true);
+      await until(() => pip.url.isNotEmpty);
+      await controller.background(pictureInPicture: false);
+      final seeks = fixture.current.seeks.length;
+      barrier.complete();
+      expect(await entering, false);
+      expect(fixture.current.seeks.length, seeks);
+      expect(controller.state.position.inSeconds, 168);
+      expect(controller.state.playing, false);
+      controller.foreground();
+      await until(() => fixture.current.seeks.length > seeks);
+      expect(controller.state.position.inSeconds, 168);
+      expect(controller.state.playing, false);
+    },
+  );
+  test(
     'iOS external playback rejects protected and app-local streams before opening another app',
     () async {
       final fixture = PlaybackFixture(count: 1);
