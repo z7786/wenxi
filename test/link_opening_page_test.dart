@@ -149,7 +149,11 @@ void main() {
       await tester.pumpWidget(
         const MaterialApp(
           home: LinkOpeningPage(
-            platform: LinkOpeningPlatform(channel: channel, android: false),
+            platform: LinkOpeningPlatform(
+              channel: channel,
+              android: false,
+              operatingSystem: 'windows',
+            ),
           ),
         ),
       );
