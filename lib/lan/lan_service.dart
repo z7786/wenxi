@@ -16,6 +16,7 @@ import 'lan_datagrams.dart';
 import 'lan_files.dart';
 import 'lan_models.dart';
 import 'lan_qr.dart';
+import 'lan_unicast_discovery.dart';
 
 part 'lan_server.dart';
 part 'lan_discovery.dart';
@@ -57,6 +58,7 @@ class LanService extends ChangeNotifier {
     required this.files,
     this.foreground,
     this.discoveryEnabled = true,
+    bool? unicastDiscovery,
     this.requestedPort = lanHttpPort,
     this.requestedDiscoveryPort = lanDiscoveryPort,
     InternetAddress? bindAddress,
@@ -64,7 +66,8 @@ class LanService extends ChangeNotifier {
     DateTime Function()? clock,
   }) : bindAddress = bindAddress ?? InternetAddress.anyIPv4,
        _addresses = addresses ?? localLanAddresses,
-       clock = clock ?? DateTime.now {
+       clock = clock ?? DateTime.now,
+       unicastDiscovery = unicastDiscovery ?? Platform.isIOS {
     _inbox.addAll(
       store.data.list('lanInbox').map(LanInboxItem.fromJson).take(100),
     );
@@ -73,6 +76,7 @@ class LanService extends ChangeNotifier {
   final LanFiles files;
   final Future<void> Function()? foreground;
   final bool discoveryEnabled;
+  final bool unicastDiscovery;
   final int requestedPort;
   final int requestedDiscoveryPort;
   final InternetAddress bindAddress;
@@ -91,7 +95,10 @@ class LanService extends ChangeNotifier {
   HttpClient? _client;
   RawDatagramSocket? _discovery;
   LanDatagrams? _datagrams;
-  Timer? _heartbeat, _notifyTimer;
+  Timer? _heartbeat, _notifyTimer, _unicastTimer;
+  List<InternetAddress> _unicastTargets = [];
+  int _unicastOffset = 0;
+  DateTime? _lastUnicastScan;
   List<String> addresses = [];
   String id = '', name = '', connectionCode = '', networkHint = '';
   bool _disposed = false, _running = false;
@@ -141,7 +148,7 @@ class LanService extends ChangeNotifier {
     }
     name = store.data
         .str('lanDeviceName')
-        .ifEmpty(Platform.isAndroid ? '我的手机' : '我的电脑');
+        .ifEmpty(Platform.isAndroid || Platform.isIOS ? '我的手机' : '我的电脑');
     connectionCode = Random.secure()
         .nextInt(1000000)
         .toString()
@@ -685,6 +692,11 @@ class LanService extends ChangeNotifier {
       if (share.expired(now)) stopShare(share);
     }
     _announce();
+    if (unicastDiscovery &&
+        (_lastUnicastScan == null ||
+            now.difference(_lastUnicastScan!).inSeconds >= 30)) {
+      _startUnicastScan();
+    }
     _changed();
   }
 
@@ -695,6 +707,10 @@ class LanService extends ChangeNotifier {
     _heartbeat = null;
     _notifyTimer?.cancel();
     _notifyTimer = null;
+    _unicastTimer?.cancel();
+    _unicastTimer = null;
+    _unicastTargets = [];
+    _lastUnicastScan = null;
     _discovery?.close();
     _discovery = null;
     _datagrams?.close();

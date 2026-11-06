@@ -10,6 +10,7 @@ class MainFlutterWindow: NSWindow {
   private var pendingOpens = [[String: Any]]()
   private var sleepAssertion: IOPMAssertionID = 0
   private var externalPanel: NSOpenPanel?
+  private let fileQueue = DispatchQueue(label: "com.asterlink.app.files")
 
   override func awakeFromNib() {
     // media_kit's native OpenGL output assumes this pixel format exists.
@@ -43,9 +44,37 @@ class MainFlutterWindow: NSWindow {
       guard let self = self else { return result(FlutterError(code: "closed", message: "窗口已关闭", details: nil)) }
       let args = call.arguments as? [String: Any] ?? [:]
       switch call.method {
+      case "storageVolume":
+        guard let path = args["path"] as? String, path.hasPrefix("/") else {
+          return result(FlutterError(code: "storage", message: "存储路径无效", details: nil))
+        }
+        self.fileQueue.async {
+          do {
+            let attributes = try FileManager.default.attributesOfFileSystem(forPath: path)
+            let values = try URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeSupportsHardLinksKey])
+            guard let identifier = attributes[.systemNumber] as? NSNumber else {
+              DispatchQueue.main.async { result(nil) }; return
+            }
+            let value: [String: Any] = ["id": identifier.stringValue, "hardLinks": values.volumeSupportsHardLinks ?? false]
+            DispatchQueue.main.async { result(value) }
+          } catch { DispatchQueue.main.async { result(nil) } }
+        }
+      case "createHardLink":
+        guard let source = args["source"] as? String, let target = args["target"] as? String,
+              source.hasPrefix("/"), target.hasPrefix("/"), source != target else {
+          return result(FlutterError(code: "storage", message: "文件保存位置无效", details: nil))
+        }
+        self.fileQueue.async {
+          do {
+            try FileManager.default.linkItem(atPath: source, toPath: target)
+            DispatchQueue.main.async { result(true) }
+          } catch { DispatchQueue.main.async { result(false) } }
+        }
       case "foreground":
         self.preventSleep((args["active"] as? Int ?? 0) > 0)
         result(nil)
+      case "downloadProtectionStatus":
+        result(["desktop": true, "wakeLockHeld": self.sleepAssertion != 0])
       case "selectExternalPlayer":
         guard self.externalPanel == nil else { return result(nil) }
         let panel = NSOpenPanel()

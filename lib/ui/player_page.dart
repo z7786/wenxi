@@ -279,6 +279,9 @@ class _PlayerPageState extends State<PlayerPage>
       controller.backend?.subtitleFontLoading,
       controller.cloudSubtitleId,
       controller.usingSoftwareDecoder,
+      controller.usingSystemPip,
+      controller.preparingSystemPip,
+      controller.systemPipPlayback?.surfaceKey,
       state.playing,
       state.completed,
       state.buffering,
@@ -499,6 +502,9 @@ class _PlayerPageState extends State<PlayerPage>
     final revision = ++_lifecycleRevision;
     if (state == AppLifecycleState.resumed) {
       controller.foreground();
+      if (controller.usingSystemPip && !_pipBusy) {
+        _run(() => controller.restoreSystemPip(resume: true));
+      }
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       if (state == AppLifecycleState.detached || (!device.inPip && !_pipBusy)) {
@@ -857,7 +863,13 @@ class _PlayerPageState extends State<PlayerPage>
     _pipBusy = true;
     try {
       await controller.endBoost();
-      if (!await device.enterPip() && mounted) _showHud('当前设备暂时无法进入画中画');
+      final systemPip = device.systemPip;
+      final entered = systemPip == null
+          ? await device.enterPip()
+          : await controller.enterSystemPip(systemPip, device.enterPip);
+      if (!entered && mounted) {
+        _showHud('当前视频或设备暂时无法进入画中画，已保留内置播放');
+      }
     } finally {
       _pipBusy = false;
     }
@@ -1523,6 +1535,7 @@ class _PlayerPageState extends State<PlayerPage>
                   XTypeGroup(
                     label: '字幕文件',
                     extensions: SubtitleFiles.extensions,
+                    uniformTypeIdentifiers: const ['public.data'],
                   ),
                 ],
               ));
@@ -2491,7 +2504,7 @@ class _PlayerPageState extends State<PlayerPage>
           }
         }
         return opened;
-      });
+      }, directLink: device.externalPlayerNeedsDirectLink);
     } finally {
       _modalDepth--;
       if (mounted) _touch();
@@ -2715,19 +2728,24 @@ class _PlayerPageState extends State<PlayerPage>
                       ? 12
                       : controller.preferences.subtitleSize;
                   _syncNativeSubtitles();
-                  final video = backend?.buildVideo(
-                    aspectRatio:
-                        !desktopPip && controller.preferences.aspectRatio > 0
-                        ? controller.preferences.aspectRatio
-                        : controller.videoGeometry?.aspectRatio,
-                    fit: desktopPip
-                        ? BoxFit.contain
-                        : switch (controller.preferences.fit) {
-                            PlaybackFit.contain => BoxFit.contain,
-                            PlaybackFit.cover => BoxFit.cover,
-                            PlaybackFit.stretch => BoxFit.fill,
-                          },
-                  );
+                  final video =
+                      controller.systemPipPlayback?.buildVideo(
+                        fit: BoxFit.contain,
+                      ) ??
+                      backend?.buildVideo(
+                        aspectRatio:
+                            !desktopPip &&
+                                controller.preferences.aspectRatio > 0
+                            ? controller.preferences.aspectRatio
+                            : controller.videoGeometry?.aspectRatio,
+                        fit: desktopPip
+                            ? BoxFit.contain
+                            : switch (controller.preferences.fit) {
+                                PlaybackFit.contain => BoxFit.contain,
+                                PlaybackFit.cover => BoxFit.cover,
+                                PlaybackFit.stretch => BoxFit.fill,
+                              },
+                      );
                   final nativeSubtitles = backend?.buildSubtitleOverlay();
                   return Stack(
                     fit: StackFit.expand,

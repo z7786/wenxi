@@ -138,9 +138,13 @@ void main() {
   File localFile(String name, [List<int> bytes = const [1, 2, 3, 4]]) =>
       File(p.join(fixture.directory.path, name))..writeAsBytesSync(bytes);
 
-  void scenario(String name, Future<void> Function(WidgetTester) body) {
+  void scenario(
+    String name,
+    Future<void> Function(WidgetTester) body, {
+    TargetPlatform platform = TargetPlatform.windows,
+  }) {
     testWidgets(name, (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      debugDefaultTargetPlatformOverride = platform;
       fixture = await BrowserUiFixture.create(platform: CloudPlatform.quark);
       connector = _DropConnector();
       fixture.services.cloud.connectors[CloudPlatform.quark] = connector;
@@ -165,6 +169,25 @@ void main() {
       }
     });
   }
+
+  scenario(
+    'Finder drops upload files on macOS and clear the drag overlay',
+    (tester) async {
+      await render(tester, empty: true);
+      final file = localFile('Mac 文件.txt');
+      await enter(tester);
+      expect(find.text('松开鼠标上传文件'), findsOneWidget);
+      await release(tester, [file.path]);
+      expect(connector.uploaded.single.$2, 'Mac 文件.txt');
+      expect(connector.uploaded.single.$3, [1, 2, 3, 4]);
+      expect(
+        fixture.services.uploads.tasks.single.status,
+        UploadStatus.completed,
+      );
+      expect(find.byKey(const Key('cloud-upload-drop-overlay')), findsNothing);
+    },
+    platform: TargetPlatform.macOS,
+  );
 
   scenario(
     'Explorer drops upload several files into an empty folder and refresh the list',

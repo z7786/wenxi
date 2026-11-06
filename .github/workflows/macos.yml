@@ -68,7 +68,8 @@ jobs:
           ASTERLINK_JS_LIBRARY: ${{ github.workspace }}/native/bin/macos-arm64/libasterlink_js.dylib
         run: |
           flutter analyze --no-pub
-          flutter test --no-pub --concurrency=4 test/macos_platform_test.dart test/account_cookie_test.dart test/account_identity_test.dart test/floating_playback_test.dart test/playback_features_test.dart test/playback_device_test.dart test/github_update_test.dart test/app_update_installer_test.dart test/external_player_test.dart test/source_runtime_test.dart
+          flutter test --no-pub --concurrency=4 test/macos_platform_test.dart test/account_cookie_test.dart test/account_identity_test.dart test/floating_playback_test.dart test/playback_features_test.dart test/playback_device_test.dart test/github_update_test.dart test/app_update_installer_test.dart test/external_player_test.dart test/system_pip_test.dart test/source_runtime_test.dart
+          flutter test --no-pub --concurrency=4 test/apple_documents_test.dart test/apple_storage_test.dart test/apple_web_login_test.dart test/cloud_drop_upload_test.dart test/cast_protocol_test.dart test/cast_widget_test.dart test/lan_service_test.dart test/lan_qr_test.dart test/desktop_save_space_test.dart test/download_protection_page_test.dart test/link_opening_page_test.dart test/web_login_capture_test.dart test/parser_password_web_widget_test.dart
       - name: Test native download helper
         working-directory: native/gopeed
         env:

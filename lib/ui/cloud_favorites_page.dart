@@ -161,7 +161,10 @@ class _CloudFavoritesPageState extends State<CloudFavoritesPage> {
   final _search = TextEditingController();
   late bool _organizing = widget.organize;
   bool _saving = false;
-  bool get _desktop => Theme.of(context).platform == TargetPlatform.windows;
+  bool get _desktop => const {
+    TargetPlatform.windows,
+    TargetPlatform.macOS,
+  }.contains(Theme.of(context).platform);
   @override
   void dispose() {
     _search.dispose();
@@ -591,7 +594,12 @@ class _CloudFavoritesSummaryState extends State<CloudFavoritesSummary> {
   }
 
   Widget _dragTarget(CloudFavorite favorite, Widget child, bool enabled) {
-    if (Theme.of(context).platform != TargetPlatform.windows) return child;
+    if (!const {
+      TargetPlatform.windows,
+      TargetPlatform.macOS,
+    }.contains(Theme.of(context).platform)) {
+      return child;
+    }
     return DragTarget<String>(
       key: ValueKey('home-favorite-drag-${favorite.id}'),
       onWillAcceptWithDetails: (details) {

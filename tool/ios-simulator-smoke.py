@@ -32,7 +32,8 @@ try:
         if reports:
             report = json.loads(reports[0].read_text())
             assert 'error' not in report, report
-            assert all(report.get(name) for name in ['startup', 'quickjs', 'download', 'freeSpace', 'playback']), report
+            assert all(report.get(name) for name in ['startup', 'quickjs', 'download', 'freeSpace', 'playback',
+                                                     'systemPipTransport', 'systemPipPlayback', 'systemPipSeek']), report
             (local / 'ios-smoke-result.json').write_text(json.dumps(report, indent=2))
             sim('io', device, 'screenshot', str(local / 'ios-smoke.png'))
             print('iOS simulator smoke passed:', report)

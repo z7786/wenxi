@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import '../data/state_store.dart';
+import 'apple_storage.dart';
 
 const nativeChannel = MethodChannel('com.asterlink.app/native');
 
@@ -50,6 +51,20 @@ class IOSGopeedTransport extends AndroidGopeedTransport {
   Future<Object?> call(String method, [Json args = const {}]) async {
     if (method == 'freeSpace') {
       return await nativeChannel.invokeMethod<Object?>('freeSpace', args);
+    }
+    if (method == 'open') {
+      final storage = asJson(
+        await nativeChannel.invokeMethod<Object?>('restoreStorage'),
+      );
+      final mappings = appleStorageMappings(storage, [
+        args.str('storageDir'),
+        args.str('cacheDir'),
+      ]);
+      return super.call(method, {
+        ...args,
+        'storagePaths': mappings,
+        'storageHome': storage.str('home'),
+      });
     }
     return super.call(method, args);
   }

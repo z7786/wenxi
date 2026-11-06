@@ -28,7 +28,7 @@ class RemoteControlConfig {
   final String aboutDescription;
   final Uri? parserHubUrl;
   static const defaultAboutDescription =
-      '网盘文件管理与 Gopeed 下载器\nAndroid · Windows · macOS';
+      '网盘文件管理与 Gopeed 下载器\nAndroid · iOS · Windows · macOS';
   String get aboutText =>
       aboutDescription.isEmpty ? defaultAboutDescription : aboutDescription;
 

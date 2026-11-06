@@ -4,7 +4,9 @@ import '../core/json.dart';
 import 'native_engine.dart';
 
 bool get canScanQr =>
-    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS);
 
 Future<String?> scanLanQr() async {
   require(canScanQr, '请使用手机扫描连接二维码，或手动输入设备地址');

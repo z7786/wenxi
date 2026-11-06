@@ -19,6 +19,7 @@ extension PlaybackCasting on PlaybackController {
   Future<void> _castTo(CastDevice device) async {
     require(!closed && !loading && hasVideo, '请等待视频地址准备完成');
     require(!connectingCast && !openingExternalPlayer, '正在连接播放器，请稍候');
+    require(!usingSystemPip && !preparingSystemPip, '请先退出画中画');
     checkSource?.call();
     final position = state.position, duration = state.duration;
     final wasPlaying = state.playing && !casting;

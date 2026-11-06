@@ -7,6 +7,7 @@ import 'dart:io';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
 import '../diagnostics/diagnostic_share.dart';
+import '../platform/document_actions.dart';
 import 'common.dart';
 import 'remote_control_dialogs.dart';
 
@@ -66,28 +67,15 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
       String? saved;
       if (widget.saveExport != null) {
         saved = await widget.saveExport!(bytes, name);
-      } else if (Platform.isAndroid) {
-        saved = await const MethodChannel('com.asterlink.app/native')
-            .invokeMethod<String>('saveDocument', {
-              'name': name,
-              'bytes': bytes,
-              'mime': 'application/zip',
-            });
       } else {
-        final location = await getSaveLocation(
-          suggestedName: name,
+        saved = await const DocumentActions().saveBytes(
+          bytes,
+          name,
+          mime: 'application/zip',
           acceptedTypeGroups: const [
             XTypeGroup(label: '日志 ZIP', extensions: ['zip']),
           ],
         );
-        if (location != null) {
-          await XFile.fromData(
-            bytes,
-            name: name,
-            mimeType: 'application/zip',
-          ).saveTo(location.path);
-          saved = location.path;
-        }
       }
       if (mounted) {
         if (saved != null) lastSavedPath = saved;
@@ -112,10 +100,17 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
         label: '正在整理日志…',
       );
       if (bytes == null || !mounted) return;
-      final result = await (widget.shareExport ?? shareDiagnosticZip)(
-        bytes,
-        exportName,
-      );
+      final share = widget.shareExport;
+      final box = context.findRenderObject() as RenderBox?;
+      final result = share != null
+          ? await share(bytes, exportName)
+          : await shareDiagnosticZip(
+              bytes,
+              exportName,
+              origin: box == null
+                  ? null
+                  : box.localToGlobal(Offset.zero) & box.size,
+            );
       if (mounted) {
         message(context, switch (result) {
           ShareResultStatus.success => '日志已交给所选应用，请在该应用内确认发送',
@@ -253,7 +248,7 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
           icon: const Icon(CupertinoIcons.folder),
           label: const Text('导出日志 ZIP'),
         ),
-        if (Platform.isAndroid || widget.shareExport != null)
+        if (Platform.isAndroid || Platform.isIOS || widget.shareExport != null)
           OutlinedButton.icon(
             key: const Key('diagnostics-share'),
             onPressed: working ? null : share,
@@ -267,7 +262,9 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
           label: const Text('反馈地址'),
         ),
         if (lastSavedPath != null &&
-            (Platform.isWindows || widget.openExportLocation != null))
+            (Platform.isWindows ||
+                Platform.isMacOS ||
+                widget.openExportLocation != null))
           TextButton.icon(
             key: const Key('diagnostics-open-location'),
             onPressed: working ? null : openLocation,

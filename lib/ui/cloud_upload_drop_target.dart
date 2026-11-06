@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'common.dart';
 
-/// Accepts Explorer files only while this directory is the visible route.
+/// Accepts desktop files only while this directory is the visible route.
 class CloudUploadDropTarget extends StatefulWidget {
   const CloudUploadDropTarget({
     super.key,
@@ -16,7 +16,9 @@ class CloudUploadDropTarget extends StatefulWidget {
   });
 
   static bool get supported =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.macOS);
 
   final bool enabled;
   final String folderName;

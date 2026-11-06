@@ -303,7 +303,10 @@ class _DownloadsPageState extends State<DownloadsPage>
                       child: const Text('无法下载？'),
                     ),
                     if (widget.services.platformFeatures &&
-                        (Platform.isAndroid || Platform.isWindows))
+                        (Platform.isAndroid ||
+                            Platform.isIOS ||
+                            Platform.isWindows ||
+                            Platform.isMacOS))
                       IconButton(
                         tooltip: '后台下载保护',
                         icon: Icon(
@@ -1139,6 +1142,10 @@ class _DownloadsPageState extends State<DownloadsPage>
   Future<void> _share(DownloadTask task) async {
     if (!await _checkOpen(task) || !mounted) return;
     if (task.savedPath == null) return;
+    final box = context.findRenderObject() as RenderBox?;
+    final origin = box == null
+        ? null
+        : box.localToGlobal(Offset.zero) & box.size;
     await busy(context, () async {
       if (Platform.isAndroid) {
         await nativeChannelOpen(
@@ -1148,7 +1155,10 @@ class _DownloadsPageState extends State<DownloadsPage>
         );
       } else {
         await SharePlus.instance.share(
-          ShareParams(files: [XFile(task.savedPath!)]),
+          ShareParams(
+            files: [XFile(task.savedPath!)],
+            sharePositionOrigin: origin,
+          ),
         );
       }
     });

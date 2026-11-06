@@ -10,6 +10,9 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/platform/native_engine.dart';
+import 'package:asterlink/platform/playback_device.dart';
+import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/playback/external_stream.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/main.dart' as app;
 
@@ -146,6 +149,7 @@ Future<void> main() async {
     stage = 'playback';
     final player = Player();
     final video = VideoController(player);
+    var decodedPosition = 0;
     runApp(
       MaterialApp(
         home: Scaffold(
@@ -163,6 +167,109 @@ Future<void> main() async {
         player.state.duration.inSeconds > 2,
         'Video duration was not decoded',
       );
+      decodedPosition = player.state.position.inMilliseconds;
+    } finally {
+      await player.dispose();
+    }
+    stage = 'systemPip';
+    final movieBytes = await File(movie).readAsBytes();
+    final mediaServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var authorizedReads = 0;
+    mediaServer.listen((request) async {
+      try {
+        if (request.headers.value('Cookie') != 'smoke-media=fixture') {
+          request.response.statusCode = 403;
+          return;
+        }
+        authorizedReads++;
+        final range = RegExp(
+          r'^bytes=(\d+)-(\d*)$',
+        ).firstMatch(request.headers.value('Range') ?? '');
+        final start = range == null ? 0 : int.parse(range[1]!);
+        final end = range == null || range[2]!.isEmpty
+            ? movieBytes.length - 1
+            : int.parse(range[2]!).clamp(0, movieBytes.length - 1);
+        if (start > end || start >= movieBytes.length) {
+          request.response.statusCode = 416;
+          return;
+        }
+        if (range != null) {
+          request.response.statusCode = 206;
+          request.response.headers.set(
+            'Content-Range',
+            'bytes $start-$end/${movieBytes.length}',
+          );
+        }
+        request.response.headers.set('Content-Type', 'video/mp4');
+        request.response.headers.set('Accept-Ranges', 'bytes');
+        request.response.contentLength = end - start + 1;
+        if (request.method != 'HEAD') {
+          request.response.add(movieBytes.sublist(start, end + 1));
+        }
+      } finally {
+        try {
+          await request.response.close();
+        } catch (_) {}
+      }
+    });
+    final media = ExternalPlaybackStream(
+      DownloadSpec(
+        url: 'http://127.0.0.1:${mediaServer.port}/movie.mp4',
+        fileName: 'ios-smoke.mp4',
+        headers: const {'Cookie': 'smoke-media=fixture'},
+      ),
+    );
+    final device = NativePlaybackDevice(targetPlatform: TargetPlatform.iOS);
+    try {
+      await device.start(video: true);
+      final pip = device.systemPip!;
+      await media.start();
+      final preparation = pip.prepare(
+        url: media.url,
+        title: 'ios-smoke.mp4',
+        initialState: const PlayerState(playing: false),
+      );
+      runApp(
+        MaterialApp(
+          home: Scaffold(
+            body: AnimatedBuilder(
+              animation: pip,
+              builder: (_, _) =>
+                  pip.buildVideo(fit: BoxFit.contain) ?? const SizedBox(),
+            ),
+          ),
+        ),
+      );
+      require(
+        await preparation,
+        'AVKit could not prepare the authorized stream',
+      );
+      await pip.play();
+      final playbackDeadline = DateTime.now().add(const Duration(seconds: 15));
+      while (pip.state.position.inMilliseconds < 1000 &&
+          DateTime.now().isBefore(playbackDeadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      require(
+        pip.state.position.inMilliseconds >= 1000,
+        'AVKit playback did not advance',
+      );
+      await pip.pause();
+      await pip.seek(const Duration(milliseconds: 500));
+      require(
+        (pip.state.position.inMilliseconds - 500).abs() < 250,
+        'AVKit seek did not update progress',
+      );
+      require(!pip.state.playing, 'AVKit pause did not stop audio');
+      require(
+        authorizedReads > 0,
+        'AVKit did not read the authorized local transport',
+      );
+      final stopped = await pip.stop();
+      require(
+        stopped.position.inMilliseconds > 0 && !device.inPip,
+        'AVKit stop did not return its bookmark',
+      );
       await report.writeAsString(
         jsonEncode({
           'startup': true,
@@ -170,12 +277,19 @@ Future<void> main() async {
           'download': true,
           'freeSpace': true,
           'playback': true,
-          'positionMs': player.state.position.inMilliseconds,
+          'positionMs': decodedPosition,
+          'systemPipTransport': true,
+          'systemPipPlayback': true,
+          'systemPipSeek': true,
+          'systemPipSupported': device.supportsPip,
+          'authorizedMediaReads': authorizedReads,
         }),
       );
       await Future<void>.delayed(const Duration(seconds: 3));
     } finally {
-      await player.dispose();
+      await device.finish();
+      await media.close();
+      await mediaServer.close(force: true);
     }
   } catch (error, stack) {
     DiagnosticLog.error('ios.smoke_failed', error, stack);

@@ -52,6 +52,7 @@ import 'download/download_shutdown.dart';
 import 'download/download_overlay.dart';
 import 'download/transfer_http.dart';
 import 'platform/file_access.dart';
+import 'platform/apple_storage.dart';
 import 'playback/floating_playback.dart';
 import 'platform/download_network.dart';
 import 'platform/app_update_installer.dart';
@@ -500,7 +501,9 @@ class AppServices extends ChangeNotifier {
   }
 
   final externalOpens = ExternalOpenInbox(
-    channel: isDesktopPlatform ? windowsExternalOpenChannel : nativeChannel,
+    channel: isDesktopPlatform || Platform.isIOS
+        ? windowsExternalOpenChannel
+        : nativeChannel,
   );
   String? migrationError;
   bool _closed = false;
@@ -600,6 +603,7 @@ class AppServices extends ChangeNotifier {
     try {
       DiagnosticLog.event('app.state_read_start');
       final store = await StateStore.open(data);
+      await restoreAppleStorage(store);
       DiagnosticLog.event(
         'app.state_read',
         fields: {
@@ -640,7 +644,7 @@ class AppServices extends ChangeNotifier {
     // are verified synchronously and remote updates share this store's write
     // gate; neither should compete with local account/queue initialization.
     final startup = Stopwatch()..start();
-    if (platformFeatures && isDesktopPlatform) {
+    if (platformFeatures && (isDesktopPlatform || Platform.isIOS)) {
       windowsExternalOpenChannel.setMethodCallHandler((call) async {
         if (call.method == 'externalOpenAvailable') {
           await externalOpens.refresh();
@@ -1109,7 +1113,7 @@ class AppServices extends ChangeNotifier {
     _closed = true;
     clipboard.dispose();
     externalOpens.dispose();
-    if (platformFeatures && isDesktopPlatform) {
+    if (platformFeatures && (isDesktopPlatform || Platform.isIOS)) {
       windowsExternalOpenChannel.setMethodCallHandler(null);
     }
     downloadNavigation.dispose();

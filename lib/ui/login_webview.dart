@@ -6,6 +6,7 @@ InAppWebViewSettings webSettings({
   String? userAgent,
   bool desktopMode = true,
   bool isPopup = false,
+  TargetPlatform? platform,
 }) => InAppWebViewSettings(
   javaScriptEnabled: true,
   domStorageEnabled: true,
@@ -26,14 +27,65 @@ InAppWebViewSettings webSettings({
   thirdPartyCookiesEnabled: true,
   // WebView2 requires authorization windows to share the opener's InPrivate
   // profile. Android popups must avoid clearing the shared cookie jar again.
-  incognito: !isPopup || defaultTargetPlatform == TargetPlatform.windows,
-  cacheEnabled: false,
+  // WK CookieManager reads the default website store. Keep Apple login
+  // windows and their SSO popups in that store so HttpOnly cookies are visible.
+  incognito:
+      !usesAppleWebStore(platform) &&
+      (!isPopup ||
+          (platform ?? defaultTargetPlatform) == TargetPlatform.windows),
+  cacheEnabled: usesAppleWebStore(platform),
   saveFormData: false,
   supportZoom: true,
   builtInZoomControls: true,
   displayZoomControls: false,
   ignoresViewportScaleLimits: true,
 );
+
+bool usesAppleWebStore([TargetPlatform? platform]) =>
+    switch (platform ?? defaultTargetPlatform) {
+      TargetPlatform.iOS || TargetPlatform.macOS => true,
+      _ => false,
+    };
+
+bool loginCookieDomain(WebLoginTarget target, String? domain) {
+  final host = (domain ?? '').replaceFirst(RegExp(r'^\.'), '').toLowerCase();
+  if (host.isEmpty) return false;
+  final roots = <String>{
+    ...target.platform.hosts,
+    for (final value in [
+      target.url,
+      ...target.cookieDomains,
+      ...target.clearCookieDomains,
+      ...target.storageOrigins,
+    ])
+      Uri.parse(value).host.toLowerCase(),
+  };
+  return roots.any((root) => host == root || host.endsWith('.$root'));
+}
+
+Future<void> forgetWebLoginCookies(
+  CookieManager manager,
+  WebLoginTarget target, {
+  TargetPlatform? platform,
+}) async {
+  if (!usesAppleWebStore(platform)) {
+    await manager.deleteAllCookies();
+    return;
+  }
+  // Apple login and search share WK's default store. Clear only this provider's
+  // cookies so adding an account cannot erase an unrelated search challenge.
+  for (final cookie in await manager.getAllCookies()) {
+    if (!loginCookieDomain(target, cookie.domain)) continue;
+    final domain = cookie.domain!.replaceFirst(RegExp(r'^\.'), '');
+    final path = cookie.path ?? '/';
+    await manager.deleteCookie(
+      url: WebUri(Uri(scheme: 'https', host: domain, path: path).toString()),
+      name: cookie.name,
+      domain: cookie.domain,
+      path: path,
+    );
+  }
+}
 
 // A desktop UA alone does not override a site's mobile viewport. Keep the main
 // document wide and zoomable, including when an SPA replaces its viewport tag.

@@ -22,10 +22,12 @@ func dispatch(method, encoded string) (result any, err error) {
 		}
 	}()
 	var args struct {
-		ID         string `json:"id"`
-		StorageDir string `json:"storageDir"`
-		CacheDir   string `json:"cacheDir"`
-		Key        string `json:"key"`
+		ID           string            `json:"id"`
+		StorageDir   string            `json:"storageDir"`
+		CacheDir     string            `json:"cacheDir"`
+		Key          string            `json:"key"`
+		StoragePaths map[string]string `json:"storagePaths"`
+		StorageHome  string            `json:"storageHome"`
 	}
 	if err = json.Unmarshal([]byte(encoded), &args); err != nil {
 		return
@@ -35,7 +37,7 @@ func dispatch(method, encoded string) (result any, err error) {
 	case "version":
 		result = map[string]any{"version": gopeed.Version(), "protocol": 1, "taskCacheRoots": true, "sourceNetworkPolicy": true, "parserHttp2": true, "ed2k": true}
 	case "open":
-		err = gopeed.Open(args.StorageDir, args.CacheDir, args.Key)
+		err = gopeed.OpenWithStoragePaths(args.StorageDir, args.CacheDir, args.Key, args.StoragePaths, args.StorageHome)
 	case "begin":
 		err = gopeed.Begin(encoded)
 	case "snapshot":

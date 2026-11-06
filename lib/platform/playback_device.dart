@@ -5,6 +5,7 @@ import 'package:window_manager/window_manager.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/playback.dart';
+import '../playback/system_pip.dart';
 import 'windows_pip.dart';
 import 'windows_external_player.dart';
 import 'macos_external_player.dart';
@@ -15,6 +16,8 @@ abstract class PlaybackDevice extends ChangeNotifier {
   bool get supportsDesktopPip => false;
   bool get supportsIndependentPlayerWindows => false;
   bool get supportsExternalPlayer => false;
+  bool get externalPlayerNeedsDirectLink => false;
+  SystemPipPlayback? get systemPip => null;
   WindowsExternalPlayer? get windowsExternalPlayer => null;
   bool get supportsBrightness;
   bool get supportsSystemVolume => false;
@@ -66,7 +69,21 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   bool get supportsOrientation => _mobile;
   @override
-  bool get supportsExternalPlayer => _android || _desktop;
+  bool get supportsExternalPlayer => _mobile || _desktop;
+  @override
+  bool get externalPlayerNeedsDirectLink => _ios;
+  late final IOSSystemPipPlayback? _systemPip = _ios
+      ? IOSSystemPipPlayback(_session, (method, args) async {
+          final result = await _invoke<Object?>(method, args);
+          if (method == 'stopPip' && !_closed) {
+            _inPip = false;
+            notifyListeners();
+          }
+          return result;
+        })
+      : null;
+  @override
+  SystemPipPlayback? get systemPip => _systemPip;
   @override
   WindowsExternalPlayer? get windowsExternalPlayer => _windows
       ? _windowsPlayer
@@ -96,7 +113,7 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   bool get supportsBrightness => _mobile;
   @override
-  bool get supportsSystemVolume => _android && _supportsSystemVolume;
+  bool get supportsSystemVolume => _mobile && _supportsSystemVolume;
   @override
   bool get inPip => _windows ? _windowsPip.active : _inPip;
   @override
@@ -118,12 +135,15 @@ class NativePlaybackDevice extends PlaybackDevice {
         final args = asJson(call.arguments);
         if (_closed || args.str('session') != _session) return;
         if (call.method == 'pip') {
+          if (_ios && _systemPip?.accepts(args) != true) return;
           _inPip = args.boolean('active');
           notifyListeners();
         } else if (call.method == 'action') {
           _actions.add(args.str('action'));
         } else if (call.method == 'volume') {
           _readSystemVolume(args);
+        } else if (call.method == 'pipState') {
+          _systemPip?.update(args);
         }
       });
       final values = asJson(await _invoke<Object?>('begin', {'video': video}));
@@ -257,8 +277,14 @@ class NativePlaybackDevice extends PlaybackDevice {
 
   @override
   Future<void> exitPip() async {
-    if (_closed || !_windows) return;
-    await _windowsPip.exit();
+    if (_closed) return;
+    if (_windows) {
+      await _windowsPip.exit();
+    } else if (_ios) {
+      await _invoke<void>('exitPip');
+    } else {
+      return;
+    }
     if (!_closed) notifyListeners();
   }
 
@@ -275,7 +301,7 @@ class NativePlaybackDevice extends PlaybackDevice {
           await windowManager.isVisible() &&
           !await windowManager.isMinimized();
     }
-    if (_closed || !_android) return false;
+    if (_closed || !_mobile) return false;
     return await _invoke<bool>('isPip') ?? false;
   }
 
@@ -304,6 +330,7 @@ class NativePlaybackDevice extends PlaybackDevice {
         _handlerOwner = null;
       }
       await _actions.close();
+      _systemPip?.dispose();
       super.dispose();
     }
   }

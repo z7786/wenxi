@@ -64,6 +64,7 @@ void main() {
     bool home = false,
     Size size = const Size(393, 864),
     double scale = 1,
+    String initialText = '',
     Future<ParsedLink> Function(CloudPlatform, String)? resolve,
   }) async {
     tester.view.devicePixelRatio = 1;
@@ -100,6 +101,7 @@ void main() {
             ? Scaffold(body: ParsePage(services))
             : CloudCommandPage(
                 services,
+                initialText: initialText,
                 resolveCommand:
                     resolve ??
                     CloudCommandResolver(
@@ -299,6 +301,54 @@ void main() {
       expect(http.calls, isEmpty);
     },
   );
+
+  scenario(
+    'Chinese mobile command selects mobile cloud and opens with the app account',
+    (tester) async {
+      const text = '“蕧郅岱等遥温琴扣炩”';
+      await render(tester, initialText: text);
+      expect(find.textContaining('支持移动云盘文字口令'), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('command-input')))
+            .controller!
+            .text,
+        text,
+      );
+      expect(http.calls, isEmpty);
+      await services.store.put('credentials', {
+        'C139': Credential('app-user', {
+          'authorization': 'app-user-authorization',
+        }, updatedAt: 5).toJson(),
+      });
+      await tap(tester, find.byKey(const Key('command-start')));
+      expect(find.byType(BrowserPage), findsOneWidget);
+      final opened = connectors[CloudPlatform.c139]!.opened.single;
+      expect(opened.shareId, '蕧郅岱等遥温琴扣炩');
+      expect(Uri.parse(opened.url).queryParameters['linkCode'], opened.shareId);
+      expect(
+        connectors[CloudPlatform.c139]!.openedCredentials.single?.field(
+          'authorization',
+        ),
+        'app-user-authorization',
+      );
+      expect(services.commandHistory.all.single.text, text);
+      expect(http.calls, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  scenario('Existing Quark Chinese command keeps the selected provider', (
+    tester,
+  ) async {
+    const text = '咐置松君杂货铺叩苓';
+    await render(tester, initialText: text);
+    expect(find.textContaining('支持移动云盘文字口令'), findsNothing);
+    await tap(tester, find.byKey(const Key('command-start')));
+    expect(connectors[CloudPlatform.quark]!.opened, hasLength(1));
+    expect(connectors[CloudPlatform.c139]!.opened, isEmpty);
+    expect(http.calls.single.uri.host, 'utoken2.quark.cn');
+  });
 
   scenario('Quark short tokens open the share page after manual submission', (
     tester,

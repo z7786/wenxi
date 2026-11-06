@@ -23,14 +23,16 @@ extension _LanDiscovery on LanService {
       }
       final datagrams = LanDatagrams(socket);
       _datagrams = datagrams;
-      socket.broadcastEnabled = true;
+      if (!unicastDiscovery) socket.broadcastEnabled = true;
       socket.multicastHops = 1;
-      for (final nic in await NetworkInterface.list(
-        type: InternetAddressType.IPv4,
-      )) {
-        try {
-          socket.joinMulticast(InternetAddress('239.255.77.81'), nic);
-        } catch (_) {}
+      if (!unicastDiscovery) {
+        for (final nic in await NetworkInterface.list(
+          type: InternetAddressType.IPv4,
+        )) {
+          try {
+            socket.joinMulticast(InternetAddress('239.255.77.81'), nic);
+          } catch (_) {}
+        }
       }
       socket.listen((event) {
         if (!running || socket != _discovery) return;
@@ -92,6 +94,7 @@ extension _LanDiscovery on LanService {
         }
       }, onError: (Object _) {});
       _announce(discover: true);
+      if (unicastDiscovery) _startUnicastScan();
     } catch (_) {
       _discovery?.close();
       _discovery = null;
@@ -115,11 +118,19 @@ extension _LanDiscovery on LanService {
     final targetPort = requestedDiscoveryPort == 0
         ? lanDiscoveryPort
         : requestedDiscoveryPort;
-    // A fallback port cannot hear unsolicited broadcasts on the well-known
-    // port. Ask peers to reply to it on every heartbeat as well as on refresh.
+    // Unicast-only and fallback-port listeners cannot hear the peers' regular
+    // broadcasts. Request a reply on every heartbeat to keep devices visible.
     final packet = _discoveryPacket(
-      discover: discover || _discovery!.port != targetPort,
+      discover: discover || unicastDiscovery || _discovery!.port != targetPort,
     );
+    if (unicastDiscovery) {
+      for (final peer in peers) {
+        try {
+          _datagrams!.send(packet, InternetAddress(peer.address), targetPort);
+        } catch (_) {}
+      }
+      return;
+    }
     final targets = <String>{
       if (addresses.any((address) => !address.startsWith('127.'))) ...[
         '255.255.255.255',
@@ -144,6 +155,7 @@ extension _LanDiscovery on LanService {
     if (!running) return;
     if (discoveryEnabled && _discovery == null) await _startDiscovery();
     _announce(discover: true);
+    if (unicastDiscovery) _startUnicastScan();
     _changed();
   }
 
@@ -154,6 +166,40 @@ extension _LanDiscovery on LanService {
     if (listEquals(current, addresses)) return;
     addresses = current;
     _announce(discover: true);
+    if (unicastDiscovery) _startUnicastScan();
     _changed();
+  }
+
+  void _startUnicastScan() {
+    if (!running || _datagrams == null) return;
+    _unicastTimer?.cancel();
+    _unicastTargets = lanUnicastTargets(addresses);
+    _unicastOffset = 0;
+    _lastUnicastScan = clock();
+    final targetPort = requestedDiscoveryPort == 0
+        ? lanDiscoveryPort
+        : requestedDiscoveryPort;
+    final packet = _discoveryPacket(discover: true);
+    void batch() {
+      if (!running || _datagrams == null) {
+        _unicastTimer?.cancel();
+        return;
+      }
+      final end = min(_unicastOffset + 16, _unicastTargets.length);
+      while (_unicastOffset < end) {
+        _datagrams!.send(packet, _unicastTargets[_unicastOffset++], targetPort);
+      }
+      if (_unicastOffset >= _unicastTargets.length) {
+        _unicastTimer?.cancel();
+        _unicastTimer = null;
+      }
+    }
+
+    batch();
+    if (_unicastOffset < _unicastTargets.length) {
+      _unicastTimer = _serviceZone.run(
+        () => Timer.periodic(const Duration(milliseconds: 80), (_) => batch()),
+      );
+    }
   }
 }

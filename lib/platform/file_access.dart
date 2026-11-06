@@ -6,6 +6,7 @@ import '../core/json.dart';
 import 'android_download_file.dart';
 import 'native_engine.dart';
 import 'windows_storage.dart';
+import 'apple_storage.dart';
 
 String safeFileName(String raw) {
   var name = raw
@@ -129,9 +130,15 @@ extension FileAvailabilityLabel on FileAvailability {
 }
 
 class PlatformFileAccess implements FileAccess {
-  PlatformFileAccess(this.transport, this.defaultDirectory, {bool? android})
-    : _android = android ?? Platform.isAndroid;
+  PlatformFileAccess(
+    this.transport,
+    this.defaultDirectory, {
+    bool? android,
+    AppleStorage appleStorage = const AppleStorage(),
+  }) : _android = android ?? Platform.isAndroid,
+       _appleStorage = appleStorage;
   final bool _android;
+  final AppleStorage _appleStorage;
   final NativeTransport transport;
   final Directory defaultDirectory;
   @override
@@ -238,7 +245,9 @@ class PlatformFileAccess implements FileAccess {
   @override
   Future<String?> downloadCacheRoot(String? destination) async {
     if (_android) return null;
-    final target = destination ?? defaultDirectory.path;
+    final target = await resolveAppleDirectory(
+      destination ?? defaultDirectory.path,
+    );
     require(p.isAbsolute(target), '请选择有效的下载目录');
     return p.normalize(p.join(target, GopeedEngine.destinationCacheName));
   }
@@ -265,6 +274,10 @@ class PlatformFileAccess implements FileAccess {
         directory = directory.parent;
       }
       final resolved = await directory.resolveSymbolicLinks();
+      final apple = await _appleStorage.volume(resolved);
+      if (apple != null) {
+        return (StorageVolume(apple.id, resolved), apple.hardLinks);
+      }
       final windows = WindowsStorage.volume(resolved);
       return (
         StorageVolume(
@@ -276,7 +289,9 @@ class PlatformFileAccess implements FileAccess {
     }
 
     final cacheVolume = await volume(cache);
-    final targetVolume = await volume(destination ?? defaultDirectory.path);
+    final targetVolume = await volume(
+      await resolveAppleDirectory(destination ?? defaultDirectory.path),
+    );
     return StoragePlan(
       cacheVolume.$1,
       targetVolume.$1,
@@ -307,7 +322,11 @@ class PlatformFileAccess implements FileAccess {
     RandomAccessFile? handle;
     try {
       final uri = Uri.tryParse(path);
-      final file = uri?.scheme == 'file' ? File.fromUri(uri!) : File(path);
+      final file = File(
+        await resolveAppleDirectory(
+          uri?.scheme == 'file' ? File.fromUri(uri!).path : path,
+        ),
+      );
       if (!p.isAbsolute(file.path)) return FileAvailability.inaccessible;
       handle = await file.open();
       await handle.length();
@@ -324,7 +343,8 @@ class PlatformFileAccess implements FileAccess {
   }
 
   @override
-  Future<String?> chooseDirectory() async => Platform.isAndroid
+  Future<String?> chooseDirectory() async =>
+      (Platform.isAndroid || Platform.isIOS)
       ? nativeChannel.invokeMethod<String>('chooseDirectory')
       : getDirectoryPath(confirmButtonText: '选择下载目录');
   @override
@@ -336,7 +356,9 @@ class PlatformFileAccess implements FileAccess {
           -1;
     }
     return asJson(
-      await transport.call('freeSpace', {'path': path}),
+      await transport.call('freeSpace', {
+        'path': await resolveAppleDirectory(path),
+      }),
     ).integer('bytes');
   }
 
@@ -376,7 +398,9 @@ class PlatformFileAccess implements FileAccess {
         if (_exportCallbacks[id]?.$1 == token) _exportCallbacks.remove(id);
       }
     }
-    final root = Directory(destination ?? defaultDirectory.path);
+    final root = Directory(
+      await resolveAppleDirectory(destination ?? defaultDirectory.path),
+    );
     await root.create(recursive: true);
     final rootPath = await root.resolveSymbolicLinks();
     final targetDirectory = Directory(
@@ -398,7 +422,18 @@ class PlatformFileAccess implements FileAccess {
         checkpoint();
         final file = File(p.join(resolved, i == 0 ? safe : '$base ($i)$ext'));
         try {
-          WindowsStorage.createHardLink(source.path, file.path);
+          if (_appleStorage.enabled) {
+            if (!await _appleStorage.link(source.path, file.path)) {
+              if (await file.exists()) continue;
+              // Keep the complete source resumable when a cloud provider
+              // refuses hard links; a copy needs space for the second file.
+              final free = await freeBytes(resolved);
+              require(free < 0 || free >= total, '保存需要额外空间，请释放空间或更换目录');
+              break;
+            }
+          } else {
+            WindowsStorage.createHardLink(source.path, file.path);
+          }
         } on FileSystemException {
           if (!await file.exists()) rethrow;
           continue;
@@ -412,7 +447,9 @@ class PlatformFileAccess implements FileAccess {
           rethrow;
         }
       }
-      throw const AppException('同名文件过多，请更换下载目录');
+      if (!_appleStorage.enabled) {
+        throw const AppException('同名文件过多，请更换下载目录');
+      }
     }
     File? target;
     for (var i = 0; i < 10000; i++) {
@@ -461,7 +498,11 @@ class PlatformFileAccess implements FileAccess {
       }
     } else {
       final uri = Uri.tryParse(path);
-      final file = uri?.scheme == 'file' ? File.fromUri(uri!) : File(path);
+      final file = File(
+        await resolveAppleDirectory(
+          uri?.scheme == 'file' ? File.fromUri(uri!).path : path,
+        ),
+      );
       require(p.isAbsolute(file.path), '已保存文件路径无效');
       final type = await FileSystemEntity.type(file.path, followLinks: false);
       if (type == FileSystemEntityType.notFound) {

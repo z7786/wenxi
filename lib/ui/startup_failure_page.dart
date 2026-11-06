@@ -7,6 +7,7 @@ import '../data/backup.dart';
 import '../data/state_store.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
+import '../platform/document_actions.dart';
 import 'common.dart';
 import 'diagnostics_page.dart';
 import 'remote_control_dialogs.dart' show openRemoteLink;
@@ -100,18 +101,7 @@ class _StartupFailurePageState extends State<StartupFailurePage> {
       if (fromBackup) {
         final file =
             await (widget.chooseBackup?.call() ??
-                openFile(
-                  acceptedTypeGroups: const [
-                    XTypeGroup(
-                      label: '文析助手备份',
-                      extensions: ['json', 'bak'],
-                      mimeTypes: [
-                        'application/json',
-                        'application/octet-stream',
-                      ],
-                    ),
-                  ],
-                ));
+                openFile(acceptedTypeGroups: const [backupFileType]));
         if (file == null || !mounted) return;
         require(await file.length() <= 16 * 1024 * 1024, '备份文件过大');
         if (!mounted) return;

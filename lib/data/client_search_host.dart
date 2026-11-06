@@ -153,7 +153,10 @@ class ClientSearchHost {
         }
         return null;
       }
-      require(io.Platform.isWindows || io.Platform.isMacOS, '此来源需要独立网页搜索环境');
+      require(
+        io.Platform.isWindows || io.Platform.isMacOS || io.Platform.isIOS,
+        '此来源需要网页搜索环境',
+      );
       browserTransport = args.str('transport') == 'curl';
       if (!browserTransport &&
           session.readyUntil?.isAfter(DateTime.now()) == true) {
@@ -207,7 +210,10 @@ class ClientSearchHost {
     final uri = source.checkedUrl(args.str('url'));
     if (_browser != null) return;
     final ready = Completer<InAppWebViewController>();
-    require(io.Platform.isWindows || io.Platform.isMacOS, '此来源需要独立网页搜索环境');
+    require(
+      io.Platform.isWindows || io.Platform.isMacOS || io.Platform.isIOS,
+      '此来源需要网页搜索环境',
+    );
     WebViewEnvironment? env;
     if (io.Platform.isWindows) {
       _browserDirectory = await io.Directory.systemTemp.createTemp(
@@ -225,9 +231,10 @@ class ClientSearchHost {
       initialUrlRequest: URLRequest(url: WebUri(uri.toString())),
       initialSettings: InAppWebViewSettings(
         javaScriptEnabled: true,
-        // macOS CookieManager reads WKWebsiteDataStore.default(); using a
+        // Apple CookieManager reads WKWebsiteDataStore.default(); using a
         // nonpersistent store would lose the search challenge cookies.
-        incognito: !io.Platform.isMacOS,
+        incognito: !(io.Platform.isMacOS || io.Platform.isIOS),
+        cacheEnabled: io.Platform.isMacOS || io.Platform.isIOS,
       ),
       onLoadStop: (controller, _) {
         if (!ready.isCompleted) ready.complete(controller);

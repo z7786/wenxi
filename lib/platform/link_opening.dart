@@ -28,11 +28,15 @@ class LinkOpeningPlatform {
   const LinkOpeningPlatform({
     MethodChannel channel = nativeChannel,
     bool? android,
+    String? operatingSystem,
   }) : _channel = channel,
-       _android = android;
+       _android = android,
+       _operatingSystem = operatingSystem;
   final MethodChannel _channel;
   final bool? _android;
+  final String? _operatingSystem;
   bool get android => _android ?? Platform.isAndroid;
+  String get operatingSystem => _operatingSystem ?? Platform.operatingSystem;
 
   Future<List<LinkOpeningTarget>> status() async {
     if (!android) return const [];
