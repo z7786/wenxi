@@ -423,8 +423,8 @@ Future<void> main() async {
         jsonEncode({
           'startup': true,
           'quickjs': true,
-        'download': true,
-        'coordinatedFileSave': true,
+          'download': true,
+          'coordinatedFileSave': true,
           'freeSpace': true,
           'playback': true,
           'positionMs': decodedPosition,

@@ -183,13 +183,38 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
                 let outputHandle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
                 defer { outputHandle.closeFile() }
                 var copied: Int64 = 0
+                var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
                 var lastProgress = ProcessInfo.processInfo.systemUptime
                 while copied < total {
                   try transfer.check()
-                  let bytes = try inputHandle.read(upToCount: 1024 * 1024) ?? Data()
-                  guard !bytes.isEmpty else { throw CocoaError(.fileReadUnknown) }
-                  try outputHandle.write(contentsOf: bytes)
-                  copied += Int64(bytes.count)
+                  // POSIX I/O preserves the supported iOS 13 deployment target
+                  // and reports disk/provider failures without NSExceptions.
+                  let received = buffer.withUnsafeMutableBytes { bytes in
+                    Darwin.read(inputHandle.fileDescriptor, bytes.baseAddress,
+                      min(bytes.count, Int(min(total - copied, Int64(bytes.count)))))
+                  }
+                  if received < 0 {
+                    let failure = errno
+                    if failure == EINTR { continue }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(failure))
+                  }
+                  guard received > 0 else { throw CocoaError(.fileReadUnknown) }
+                  try buffer.withUnsafeBytes { bytes in
+                    var written = 0
+                    while written < received {
+                      try transfer.check()
+                      let count = Darwin.write(outputHandle.fileDescriptor,
+                        bytes.baseAddress!.advanced(by: written), received - written)
+                      if count < 0 {
+                        let failure = errno
+                        if failure == EINTR { continue }
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(failure))
+                      }
+                      guard count > 0 else { throw CocoaError(.fileWriteUnknown) }
+                      written += count
+                    }
+                  }
+                  copied += Int64(received)
                   let now = ProcessInfo.processInfo.systemUptime
                   if now - lastProgress >= 0.25 || copied == total {
                     lastProgress = now

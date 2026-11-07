@@ -58,8 +58,10 @@ scheme starts from the beginning. External-app progress is not synced back.
 
 The default Documents download directory is the most predictable storage path.
 Access to third-party cloud file providers depends on the provider being online
-and its security-scoped access; direct download I/O does not yet use
-`NSFileCoordinator`, so those providers need device testing.
+and its security-scoped access. New downloads finish in Application Support
+before `NSFileCoordinator` publishes a complete document to the selected Files
+directory. A cloud sync indicator can remain after local saving completes;
+third-party provider and iCloud synchronization still need device testing.
 
 The workflow compiles the native bridges and runs Dart regressions, native Go
 storage/resume tests and the simulator smoke checks. Simulator checks cover the
