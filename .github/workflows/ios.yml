@@ -73,7 +73,8 @@ jobs:
         shell: pwsh
         run: ./tool/build-ios.ps1 -Simulator
       - name: Test iPhone and iPad startup, downloads and ordinary playback
-        run: python tool/ios-simulator-smoke.py
+        timeout-minutes: 20
+        run: python -u tool/ios-simulator-smoke.py
       - name: Analyze and test platform compatibility
         run: |
           flutter analyze --no-pub

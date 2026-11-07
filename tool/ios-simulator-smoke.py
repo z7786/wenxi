@@ -11,6 +11,7 @@ local.mkdir(exist_ok=True)
 
 
 def sim(*args, **kwargs):
+    kwargs.setdefault('timeout', 90)
     return subprocess.check_output(['xcrun', 'simctl', *args], text=True, **kwargs).strip()
 
 
@@ -31,15 +32,18 @@ for family in ['iPhone', 'iPad']:
     container = None
     prefix = 'ios-' + family.lower()
     try:
+        print(family + ' simulator: booting', flush=True)
         sim('boot', device)
-        sim('bootstatus', device, '-b')
-        sim('install', device, str(root / 'build/ios/iphonesimulator/Runner.app'))
+        sim('bootstatus', device, '-b', timeout=420)
+        print(family + ' simulator: installing test app', flush=True)
+        sim('install', device, str(root / 'build/ios/iphonesimulator/Runner.app'), timeout=180)
         container = Path(sim('get_app_container', device, 'com.asterlink.app', 'data'))
         fixture = container / 'Documents/ios-smoke.mp4'
         fixture.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / 'tool/fixtures/macos-playback.mp4', fixture)
         sim('launch', '--terminate-running-process', '--stdout=' + str(local / (prefix + '-stdout.log')),
             '--stderr=' + str(local / (prefix + '-stderr.log')), device, 'com.asterlink.app')
+        print(family + ' simulator: checking startup, storage, folder uploads and playback', flush=True)
         deadline = time.monotonic() + 150
         while time.monotonic() < deadline:
             files = list(container.rglob('ios-smoke.json'))
@@ -52,7 +56,7 @@ for family in ['iPhone', 'iPad']:
                 (local / (prefix + '-smoke-result.json')).write_text(json.dumps(report, indent=2))
                 (local / 'ios-smoke-result.json').write_text(json.dumps(reports, indent=2))
                 sim('io', device, 'screenshot', str(local / ('ios-smoke-' + family.lower() + '.png')))
-                print(family + ' simulator smoke passed:', report)
+                print(family + ' simulator smoke passed:', report, flush=True)
                 break
             time.sleep(.5)
         else:
@@ -64,5 +68,8 @@ for family in ['iPhone', 'iPad']:
             file = local / (prefix + '-' + suffix)
             if file.exists():
                 print(file.read_text(errors='replace')[-10000:])
-        subprocess.run(['xcrun', 'simctl', 'shutdown', device], check=False)
-        subprocess.run(['xcrun', 'simctl', 'delete', device], check=False)
+        for operation in ['shutdown', 'delete']:
+            try:
+                subprocess.run(['xcrun', 'simctl', operation, device], check=False, timeout=90)
+            except subprocess.TimeoutExpired:
+                print(family + ' simulator cleanup timed out: ' + operation, flush=True)
