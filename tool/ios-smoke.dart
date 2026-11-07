@@ -12,6 +12,7 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/playback_device.dart';
+import 'package:asterlink/upload/upload_sources.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback.dart';
 import 'package:asterlink/playback/media_backend.dart';
@@ -174,6 +175,39 @@ Future<void> main() async {
             saved != duplicate && File(saved).existsSync(),
             'Publishing overwrote an existing document',
           );
+          stage = 'folderUploadSource';
+          final uploadRoot = Directory('${documents.path}/upload-smoke');
+          await Directory('${uploadRoot.path}/nested').create(recursive: true);
+          await Directory('${uploadRoot.path}/empty').create();
+          final uploadBytes = [...bytes, ...bytes.take(32)];
+          await File(
+            '${uploadRoot.path}/nested/source.bin',
+          ).writeAsBytes(uploadBytes);
+          try {
+            final sources = UploadSources(android: false, ios: true);
+            final plan = await sources.scanFolder(uploadRoot.path);
+            require(
+              plan.files.length == 1 &&
+                  plan.files.single.relativePath == 'nested/source.bin' &&
+                  plan.directories.contains('empty'),
+              'Native folder upload scan lost files or empty directories',
+            );
+            await sources.validateFolder(plan);
+            await sources.validate(plan.files.single);
+            final received = await sources
+                .read(plan.files.single, 17, uploadBytes.length - 9)
+                .expand((chunk) => chunk)
+                .toList();
+            require(
+              received.length == uploadBytes.length - 26 &&
+                  Iterable<int>.generate(
+                    received.length,
+                  ).every((i) => received[i] == uploadBytes[i + 17]),
+              'Native folder upload source range bytes differ',
+            );
+          } finally {
+            await uploadRoot.delete(recursive: true);
+          }
           await files.delete(saved);
           await files.delete(duplicate);
           movie = '${documents.path}/ios-smoke.mp4';
@@ -272,6 +306,7 @@ Future<void> main() async {
           'quickjs': true,
           'download': true,
           'coordinatedFileSave': true,
+          'folderUploadSource': true,
           'freeSpace': true,
           'playback': true,
           'positionMs': decodedPosition,

@@ -127,8 +127,19 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
             _ = try self.uploadFileInfo(url)
             let handle = try FileHandle(forReadingFrom: url)
             defer { try? handle.close() }
-            try handle.seek(toOffset: UInt64(start))
-            return try handle.read(upToCount: length) ?? Data()
+            var bytes = Data(count: length)
+            let count = try bytes.withUnsafeMutableBytes { (buffer: UnsafeMutableRawBufferPointer) -> Int in
+              var received: Int
+              repeat {
+                received = Darwin.pread(handle.fileDescriptor, buffer.baseAddress, length, off_t(start))
+              } while received < 0 && errno == EINTR
+              guard received >= 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+              }
+              return received
+            }
+            bytes.count = count
+            return bytes
           }
           value = FlutterStandardTypedData(bytes: bytes)
         default: throw self.uploadError("不支持的上传源操作")

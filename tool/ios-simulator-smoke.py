@@ -19,6 +19,7 @@ runtime = next(item for item in reversed(runtimes) if item.get('isAvailable') an
 available = json.loads(sim('list', 'devices', 'available', '--json'))['devices']
 checks = [
     'startup', 'quickjs', 'download', 'coordinatedFileSave', 'freeSpace', 'playback',
+    'folderUploadSource',
     'playerPagePlayback', 'playerPageControls', 'playerPageTexture',
     'pipDisabled',
 ]
