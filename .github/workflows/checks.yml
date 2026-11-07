@@ -11,7 +11,7 @@ jobs:
       run:
         shell: bash
     env:
-      PUB_HOSTED_URL: https://pub.flutter-io.cn
+      PUB_HOSTED_URL: https://pub.dev
       FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
       GOPROXY: https://proxy.golang.org,direct
       GOTOOLCHAIN: go1.24.7
