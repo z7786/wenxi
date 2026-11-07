@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'common.dart';
 
-/// Accepts Explorer files only while this directory is the visible route.
+/// Accepts desktop files and supported folders while this directory is visible.
 class CloudUploadDropTarget extends StatefulWidget {
   const CloudUploadDropTarget({
     super.key,
@@ -13,12 +13,16 @@ class CloudUploadDropTarget extends StatefulWidget {
     required this.folderName,
     required this.onFilesDropped,
     required this.child,
+    this.foldersSupported = false,
   });
 
   static bool get supported =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.macOS);
 
   final bool enabled;
+  final bool foldersSupported;
   final String folderName;
   final ValueChanged<List<XFile>> onFilesDropped;
   final Widget child;
@@ -95,8 +99,10 @@ class _CloudUploadDropTargetState extends State<CloudUploadDropTarget> {
                             color: accent,
                           ),
                           const SizedBox(height: 16),
-                          const Text(
-                            '松开鼠标上传文件',
+                          Text(
+                            widget.foldersSupported
+                                ? '松开鼠标上传文件或文件夹'
+                                : '松开鼠标上传文件',
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               fontSize: 18,
@@ -105,7 +111,7 @@ class _CloudUploadDropTargetState extends State<CloudUploadDropTarget> {
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            '上传到“${widget.folderName}” · 支持多个文件',
+                            '上传到“${widget.folderName}” · ${widget.foldersSupported ? '文件夹保留原目录结构' : '支持多个文件'}',
                             textAlign: TextAlign.center,
                             maxLines: 3,
                             overflow: TextOverflow.ellipsis,

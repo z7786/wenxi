@@ -1,9 +1,11 @@
 package com.asterlink.app
 
 import android.app.Application
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.PatternMatcher
 import android.provider.Settings
@@ -26,10 +28,11 @@ class LinkOpeningTest {
     private fun Element.attr(name: String) = getAttributeNS(ns, name)
     private fun Element.children(tag: String): List<Element> = (0 until childNodes.length)
         .mapNotNull { childNodes.item(it) as? Element }.filter { it.tagName == tag }
-    private fun aliases(): Map<String, Element> {
+    private fun entries(): Map<String, Element> {
         val root = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
             .newDocumentBuilder().parse(File("src/main/AndroidManifest.xml")).documentElement
-        return root.children("application").single().children("activity-alias").associateBy { it.attr("name") }
+        val app = root.children("application").single()
+        return (app.children("activity") + app.children("activity-alias")).associateBy { it.attr("name") }
     }
     private fun filters(entry: Element): List<IntentFilter> = entry.children("intent-filter").map { source ->
         IntentFilter().apply {
@@ -48,29 +51,46 @@ class LinkOpeningTest {
     }
     private fun matches(entry: Element, url: String, action: String = Intent.ACTION_VIEW, mime: String? = null): Boolean {
         val uri = Uri.parse(url)
-        return filters(entry).any { it.match(action, mime, uri.scheme, uri, setOf(Intent.CATEGORY_DEFAULT), "links-test") >= 0 }
+        val categories = if (action == Intent.ACTION_VIEW) setOf(Intent.CATEGORY_DEFAULT, Intent.CATEGORY_BROWSABLE)
+            else setOf(Intent.CATEGORY_DEFAULT)
+        return filters(entry).any { it.match(action, mime, uri.scheme, uri, categories, "links-test") >= 0 }
     }
 
+    private fun enabledMatches(entries: Map<String, Element>, url: String,
+        action: String = Intent.ACTION_VIEW, mime: String? = null): Set<String> = entries.filter { (name, entry) ->
+        val className = if (name.startsWith(".")) context.packageName + name else name
+        val state = context.packageManager.getComponentEnabledSetting(ComponentName(context.packageName, className))
+        val enabled = when (state) {
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER,
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED -> false
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> true
+            else -> entry.attr("enabled") != "false"
+        }
+        enabled && entry.attr("exported") == "true" && matches(entry, url, action, mime)
+    }.keys
+
+    private val shareLinks = mapOf(
+        "QuarkEntry" to "https://pan.quark.cn/s/abc123?pwd=1234",
+        "UcEntry" to "https://drive.uc.cn/s/abc123",
+        "BaiduEntry" to "https://pan.baidu.com/share/init?surl=abc123",
+        "AliyunEntry" to "https://www.alipan.com/s/abc123",
+        "TianyiEntry" to "https://cloud.189.cn/web/share?code=abc123",
+        "C139Entry" to "https://yun.139.com/shareweb/#/w/i/abc123",
+        "WopanEntry" to "https://pan.wo.cn/s/abc123",
+        "GuangyaEntry" to "https://www.guangyapan.com/s/abc123",
+        "XunleiEntry" to "https://pan.xunlei.com/s/abc123",
+        "Pan115Entry" to "https://115cdn.com/s/abc123",
+        "Pan123Entry" to "https://www.123865.com/s/abc123",
+        "LanzouEntry" to "https://wws.lanzout.com/iabc123",
+        "CtfileEntry" to "https://url95.ctfile.com/f/123-456",
+        "FeijipanEntry" to "https://www.feijipan.com/#/s/abc123",
+        "PikpakEntry" to "https://mypikpak.com/s/abc123",
+    )
+
     @Test fun declaredSharePathsOpenButUnrelatedWebsitesAndLoginPagesDoNot() {
-        val aliases = aliases()
-        val cases = mapOf(
-            "QuarkEntry" to "https://pan.quark.cn/s/abc123?pwd=1234",
-            "UcEntry" to "https://drive.uc.cn/s/abc123",
-            "BaiduEntry" to "https://pan.baidu.com/share/init?surl=abc123",
-            "AliyunEntry" to "https://www.alipan.com/s/abc123",
-            "TianyiEntry" to "https://cloud.189.cn/web/share?code=abc123",
-            "C139Entry" to "https://yun.139.com/shareweb/#/w/i/abc123",
-            "WopanEntry" to "https://pan.wo.cn/s/abc123",
-            "GuangyaEntry" to "https://www.guangyapan.com/s/abc123",
-            "XunleiEntry" to "https://pan.xunlei.com/s/abc123",
-            "Pan115Entry" to "https://115cdn.com/s/abc123",
-            "Pan123Entry" to "https://www.123865.com/s/abc123",
-            "LanzouEntry" to "https://wws.lanzout.com/iabc123",
-            "CtfileEntry" to "https://url95.ctfile.com/f/123-456",
-            "FeijipanEntry" to "https://www.feijipan.com/#/s/abc123",
-            "PikpakEntry" to "https://mypikpak.com/s/abc123",
-        )
-        for ((name, url) in cases) {
+        val aliases = entries()
+        for ((name, url) in shareLinks) {
             val entry = aliases.getValue("com.asterlink.app.link.$name")
             assertTrue("Missing $url", matches(entry, url))
             assertTrue("Missing HTTP fallback for $name", matches(entry, url.replace("https:", "http:")))
@@ -83,7 +103,7 @@ class LinkOpeningTest {
     }
 
     @Test fun everySettingOwnsOneEnabledAliasAndOnlyExpectedActionsAreExposed() {
-        val aliases = aliases()
+        val aliases = entries()
         assertEquals(LinkOpening.targets.size, LinkOpening.targets.map { it.alias }.distinct().size)
         for (target in LinkOpening.targets) {
             val entry = aliases.getValue(target.alias)
@@ -96,6 +116,56 @@ class LinkOpeningTest {
         assertFalse(matches(aliases.getValue("com.asterlink.app.link.ProtocolEntry"), "wenxi://delete?url=x"))
         assertTrue(matches(aliases.getValue("com.asterlink.app.link.ShareEntry"), "", Intent.ACTION_SEND, "text/plain"))
         assertTrue(matches(aliases.getValue("com.asterlink.app.link.SelectionEntry"), "", Intent.ACTION_PROCESS_TEXT, "text/plain"))
+    }
+
+    @Test fun disablingAllCloudsLeavesNoEntryForOrdinaryShareHyperlinks() {
+        val entries = entries()
+        val manager = LinkOpening(context)
+        LinkOpening.targets.filter { LinkOpening.isShareEntry(it.alias) }.forEach { manager.setEnabled(it.id, false) }
+        assertTrue(manager.status().filter { it["id"] !in setOf("share", "selection", "protocol") }
+            .all { it["enabled"] == false })
+        for (url in shareLinks.values + "https://example.test/page") {
+            for (scheme in listOf("http", "https")) {
+                val link = url.replace("https:", "$scheme:")
+                for (mime in listOf(null, "text/html", "application/xhtml+xml")) {
+                    assertEquals("Disabled link still captured: $link ($mime)", emptySet<String>(),
+                        enabledMatches(entries, link, mime = mime))
+                }
+            }
+        }
+    }
+
+    @Test fun aDisabledCloudCannotFallThroughToTheDownloaderOrPlayer() {
+        val entries = entries()
+        val manager = LinkOpening(context)
+        for (target in LinkOpening.targets.filter { LinkOpening.isShareEntry(it.alias) }) {
+            val url = shareLinks.getValue(target.entry)
+            assertEquals(setOf(target.alias), enabledMatches(entries, url))
+            manager.setEnabled(target.id, false)
+            assertTrue("Disabled ${target.id} was captured by another entry", enabledMatches(entries, url).isEmpty())
+            manager.setEnabled(target.id, true)
+            assertEquals(setOf(target.alias), enabledMatches(entries, url))
+        }
+    }
+
+    @Test fun cloudSwitchesKeepFilePlaybackDownloadsSharingAndProtocolsAvailable() {
+        val entries = entries()
+        val manager = LinkOpening(context)
+        LinkOpening.targets.filter { LinkOpening.isShareEntry(it.alias) }.forEach { manager.setEnabled(it.id, false) }
+        assertEquals(setOf(".DownloadEntry", ".PlayerEntry"),
+            enabledMatches(entries, "https://example.test/video?id=1", mime = "video/mp4"))
+        assertEquals(setOf(".PlayerEntry"), enabledMatches(entries, "content://videos.test/12", mime = "video/mp4"))
+        assertEquals(setOf(".DownloadEntry"), enabledMatches(entries, "https://example.test/app.apk", mime = FileOpening.APK_MIME))
+        assertEquals(setOf(".DownloadEntry"), enabledMatches(entries, "magnet:?xt=urn:btih:0123456789012345678901234567890123456789"))
+        assertEquals(setOf(".DownloadEntry", "com.asterlink.app.link.ShareEntry"),
+            enabledMatches(entries, "", Intent.ACTION_SEND, "text/plain"))
+        assertEquals(setOf(".PlayerEntry"), enabledMatches(entries, "", Intent.ACTION_SEND, "video/mp4"))
+        assertEquals(setOf("com.asterlink.app.link.SelectionEntry"),
+            enabledMatches(entries, "", Intent.ACTION_PROCESS_TEXT, "text/plain"))
+        assertEquals(setOf("com.asterlink.app.link.ProtocolEntry"), enabledMatches(entries, "wenxi://resolve?url=x"))
+        for (id in listOf("share", "selection", "protocol")) manager.setEnabled(id, false)
+        assertTrue(enabledMatches(entries, shareLinks.getValue("QuarkEntry")).isEmpty())
+        assertTrue(enabledMatches(entries, "wenxi://resolve?url=x").isEmpty())
     }
 
     @Test fun changingOneCloudPersistsAcrossManagerInstancesAndLeavesOthersEnabled() {

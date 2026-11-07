@@ -3,6 +3,7 @@ package com.asterlink.app
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.database.Cursor
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.provider.DocumentsContract
@@ -99,7 +100,92 @@ class LanFiles(private val context: Context) {
         return mapOf("name" to name, "size" to size, "modifiedAt" to modified)
     }
 
-    fun scan(location: String, folder: Boolean): Map<String, Any> {
+    fun checkDirectory(location: String) {
+        val uri = Uri.parse(location)
+        val root = if (uri.scheme == "content") DocumentFile.fromTreeUri(context, uri)
+            else DocumentFile.fromFile(localFile(location).canonicalFile)
+        require(root != null && root.isDirectory && root.canRead()) { "所选文件夹不可读取，请重新选择" }
+    }
+
+    private data class UploadDocument(val id: String, val name: String, val mime: String,
+        val size: Long, val modified: Long)
+
+    private val uploadColumns = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+        DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE,
+        DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+
+    private fun uploadDocument(cursor: Cursor): UploadDocument {
+        fun text(column: String): String = cursor.getColumnIndex(column).let {
+            if (it >= 0 && !cursor.isNull(it)) cursor.getString(it).orEmpty() else ""
+        }
+        fun number(column: String, fallback: Long): Long = cursor.getColumnIndex(column).let {
+            if (it >= 0 && !cursor.isNull(it)) cursor.getLong(it) else fallback
+        }
+        val id = text(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+        val name = text(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+        val mime = text(DocumentsContract.Document.COLUMN_MIME_TYPE)
+        require(id.isNotEmpty() && name.isNotBlank() && mime.isNotEmpty() &&
+            name !in listOf(".", "..") && !name.contains('/') && !name.contains('\\')) {
+            "文件提供器未返回有效的目录内容，请重新选择"
+        }
+        return UploadDocument(id, name, mime, number(DocumentsContract.Document.COLUMN_SIZE, -1),
+            number(DocumentsContract.Document.COLUMN_LAST_MODIFIED, 0))
+    }
+
+    /** Query each SAF directory once, and fail instead of treating unreadable children as empty. */
+    fun scanUploadDirectory(location: String): Map<String, Any> {
+        val tree = Uri.parse(location)
+        if (tree.scheme != "content") return scan(location, true, MAX_FILES)
+        require(DocumentsContract.isTreeUri(tree)) { "请选择系统文件选择器中的文件夹" }
+        val rootId = DocumentsContract.getTreeDocumentId(tree)
+        val rootUri = DocumentsContract.buildDocumentUriUsingTree(tree, rootId)
+        val root = requireNotNull(context.contentResolver.query(rootUri, uploadColumns, null, null, null)) {
+            "所选文件夹不可读取，请重新选择"
+        }.use { cursor ->
+            require(cursor.moveToFirst()) { "所选文件夹已移走，请重新选择" }
+            uploadDocument(cursor)
+        }
+        require(root.mime == DocumentsContract.Document.MIME_TYPE_DIR) { "请选择文件夹" }
+        val pending = ArrayDeque<Pair<String, String>>()
+        pending.add(rootId to "")
+        val visited = hashSetOf(rootId)
+        val directories = arrayListOf("")
+        val files = ArrayList<Map<String, Any>>()
+        while (pending.isNotEmpty()) {
+            val (parentId, relative) = pending.removeFirst()
+            val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentId)
+            requireNotNull(context.contentResolver.query(children, uploadColumns, null, null, null)) {
+                "子目录不可读取，请检查文件夹权限后重新选择"
+            }.use { cursor ->
+                require(!cursor.extras.getBoolean(DocumentsContract.EXTRA_LOADING, false)) {
+                    "文件提供器仍在加载目录，请稍后重新选择"
+                }
+                while (cursor.moveToNext()) {
+                    val info = uploadDocument(cursor)
+                    val path = if (relative.isEmpty()) info.name else "$relative/${info.name}"
+                    require(path.split('/').size < 64) { "文件夹层级过深" }
+                    if (info.mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                        require(visited.add(info.id)) { "文件提供器返回了重复目录，请换一个位置选择" }
+                        directories.add(path)
+                        pending.add(info.id to path)
+                    } else {
+                        val fileUri = DocumentsContract.buildDocumentUriUsingTree(tree, info.id)
+                        val size = if (info.size >= 0) info.size else
+                            context.contentResolver.openFileDescriptor(fileUri, "r")?.use { it.statSize } ?: -1
+                        require(size >= 0) { "文件提供器未返回有效文件大小，请换一个位置选择" }
+                        files.add(mapOf("location" to fileUri.toString(), "relative" to path,
+                            "size" to size, "modifiedAt" to info.modified))
+                    }
+                    require(files.size + directories.size <= MAX_FILES) {
+                        "一次最多上传 10000 个文件和目录，请分批选择"
+                    }
+                }
+            }
+        }
+        return mapOf("name" to root.name, "files" to files, "directories" to directories)
+    }
+
+    fun scan(location: String, folder: Boolean, maxEntries: Int? = null): Map<String, Any> {
         if (!folder) {
             val info = stat(location)
             return mapOf("name" to info.getValue("name"), "files" to listOf(
@@ -113,6 +199,7 @@ class LanFiles(private val context: Context) {
         require(root != null && root.isDirectory && root.canRead()) { "所选文件夹不可读取" }
         val files = ArrayList<Map<String, Any>>()
         val directories = arrayListOf("")
+        var skippedLinks = 0
         val pending = ArrayDeque<Pair<DocumentFile, String>>()
         pending.add(root to "")
         while (pending.isNotEmpty()) {
@@ -123,7 +210,7 @@ class LanFiles(private val context: Context) {
                 require(name.isNotBlank() && !name.contains('/') && !name.contains('\\')) { "文件名称无效" }
                 val path = if (relative.isEmpty()) name else "$relative/$name"
                 val local = localRoot?.let { File(it, path.replace('/', File.separatorChar)) }
-                if (local != null && local.canonicalFile != local.absoluteFile) continue
+                if (local != null && local.canonicalFile != local.absoluteFile) { skippedLinks++; continue }
                 val childLocation = local?.absolutePath ?: child.uri.toString()
                 if (child.isDirectory) {
                     directories.add(path)
@@ -132,9 +219,12 @@ class LanFiles(private val context: Context) {
                     files.add(stat(childLocation) + mapOf("location" to childLocation, "relative" to path))
                 }
                 require(files.size <= MAX_FILES && directories.size <= MAX_FILES) { "一次最多分享 10000 个文件或目录" }
+                require(maxEntries == null || files.size + directories.size <= maxEntries) {
+                    "一次最多上传 10000 个文件和目录，请分批选择"
+                }
             }
         }
-        return mapOf("name" to root.name.orEmpty(), "files" to files, "directories" to directories)
+        return mapOf("name" to root.name.orEmpty(), "files" to files, "directories" to directories, "skippedLinks" to skippedLinks)
     }
 
     fun open(location: String, offset: Long): String {

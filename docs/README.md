@@ -9,6 +9,7 @@
 - [GitHub 发布](GITHUB-PUBLISH.md)
 - [消息公告配置](ANNOUNCEMENTS.md)
 - [Android 后台下载](DOWNLOAD-BACKGROUND.md)
+- [设备互联与连接恢复](LAN-TRANSFER.md)
 - [下载与删除性能](DOWNLOAD-PERFORMANCE.md)
 - [BT 找源与连续下载](BT-DOWNLOAD.md)
 - [ED2K 文件下载](ED2K-DOWNLOAD.md)

@@ -1,6 +1,7 @@
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/uploads.dart';
+import 'upload_folder.dart';
 
 enum UploadStatus {
   pending,
@@ -29,7 +30,16 @@ class UploadTask {
     this.sent = 0,
     this.error = '',
     this.fileId = '',
-  });
+    this.folder,
+  }) {
+    require(
+      folder == null ||
+          folder!.size == size &&
+              folder!.name == name &&
+              folder!.location == path,
+      '已保存的上传文件夹信息不一致，请重新选择',
+    );
+  }
 
   final String id, parent, folderName, accountName, path, name, mimeType;
   BrowseSession session;
@@ -38,6 +48,8 @@ class UploadTask {
   UploadPhase phase;
   int sent, speed = 0;
   String error, fileId;
+  final UploadFolder? folder;
+  bool get isFolder => folder != null;
   bool get active =>
       status == UploadStatus.pending || status == UploadStatus.running;
   bool get canRetry => !active && status != UploadStatus.completed;
@@ -48,7 +60,7 @@ class UploadTask {
     UploadStatus.cancelled => '已取消',
     UploadStatus.interrupted => '已中断',
     UploadStatus.running => switch (phase) {
-      UploadPhase.preparing => '正在校验文件',
+      UploadPhase.preparing => isFolder ? '正在准备文件夹' : '正在校验文件',
       UploadPhase.uploading => '正在上传',
       UploadPhase.finishing => '等待网盘确认',
     },
@@ -82,6 +94,7 @@ class UploadTask {
     'sent': sent,
     'error': error,
     'fileId': fileId,
+    if (folder != null) 'folder': folder!.toJson(),
   };
 
   factory UploadTask.fromJson(Json value) => UploadTask(
@@ -107,5 +120,8 @@ class UploadTask {
     sent: value.integer('sent'),
     error: value.str('error'),
     fileId: value.str('fileId'),
+    folder: value['folder'] == null
+        ? null
+        : UploadFolder.fromJson(value.obj('folder')),
   );
 }

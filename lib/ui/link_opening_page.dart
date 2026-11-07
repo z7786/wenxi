@@ -127,7 +127,13 @@ class _LinkOpeningPageState extends State<LinkOpeningPage>
             Text(
               android
                   ? '点击已关联的网盘链接，或通过分享菜单、选中文字发送到文析助手，即可进入解析页并识别提取码。'
-                  : '点击网页上的“用文析助手打开”，即可将网盘链接和提取码带入解析页。请使用 Windows 安装版完成关联。',
+                  : switch (widget.platform.operatingSystem) {
+                      'ios' => '点击网页上的“用文析助手打开”，即可将网盘链接和提取码带入解析页。也可复制链接后进入应用。',
+                      'macos' =>
+                        '将文析助手放入“应用程序”并启动一次后，点击网页上的“用文析助手打开”，即可带入链接和提取码。也可复制链接后进入应用。',
+                      _ =>
+                        '点击网页上的“用文析助手打开”，即可将网盘链接和提取码带入解析页。请使用 Windows 安装版完成关联。',
+                    },
               style: TextStyle(color: secondary(context), height: 1.6),
             ),
             if (android) ...[

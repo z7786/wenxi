@@ -35,6 +35,7 @@ import '../data/parser_rules/hub.dart';
 import 'cloud_thumbnail.dart';
 import 'cloud_search_page.dart';
 import '../upload/upload_task.dart';
+import '../upload/upload_folder.dart';
 import 'login_page.dart';
 import 'preview_page.dart';
 import 'cloud_favorites_page.dart';
@@ -79,6 +80,30 @@ class BrowserPage extends StatefulWidget {
   State<BrowserPage> createState() => _BrowserPageState();
 }
 
+class _DirectoryCheckpoint {
+  _DirectoryCheckpoint({
+    required List<CloudFile> items,
+    required this.offset,
+    required this.searchText,
+    required this.display,
+    required this.timeReference,
+    required this.savedAt,
+    required this.cursor,
+    required this.pageError,
+  }) : count = items.length,
+       files = items.length <= 20000 ? List.unmodifiable(items) : null;
+
+  // Large/old snapshots can release their files while retaining the position
+  // and loaded count needed to restore the directory after a fresh read.
+  List<CloudFile>? files;
+  final int count;
+  final double offset;
+  final String searchText, pageError;
+  final (String, String, bool) display;
+  final DateTime timeReference, savedAt;
+  final String? cursor;
+}
+
 class _BrowserPageState extends State<BrowserPage> {
   late BrowseSession session = widget.services.cloud.bindSession(
     widget.session,
@@ -103,9 +128,12 @@ class _BrowserPageState extends State<BrowserPage> {
   List<CloudFile> _searchFiles = const [];
   int _searchFilesGeneration = -1, _searchFilesCount = -1;
   final selected = <String>{}, search = TextEditingController();
-  late final _fileScroll = ScrollController(
+  late var _fileScroll = TrackingScrollController(
     initialScrollOffset: widget.initialScrollOffset,
+    keepScrollOffset: false,
   );
+  int _fileListRevision = 0;
+  final _directoryCheckpoints = <String, _DirectoryCheckpoint>{};
   final _progress = OperationProgress();
   late final CloudDirectorySearch _deepSearch;
   bool _searchResults = false;
@@ -141,6 +169,7 @@ class _BrowserPageState extends State<BrowserPage> {
   CloudConnector get _provider =>
       widget.services.cloud.connector(session.platform);
   bool get _canUpload => _provider.canUploadTo(session, stack.last.$1);
+  bool get _canUploadFolder => _canUpload && _canCreateFolder;
   bool get _canDropUpload =>
       CloudUploadDropTarget.supported &&
       !widget.picking &&
@@ -209,13 +238,22 @@ class _BrowserPageState extends State<BrowserPage> {
           task.session.platform != session.platform ||
           task.session.accountId != session.accountId ||
           task.session.personalSpaceId != session.personalSpaceId ||
-          (!_searchResults && task.parent != stack.last.$1)) {
+          task.session.familyId != session.familyId) {
         return;
       }
+      if (task.isFolder) {
+        _invalidateDirectoryFiles();
+      } else {
+        _invalidateDirectoryFiles(parent: task.parent);
+      }
+      bool affectsDirectory(String parent) =>
+          task.parent == parent ||
+          task.folder?.remoteDirectories.containsValue(parent) == true;
+      if (!_searchResults && !affectsDirectory(stack.last.$1)) return;
       _uploadRefresh?.cancel();
       _uploadRefresh = Timer(const Duration(milliseconds: 400), () {
         if (mounted &&
-            (_searchResults || task.parent == stack.last.$1) &&
+            (_searchResults || affectsDirectory(stack.last.$1)) &&
             task.session.accountId == session.accountId) {
           unawaited(_refresh(preserveSelection: true));
         }
@@ -247,12 +285,112 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   void _scrollChanged() {
-    if (_fileScroll.hasClients &&
+    if (_fileScroll.positions.length == 1 &&
         _fileScroll.position.extentAfter < 160 &&
         _pageError.isEmpty &&
         !_selecting) {
       unawaited(_loadMore());
     }
+  }
+
+  void _replaceFileScroll(double offset) {
+    final previous = _fileScroll..removeListener(_scrollChanged);
+    _fileScroll = TrackingScrollController(
+      initialScrollOffset: offset.isFinite && offset > 0 ? offset : 0,
+      keepScrollOffset: false,
+    )..addListener(_scrollChanged);
+    _fileListRevision++;
+    // A controller is still attached until the old list leaves the tree.
+    WidgetsBinding.instance.addPostFrameCallback((_) => previous.dispose());
+  }
+
+  void _rememberDirectory() {
+    if (loading ||
+        changingAccount ||
+        error.isNotEmpty ||
+        _searchResults ||
+        !_available ||
+        accountRevision !=
+            widget.services.cloud.sessionCredential(session)?.updatedAt) {
+      return;
+    }
+    _directoryCheckpoints.remove(stack.last.$1);
+    _directoryCheckpoints[stack.last.$1] = _DirectoryCheckpoint(
+      items: items,
+      offset: _fileScroll.hasClients ? _fileScroll.offset : 0,
+      searchText: search.text,
+      display: (view, sort, ascending),
+      timeReference: _timeReference,
+      savedAt: widget.services.clock(),
+      cursor: _nextCursor,
+      pageError: _pageError,
+    );
+    var entries = 0, directories = 0;
+    for (final checkpoint in _directoryCheckpoints.values.toList().reversed) {
+      final files = checkpoint.files;
+      if (files == null) continue;
+      if (directories >= 32 || entries + files.length > 20000) {
+        checkpoint.files = null;
+      } else {
+        entries += files.length;
+        directories++;
+      }
+    }
+  }
+
+  void _invalidateDirectoryFiles({String? parent}) {
+    for (final entry in _directoryCheckpoints.entries) {
+      if (parent == null || entry.key == parent) entry.value.files = null;
+    }
+  }
+
+  void _returnToDirectory(int index) {
+    if (index < 0 || index >= stack.length - 1) return;
+    final checkpoint = _directoryCheckpoints.remove(stack[index].$1);
+    stack.removeRange(index + 1, stack.length);
+    final ancestors = stack.map((part) => part.$1).toSet();
+    _directoryCheckpoints.removeWhere(
+      (parent, _) => !ancestors.contains(parent),
+    );
+    highlight = null;
+    search.text = checkpoint?.searchText ?? '';
+    final offset = checkpoint?.display == (view, sort, ascending)
+        ? checkpoint!.offset
+        : 0.0;
+    final files = checkpoint?.files;
+    final elapsed = checkpoint == null
+        ? null
+        : widget.services.clock().difference(checkpoint.savedAt);
+    if (files == null ||
+        elapsed == null ||
+        elapsed.isNegative ||
+        elapsed > const Duration(seconds: 45) ||
+        !_available ||
+        accountRevision !=
+            widget.services.cloud.sessionCredential(session)?.updatedAt) {
+      unawaited(
+        _load(initialOffset: offset, minimumItems: checkpoint?.count ?? 0),
+      );
+      return;
+    }
+    request?.cancel();
+    request = null;
+    _pageRequest?.cancel();
+    _pageRequest = null;
+    _progress.close(cancelled: true);
+    _resetSearch(clearCache: true);
+    generation++;
+    _replaceFileScroll(offset);
+    setState(() {
+      items = files;
+      _nextCursor = checkpoint!.cursor;
+      _pageError = checkpoint.pageError;
+      _loadingMore = false;
+      _timeReference = checkpoint.timeReference;
+      error = '';
+      loading = false;
+      if (!_hasMore) _deepSearch.remember(session, stack.last.$1, files);
+    });
   }
 
   Future<void> _loadMore() async {
@@ -323,6 +461,7 @@ class _BrowserPageState extends State<BrowserPage> {
         unawaited(_load());
       }
     } else {
+      _invalidateDirectoryFiles();
       _resetSearch(clearCache: true);
       request?.cancel();
       _pageRequest?.cancel();
@@ -338,6 +477,10 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   void _profileChanged() {
+    if (accountRevision !=
+        widget.services.cloud.sessionCredential(session)?.updatedAt) {
+      _directoryCheckpoints.clear();
+    }
     if ((_searchResults || widget.searchPage) &&
         accountRevision !=
             widget.services.cloud.sessionCredential(session)?.updatedAt) {
@@ -510,6 +653,7 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   Future<void> _refresh({bool preserveSelection = false}) async {
+    _invalidateDirectoryFiles();
     if (_searchResults && _includeSubfolders) {
       await _startSearch(refresh: true);
     } else if (!widget.searchPage) {
@@ -555,13 +699,21 @@ class _BrowserPageState extends State<BrowserPage> {
     return current?.updatedAt == accountRevision ? current : null;
   }
 
-  Future<void> _load({bool preserveSelection = false}) async {
+  Future<void> _load({
+    bool preserveSelection = false,
+    double? initialOffset,
+    int minimumItems = 0,
+  }) async {
     _pageRequest?.cancel();
     _pageRequest = null;
     _loadingMore = false;
     _nextCursor = null;
     _pageError = '';
-    if (!preserveSelection && _fileScroll.hasClients) _fileScroll.jumpTo(0);
+    if (!preserveSelection) {
+      _replaceFileScroll(
+        initialOffset ?? (generation == 0 ? widget.initialScrollOffset : 0),
+      );
+    }
     final previousSelection = preserveSelection
         ? Set<String>.of(selected)
         : <String>{};
@@ -569,6 +721,7 @@ class _BrowserPageState extends State<BrowserPage> {
     request?.cancel();
     final current = ++generation,
         scope = request = RequestScope(),
+        captured = session,
         parent = stack.last.$1;
     setState(() {
       loading = !preserveSelection;
@@ -581,11 +734,33 @@ class _BrowserPageState extends State<BrowserPage> {
     try {
       _checkAccount();
       final page = await scope.run(
-        () => _progress.run(
-          () async => highlight != null
-              ? CloudFilePage(await widget.services.cloud.list(session, parent))
-              : await widget.services.cloud.listPage(session, parent),
-        ),
+        () => _progress.run(() async {
+          final page = highlight != null
+              ? CloudFilePage(
+                  await widget.services.cloud.list(captured, parent),
+                )
+              : await widget.services.cloud.listPage(captured, parent);
+          if (page.files.length >= minimumItems || !page.hasMore) return page;
+          final merged = {for (final file in page.files) file.id: file};
+          var cursor = page.nextCursor;
+          final seen = <String>{};
+          while (merged.length < minimumItems && cursor != null) {
+            RequestScope.checkpoint();
+            _checkAccount();
+            require(current == generation && mounted, '目录已变化');
+            require(seen.add(cursor), '文件列表分页已失效，请刷新');
+            final next = await widget.services.cloud.listPage(
+              captured,
+              parent,
+              cursor: cursor,
+            );
+            for (final file in next.files) {
+              merged[file.id] = file;
+            }
+            cursor = next.nextCursor;
+          }
+          return CloudFilePage(merged.values.toList(), nextCursor: cursor);
+        }),
       );
       final files = page.files;
       _checkAccount();
@@ -629,7 +804,11 @@ class _BrowserPageState extends State<BrowserPage> {
         );
         if (grant != null && mounted && current == generation) {
           _setParserPasswordGrant(grant);
-          await _load(preserveSelection: preserveSelection);
+          await _load(
+            preserveSelection: preserveSelection,
+            initialOffset: initialOffset,
+            minimumItems: minimumItems,
+          );
         }
       }
     }
@@ -644,6 +823,7 @@ class _BrowserPageState extends State<BrowserPage> {
       return;
     }
     final trail = List<(String, String)>.of(_trailFor(file));
+    _rememberDirectory();
     stack
       ..clear()
       ..addAll(trail)
@@ -1328,6 +1508,13 @@ class _BrowserPageState extends State<BrowserPage> {
             icon: CupertinoIcons.arrow_up_doc,
             enabled: !pickingUpload,
           ),
+        if (_canUploadFolder)
+          AppMenuAction(
+            value: 'upload-folder',
+            label: '上传文件夹',
+            icon: CupertinoIcons.folder,
+            enabled: !pickingUpload,
+          ),
         if (_canCreateFolder)
           const AppMenuAction(
             value: 'new-folder',
@@ -1354,6 +1541,8 @@ class _BrowserPageState extends State<BrowserPage> {
           await _refresh();
         case 'upload':
           await _upload();
+        case 'upload-folder':
+          await _upload(folder: true);
         case 'new-folder':
           await _newFolder();
         case 'select-all':
@@ -1389,24 +1578,47 @@ class _BrowserPageState extends State<BrowserPage> {
     if (result != null && mounted) await _refresh();
   }
 
-  Future<List<XFile>> _droppedUploadFiles(List<XFile> dropped) async {
-    final paths = <String>{}, files = <XFile>[];
+  Future<(List<XFile>, List<UploadFolder>)> _droppedUploadFiles(
+    List<XFile> dropped,
+  ) async {
+    final paths = <String>{}, inputs = <(XFile, String, bool)>[];
     for (final file in dropped) {
       require(file.path.isNotEmpty && p.isAbsolute(file.path), '请从资源管理器拖入本地文件');
       final type = await FileSystemEntity.type(file.path);
-      require(type != FileSystemEntityType.directory, '暂不支持拖拽文件夹，请选择文件夹内的文件');
-      require(type == FileSystemEntityType.file, '无法读取拖入的文件，请检查文件是否存在及访问权限');
-      if (paths.add(p.normalize(file.path).toLowerCase())) files.add(file);
+      final directory = type == FileSystemEntityType.directory;
+      require(!directory || _canUploadFolder, '当前目录不支持上传文件夹');
+      require(
+        directory || type == FileSystemEntityType.file,
+        '无法读取拖入的文件，请检查文件是否存在及访问权限',
+      );
+      final resolved =
+          await (directory ? Directory(file.path) : File(file.path))
+              .resolveSymbolicLinks();
+      if (paths.add(Platform.isWindows ? resolved.toLowerCase() : resolved)) {
+        inputs.add((file, resolved, directory));
+      }
     }
-    return files;
+    final files = <XFile>[], folders = <UploadFolder>[];
+    for (final (file, path, directory) in inputs) {
+      if (inputs.any((other) => other.$3 && p.isWithin(other.$2, path))) {
+        continue;
+      }
+      if (directory) {
+        folders.add(await widget.services.uploads.sources.scanFolder(path));
+      } else {
+        files.add(file);
+      }
+    }
+    return (files, folders);
   }
 
-  Future<void> _upload({List<XFile>? droppedFiles}) async {
+  Future<void> _upload({List<XFile>? droppedFiles, bool folder = false}) async {
     if (droppedFiles != null &&
         (!_canDropUpload || !(ModalRoute.isCurrentOf(context) ?? true))) {
       return;
     }
     if (pickingUpload || !_canUpload) return;
+    if (folder && !_canUploadFolder) return;
     if (!allowCloudAction(context, widget.services.control, session.platform)) {
       return;
     }
@@ -1421,13 +1633,28 @@ class _BrowserPageState extends State<BrowserPage> {
         'upload.$source.start',
         fields: {'platform': activeSession.platform.key},
       );
-      final List<XFile>? files;
-      if (droppedFiles != null) {
-        files = await _droppedUploadFiles(droppedFiles);
+      final (List<XFile>, List<UploadFolder>)? selection;
+      if (folder) {
+        final location = await widget.services.uploads.sources.pickFolder();
+        if (location == null || !mounted) return;
+        selection = await busy(
+          context,
+          () async => (
+            <XFile>[],
+            [await widget.services.uploads.sources.scanFolder(location)],
+          ),
+          label: '正在读取文件夹和子目录…',
+        );
+      } else if (droppedFiles != null) {
+        selection = await busy(
+          context,
+          () => _droppedUploadFiles(droppedFiles),
+          label: '正在读取所选文件和文件夹…',
+        );
       } else {
-        files = await busy(context, () async {
+        selection = await busy(context, () async {
           try {
-            return await openFiles();
+            return (await openFiles(), <UploadFolder>[]);
           } catch (error, stack) {
             DiagnosticLog.error(
               'upload.pick.failed',
@@ -1439,10 +1666,15 @@ class _BrowserPageState extends State<BrowserPage> {
           }
         }, label: '正在读取所选文件…');
       }
-      if (!mounted || files == null || files.isEmpty) return;
+      if (!mounted || selection == null) return;
+      final (files, folders) = selection;
+      if (files.isEmpty && folders.isEmpty) return;
       DiagnosticLog.event(
         'upload.$source.ready',
-        fields: {'platform': activeSession.platform.key, 'count': files.length},
+        fields: {
+          'platform': activeSession.platform.key,
+          'count': files.length + folders.length,
+        },
       );
       if (!identical(session, activeSession) || accountRevision != revision) {
         throw const AppException('账号或网盘已变化，请重新选择上传文件');
@@ -1453,11 +1685,12 @@ class _BrowserPageState extends State<BrowserPage> {
         parent,
         folderName,
         files,
+        folders: folders,
       );
       if (mounted && ids.isNotEmpty) {
         message(
           context,
-          '已添加 ${ids.length} 个上传任务，可离开页面 · 查看',
+          '已添加 ${ids.length} 个上传任务${folders.any((f) => f.skippedLinks > 0) ? '（已跳过符号链接）' : ''}，可离开页面 · 查看',
           onTap: widget.services.requestUploadManager,
         );
       }
@@ -1763,9 +1996,11 @@ class _BrowserPageState extends State<BrowserPage> {
     List<CloudFile>? initialItems,
   }) async {
     _resetSearch(clearCache: true);
+    _directoryCheckpoints.clear();
     request?.cancel();
     _pageRequest?.cancel();
     generation++;
+    _replaceFileScroll(0);
     setState(() {
       session = value;
       accountRevision = widget.services.cloud
@@ -2092,7 +2327,7 @@ class _BrowserPageState extends State<BrowserPage> {
   Widget _fileListContent(List<CloudFile> files, BoxConstraints constraints) {
     final footer = _hasMore && !_searchResults && !widget.searchPage;
     final key = ValueKey(
-      '${session.platform.name}:${session.mode.name}:${session.familyId}:${session.personalSpaceId}:${stack.last.$1}:$view:${_searchResults ? _searchGeneration : 0}',
+      '${session.platform.name}:${session.mode.name}:${session.familyId}:${session.personalSpaceId}:${stack.last.$1}:$view:${_searchResults ? _searchGeneration : 0}:$_fileListRevision',
     );
     if (view == 'grid' && !widget.picking) {
       final columns = ((constraints.maxWidth - 20) / 180).round().clamp(1, 8);
@@ -3030,8 +3265,7 @@ class _BrowserPageState extends State<BrowserPage> {
             search.clear();
           });
         } else if (stack.length > 1) {
-          stack.removeLast();
-          _load();
+          _returnToDirectory(stack.length - 2);
         }
       },
       child: PageFrame(
@@ -3117,6 +3351,8 @@ class _BrowserPageState extends State<BrowserPage> {
                 onSelected: (action) {
                   if (action == 'upload') {
                     _upload();
+                  } else if (action == 'upload-folder') {
+                    _upload(folder: true);
                   } else {
                     _newFolder();
                   }
@@ -3127,6 +3363,12 @@ class _BrowserPageState extends State<BrowserPage> {
                       value: 'upload',
                       label: '上传文件',
                       icon: CupertinoIcons.cloud_upload,
+                    ),
+                  if (_canUploadFolder)
+                    const AppMenuAction(
+                      value: 'upload-folder',
+                      label: '上传文件夹',
+                      icon: CupertinoIcons.folder,
                     ),
                   if (_canCreateFolder)
                     const AppMenuAction(
@@ -3237,10 +3479,7 @@ class _BrowserPageState extends State<BrowserPage> {
                               TextButton(
                                 onPressed: i == stack.length - 1
                                     ? null
-                                    : () {
-                                        stack.removeRange(i + 1, stack.length);
-                                        _load();
-                                      },
+                                    : () => _returnToDirectory(i),
                                 child: Text(
                                   stack[i].$2,
                                   style: const TextStyle(fontSize: 12),
@@ -3350,6 +3589,7 @@ class _BrowserPageState extends State<BrowserPage> {
                   Expanded(
                     child: CloudUploadDropTarget(
                       enabled: _canDropUpload,
+                      foldersSupported: _canUploadFolder,
                       folderName: stack.last.$2,
                       onFilesDropped: (files) =>
                           unawaited(_upload(droppedFiles: files)),

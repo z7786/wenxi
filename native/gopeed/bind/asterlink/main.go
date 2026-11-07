@@ -76,6 +76,16 @@ type request struct {
 }
 
 func Open(storageDir, cacheDir, encodedKey string) (err error) {
+	return openStorage(storageDir, cacheDir, encodedKey, nil, "")
+}
+
+// iOS app containers and granted directories can move across updates. Restore
+// the stored task paths before the downloader loads its durable checkpoints.
+func OpenWithStoragePaths(storageDir, cacheDir, encodedKey string, paths map[string]string, appleHome string) error {
+	return openStorage(storageDir, cacheDir, encodedKey, paths, appleHome)
+}
+
+func openStorage(storageDir, cacheDir, encodedKey string, paths map[string]string, appleHome string) (err error) {
 	apiMu.Lock()
 	defer apiMu.Unlock()
 	if core != nil {
@@ -92,6 +102,12 @@ func Open(storageDir, cacheDir, encodedKey string) (err error) {
 	}
 	if err != nil {
 		return err
+	}
+	if len(paths) > 0 || appleHome != "" {
+		if err = storage.restorePaths(paths, appleHome); err != nil {
+			storage.Close()
+			return err
+		}
 	}
 	payloadRoot, err = filepath.Abs(cacheDir)
 	if err == nil {

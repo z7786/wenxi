@@ -149,7 +149,11 @@ void main() {
       await tester.pumpWidget(
         const MaterialApp(
           home: LinkOpeningPage(
-            platform: LinkOpeningPlatform(channel: channel, android: false),
+            platform: LinkOpeningPlatform(
+              channel: channel,
+              android: false,
+              operatingSystem: 'windows',
+            ),
           ),
         ),
       );
@@ -160,4 +164,31 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+  for (final system in ['ios', 'macos']) {
+    testWidgets(
+      '$system explains its own launch entry without Windows installation instructions',
+      (tester) async {
+        messenger.setMockMethodCallHandler(
+          channel,
+          (_) async => fail('Android method called'),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LinkOpeningPage(
+              platform: LinkOpeningPlatform(
+                channel: channel,
+                android: false,
+                operatingSystem: system,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('网页一键打开'), findsOneWidget);
+        expect(find.textContaining('Windows 安装版'), findsNothing);
+        expect(find.byType(SwitchListTile), findsNothing);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 }

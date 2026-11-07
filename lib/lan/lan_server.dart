@@ -1,8 +1,15 @@
 part of 'lan_service.dart';
 
+// Once a file body starts, close a failed connection without appending JSON to
+// the partial payload. The receiver can then retry the unchanged byte range.
+class _LanStreamFailure implements Exception {
+  const _LanStreamFailure();
+}
+
 extension _LanServer on LanService {
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
+    var upgraded = false;
     final browserRead = request.method == 'GET' || request.method == 'HEAD';
     final browserPath =
         request.uri.path == '/' ||
@@ -18,8 +25,13 @@ extension _LanServer on LanService {
       return;
     }
     try {
-      final remote = request.connectionInfo?.remoteAddress.address ?? '';
-      require(running && isLanAddress(remote), '仅允许局域网连接');
+      final physicalRemote = request.connectionInfo?.remoteAddress;
+      require(
+        running && isLanAddress(physicalRemote?.address ?? ''),
+        '仅允许局域网连接',
+      );
+      final forwarded = _forwardedSession(request);
+      final remote = forwarded?.address ?? physicalRemote!.address;
       final host = request.headers.value(HttpHeaders.hostHeader);
       require(
         host != null && isLanAddress(Uri.parse('http://$host').host),
@@ -55,7 +67,29 @@ extension _LanServer on LanService {
           'name': name,
           'port': port,
         });
+      } else if (request.method == 'POST' &&
+          request.uri.path == '/v1/discover') {
+        require(forwarded == null, '发现请求无效');
+        final body = await _readBody(request);
+        _observePeer(LanPeer.fromJson(body, remote, clock()), persist: true);
+        _reply(response, {
+          'protocol': lanProtocol,
+          'id': id,
+          'name': name,
+          'port': port,
+        });
+      } else if (request.method == 'GET' && request.uri.path == '/v1/reverse') {
+        require(forwarded == null, '连接请求无效');
+        await _acceptReverse(request, remote);
+        upgraded = true;
+      } else if (parts.length == 3 &&
+          parts[0] == 'v1' &&
+          parts[1] == 'receive' &&
+          browserRead) {
+        require(physicalRemote!.isLoopback && forwarded == null, '仅允许本机下载组件连接');
+        await _serveForwardedFile(request, parts[2]);
       } else if (request.method == 'POST' && request.uri.path == '/v1/pair') {
+        require(forwarded == null, '配对请求无效');
         final body = await _readBody(request);
         final attempts = _attempts.putIfAbsent(remote, () => []);
         attempts.removeWhere((time) => clock().difference(time).inMinutes >= 1);
@@ -87,6 +121,21 @@ extension _LanServer on LanService {
             '设备回连信息无效',
           );
         }
+        final reverseTransfer =
+            bidirectional && body.boolean('reverseTransfer');
+        final cacheKey = '$remote/$peerId/$replySession';
+        final fingerprint = jsonEncode([peerName, peerPort, reverseTransfer]);
+        final cached = _pairReplies[cacheKey];
+        if (bidirectional &&
+            cached != null &&
+            cached.expires.isAfter(clock()) &&
+            _sessions.containsKey(cached.reply.str('session')) &&
+            _peerSessions[peerId]?.token == replySession) {
+          require(cached.fingerprint == fingerprint, '设备回连信息已变化，请重新配对');
+          _reply(response, cached.reply);
+          return;
+        }
+        _disconnectPeer(peerId);
         final expires = clock().add(const Duration(hours: 4));
         _sessions.removeWhere(
           (key, value) =>
@@ -110,12 +159,29 @@ extension _LanServer on LanService {
             base: peer.base,
             expires: expires,
           );
+          _rememberPeerEndpoint(peer, persist: true);
+          if (reverseTransfer) _reverseCapablePeers.add(peerId);
         }
-        _reply(response, {
+        final reply = <String, dynamic>{
           'session': token,
           'id': id,
           'bidirectional': bidirectional,
-        });
+          if (reverseTransfer) 'reverseTransfer': true,
+        };
+        if (bidirectional) {
+          _pairReplies.removeWhere(
+            (key, value) => !value.expires.isAfter(clock()),
+          );
+          if (_pairReplies.length >= 128) {
+            _pairReplies.remove(_pairReplies.keys.first);
+          }
+          _pairReplies[cacheKey] = (
+            reply: reply,
+            fingerprint: fingerprint,
+            expires: clock().add(const Duration(minutes: 2)),
+          );
+        }
+        _reply(response, reply);
         _changed();
       } else if (request.method == 'GET' && request.uri.path == '/v1/shares') {
         _authorize(request, remote);
@@ -152,7 +218,18 @@ extension _LanServer on LanService {
           require(LinkParser.parse(value).isNotEmpty, '消息中没有可识别的链接');
         }
         await _inboxGate.run(() async {
-          if (_inbox.any((message) => message.id == messageId)) return;
+          final duplicate = _inbox
+              .where((message) => message.id == messageId)
+              .firstOrNull;
+          if (duplicate != null) {
+            require(
+              duplicate.senderId == session.id &&
+                  duplicate.kind == kind &&
+                  duplicate.value == value,
+              '消息标识与内容不匹配',
+            );
+            return;
+          }
           require(
             _inbox.where((m) => !m.read).length < 100,
             '对方收件箱已满，请先处理已有消息',
@@ -227,11 +304,19 @@ extension _LanServer on LanService {
       }
     } catch (error) {
       try {
+        if (error is _LanStreamFailure) {
+          DiagnosticLog.event('lan.stream_interrupted');
+          return;
+        }
         // Rejected requests can still have an unread body. Never advertise a
         // reusable connection that the server is about to discard.
         response.persistentConnection = false;
         final message = error is AppException ? error.message : '设备请求失败，请重新连接';
-        final status = error is _LanRequestError ? error.status : 400;
+        final status = error is _LanRequestError
+            ? error.status
+            : error is _LanConnectionError
+            ? 503
+            : 400;
         if (browserRead && browserPath) {
           _browserPage(
             response,
@@ -245,7 +330,7 @@ extension _LanServer on LanService {
       } catch (_) {}
     } finally {
       try {
-        await response.close();
+        if (!upgraded) await response.close();
       } catch (_) {}
       _activeRequests--;
     }
@@ -300,6 +385,8 @@ extension _LanServer on LanService {
   }
 
   _LanSession _authorize(HttpRequest request, String remote) {
+    final forwarded = _forwardedSession(request);
+    if (forwarded != null) return forwarded;
     final value = request.headers.value(HttpHeaders.authorizationHeader) ?? '';
     final session = value.startsWith('Bearer ')
         ? _sessions[value.substring(7)]
@@ -308,6 +395,25 @@ extension _LanServer on LanService {
         session.address != remote ||
         !session.expires.isAfter(clock())) {
       throw const _LanRequestError('连接已失效，请重新输入对方的连接码', 401);
+    }
+    return session;
+  }
+
+  _LanSession? _forwardedSession(HttpRequest request) {
+    final permit = request.headers.value('X-AsterLink-Forwarded-Session');
+    if (permit == null) return null;
+    final permitInfo = request.connectionInfo?.remoteAddress.isLoopback == true
+        ? _forwardedRequests[permit]
+        : null;
+    final session = permitInfo?.session;
+    final paired = session == null ? null : _peerSessions[session.id];
+    if (session == null ||
+        !session.expires.isAfter(clock()) ||
+        paired == null ||
+        !paired.expires.isAfter(clock()) ||
+        paired.base.host != session.address ||
+        paired.token != permitInfo?.token) {
+      throw const _LanRequestError('转发连接已失效，请重新连接设备', 401);
     }
     return session;
   }
@@ -393,17 +499,21 @@ extension _LanServer on LanService {
       share.clientRequests[client] = (share.clientRequests[client] ?? 0) + 1;
       if (request.method == 'HEAD') return;
       share.lastActivity = clock();
-      await response.addStream(
-        files.read(source, start, end).map((chunk) {
-          if (!running || share.stopped || share.expired(clock())) {
-            throw const HttpException('Share ended');
-          }
-          share.transferred += chunk.length;
-          share.lastActivity = clock();
-          _changed(progress: true);
-          return chunk;
-        }),
-      );
+      try {
+        await response.addStream(
+          files.read(source, start, end).map((chunk) {
+            if (!running || share.stopped || share.expired(clock())) {
+              throw const HttpException('Share ended');
+            }
+            share.transferred += chunk.length;
+            share.lastActivity = clock();
+            _changed(progress: true);
+            return chunk;
+          }),
+        );
+      } catch (_) {
+        throw const _LanStreamFailure();
+      }
     } finally {
       share.responses.remove(response);
       final requests = (share.clientRequests[client] ?? 1) - 1;

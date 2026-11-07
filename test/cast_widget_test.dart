@@ -28,6 +28,13 @@ final _tv = CastDevice(
 class _Discovery extends CastDiscovery {
   int scans = 0;
   bool cleaned = false;
+  final manualAddresses = <String>[];
+  @override
+  Future<CastDevice> addAddress(String value) async {
+    manualAddresses.add(value);
+    return _tv;
+  }
+
   @override
   List<CastDevice> get devices => [_tv];
   @override
@@ -182,9 +189,37 @@ void main() {
     expect(find.byKey(const Key('player-cast-panel')), findsOneWidget);
   }
 
+  testWidgets(
+    'manual address dialog can be closed and reopened without stale text controllers',
+    (tester) async {
+      final result = await render(tester);
+      await open(tester);
+      await tester.tap(find.byKey(const Key('cast-add-address')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('cast-address-input')),
+        '192.168.1.8',
+      );
+      await tester.tap(find.byKey(const Key('cast-address-confirm')));
+      await tester.pumpAndSettle();
+      expect(result.discovery.manualAddresses, ['192.168.1.8']);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byKey(const Key('cast-add-address')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(result.discovery.manualAddresses, ['192.168.1.8']);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+      result.fixture.store.dispose();
+    },
+  );
+
   Future<void> connect(WidgetTester tester) async {
     final tile = find.byKey(const ValueKey('cast-device-test-tv'));
     await tester.ensureVisible(tile);
+    await tester.pumpAndSettle();
     await tester.tap(tile);
     await tester.pumpAndSettle();
   }

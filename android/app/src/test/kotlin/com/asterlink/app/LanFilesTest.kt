@@ -54,6 +54,33 @@ class LanFilesTest {
                             selectionArgs: Array<out String>?) = 0
     }
 
+    private class TreeProvider : ContentProvider() {
+        val queries = arrayListOf<String>()
+        var unreadable = false
+        override fun onCreate() = true
+        override fun getType(uri: Uri) = DocumentsContract.Document.MIME_TYPE_DIR
+        override fun query(uri: Uri, projection: Array<out String>?, selection: String?,
+            selectionArgs: Array<out String>?, sortOrder: String?): Cursor? {
+            queries.add(uri.toString())
+            val id = DocumentsContract.getDocumentId(uri)
+            val children = uri.lastPathSegment == "children"
+            if (unreadable && id == "sub" && children) return null
+            val directory = DocumentsContract.Document.MIME_TYPE_DIR
+            val rows: List<Array<Any>> = if (!children) listOf(arrayOf(id, "资料", directory, 0L, 0L))
+                else when (id) {
+                    "root" -> listOf(arrayOf("sub", "子目录", directory, 0L, 0L),
+                        arrayOf("empty", "空目录", directory, 0L, 0L),
+                        arrayOf("one", "根文件.txt", "text/plain", 3L, 1234L))
+                    "sub" -> listOf(arrayOf("two", "说明.txt", "text/plain", 5L, 5678L))
+                    else -> emptyList()
+                }
+            return MatrixCursor(projection).apply { rows.forEach(::addRow) }
+        }
+        override fun insert(uri: Uri, values: ContentValues?): Uri? = null
+        override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?) = 0
+        override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?) = 0
+    }
+
     @Before fun setup() {
         val app = RuntimeEnvironment.getApplication()
         root = File(app.cacheDir, "lan-files-test").apply { mkdirs() }
@@ -121,5 +148,48 @@ class LanFilesTest {
         assertThrows(IllegalArgumentException::class.java) { files.read(handle, 512 * 1024 + 1) }
         assertThrows(IllegalArgumentException::class.java) { files.read(handle, 0) }
         files.close(handle)
+    }
+
+    @Test fun folderUploadScanIsReadOnlyAndCountsFilesAndDirectoriesTogether() {
+        val folder = File(root, "上传资料").apply { mkdirs() }
+        File(folder, "空目录").mkdirs()
+        File(folder, "说明.txt").writeText("hello")
+        files.checkDirectory(folder.absolutePath)
+        val selected = files.scan(folder.absolutePath, true, 3)
+        assertEquals("上传资料", selected["name"])
+        assertEquals(setOf("", "空目录"), (selected["directories"] as List<*>).toSet())
+        assertEquals(1, (selected["files"] as List<*>).size)
+        assertThrows(IllegalArgumentException::class.java) { files.scan(folder.absolutePath, true, 2) }
+        assertEquals("hello", File(folder, "说明.txt").readText())
+        assertEquals(setOf("说明.txt", "空目录"), folder.listFiles()!!.map { it.name }.toSet())
+        assertThrows(IllegalArgumentException::class.java) { files.checkDirectory(sample.absolutePath) }
+    }
+
+    @Test fun stoppingLanSharingDoesNotCloseASeparateUploadReader() {
+        val uploader = LanFiles(RuntimeEnvironment.getApplication())
+        val uploadReader = uploader.open(contentUri.toString(), 19)
+        val lanReader = files.open(contentUri.toString(), 0)
+        files.network(false)
+        assertThrows(IllegalArgumentException::class.java) { files.read(lanReader, 1) }
+        assertArrayEquals(payload.copyOfRange(19, 52), uploader.read(uploadReader, 33))
+        uploader.close(uploadReader)
+    }
+
+    @Test fun uploadTreeQueriesEachDirectoryOnceAndRejectsUnreadableChildren() {
+        val app = RuntimeEnvironment.getApplication()
+        val provider = TreeProvider()
+        provider.attachInfo(app, ProviderInfo().apply { authority = "wenxi.upload.tree" })
+        ShadowContentResolver.registerProviderInternal("wenxi.upload.tree", provider)
+        val tree = DocumentsContract.buildTreeDocumentUri("wenxi.upload.tree", "root")
+        val selected = files.scanUploadDirectory(tree.toString())
+        assertEquals("资料", selected["name"])
+        assertEquals(setOf("", "子目录", "空目录"), (selected["directories"] as List<*>).toSet())
+        val entries = selected["files"] as List<*>
+        assertEquals(2, entries.size)
+        assertEquals(setOf("根文件.txt", "子目录/说明.txt"), entries.map { (it as Map<*, *>)["relative"] }.toSet())
+        assertEquals(4, provider.queries.size)
+        assertTrue(entries.all { (it as Map<*, *>)["location"].toString().startsWith(tree.toString() + "/document/") })
+        provider.unreadable = true
+        assertThrows(IllegalArgumentException::class.java) { files.scanUploadDirectory(tree.toString()) }
     }
 }

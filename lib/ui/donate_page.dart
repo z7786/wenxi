@@ -1,9 +1,9 @@
-import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../diagnostics/app_log.dart';
+import '../platform/document_actions.dart';
 import 'common.dart';
 
 class DonatePage extends StatefulWidget {
@@ -31,28 +31,15 @@ class _DonatePageState extends State<DonatePage> {
       String? saved;
       if (widget.saveCode != null) {
         saved = await widget.saveCode!(bytes, name);
-      } else if (Platform.isAndroid) {
-        saved = await const MethodChannel('com.asterlink.app/native')
-            .invokeMethod<String>('saveDocument', {
-              'name': name,
-              'bytes': bytes,
-              'mime': 'image/png',
-            });
       } else {
-        final location = await getSaveLocation(
-          suggestedName: name,
+        saved = await const DocumentActions().saveBytes(
+          bytes,
+          name,
+          mime: 'image/png',
           acceptedTypeGroups: const [
             XTypeGroup(label: '赞赏码图片', extensions: ['png']),
           ],
         );
-        if (location != null) {
-          await XFile.fromData(
-            bytes,
-            name: name,
-            mimeType: 'image/png',
-          ).saveTo(location.path);
-          saved = location.path;
-        }
       }
       if (mounted) message(context, saved == null ? '已取消保存' : '赞赏码已保存');
     } catch (error, stack) {

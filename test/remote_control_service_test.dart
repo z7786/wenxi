@@ -6,8 +6,114 @@ import 'package:asterlink/data/remote_control_service.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
 import 'remote_control_support.dart';
+import 'support.dart' show until;
 
 void main() {
+  for (final platform in ['ios', 'macos']) {
+    test(
+      '$platform remembers ignored updates after restart and shows newer builds',
+      () async {
+        final state = StateStore.memory();
+        addTearDown(state.dispose);
+        final config = controlJson();
+        (config['updates'] as Map)[platform] = {
+          'enabled': true,
+          'version': '2.2.1',
+          'build': 221,
+          'downloadUrl': 'https://example.test/$platform',
+        };
+        final fetcher = FakeControlFetcher(config);
+        final service = RemoteControlService(
+          state,
+          platform: platform,
+          currentBuild: 220,
+          configUrl: controlEndpoint,
+          enabled: true,
+          fetcher: fetcher,
+          clock: () => controlNow,
+        );
+        addTearDown(service.close);
+        await service.refresh(force: true);
+        await until(() => service.cachePersisted);
+        await service.ignoreUpdate(221);
+        service.close();
+        final restoredState = StateStore.memory(
+          asJson(jsonDecode(jsonEncode(state.data))),
+        );
+        addTearDown(restoredState.dispose);
+        final restored = RemoteControlService(
+          restoredState,
+          platform: platform,
+          currentBuild: 220,
+          configUrl: controlEndpoint,
+          enabled: true,
+          fetcher: fetcher,
+          clock: () => controlNow,
+        );
+        addTearDown(restored.close);
+        expect(restored.availableUpdate!.build, 221);
+        expect(restored.unreadUpdate, isNull);
+        (config['updates'] as Map)[platform]['build'] = 222;
+        config['revision'] = 2;
+        fetcher.text = jsonEncode(config);
+        await restored.refresh(force: true);
+        expect(restored.unreadUpdate!.build, 222);
+        expect(restored.unreadUpdate!.force, isFalse);
+      },
+    );
+    test(
+      '$platform uses remote updates, expiry, cloud controls and saved cache',
+      () async {
+        final store = StateStore.memory({});
+        addTearDown(store.dispose);
+        var now = controlNow;
+        final root = controlJson(disabled: ['quark'], noticeId: 'apple');
+        (root['updates'] as Map)[platform] = {
+          'enabled': true,
+          'force': true,
+          'version': '2.2.1',
+          'build': 221,
+          'downloadUrl': 'https://example.test/$platform',
+          'expiresAt': now
+              .toUtc()
+              .add(const Duration(hours: 1))
+              .toIso8601String(),
+        };
+        final control = RemoteControlService(
+          store,
+          platform: platform,
+          currentBuild: 220,
+          configUrl: controlEndpoint,
+          enabled: true,
+          fetcher: FakeControlFetcher(root),
+          clock: () => now,
+        );
+        addTearDown(control.close);
+        expect(await control.refresh(), ControlRefreshResult.success);
+        expect(control.requiredUpdate!.build, 221);
+        expect(control.cloudEnabled(CloudPlatform.quark), isFalse);
+        await until(() => control.cachePersisted);
+        control.close();
+        final cached = RemoteControlService(
+          store,
+          platform: platform,
+          currentBuild: 220,
+          configUrl: controlEndpoint,
+          enabled: true,
+          fetcher: FakeControlFetcher(),
+          clock: () => now,
+        );
+        addTearDown(cached.close);
+        expect(cached.requiredUpdate!.build, 221);
+        expect(cached.errorForSection('updates.$platform'), isNull);
+        now = now.add(const Duration(hours: 2));
+        expect(cached.requiredUpdate, isNull);
+        expect(cached.availableUpdate!.force, isFalse);
+        expect(cached.config.announcement, isNotNull);
+      },
+    );
+  }
+
   late StateStore store;
   late FakeControlFetcher fetcher;
   late RemoteControlService control;

@@ -6,6 +6,7 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/ui/download_protection_page.dart';
 
 class _Platform extends DownloadProtectionPlatform {
+  _Platform({super.operatingSystem});
   final opened = <String>[];
   bool allowed = false, failRead = false, failOpen = false;
   bool desktop = false, running = false, keepAlive = false;
@@ -33,6 +34,41 @@ class _Platform extends DownloadProtectionPlatform {
 }
 
 void main() {
+  testWidgets(
+    'iOS explains foreground transfers without requesting Android settings',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: DownloadProtectionPage(
+            platform: DownloadProtectionPlatform(operatingSystem: 'ios'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('iOS 下载与续传'), findsOneWidget);
+      expect(find.textContaining('请保持应用在前台'), findsOneWidget);
+      expect(find.text('电池优化'), findsNothing);
+      expect(find.text('开启通知'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'macOS displays sleep protection without Windows tray instructions',
+    (tester) async {
+      final platform = _Platform(operatingSystem: 'macos')
+        ..desktop = true
+        ..running = true;
+      await tester.pumpWidget(
+        MaterialApp(home: DownloadProtectionPage(platform: platform)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('最小化窗口后下载和上传会继续'), findsOneWidget);
+      expect(find.text('下载保活运行中 · 自动休眠保护已开启'), findsOneWidget);
+      expect(find.textContaining('系统托盘，下载和上传'), findsNothing);
+      expect(find.textContaining('托盘下载'), findsNothing);
+      expect(platform.opened, isEmpty);
+    },
+  );
   testWidgets(
     'Android reports startup keepalive independently of active downloads and denied notifications',
     (tester) async {

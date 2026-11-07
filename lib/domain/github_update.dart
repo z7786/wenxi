@@ -162,6 +162,22 @@ class GitHubReleaseParser {
       } else {
         return null;
       }
+    } else if (platform == 'macos') {
+      if (RegExp(r'(?:^|[-_. ])test(?:[-_. ]|$)').hasMatch(lower)) {
+        return null;
+      }
+      if (!RegExp(
+        r'(?:^|[-_. ])(?:macos|darwin|mac)(?:[-_. ]|$)',
+      ).hasMatch(lower)) {
+        return null;
+      }
+      if (lower.endsWith('.dmg')) {
+        kind = 5;
+      } else if (lower.endsWith('.zip')) {
+        kind = 1;
+      } else {
+        return null;
+      }
     } else {
       return null;
     }

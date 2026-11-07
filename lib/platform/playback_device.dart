@@ -1,19 +1,27 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:window_manager/window_manager.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/playback.dart';
+import '../playback/system_pip.dart';
 import 'windows_pip.dart';
 import 'windows_external_player.dart';
+import 'macos_external_player.dart';
 
 abstract class PlaybackDevice extends ChangeNotifier {
   bool get supportsOrientation => false;
+
+  /// Safe bounds independent of system bar visibility for the current viewport.
+  EdgeInsets? systemInsetsFor(MediaQueryData media) => null;
   bool get supportsPip;
   bool get supportsDesktopPip => false;
   bool get supportsIndependentPlayerWindows => false;
   bool get supportsExternalPlayer => false;
+  bool get externalPlayerNeedsDirectLink => false;
+  SystemPipPlayback? get systemPip => null;
   WindowsExternalPlayer? get windowsExternalPlayer => null;
   bool get supportsBrightness;
   bool get supportsSystemVolume => false;
@@ -47,23 +55,33 @@ abstract class PlaybackDevice extends ChangeNotifier {
   }) async => false;
 }
 
-class NativePlaybackDevice extends PlaybackDevice {
+class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   NativePlaybackDevice({
     TargetPlatform? targetPlatform,
     WindowsExternalPlayer? windowsExternalPlayer,
   }) : _platform = targetPlatform ?? defaultTargetPlatform,
        _windowsPlayer = windowsExternalPlayer ?? WindowsExternalPlayer();
   final WindowsExternalPlayer _windowsPlayer;
+  final _macosPlayer = MacOSExternalPlayer();
   final TargetPlatform _platform;
   bool get _android => _platform == TargetPlatform.android;
+  bool get _ios => _platform == TargetPlatform.iOS;
+  bool get _mobile => _android || _ios;
   bool get _windows => _platform == TargetPlatform.windows;
+  bool get _macos => _platform == TargetPlatform.macOS;
+  bool get _desktop => _windows || _macos;
   @override
-  bool get supportsOrientation => _android;
+  bool get supportsOrientation => _mobile;
   @override
-  bool get supportsExternalPlayer => _android || _windows;
+  bool get supportsExternalPlayer => _mobile || _desktop;
   @override
-  WindowsExternalPlayer? get windowsExternalPlayer =>
-      _windows ? _windowsPlayer : null;
+  bool get externalPlayerNeedsDirectLink => _ios;
+  @override
+  WindowsExternalPlayer? get windowsExternalPlayer => _windows
+      ? _windowsPlayer
+      : _macos
+      ? _macosPlayer
+      : null;
   static const _channel = MethodChannel('com.asterlink.app/playback');
   static const _nativeChannel = MethodChannel('com.asterlink.app/native');
   static NativePlaybackDevice? _handlerOwner;
@@ -73,9 +91,15 @@ class NativePlaybackDevice extends PlaybackDevice {
   bool _supportsPip = false, _inPip = false, _closed = false, _started = false;
   bool _fullscreen = false, _previousWindowsFullscreen = false;
   bool _video = false;
+  bool _controlsVisible = true, _locked = false;
+  bool? _iosUiHidden;
+  PlaybackOrientation? _iosOrientation;
   double _brightness = .5;
   double _systemVolume = 100;
   bool _supportsSystemVolume = false;
+  Size? _systemInsetsSize;
+  EdgeInsets? _systemInsets;
+  int _systemInsetsRevision = 0;
   final _volumeGate = AsyncGate();
   String _lastUpdate = '';
   @override
@@ -83,19 +107,31 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   bool get supportsDesktopPip => _windows && _supportsPip;
   @override
-  bool get supportsIndependentPlayerWindows => _windows;
+  bool get supportsIndependentPlayerWindows => _desktop;
   @override
-  bool get supportsBrightness => _android;
+  bool get supportsBrightness => _mobile;
   @override
-  bool get supportsSystemVolume => _android && _supportsSystemVolume;
+  bool get supportsSystemVolume => _mobile && _supportsSystemVolume;
   @override
-  bool get inPip => _windows ? _windowsPip.active : _inPip;
+  bool get inPip => _windows ? _windowsPip.active : _android && _inPip;
   @override
   double get brightness => _brightness;
   @override
   double get systemVolume => _systemVolume;
   @override
   Stream<String> get actions => _actions.stream;
+  @override
+  EdgeInsets? systemInsetsFor(MediaQueryData media) {
+    final size = _systemInsetsSize;
+    if (!_android ||
+        size == null ||
+        (size.width - media.size.width).abs() > 1 ||
+        (size.height - media.size.height).abs() > 1) {
+      return null;
+    }
+    return _systemInsets;
+  }
+
   Future<T?> _invoke<T>(String name, [Json arguments = const {}]) =>
       _channel.invokeMethod<T>(name, {'session': _session, ...arguments});
   @override
@@ -103,12 +139,12 @@ class NativePlaybackDevice extends PlaybackDevice {
     if (_closed || _started) return;
     _started = true;
     _video = video;
-    if (_android) {
+    if (_mobile) {
       _handlerOwner = this;
       _channel.setMethodCallHandler((call) async {
         final args = asJson(call.arguments);
         if (_closed || args.str('session') != _session) return;
-        if (call.method == 'pip') {
+        if (_android && call.method == 'pip') {
           _inPip = args.boolean('active');
           notifyListeners();
         } else if (call.method == 'action') {
@@ -119,14 +155,60 @@ class NativePlaybackDevice extends PlaybackDevice {
       });
       final values = asJson(await _invoke<Object?>('begin', {'video': video}));
       if (_closed) return;
-      _supportsPip = values.boolean('pip');
+      if (identical(_handlerOwner, this)) {
+        WidgetsBinding.instance.addObserver(this);
+        if (_ios) await _syncIosSystemUi();
+      }
+      _supportsPip = _android && values.boolean('pip');
       _brightness = values.number('brightness', .5).clamp(0, 1).toDouble();
+      _readSystemInsets(values);
       _readSystemVolume(values);
-    } else if (_windows) {
+    } else if (_desktop) {
       _previousWindowsFullscreen = await windowManager.isFullScreen();
-      _supportsPip = video;
+      _supportsPip = _windows && video;
     }
     if (!_closed) notifyListeners();
+  }
+
+  void _readSystemInsets(Json values) {
+    if (!_android || _closed) return;
+    final bounds = values.obj('systemInsets');
+    final width = bounds.number('width', double.nan);
+    final height = bounds.number('height', double.nan);
+    final sides = [
+      for (final side in ['left', 'top', 'right', 'bottom'])
+        bounds.number(side, double.nan),
+    ];
+    if (!width.isFinite ||
+        !height.isFinite ||
+        width <= 0 ||
+        height <= 0 ||
+        sides.any((value) => !value.isFinite || value < 0) ||
+        sides[0] + sides[2] >= width ||
+        sides[1] + sides[3] >= height) {
+      return;
+    }
+    final size = Size(width, height);
+    final insets = EdgeInsets.fromLTRB(sides[0], sides[1], sides[2], sides[3]);
+    if (size == _systemInsetsSize && insets == _systemInsets) return;
+    _systemInsetsSize = size;
+    _systemInsets = insets;
+    notifyListeners();
+  }
+
+  Future<void> _refreshSystemInsets() async {
+    if (!_android || _closed || !identical(_handlerOwner, this)) return;
+    final revision = ++_systemInsetsRevision;
+    try {
+      final values = asJson(await _invoke<Object?>('systemInsets'));
+      if (!_closed &&
+          revision == _systemInsetsRevision &&
+          identical(_handlerOwner, this)) {
+        _readSystemInsets(values);
+      }
+    } catch (_) {
+      // Keep the existing MediaQuery fallback on older native bridges.
+    }
   }
 
   void _readSystemVolume(Json values) {
@@ -166,7 +248,7 @@ class NativePlaybackDevice extends PlaybackDevice {
       _windowsPip.videoSize(width, height);
       return;
     }
-    if (!_android) return;
+    if (!_mobile) return;
     final targetOrientation = _video && orientation != null
         ? orientation
         : playbackOrientation(
@@ -180,6 +262,26 @@ class NativePlaybackDevice extends PlaybackDevice {
     if (_lastUpdate == signature) return;
     _lastUpdate = signature;
     try {
+      if (_ios) {
+        if (!identical(_handlerOwner, this)) return;
+        _controlsVisible = controlsVisible;
+        _locked = locked;
+        if (targetOrientation != null && targetOrientation != _iosOrientation) {
+          _iosOrientation = targetOrientation;
+          await SystemChrome.setPreferredOrientations(
+            targetOrientation == PlaybackOrientation.landscape
+                ? [
+                    DeviceOrientation.landscapeLeft,
+                    DeviceOrientation.landscapeRight,
+                  ]
+                : targetOrientation == PlaybackOrientation.portrait
+                ? [DeviceOrientation.portraitUp]
+                : [],
+          );
+        }
+        await _syncIosSystemUi();
+        if (_closed || !identical(_handlerOwner, this)) return;
+      }
       await _invoke<void>('state', {
         'playing': playing,
         'width': width,
@@ -190,6 +292,45 @@ class NativePlaybackDevice extends PlaybackDevice {
       });
     } catch (_) {
       _lastUpdate = '';
+      if (_ios) _iosOrientation = null;
+    }
+  }
+
+  Future<void> _syncIosSystemUi({bool force = false}) async {
+    if (!_ios || _closed || !identical(_handlerOwner, this)) return;
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    final size = views.isEmpty ? Size.zero : views.first.physicalSize;
+    final landscape =
+        _iosOrientation == PlaybackOrientation.landscape ||
+        (_iosOrientation == null ||
+                _iosOrientation == PlaybackOrientation.system) &&
+            size.width > size.height;
+    final hidden =
+        _video && (_fullscreen || landscape || _locked || !_controlsVisible);
+    if (!force && _iosUiHidden == hidden) return;
+    _iosUiHidden = hidden;
+    try {
+      await SystemChrome.setEnabledSystemUIMode(
+        SystemUiMode.manual,
+        overlays: hidden ? [] : SystemUiOverlay.values,
+      );
+    } catch (_) {
+      _iosUiHidden = null;
+      rethrow;
+    }
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (_android) unawaited(_refreshSystemInsets());
+    unawaited(_syncIosSystemUi().catchError((Object _) {}));
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (_android) unawaited(_refreshSystemInsets());
+      unawaited(_syncIosSystemUi(force: true).catchError((Object _) {}));
     }
   }
 
@@ -204,9 +345,14 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   Future<void> fullscreen(bool enabled) async {
     if (_closed) return;
-    if (_android) {
+    if (_mobile) {
+      _fullscreen = enabled;
+      if (_ios) {
+        await _syncIosSystemUi();
+        if (_closed || !identical(_handlerOwner, this)) return;
+      }
       await _invoke<void>('fullscreen', {'enabled': enabled});
-    } else if (_windows) {
+    } else if (_desktop) {
       await exitPip();
       await windowManager.setFullScreen(
         enabled ? true : _previousWindowsFullscreen,
@@ -231,8 +377,12 @@ class NativePlaybackDevice extends PlaybackDevice {
 
   @override
   Future<void> exitPip() async {
-    if (_closed || !_windows) return;
-    await _windowsPip.exit();
+    if (_closed) return;
+    if (_windows) {
+      await _windowsPip.exit();
+    } else {
+      return;
+    }
     if (!_closed) notifyListeners();
   }
 
@@ -257,15 +407,22 @@ class NativePlaybackDevice extends PlaybackDevice {
   Future<void> finish() async {
     if (_closed) return;
     _closed = true;
+    if (_mobile) WidgetsBinding.instance.removeObserver(this);
     try {
       if (_android) {
         await _nativeChannel.invokeMethod<void>('cancelExternalPlayer', {
           'session': _session,
         });
       }
-      if (_android && _started) await _invoke<void>('end');
+      if (_mobile && _started) await _invoke<void>('end');
+      if (_ios && identical(_handlerOwner, this)) {
+        await SystemChrome.setPreferredOrientations([]);
+        if (identical(_handlerOwner, this)) {
+          await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+        }
+      }
       if (_windows) await _windowsPip.exit();
-      if (_windows && _fullscreen) {
+      if (_desktop && _fullscreen) {
         await windowManager.setFullScreen(_previousWindowsFullscreen);
       }
     } finally {
@@ -286,6 +443,7 @@ class NativePlaybackDevice extends PlaybackDevice {
   }) async {
     require(supportsExternalPlayer && !_closed, '当前设备不支持选择第三方播放器');
     if (_windows) return _windowsPlayer.open(url);
+    if (_macos) return _macosPlayer.open(url);
     try {
       return await _nativeChannel.invokeMethod<bool>('openExternalPlayer', {
             'session': _session,

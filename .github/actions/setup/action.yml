@@ -27,3 +27,7 @@ runs:
         channel: stable
         flutter-version: ${{ inputs.windows-arm64 == 'true' && '3.47.9' || '3.41.4' }}
         cache: false
+    - name: Use the official package registry with existing locked hashes
+      shell: bash
+      run: |
+        python -c "from pathlib import Path; p=Path('pubspec.lock'); p.write_text(p.read_text().replace('https://pub.flutter-io.cn', 'https://pub.dev'))"

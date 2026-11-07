@@ -6,6 +6,7 @@ import 'package:share_plus/share_plus.dart';
 import '../core/json.dart';
 import '../domain/playback.dart';
 import 'file_access.dart';
+import 'document_actions.dart';
 
 String playerScreenshotName(
   String video,
@@ -26,7 +27,7 @@ class PlayerScreenshotActions {
   static const _native = MethodChannel('com.asterlink.app/native');
   static const _clipboard = MethodChannel('com.asterlink.app/player_images');
   bool get canShare => Platform.isAndroid || Platform.isIOS;
-  bool get canCopy => Platform.isWindows;
+  bool get canCopy => Platform.isWindows || Platform.isMacOS;
 
   Future<String?> save(Uint8List bytes, String name) async {
     _check(bytes);
@@ -47,19 +48,21 @@ class PlayerScreenshotActions {
           ? null
           : '所选位置';
     }
-    final target = await getSaveLocation(
-      suggestedName: name,
+    if (Platform.isIOS) {
+      final saved = await _native.invokeMethod<String>('savePlayerScreenshot', {
+        'bytes': bytes,
+        'name': safeFileName(name),
+      });
+      return saved == null ? null : '相册';
+    }
+    return const DocumentActions().saveBytes(
+      bytes,
+      name,
+      mime: 'image/png',
       acceptedTypeGroups: const [
         XTypeGroup(label: 'PNG 图片', extensions: ['png']),
       ],
     );
-    if (target == null) return null;
-    await XFile.fromData(
-      bytes,
-      mimeType: 'image/png',
-      name: name,
-    ).saveTo(target.path);
-    return target.path;
   }
 
   Future<void> share(Uint8List bytes, String name, ui.Rect origin) async {

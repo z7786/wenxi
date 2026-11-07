@@ -46,18 +46,22 @@ import 'download/mobile_data_download_guard.dart';
 import 'download/transfer_activity.dart';
 import 'download/navigation_transfers.dart';
 import 'upload/upload_manager.dart';
+import 'upload/upload_sources.dart';
 import 'lan/lan_service.dart';
+import 'lan/lan_download_route.dart';
 import 'lan/lan_files.dart';
 import 'download/download_shutdown.dart';
 import 'download/download_overlay.dart';
 import 'download/transfer_http.dart';
 import 'platform/file_access.dart';
+import 'platform/apple_storage.dart';
 import 'playback/floating_playback.dart';
 import 'platform/download_network.dart';
 import 'platform/app_update_installer.dart';
 import 'platform/clipboard_links.dart';
 import 'platform/external_open.dart';
 import 'platform/native_engine.dart';
+import 'platform/desktop_platform.dart';
 import 'platform/windows_actions.dart';
 import 'platform/windows_webview.dart';
 import 'data/providers/ilanzou.dart';
@@ -274,7 +278,7 @@ class AppServices extends ChangeNotifier {
     );
     transfer = transferHttp ?? TransferHttp();
     final backgroundTransfers =
-        platformFeatures && (Platform.isAndroid || Platform.isWindows);
+        platformFeatures && (Platform.isAndroid || isDesktopPlatform);
     lan =
         lanService ??
         LanService(
@@ -300,6 +304,10 @@ class AppServices extends ChangeNotifier {
     uploads = UploadManager(
       store: store,
       cloud: cloud,
+      sources: UploadSources(
+        android: platformFeatures && Platform.isAndroid,
+        ios: platformFeatures && Platform.isIOS,
+      ),
       foreground: backgroundTransfers ? transferActivity.sync : null,
     );
     mobileDataDownloads = MobileDataDownloadGuard(
@@ -317,7 +325,9 @@ class AppServices extends ChangeNotifier {
       files: files,
       cleanups: cleanups,
       http: transfer,
-      refreshSource: (spec) => RemoteSources.owns(spec)
+      refreshSource: (spec) => LanDownloadRoute.owns(spec)
+          ? lan.resolveDownload(spec)
+          : RemoteSources.owns(spec)
           ? sources.refreshDownload(spec)
           : cloud.refresh(spec),
       checkNewCloudTask: control.checkCloud,
@@ -499,7 +509,9 @@ class AppServices extends ChangeNotifier {
   }
 
   final externalOpens = ExternalOpenInbox(
-    channel: Platform.isWindows ? windowsExternalOpenChannel : nativeChannel,
+    channel: isDesktopPlatform || Platform.isIOS
+        ? windowsExternalOpenChannel
+        : nativeChannel,
   );
   String? migrationError;
   bool _closed = false;
@@ -549,8 +561,17 @@ class AppServices extends ChangeNotifier {
       cache = Directory(paths.str('cache'));
       destination = cache;
       transport = AndroidGopeedTransport();
+    } else if (Platform.isIOS) {
+      data = Directory(
+        p.join((await getApplicationSupportDirectory()).path, 'AsterLink'),
+      );
+      cache = Directory(p.join(data.path, 'downloads'));
+      destination = Directory(
+        p.join((await getApplicationDocumentsDirectory()).path, 'Downloads'),
+      );
+      transport = IOSGopeedTransport();
     } else {
-      require(Platform.isWindows, '当前版本支持 Android 和 Windows');
+      require(isDesktopPlatform, '当前版本支持 Android、Windows 和 macOS');
       data = Directory(
         p.join((await getApplicationSupportDirectory()).path, 'AsterLink'),
       );
@@ -564,9 +585,9 @@ class AppServices extends ChangeNotifier {
         ),
       );
       transport = DesktopGopeedTransport(
-        executable: p.join(
-          p.dirname(Platform.resolvedExecutable),
-          'asterlink_gopeed.exe',
+        executable: desktopDownloadExecutable(
+          Platform.resolvedExecutable,
+          Platform.operatingSystem,
         ),
       );
     }
@@ -590,6 +611,7 @@ class AppServices extends ChangeNotifier {
     try {
       DiagnosticLog.event('app.state_read_start');
       final store = await StateStore.open(data);
+      await restoreAppleStorage(store);
       DiagnosticLog.event(
         'app.state_read',
         fields: {
@@ -630,7 +652,7 @@ class AppServices extends ChangeNotifier {
     // are verified synchronously and remote updates share this store's write
     // gate; neither should compete with local account/queue initialization.
     final startup = Stopwatch()..start();
-    if (platformFeatures && Platform.isWindows) {
+    if (platformFeatures && (isDesktopPlatform || Platform.isIOS)) {
       windowsExternalOpenChannel.setMethodCallHandler((call) async {
         if (call.method == 'externalOpenAvailable') {
           await externalOpens.refresh();
@@ -1050,6 +1072,7 @@ class AppServices extends ChangeNotifier {
     'remoteControl': control.diagnostics(),
     'parserRules': parserRules.diagnostics(),
     'sources': sources.diagnostics(),
+    'lan': lan.diagnostics,
     'accounts': {
       for (final platform in CloudPlatform.values)
         platform.key: LoginCredentials.stored(
@@ -1099,7 +1122,7 @@ class AppServices extends ChangeNotifier {
     _closed = true;
     clipboard.dispose();
     externalOpens.dispose();
-    if (platformFeatures && Platform.isWindows) {
+    if (platformFeatures && (isDesktopPlatform || Platform.isIOS)) {
       windowsExternalOpenChannel.setMethodCallHandler(null);
     }
     downloadNavigation.dispose();

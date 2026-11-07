@@ -166,9 +166,17 @@ class ExternalOpenRequestTest {
         val aliases = app.children("activity-alias").associateBy { it.attr("name") }
         val downloads = filters(aliases.getValue(".DownloadEntry"))
         val player = filters(aliases.getValue(".PlayerEntry"))
-        for (mime in listOf(null, "video/mp4", "application/vnd.apple.mpegurl", "application/dash+xml")) {
+        for (mime in listOf("video/mp4", "application/vnd.apple.mpegurl", "application/dash+xml", "application/mp4", "application/x-matroska")) {
             assertTrue(matches(downloads, "https://example.test/play?id=1", mime))
             assertTrue(matches(player, "https://example.test/play?id=1", mime))
+        }
+        for (mime in listOf(null, "text/html", "application/xhtml+xml")) {
+            assertFalse(matches(downloads, "https://example.test/page", mime))
+            assertFalse(matches(player, "https://example.test/page", mime))
+        }
+        for (mime in listOf("application/octet-stream", "application/pdf", "application/zip", "application/x-bittorrent",
+            "audio/mpeg", "image/jpeg", "text/plain", "text/csv")) {
+            assertTrue("File type missing: $mime", matches(downloads, "https://example.test/file", mime))
         }
         assertTrue(matches(player, "content://videos.test/12", "video/mp4"))
         assertTrue(matches(player, "file:///storage/emulated/0/video.mp4", "video/mp4"))

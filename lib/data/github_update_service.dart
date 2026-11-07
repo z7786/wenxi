@@ -38,15 +38,15 @@ class GitHubUpdateService {
   bool _closed = false;
 
   static String get runtimeArchitecture => switch (Abi.current()) {
-    Abi.androidArm64 || Abi.windowsArm64 => 'arm64',
-    Abi.androidX64 || Abi.windowsX64 => 'x64',
+    Abi.androidArm64 || Abi.windowsArm64 || Abi.macosArm64 => 'arm64',
+    Abi.androidX64 || Abi.windowsX64 || Abi.macosX64 => 'x64',
     Abi.androidArm => 'arm',
     Abi.androidIA32 || Abi.windowsIA32 => 'x86',
     _ => 'unsupported',
   };
 
   bool get configured =>
-      {'android', 'windows'}.contains(platform) &&
+      {'android', 'windows', 'macos'}.contains(platform) &&
       {'arm64', 'x64', 'arm', 'x86'}.contains(architecture) &&
       RegExp(
         r'^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$',

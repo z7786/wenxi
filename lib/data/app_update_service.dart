@@ -42,7 +42,7 @@ class AppUpdateService extends ChangeNotifier {
   final _stages = <String, String>{};
   bool _closed = false;
 
-  bool get supported => platform == 'android' || platform == 'windows';
+  bool get supported => {'android', 'windows', 'macos'}.contains(platform);
 
   String keyFor(RemoteUpdate update) => sha256
       .convert(

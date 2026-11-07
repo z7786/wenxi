@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../app_services.dart';
 import '../domain/background.dart';
 import '../domain/settings.dart';
+import '../platform/document_actions.dart';
 import 'app_background.dart';
 import 'appearance_preview.dart';
 import 'background_crop_page.dart';
@@ -54,13 +55,7 @@ class _BackgroundPageState extends State<BackgroundPage> {
       final source = widget.pickImage != null
           ? await widget.pickImage!()
           : await openFile(
-              acceptedTypeGroups: const [
-                XTypeGroup(
-                  label: '背景图片',
-                  extensions: ['jpg', 'jpeg', 'png', 'webp'],
-                  mimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
-                ),
-              ],
+              acceptedTypeGroups: const [backgroundImageFileType],
               confirmButtonText: '选择背景',
             );
       if (source == null || !mounted) return;

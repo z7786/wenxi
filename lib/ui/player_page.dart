@@ -111,6 +111,7 @@ class _PlayerPageState extends State<PlayerPage>
   bool _wasPlaying = false, _pauseWithoutControls = false;
   int _modalDepth = 0, _seenGeneration = -1;
   int _lifecycleRevision = 0;
+  bool _pipWasBackground = false;
   String hud = '', _seenNotice = '';
   String _seenFontMessage = '';
   Duration? _seekPreview;
@@ -279,6 +280,9 @@ class _PlayerPageState extends State<PlayerPage>
       controller.backend?.subtitleFontLoading,
       controller.cloudSubtitleId,
       controller.usingSoftwareDecoder,
+      controller.usingSystemPip,
+      controller.preparingSystemPip,
+      controller.systemPipPlayback?.surfaceKey,
       state.playing,
       state.completed,
       state.buffering,
@@ -499,8 +503,16 @@ class _PlayerPageState extends State<PlayerPage>
     final revision = ++_lifecycleRevision;
     if (state == AppLifecycleState.resumed) {
       controller.foreground();
+      if (!_pipBusy) {
+        final returning = _pipWasBackground;
+        _pipWasBackground = false;
+        if (returning && controller.usingSystemPip) {
+          _run(() => controller.restoreSystemPip(resume: true));
+        }
+      }
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      _pipWasBackground = true;
       if (state == AppLifecycleState.detached || (!device.inPip && !_pipBusy)) {
         _run(() => controller.background(pictureInPicture: false));
         return;
@@ -854,12 +866,35 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
     if (_pipBusy) return;
-    _pipBusy = true;
+    if (controller.usingSystemPip) {
+      await controller.restoreSystemPip(resume: true);
+      return;
+    }
+    setState(() => _pipBusy = true);
+    _showHud('正在启动画中画');
     try {
       await controller.endBoost();
-      if (!await device.enterPip() && mounted) _showHud('当前设备暂时无法进入画中画');
+      final systemPip = device.systemPip;
+      final entered = systemPip == null
+          ? await device.enterPip()
+          : await controller.enterSystemPip(systemPip, device.enterPip);
+      if (!entered && mounted) {
+        _showHud('当前视频或设备暂时无法进入画中画，已保留内置播放');
+      }
     } finally {
-      _pipBusy = false;
+      if (mounted) {
+        setState(() => _pipBusy = false);
+      } else {
+        _pipBusy = false;
+      }
+      if (mounted &&
+          _pipWasBackground &&
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+        _pipWasBackground = false;
+        if (controller.usingSystemPip) {
+          _run(() => controller.restoreSystemPip(resume: true));
+        }
+      }
     }
   }
 
@@ -1523,6 +1558,7 @@ class _PlayerPageState extends State<PlayerPage>
                   XTypeGroup(
                     label: '字幕文件',
                     extensions: SubtitleFiles.extensions,
+                    uniformTypeIdentifiers: const ['public.data'],
                   ),
                 ],
               ));
@@ -2174,7 +2210,7 @@ class _PlayerPageState extends State<PlayerPage>
               [
                 '拖动进度条可快速定位播放位置。',
                 '横向滑动调整进度，左侧上下滑动调亮度，右侧调音量；长按加速，按住上滑锁定、下滑取消。',
-                if (Platform.isWindows)
+                if (Platform.isWindows || Platform.isMacOS)
                   '键盘：空格播放/暂停，←/→跳转，↑/↓音量，F 全屏，Esc 返回，M 静音。',
               ].join('\n\n'),
               style: const TextStyle(
@@ -2480,9 +2516,10 @@ class _PlayerPageState extends State<PlayerPage>
         );
         if (opened && executable != null) {
           try {
-            await ExternalPlayerHistory(
-              controller.history.store,
-            ).used(executable);
+            await ExternalPlayerHistory(controller.history.store).used(
+              executable,
+              platform: Platform.isMacOS ? 'macos' : 'windows',
+            );
           } catch (_) {
             // A launched player already owns the stream. A failed preference
             // write must not close that stream or restart internal audio.
@@ -2490,7 +2527,7 @@ class _PlayerPageState extends State<PlayerPage>
           }
         }
         return opened;
-      });
+      }, directLink: device.externalPlayerNeedsDirectLink);
     } finally {
       _modalDepth--;
       if (mounted) _touch();
@@ -2498,7 +2535,10 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<String?> _chooseWindowsPlayer() async {
-    final history = ExternalPlayerHistory(controller.history.store).windows;
+    final historyStore = ExternalPlayerHistory(controller.history.store);
+    final history = Platform.isMacOS
+        ? historyStore.macos
+        : historyStore.windows;
     final saved = history.firstOrNull ?? '';
     if (history.isNotEmpty) {
       final route = DialogRoute<String>(
@@ -2545,6 +2585,11 @@ class _PlayerPageState extends State<PlayerPage>
       await route.completed;
       if (selected == null || !mounted || _leaving) return null;
       if (selected != 'choose') return selected;
+    }
+    if (Platform.isMacOS && widget.chooseExternalPlayer == null) {
+      return const MethodChannel(
+        'com.asterlink.app/native',
+      ).invokeMethod<String>('selectExternalPlayer');
     }
     final selected =
         await (widget.chooseExternalPlayer?.call() ??
@@ -2613,26 +2658,28 @@ class _PlayerPageState extends State<PlayerPage>
     final media = MediaQuery.of(context);
     final orientation = media.orientation;
     final previousInsets = _safeInsets[orientation] ?? EdgeInsets.zero;
-    // Android reports smaller padding while system bars animate away. Retain
-    // the safe bounds for this orientation so the controls never jump with it.
-    final insets = EdgeInsets.fromLTRB(
-      math.max(
-        previousInsets.left,
-        math.max(media.viewPadding.left, media.padding.left),
-      ),
-      math.max(
-        previousInsets.top,
-        math.max(media.viewPadding.top, media.padding.top),
-      ),
-      math.max(
-        previousInsets.right,
-        math.max(media.viewPadding.right, media.padding.right),
-      ),
-      math.max(
-        previousInsets.bottom,
-        math.max(media.viewPadding.bottom, media.padding.bottom),
-      ),
-    );
+    // Prefer Android's bounds with hidden bars included. The cached fallback
+    // keeps other platforms and older native bridges stable during bar fades.
+    final insets =
+        device.systemInsetsFor(media) ??
+        EdgeInsets.fromLTRB(
+          math.max(
+            previousInsets.left,
+            math.max(media.viewPadding.left, media.padding.left),
+          ),
+          math.max(
+            previousInsets.top,
+            math.max(media.viewPadding.top, media.padding.top),
+          ),
+          math.max(
+            previousInsets.right,
+            math.max(media.viewPadding.right, media.padding.right),
+          ),
+          math.max(
+            previousInsets.bottom,
+            math.max(media.viewPadding.bottom, media.padding.bottom),
+          ),
+        );
     _safeInsets[orientation] = insets;
     final chromeMedia = media.copyWith(padding: insets, viewPadding: insets);
     return Theme(
@@ -2706,6 +2753,11 @@ class _PlayerPageState extends State<PlayerPage>
                       ? 12
                       : controller.preferences.subtitleSize;
                   _syncNativeSubtitles();
+                  final systemPipVideo = controller.systemPipPlayback
+                      ?.buildVideo(fit: BoxFit.contain);
+                  // Keep the ordinary texture mounted across AVKit handoffs.
+                  // The transparent native layer covers it only after a frame
+                  // is ready and releases it when PiP finishes or fails.
                   final video = backend?.buildVideo(
                     aspectRatio:
                         !desktopPip && controller.preferences.aspectRatio > 0
@@ -2777,6 +2829,13 @@ class _PlayerPageState extends State<PlayerPage>
                                 ),
                               ],
                             ),
+                          ),
+                        ),
+                      if (systemPipVideo != null)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            key: const Key('player-system-pip-surface'),
+                            child: systemPipVideo,
                           ),
                         ),
                       if (controller.hasVideo &&

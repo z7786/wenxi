@@ -25,6 +25,7 @@ import '../domain/ed2k.dart';
 import '../domain/resource_search.dart';
 import 'cloud_command_page.dart';
 import '../platform/file_access.dart';
+import '../platform/document_actions.dart';
 import 'browser_page.dart';
 import 'ctfile_verification_page.dart';
 import 'baidu_share_route_picker.dart';
@@ -329,15 +330,7 @@ class ParsePageState extends State<ParsePage> {
   Future<void> addTorrent() async {
     if (working) return;
     try {
-      final file = await openFile(
-        acceptedTypeGroups: [
-          const XTypeGroup(
-            label: 'BT 种子',
-            extensions: ['torrent'],
-            mimeTypes: ['application/x-bittorrent', 'application/octet-stream'],
-          ),
-        ],
-      );
+      final file = await openFile(acceptedTypeGroups: const [torrentFileType]);
       if (file == null || !mounted) return;
       require(await file.length() <= maxTorrentBytes, '种子文件不能超过 4 MiB');
       final data = await file.readAsBytes();
@@ -1426,7 +1419,10 @@ class ParsePageState extends State<ParsePage> {
   @override
   Widget build(BuildContext context) {
     final link = current;
-    final desktop = Theme.of(context).platform == TargetPlatform.windows;
+    final desktop = const {
+      TargetPlatform.windows,
+      TargetPlatform.macOS,
+    }.contains(Theme.of(context).platform);
     final hint = Theme.of(context).brightness == Brightness.dark
         ? const Color(0xff77777c)
         : const Color(0xffc4c4c7);

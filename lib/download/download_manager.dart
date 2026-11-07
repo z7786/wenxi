@@ -24,6 +24,7 @@ import '../domain/settings.dart';
 import '../domain/torrent.dart';
 import '../platform/file_access.dart';
 import '../platform/native_engine.dart';
+import '../lan/lan_download_route.dart';
 import 'hls.dart';
 import 'download_activity.dart';
 import 'download_request.dart';
@@ -2232,6 +2233,11 @@ class DownloadManager extends ChangeNotifier {
         }
       }
       if (output == null) {
+        if (LanDownloadRoute.owns(_tasks[id]!.spec)) {
+          // Rebuild the local listener only when network data is needed. A
+          // completed payload can still be verified/exported with LAN off.
+          await _prepareSource(id, run);
+        }
         var refresh = 0;
         while (true) {
           run.check();
