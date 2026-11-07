@@ -299,6 +299,18 @@ Future<void> main() async {
         'Hidden player controls did not hide the status bar',
       );
       stage = 'systemPipControls';
+      var systemPipWindows = 0;
+      if (device.supportsPip) {
+        require(
+          await device.enterPip(),
+          'AVKit did not open its PiP window in the foreground',
+        );
+        require(
+          device.inPip && await device.queryPip(),
+          'AVKit did not confirm its active PiP window',
+        );
+        systemPipWindows++;
+      }
       await pip.pause();
       require(
         !pip.state.playing,
@@ -340,6 +352,14 @@ Future<void> main() async {
               pip.state.position.inMilliseconds > 800,
           'Repeated AVKit handoff did not display or play',
         );
+        if (device.supportsPip) {
+          require(await device.enterPip(), 'Repeated AVKit PiP entry failed');
+          require(
+            await device.queryPip(),
+            'Repeated AVKit PiP window was not active',
+          );
+          systemPipWindows++;
+        }
         await pip.pause();
         require(
           !pip.state.playing,
@@ -377,6 +397,7 @@ Future<void> main() async {
           'systemPipRepeat': true,
           'playerStatusBar': true,
           'systemPipSupported': device.supportsPip,
+          'systemPipWindows': systemPipWindows,
           'authorizedMediaReads': authorizedReads,
         }),
       );

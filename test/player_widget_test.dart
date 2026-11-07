@@ -19,6 +19,7 @@ import 'package:asterlink/ui/player_theme.dart';
 import 'package:asterlink/platform/player_screenshot.dart';
 import 'package:asterlink/platform/windows_external_player.dart';
 import 'package:asterlink/playback/playback_sleep_timer.dart';
+import 'package:asterlink/playback/system_pip.dart';
 import 'package:asterlink/ui/subtitle_appearance.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/playback/external_stream.dart';
@@ -58,6 +59,35 @@ class _SlowProgressStore extends PlaybackStore {
     saves++;
     await barrier;
     await super.save(key, bookmark);
+  }
+}
+
+class _IOSPipDevice extends FakePlaybackDevice {
+  _IOSPipDevice() {
+    systemPip = IOSSystemPipPlayback('fixture-player', (
+      method,
+      arguments,
+    ) async {
+      if (method == 'preparePip') return true;
+      if (method == 'stopPip') {
+        stops++;
+        leavePip();
+        return {
+          'pipId': arguments['pipId'],
+          'positionMs': 125000,
+          'playing': true,
+        };
+      }
+      return null;
+    });
+  }
+  @override
+  late final IOSSystemPipPlayback systemPip;
+  int stops = 0;
+  @override
+  Future<void> finish() async {
+    await super.finish();
+    systemPip.dispose();
   }
 }
 
@@ -2659,6 +2689,34 @@ void main() {
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('player-play-pause')), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'iOS PiP survives a temporary foreground interruption and restores only after returning from background',
+    (tester) async {
+      final device = _IOSPipDevice();
+      final page = await render(tester, suppliedDevice: device);
+      await openMenuAction(tester, find.byKey(const Key('player-pip')));
+      expect(page.fixture.controller.usingSystemPip, isTrue);
+      expect(page.fixture.current.state.playing, isFalse);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(page.fixture.controller.usingSystemPip, isTrue);
+      expect(device.stops, 0);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(page.fixture.controller.usingSystemPip, isFalse);
+      expect(device.stops, 1);
+      expect(page.fixture.current.state.playing, isTrue);
+      expect(page.fixture.current.state.position.inSeconds, 125);
+      await openMenuAction(tester, find.byKey(const Key('player-pip')));
+      expect(page.fixture.controller.usingSystemPip, isTrue);
+      expect(device.inPip, isTrue);
+      expect(tester.takeException(), isNull);
     },
   );
 

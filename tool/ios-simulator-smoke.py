@@ -47,6 +47,8 @@ for family in ['iPhone', 'iPad']:
                 report = json.loads(files[0].read_text())
                 assert 'error' not in report, (family, report)
                 assert all(report.get(name) for name in checks), (family, report)
+                if report.get('systemPipSupported'):
+                    assert report.get('systemPipWindows') == 3, (family, report)
                 reports[family] = report
                 (local / (prefix + '-smoke-result.json')).write_text(json.dumps(report, indent=2))
                 (local / 'ios-smoke-result.json').write_text(json.dumps(reports, indent=2))

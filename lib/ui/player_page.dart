@@ -111,6 +111,7 @@ class _PlayerPageState extends State<PlayerPage>
   bool _wasPlaying = false, _pauseWithoutControls = false;
   int _modalDepth = 0, _seenGeneration = -1;
   int _lifecycleRevision = 0;
+  bool _pipWasBackground = false;
   String hud = '', _seenNotice = '';
   String _seenFontMessage = '';
   Duration? _seekPreview;
@@ -502,11 +503,16 @@ class _PlayerPageState extends State<PlayerPage>
     final revision = ++_lifecycleRevision;
     if (state == AppLifecycleState.resumed) {
       controller.foreground();
-      if (controller.usingSystemPip && !_pipBusy) {
-        _run(() => controller.restoreSystemPip(resume: true));
+      if (!_pipBusy) {
+        final returning = _pipWasBackground;
+        _pipWasBackground = false;
+        if (returning && controller.usingSystemPip) {
+          _run(() => controller.restoreSystemPip(resume: true));
+        }
       }
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      _pipWasBackground = true;
       if (state == AppLifecycleState.detached || (!device.inPip && !_pipBusy)) {
         _run(() => controller.background(pictureInPicture: false));
         return;
@@ -880,6 +886,14 @@ class _PlayerPageState extends State<PlayerPage>
         setState(() => _pipBusy = false);
       } else {
         _pipBusy = false;
+      }
+      if (mounted &&
+          _pipWasBackground &&
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+        _pipWasBackground = false;
+        if (controller.usingSystemPip) {
+          _run(() => controller.restoreSystemPip(resume: true));
+        }
       }
     }
   }
