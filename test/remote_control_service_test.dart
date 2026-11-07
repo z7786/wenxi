@@ -11,6 +11,57 @@ import 'support.dart' show until;
 void main() {
   for (final platform in ['ios', 'macos']) {
     test(
+      '$platform remembers ignored updates after restart and shows newer builds',
+      () async {
+        final state = StateStore.memory();
+        addTearDown(state.dispose);
+        final config = controlJson();
+        (config['updates'] as Map)[platform] = {
+          'enabled': true,
+          'version': '2.2.1',
+          'build': 221,
+          'downloadUrl': 'https://example.test/$platform',
+        };
+        final fetcher = FakeControlFetcher(config);
+        final service = RemoteControlService(
+          state,
+          platform: platform,
+          currentBuild: 220,
+          configUrl: controlEndpoint,
+          enabled: true,
+          fetcher: fetcher,
+          clock: () => controlNow,
+        );
+        addTearDown(service.close);
+        await service.refresh(force: true);
+        await until(() => service.cachePersisted);
+        await service.ignoreUpdate(221);
+        service.close();
+        final restoredState = StateStore.memory(
+          asJson(jsonDecode(jsonEncode(state.data))),
+        );
+        addTearDown(restoredState.dispose);
+        final restored = RemoteControlService(
+          restoredState,
+          platform: platform,
+          currentBuild: 220,
+          configUrl: controlEndpoint,
+          enabled: true,
+          fetcher: fetcher,
+          clock: () => controlNow,
+        );
+        addTearDown(restored.close);
+        expect(restored.availableUpdate!.build, 221);
+        expect(restored.unreadUpdate, isNull);
+        (config['updates'] as Map)[platform]['build'] = 222;
+        config['revision'] = 2;
+        fetcher.text = jsonEncode(config);
+        await restored.refresh(force: true);
+        expect(restored.unreadUpdate!.build, 222);
+        expect(restored.unreadUpdate!.force, isFalse);
+      },
+    );
+    test(
       '$platform uses remote updates, expiry, cloud controls and saved cache',
       () async {
         final store = StateStore.memory({});
