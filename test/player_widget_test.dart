@@ -19,7 +19,6 @@ import 'package:asterlink/ui/player_theme.dart';
 import 'package:asterlink/platform/player_screenshot.dart';
 import 'package:asterlink/platform/windows_external_player.dart';
 import 'package:asterlink/playback/playback_sleep_timer.dart';
-import 'package:asterlink/playback/system_pip.dart';
 import 'package:asterlink/ui/subtitle_appearance.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/playback/external_stream.dart';
@@ -62,33 +61,13 @@ class _SlowProgressStore extends PlaybackStore {
   }
 }
 
-class _IOSPipDevice extends FakePlaybackDevice {
-  _IOSPipDevice() {
-    systemPip = IOSSystemPipPlayback('fixture-player', (
-      method,
-      arguments,
-    ) async {
-      if (method == 'preparePip') return true;
-      if (method == 'stopPip') {
-        stops++;
-        leavePip();
-        return {
-          'pipId': arguments['pipId'],
-          'positionMs': 125000,
-          'playing': true,
-        };
-      }
-      return null;
-    });
+class _SystemInsetsDevice extends FakePlaybackDevice {
+  _SystemInsetsDevice() {
+    supportsOrientation = true;
   }
+  final insets = <Size, EdgeInsets>{};
   @override
-  late final IOSSystemPipPlayback systemPip;
-  int stops = 0;
-  @override
-  Future<void> finish() async {
-    await super.finish();
-    systemPip.dispose();
-  }
+  EdgeInsets? systemInsetsFor(MediaQueryData media) => insets[media.size];
 }
 
 class _ScreenshotActions extends PlayerScreenshotActions {
@@ -1329,6 +1308,55 @@ void main() {
       await tester.pumpAndSettle();
       expect(opacity(), 1);
     },
+  );
+
+  testWidgets(
+    'Android rotation keeps the title below stable system insets even when bars are hidden',
+    (tester) async {
+      const portrait = Size(393, 864), landscape = Size(864, 393);
+      const portraitInsets = EdgeInsets.only(top: 24, bottom: 20);
+      const landscapeInsets = EdgeInsets.fromLTRB(44, 24, 20, 0);
+      final device = _SystemInsetsDevice()
+        ..insets[portrait] = portraitInsets
+        ..insets[landscape] = landscapeInsets;
+      tester.view.padding = FakeViewPadding(top: 24, bottom: 20);
+      tester.view.viewPadding = FakeViewPadding(top: 24, bottom: 20);
+      addTearDown(tester.view.resetPadding);
+      addTearDown(tester.view.resetViewPadding);
+      final page = await render(tester, suppliedDevice: device);
+      final backend = page.fixture.current;
+      final position = backend.state.position;
+      final title = find.text(page.fixture.controller.current.name);
+      final portraitTop = tester.getRect(title).top;
+      await tester.tap(find.byKey(const Key('player-fullscreen')));
+      await tester.pump();
+      tester.view.physicalSize = landscape;
+      tester.view.padding = FakeViewPadding();
+      tester.view.viewPadding = FakeViewPadding();
+      await tester.pumpAndSettle();
+      final landscapeTitle = tester.getRect(title);
+      expect(landscapeTitle.top, portraitTop);
+      expect(landscapeTitle.left, greaterThanOrEqualTo(44));
+      // An intermediate Android frame can still expose the old portrait bars.
+      tester.view.padding = FakeViewPadding(top: 48, bottom: 20);
+      tester.view.viewPadding = FakeViewPadding(top: 48, bottom: 20);
+      await tester.pump();
+      expect(tester.getRect(title), landscapeTitle);
+      tester.view.padding = FakeViewPadding();
+      tester.view.viewPadding = FakeViewPadding();
+      await tester.pump();
+      expect(tester.getRect(title), landscapeTitle);
+      await tester.tap(find.byKey(const Key('player-fullscreen')));
+      await tester.pump();
+      tester.view.physicalSize = portrait;
+      await tester.pumpAndSettle();
+      expect(tester.getRect(title).top, portraitTop);
+      expect(page.fixture.current, same(backend));
+      expect(backend.state.position, position);
+      expect(backend.state.playing, isTrue);
+      expect(tester.takeException(), isNull);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
 
   testWidgets(
@@ -2693,9 +2721,11 @@ void main() {
   );
 
   testWidgets(
-    'iOS PiP survives a temporary foreground interruption and restores only after returning from background',
+    'iOS player hides PiP and preserves ordinary playback after backgrounding',
     (tester) async {
-      final device = _IOSPipDevice();
+      final device = FakePlaybackDevice()
+        ..supportsPip = false
+        ..supportsOrientation = true;
       final fixture = PlaybackFixture(
         externalStreamFactory: _FixtureExternalStream.new,
       )..configureBackend = (backend) => backend.videoSurface = true;
@@ -2706,34 +2736,30 @@ void main() {
       );
       final video = find.byKey(const Key('player-video-surface'));
       final ordinarySurface = tester.element(video);
-      await openMenuAction(tester, find.byKey(const Key('player-pip')));
-      expect(page.fixture.controller.usingSystemPip, isTrue);
-      expect(page.fixture.current.state.playing, isFalse);
-      expect(tester.element(video), same(ordinarySurface));
-      expect(
-        find.byKey(const Key('player-system-pip-surface')),
-        findsOneWidget,
-      );
+      await tap(tester, find.byKey(const Key('player-more')));
+      expect(find.byKey(const Key('player-pip')), findsNothing);
+      expect(find.text('画中画'), findsNothing);
+      await tap(tester, find.byTooltip('关闭面板'));
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
-      expect(page.fixture.controller.usingSystemPip, isTrue);
-      expect(device.stops, 0);
+      expect(page.fixture.current.state.playing, isTrue);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       await tester.pump();
+      expect(page.fixture.current.state.playing, isFalse);
+      expect(device.pipQueries, 0);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
       expect(page.fixture.controller.usingSystemPip, isFalse);
-      expect(device.stops, 1);
+      expect(page.fixture.current.state.playing, isFalse);
+      await tap(tester, find.byKey(const Key('player-play-pause')));
       expect(page.fixture.current.state.playing, isTrue);
-      expect(page.fixture.current.state.position.inSeconds, 125);
       expect(tester.element(video), same(ordinarySurface));
       expect(find.byKey(const Key('player-system-pip-surface')), findsNothing);
-      await openMenuAction(tester, find.byKey(const Key('player-pip')));
-      expect(page.fixture.controller.usingSystemPip, isTrue);
-      expect(device.inPip, isTrue);
+      expect(device.inPip, isFalse);
       expect(tester.takeException(), isNull);
     },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 
   testWidgets(

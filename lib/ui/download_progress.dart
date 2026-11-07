@@ -89,7 +89,7 @@ class TransferProgress extends StatefulWidget {
     total: task.size,
     transferred: task.status == UploadStatus.completed
         ? task.size
-        : task.phase == UploadPhase.preparing
+        : task.phase == UploadPhase.preparing && !task.isFolder
         ? 0
         : task.sent,
     speed: task.speed,
@@ -97,7 +97,11 @@ class TransferProgress extends StatefulWidget {
     compact: compact,
     direction: 'upload',
     stage: task.stage,
-    processingLabel: task.phase == UploadPhase.preparing ? '校验中' : '确认中',
+    processingLabel: task.phase == UploadPhase.preparing
+        ? task.isFolder
+              ? '准备中'
+              : '校验中'
+        : '确认中',
     status: switch (task.status) {
       UploadStatus.pending => TransferProgressStatus.pending,
       UploadStatus.running =>

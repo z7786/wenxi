@@ -6,7 +6,6 @@ import 'package:window_manager/window_manager.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/playback.dart';
-import '../diagnostics/app_log.dart';
 import '../playback/system_pip.dart';
 import 'windows_pip.dart';
 import 'windows_external_player.dart';
@@ -14,6 +13,9 @@ import 'macos_external_player.dart';
 
 abstract class PlaybackDevice extends ChangeNotifier {
   bool get supportsOrientation => false;
+
+  /// Safe bounds independent of system bar visibility for the current viewport.
+  EdgeInsets? systemInsetsFor(MediaQueryData media) => null;
   bool get supportsPip;
   bool get supportsDesktopPip => false;
   bool get supportsIndependentPlayerWindows => false;
@@ -74,20 +76,6 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   bool get supportsExternalPlayer => _mobile || _desktop;
   @override
   bool get externalPlayerNeedsDirectLink => _ios;
-  late final IOSSystemPipPlayback? _systemPip = _ios
-      ? IOSSystemPipPlayback(_session, (method, args) async {
-          final result = await _invoke<Object?>(method, args);
-          if (method == 'stopPip' &&
-              !_closed &&
-              args.str('pipId') == _systemPip?.pipId) {
-            _inPip = false;
-            notifyListeners();
-          }
-          return result;
-        })
-      : null;
-  @override
-  SystemPipPlayback? get systemPip => _systemPip;
   @override
   WindowsExternalPlayer? get windowsExternalPlayer => _windows
       ? _windowsPlayer
@@ -109,6 +97,9 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   double _brightness = .5;
   double _systemVolume = 100;
   bool _supportsSystemVolume = false;
+  Size? _systemInsetsSize;
+  EdgeInsets? _systemInsets;
+  int _systemInsetsRevision = 0;
   final _volumeGate = AsyncGate();
   String _lastUpdate = '';
   @override
@@ -122,13 +113,25 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   @override
   bool get supportsSystemVolume => _mobile && _supportsSystemVolume;
   @override
-  bool get inPip => _windows ? _windowsPip.active : _inPip;
+  bool get inPip => _windows ? _windowsPip.active : _android && _inPip;
   @override
   double get brightness => _brightness;
   @override
   double get systemVolume => _systemVolume;
   @override
   Stream<String> get actions => _actions.stream;
+  @override
+  EdgeInsets? systemInsetsFor(MediaQueryData media) {
+    final size = _systemInsetsSize;
+    if (!_android ||
+        size == null ||
+        (size.width - media.size.width).abs() > 1 ||
+        (size.height - media.size.height).abs() > 1) {
+      return null;
+    }
+    return _systemInsets;
+  }
+
   Future<T?> _invoke<T>(String name, [Json arguments = const {}]) =>
       _channel.invokeMethod<T>(name, {'session': _session, ...arguments});
   @override
@@ -141,52 +144,71 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
       _channel.setMethodCallHandler((call) async {
         final args = asJson(call.arguments);
         if (_closed || args.str('session') != _session) return;
-        if (call.method == 'pip') {
-          if (_ios && _systemPip?.accepts(args) != true) return;
+        if (_android && call.method == 'pip') {
           _inPip = args.boolean('active');
           notifyListeners();
         } else if (call.method == 'action') {
           _actions.add(args.str('action'));
         } else if (call.method == 'volume') {
           _readSystemVolume(args);
-        } else if (call.method == 'pipState') {
-          _systemPip?.update(args);
-        } else if (call.method == 'pipDiagnostic' &&
-            _systemPip?.accepts(args) == true) {
-          DiagnosticLog.event(
-            'player.system_pip',
-            fields: {
-              for (final key in [
-                'stage',
-                'phase',
-                'surfaceAttached',
-                'readyForDisplay',
-                'pipPossible',
-                'itemStatus',
-                'videoWidth',
-                'videoHeight',
-                'errorDomain',
-                'errorCode',
-              ])
-                if (args.containsKey(key)) key: args[key],
-            },
-          );
         }
       });
       final values = asJson(await _invoke<Object?>('begin', {'video': video}));
       if (_closed) return;
-      if (_ios && identical(_handlerOwner, this)) {
+      if (identical(_handlerOwner, this)) {
         WidgetsBinding.instance.addObserver(this);
-        await _syncIosSystemUi();
+        if (_ios) await _syncIosSystemUi();
       }
-      _supportsPip = values.boolean('pip');
+      _supportsPip = _android && values.boolean('pip');
       _brightness = values.number('brightness', .5).clamp(0, 1).toDouble();
+      _readSystemInsets(values);
       _readSystemVolume(values);
     } else if (_desktop) {
       _previousWindowsFullscreen = await windowManager.isFullScreen();
       _supportsPip = _windows && video;
     }
     if (!_closed) notifyListeners();
+  }
+
+  void _readSystemInsets(Json values) {
+    if (!_android || _closed) return;
+    final bounds = values.obj('systemInsets');
+    final width = bounds.number('width', double.nan);
+    final height = bounds.number('height', double.nan);
+    final sides = [
+      for (final side in ['left', 'top', 'right', 'bottom'])
+        bounds.number(side, double.nan),
+    ];
+    if (!width.isFinite ||
+        !height.isFinite ||
+        width <= 0 ||
+        height <= 0 ||
+        sides.any((value) => !value.isFinite || value < 0) ||
+        sides[0] + sides[2] >= width ||
+        sides[1] + sides[3] >= height) {
+      return;
+    }
+    final size = Size(width, height);
+    final insets = EdgeInsets.fromLTRB(sides[0], sides[1], sides[2], sides[3]);
+    if (size == _systemInsetsSize && insets == _systemInsets) return;
+    _systemInsetsSize = size;
+    _systemInsets = insets;
+    notifyListeners();
+  }
+
+  Future<void> _refreshSystemInsets() async {
+    if (!_android || _closed || !identical(_handlerOwner, this)) return;
+    final revision = ++_systemInsetsRevision;
+    try {
+      final values = asJson(await _invoke<Object?>('systemInsets'));
+      if (!_closed &&
+          revision == _systemInsetsRevision &&
+          identical(_handlerOwner, this)) {
+        _readSystemInsets(values);
+      }
+    } catch (_) {
+      // Keep the existing MediaQuery fallback on older native bridges.
+    }
   }
 
   void _readSystemVolume(Json values) {
@@ -300,12 +322,14 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
 
   @override
   void didChangeMetrics() {
+    if (_android) unawaited(_refreshSystemInsets());
     unawaited(_syncIosSystemUi().catchError((Object _) {}));
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      if (_android) unawaited(_refreshSystemInsets());
       unawaited(_syncIosSystemUi(force: true).catchError((Object _) {}));
     }
   }
@@ -340,11 +364,10 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   @override
   Future<bool> enterPip() async {
     if (_closed || !supportsPip) return false;
-    final pipId = _ios ? _systemPip?.pipId : null;
     final entered = _windows
         ? await _windowsPip.enter()
-        : await _invoke<bool>('enterPip', {if (_ios) 'pipId': pipId}) ?? false;
-    if (_closed || _ios && pipId != _systemPip?.pipId) return false;
+        : await _invoke<bool>('enterPip') ?? false;
+    if (_closed) return false;
     if (entered) {
       _inPip = true;
       notifyListeners();
@@ -357,8 +380,6 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
     if (_closed) return;
     if (_windows) {
       await _windowsPip.exit();
-    } else if (_ios) {
-      await _invoke<void>('exitPip', {'pipId': _systemPip?.pipId});
     } else {
       return;
     }
@@ -378,18 +399,15 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
           await windowManager.isVisible() &&
           !await windowManager.isMinimized();
     }
-    if (_closed || !_mobile) return false;
-    return await _invoke<bool>('isPip', {
-          if (_ios) 'pipId': _systemPip?.pipId,
-        }) ??
-        false;
+    if (_closed || !_android) return false;
+    return await _invoke<bool>('isPip') ?? false;
   }
 
   @override
   Future<void> finish() async {
     if (_closed) return;
     _closed = true;
-    if (_ios) WidgetsBinding.instance.removeObserver(this);
+    if (_mobile) WidgetsBinding.instance.removeObserver(this);
     try {
       if (_android) {
         await _nativeChannel.invokeMethod<void>('cancelExternalPlayer', {
@@ -413,7 +431,6 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
         _handlerOwner = null;
       }
       await _actions.close();
-      _systemPip?.dispose();
       super.dispose();
     }
   }

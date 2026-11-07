@@ -42,7 +42,9 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) -> Bool {
     let args = call.arguments as? [String: Any] ?? [:]
     switch call.method {
-    case "chooseDirectory": chooseDirectory(result)
+    case "chooseDirectory", "chooseUploadDirectory": chooseDirectory(result)
+    case "uploadScan", "uploadCheckDirectory", "uploadStat", "uploadRead":
+      uploadSource(call.method, args: args, result: result)
     case "restoreStorage":
       let storage: [String: Any] = ["paths": movedPaths, "home": NSHomeDirectory()]
       result(storage)
@@ -89,6 +91,124 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
       let root = $0.resolvingSymlinksInPath().path
       return path == root || path.hasPrefix(root + "/")
     }
+  }
+
+  private func uploadSource(_ method: String, args: [String: Any], result: @escaping FlutterResult) {
+    guard let path = args["path"] as? String, path.hasPrefix("/") else {
+      result(FlutterError(code: "upload", message: "上传源文件位置无效", details: nil)); return
+    }
+    let source = fileURL(path)
+    guard permitted(source) else {
+      result(FlutterError(code: "upload", message: "上传目录授权已失效，请重新选择文件夹", details: nil)); return
+    }
+    queue.async {
+      do {
+        let value: Any?
+        switch method {
+        case "uploadScan": value = try self.scanUploadDirectory(source)
+        case "uploadCheckDirectory":
+          let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+          guard values.isDirectory == true, values.isSymbolicLink != true else {
+            throw self.uploadError("本地文件夹已移走或变为链接，请重新选择上传")
+          }
+          _ = try self.coordinatedUploadRead(source) { url in
+            try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+          }
+          value = nil
+        case "uploadStat":
+          value = try self.coordinatedUploadRead(source) { try self.uploadFileInfo($0) }
+        case "uploadRead":
+          guard let start = (args["offset"] as? NSNumber)?.int64Value,
+                let length = (args["length"] as? NSNumber)?.intValue,
+                start >= 0, length > 0, length <= 512 * 1024 else {
+            throw self.uploadError("文件读取范围无效")
+          }
+          let bytes = try self.coordinatedUploadRead(source) { url -> Data in
+            _ = try self.uploadFileInfo(url)
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            try handle.seek(toOffset: UInt64(start))
+            return try handle.read(upToCount: length) ?? Data()
+          }
+          value = FlutterStandardTypedData(bytes: bytes)
+        default: throw self.uploadError("不支持的上传源操作")
+        }
+        DispatchQueue.main.async { result(value) }
+      } catch {
+        DispatchQueue.main.async {
+          result(FlutterError(code: "upload", message: "无法读取所选文件夹或文件：" + error.localizedDescription,
+            details: nil))
+        }
+      }
+    }
+  }
+
+  private func uploadError(_ message: String) -> NSError {
+    NSError(domain: "com.asterlink.app.upload", code: 1,
+      userInfo: [NSLocalizedDescriptionKey: message])
+  }
+
+  private func coordinatedUploadRead<T>(_ url: URL, _ read: (URL) throws -> T) throws -> T {
+    var coordination: NSError?
+    var outcome: Result<T, Error>?
+    NSFileCoordinator().coordinate(readingItemAt: url, options: .withoutChanges, error: &coordination) { located in
+      outcome = Result { try read(located) }
+    }
+    if let coordination = coordination { throw coordination }
+    guard let outcome = outcome else { throw uploadError("系统未返回可读取的文件") }
+    return try outcome.get()
+  }
+
+  private func uploadFileInfo(_ url: URL) throws -> [String: Any] {
+    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey,
+      .fileSizeKey, .contentModificationDateKey])
+    guard values.isRegularFile == true, values.isSymbolicLink != true,
+          let size = values.fileSize, size >= 0 else {
+      throw uploadError("文件已移走或无法读取大小，请重新选择上传")
+    }
+    return ["name": url.lastPathComponent, "size": size,
+      "modifiedAt": Int64((values.contentModificationDate?.timeIntervalSince1970 ?? 0) * 1000)]
+  }
+
+  private func scanUploadDirectory(_ root: URL) throws -> [String: Any] {
+    let values = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+    guard values.isDirectory == true, values.isSymbolicLink != true else {
+      throw uploadError("所选文件夹不可读取")
+    }
+    var pending: [(URL, String)] = [(root, "")]
+    var files = [[String: Any]](), directories = [""], skippedLinks = 0, index = 0
+    while index < pending.count {
+      let (directory, relative) = pending[index]
+      index += 1
+      let children = try coordinatedUploadRead(directory) {
+        try FileManager.default.contentsOfDirectory(at: $0,
+          includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+      }
+      for child in children {
+        let name = child.lastPathComponent
+        guard !name.isEmpty, !name.contains("/"), !name.contains("\\"), name != ".", name != ".." else {
+          throw uploadError("文件名称无效")
+        }
+        let path = relative.isEmpty ? name : relative + "/" + name
+        guard path.split(separator: "/").count < 64 else { throw uploadError("文件夹层级过深") }
+        let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+        if values.isSymbolicLink == true { skippedLinks += 1; continue }
+        if values.isDirectory == true {
+          directories.append(path)
+          pending.append((child, path))
+        } else if values.isRegularFile == true {
+          var info = try coordinatedUploadRead(child) { try uploadFileInfo($0) }
+          info["location"] = child.path
+          info["relative"] = path
+          files.append(info)
+        }
+        guard files.count + directories.count <= 10000 else {
+          throw uploadError("一次最多上传 10000 个文件和目录，请分批选择")
+        }
+      }
+    }
+    return ["location": root.path, "name": root.lastPathComponent, "files": files, "directories": directories,
+      "skippedLinks": skippedLinks]
   }
 
   private func saveDownload(_ args: [String: Any], result: @escaping FlutterResult) {

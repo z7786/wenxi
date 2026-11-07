@@ -46,6 +46,7 @@ import 'download/mobile_data_download_guard.dart';
 import 'download/transfer_activity.dart';
 import 'download/navigation_transfers.dart';
 import 'upload/upload_manager.dart';
+import 'upload/upload_sources.dart';
 import 'lan/lan_service.dart';
 import 'lan/lan_download_route.dart';
 import 'lan/lan_files.dart';
@@ -303,6 +304,10 @@ class AppServices extends ChangeNotifier {
     uploads = UploadManager(
       store: store,
       cloud: cloud,
+      sources: UploadSources(
+        android: platformFeatures && Platform.isAndroid,
+        ios: platformFeatures && Platform.isIOS,
+      ),
       foreground: backgroundTransfers ? transferActivity.sync : null,
     );
     mobileDataDownloads = MobileDataDownloadGuard(

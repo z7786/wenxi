@@ -4,8 +4,8 @@ GitHub Actions `Build iOS unsigned test app` uses Flutter 3.41.4, Go 1.24.7
 and the macOS 15 ARM64 runner's Xcode. It builds an iPhone ARM64 release app
 without code signing, archives it as an unsigned IPA, then builds and launches
 an ARM64 simulator app to check normal startup, QuickJS execution, free space,
-a real four-connection HTTP download, H.264 decoding, and an authenticated
-AVKit stream with play, pause, seek and final-position handoff.
+a real four-connection HTTP download, H.264 decoding, and authenticated
+media_kit playback through the production page with pause, seek and speed controls.
 
 The download core runs in the app through a C archive packaged as an
 XCFramework. No subprocess or control HTTP server is needed. The same native
@@ -17,12 +17,10 @@ The player uses the existing media_kit backend; brightness, rotation, the idle
 timer and system volume are integrated. Output volume follows hardware button
 changes; if the current output cannot be controlled, the player keeps its
 existing volume fallback. Screenshots can be saved to Photos with permission.
-System PiP uses AVKit on supported devices. Entering PiP pauses media_kit before
-the system decoder opens a separate authenticated local transport; ordinary
-playback continues to use media_kit. Returning restores the final position;
-closing PiP saves progress and keeps playback paused. Unsupported system formats
-or failed PiP startup restore the original decoder. The window is one system
-PiP session, not multiple independent iOS windows. External playback supports
+iOS does not expose picture in picture or independent player windows. Playback
+pauses when the app enters the background and can be resumed from its saved
+position in the player. Android and desktop picture in picture remain available.
+External playback supports
 installed Infuse and VLC through their URL schemes. Only directly accessible
 HTTP(S) links are handed off; videos requiring account headers or an app-local
 proxy need the internal player or file export, since another app can suspend
@@ -64,10 +62,11 @@ directory. A cloud sync indicator can remain after local saving completes;
 third-party provider and iCloud synchronization still need device testing.
 
 The workflow compiles the native bridges and runs Dart regressions, native Go
-storage/resume tests and the simulator smoke checks. Simulator checks cover the
-AVKit transport and playback operations; real system PiP window interaction,
-background playback, camera, document pickers, Photos, hardware volume and
-provider login still need verification on an Apple device.
+storage/resume tests and the simulator smoke checks. Simulator checks cover
+authenticated ordinary playback, controls and the absence of iOS PiP. Dart
+regressions verify landscape and portrait system bars. Background transitions,
+camera, document pickers, Photos, hardware volume and provider login still need
+verification on an Apple device.
 
 Run the workflow on `codex/ios-build-*`, or dispatch it manually. Official mode
 reuses the protected `release` environment's existing client configuration;

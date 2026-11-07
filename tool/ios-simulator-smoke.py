@@ -19,9 +19,8 @@ runtime = next(item for item in reversed(runtimes) if item.get('isAvailable') an
 available = json.loads(sim('list', 'devices', 'available', '--json'))['devices']
 checks = [
     'startup', 'quickjs', 'download', 'coordinatedFileSave', 'freeSpace', 'playback',
-    'systemPipTransport', 'systemPipPlayback', 'systemPipSeek',
-    'systemPipVisibleLayer', 'systemPipImmediateControls', 'systemPipRepeat',
-    'playerStatusBar', 'playerPageHandoff',
+    'playerPagePlayback', 'playerPageControls', 'playerPageTexture',
+    'pipDisabled',
 ]
 reports = {}
 for family in ['iPhone', 'iPad']:
@@ -47,9 +46,7 @@ for family in ['iPhone', 'iPad']:
                 report = json.loads(files[0].read_text())
                 assert 'error' not in report, (family, report)
                 assert all(report.get(name) for name in checks), (family, report)
-                if report.get('systemPipSupported'):
-                    assert report.get('systemPipWindows') == 3, (family, report)
-                    assert report.get('playerPagePipWindows') == 2, (family, report)
+                assert report.get('authorizedMediaReads', 0) > 0, (family, report)
                 reports[family] = report
                 (local / (prefix + '-smoke-result.json')).write_text(json.dumps(report, indent=2))
                 (local / 'ios-smoke-result.json').write_text(json.dumps(reports, indent=2))

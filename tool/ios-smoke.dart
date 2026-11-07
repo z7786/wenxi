@@ -14,8 +14,6 @@ import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/playback_device.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback.dart';
-import 'package:asterlink/playback/system_pip.dart';
-import 'package:asterlink/playback/external_stream.dart';
 import 'package:asterlink/playback/media_backend.dart';
 import 'package:asterlink/playback/playback_controller.dart';
 import 'package:asterlink/data/playback_store.dart';
@@ -216,7 +214,7 @@ Future<void> main() async {
     } finally {
       await player.dispose();
     }
-    stage = 'systemPip';
+    stage = 'playerPage';
     final movieBytes = await File(movie).readAsBytes();
     final mediaServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     var authorizedReads = 0;
@@ -257,179 +255,17 @@ Future<void> main() async {
         } catch (_) {}
       }
     });
-    final media = ExternalPlaybackStream(
-      DownloadSpec(
-        url: 'http://127.0.0.1:${mediaServer.port}/movie.mp4',
-        fileName: 'ios-smoke.mp4',
-        headers: const {'Cookie': 'smoke-media=fixture'},
-      ),
+    final source = DownloadSpec(
+      url: 'http://127.0.0.1:${mediaServer.port}/movie.mp4',
+      fileName: 'ios-smoke.mp4',
+      headers: const {'Cookie': 'smoke-media=fixture'},
     );
-    final device = NativePlaybackDevice(targetPlatform: TargetPlatform.iOS);
     try {
-      await device.start(video: true);
-      final pip = device.systemPip! as IOSSystemPipPlayback;
-      await media.start();
-      final preparation = pip.prepare(
-        url: media.url,
-        title: 'ios-smoke.mp4',
-        initialState: const PlayerState(playing: false),
-      );
-      runApp(
-        MaterialApp(
-          home: Scaffold(
-            body: AnimatedBuilder(
-              animation: pip,
-              builder: (_, _) =>
-                  pip.buildVideo(fit: BoxFit.contain) ?? const SizedBox(),
-            ),
-          ),
-        ),
-      );
-      require(
-        await preparation,
-        'AVKit could not prepare the authorized stream',
-      );
-      await pip.play();
-      final playbackDeadline = DateTime.now().add(const Duration(seconds: 15));
-      while (pip.state.position.inMilliseconds < 1000 &&
-          DateTime.now().isBefore(playbackDeadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 100));
-      }
-      require(
-        pip.state.position.inMilliseconds >= 1000,
-        'AVKit playback did not advance',
-      );
-      Future<void> waitFor(bool Function() ready, String message) async {
-        final deadline = DateTime.now().add(const Duration(seconds: 8));
-        while (!ready() && DateTime.now().isBefore(deadline)) {
-          await Future<void>.delayed(const Duration(milliseconds: 100));
-        }
-        require(ready(), message);
-      }
-
-      await waitFor(
-        () => pip.surfaceAttached && pip.readyForDisplay,
-        'AVKit did not attach a visible video layer',
-      );
-      stage = 'playerSystemBars';
-      await device.update(
-        playing: true,
-        width: 1920,
-        height: 1080,
-        orientation: PlaybackOrientation.landscape,
-        controlsVisible: true,
-      );
-      await waitFor(
-        () => pip.statusBarHidden,
-        'Landscape playback did not hide the status bar',
-      );
-      await device.update(
-        playing: true,
-        orientation: PlaybackOrientation.portrait,
-        controlsVisible: true,
-      );
-      await waitFor(
-        () => !pip.statusBarHidden,
-        'Portrait controls did not restore the status bar',
-      );
-      await device.update(
-        playing: true,
-        orientation: PlaybackOrientation.portrait,
-        controlsVisible: false,
-      );
-      await waitFor(
-        () => pip.statusBarHidden,
-        'Hidden player controls did not hide the status bar',
-      );
-      stage = 'systemPipControls';
-      var systemPipWindows = 0;
-      if (device.supportsPip) {
-        require(
-          await device.enterPip(),
-          'AVKit did not open its PiP window in the foreground',
-        );
-        require(
-          device.inPip && await device.queryPip(),
-          'AVKit did not confirm its active PiP window',
-        );
-        systemPipWindows++;
-      }
-      await pip.pause();
-      require(
-        !pip.state.playing,
-        'AVKit pause reply did not immediately update playback',
-      );
-      await pip.seek(const Duration(milliseconds: 500));
-      require(
-        (pip.state.position.inMilliseconds - 500).abs() < 250,
-        'AVKit seek did not update progress',
-      );
-      require(!pip.state.playing, 'AVKit pause did not stop audio');
-      require(
-        authorizedReads > 0,
-        'AVKit did not read the authorized local transport',
-      );
-      final stopped = await pip.stop();
-      require(
-        stopped.position.inMilliseconds > 0 && !device.inPip,
-        'AVKit stop did not return its bookmark',
-      );
-      stage = 'systemPipRepeat';
-      for (var iteration = 0; iteration < 2; iteration++) {
-        require(
-          await pip.prepare(
-            url: media.url,
-            title: 'ios-smoke.mp4',
-            initialState: const PlayerState(
-              playing: false,
-              position: Duration(milliseconds: 500),
-            ),
-          ),
-          'AVKit repeat preparation failed',
-        );
-        await pip.play();
-        await waitFor(
-          () =>
-              pip.surfaceAttached &&
-              pip.readyForDisplay &&
-              pip.state.position.inMilliseconds > 800,
-          'Repeated AVKit handoff did not display or play',
-        );
-        if (device.supportsPip) {
-          require(await device.enterPip(), 'Repeated AVKit PiP entry failed');
-          require(
-            await device.queryPip(),
-            'Repeated AVKit PiP window was not active',
-          );
-          systemPipWindows++;
-        }
-        await pip.pause();
-        require(
-          !pip.state.playing,
-          'Repeated AVKit pause did not update playback',
-        );
-        await pip.seek(const Duration(milliseconds: 500));
-        require(
-          (pip.state.position.inMilliseconds - 500).abs() < 250,
-          'Repeated AVKit seek failed',
-        );
-        await pip.setRate(1.5);
-        require(
-          (pip.state.rate - 1.5).abs() < .01,
-          'AVKit speed did not update playback',
-        );
-        final finalState = await pip.stop();
-        require(
-          !finalState.playing && finalState.position.inMilliseconds > 0,
-          'Repeated AVKit stop lost the paused bookmark',
-        );
-      }
-      stage = 'playerPageHandoff';
-      await device.finish();
-      final pageHandoffs = await verifyPlayerPageHandoff(
-        media.source,
+      await verifyPlayerPagePlayback(
+        source,
         Directory('${folder.path}/ios-smoke-subtitles'),
       );
+      require(authorizedReads > 0, 'Player did not read the authorized stream');
       await report.writeAsString(
         jsonEncode({
           'startup': true,
@@ -439,24 +275,15 @@ Future<void> main() async {
           'freeSpace': true,
           'playback': true,
           'positionMs': decodedPosition,
-          'systemPipTransport': true,
-          'systemPipPlayback': true,
-          'systemPipSeek': true,
-          'systemPipVisibleLayer': true,
-          'systemPipImmediateControls': true,
-          'systemPipRepeat': true,
-          'playerPageHandoff': true,
-          'playerPagePipWindows': pageHandoffs,
-          'playerStatusBar': true,
-          'systemPipSupported': device.supportsPip,
-          'systemPipWindows': systemPipWindows,
+          'playerPagePlayback': true,
+          'playerPageControls': true,
+          'playerPageTexture': true,
+          'pipDisabled': true,
           'authorizedMediaReads': authorizedReads,
         }),
       );
       await Future<void>.delayed(const Duration(seconds: 3));
     } finally {
-      await device.finish();
-      await media.close();
       await mediaServer.close(force: true);
     }
   } catch (error, stack) {
@@ -468,9 +295,8 @@ Future<void> main() async {
   }
 }
 
-// Exercise the production page, controller and both native decoders together.
-// Direct AVKit checks cannot catch Flutter texture replacement during handoff.
-Future<int> verifyPlayerPageHandoff(
+// Exercise ordinary playback through the production page and controller.
+Future<void> verifyPlayerPagePlayback(
   DownloadSpec source,
   Directory subtitleDirectory,
 ) async {
@@ -517,7 +343,6 @@ Future<int> verifyPlayerPageHandoff(
     require(ready(), message);
   }
 
-  var windows = 0;
   try {
     await waitFor(
       () =>
@@ -526,70 +351,64 @@ Future<int> verifyPlayerPageHandoff(
           controller.state.position.inMilliseconds >= 1000,
       'Production player page did not decode the authenticated stream',
     );
-    if (!device.supportsPip) return 0;
+    require(
+      !device.supportsPip &&
+          !device.supportsIndependentPlayerWindows &&
+          device.systemPip == null &&
+          !device.inPip &&
+          !await device.enterPip() &&
+          !await device.queryPip(),
+      'iOS unexpectedly exposed picture in picture',
+    );
     final backend = controller.backend!;
     final texture = await waitForSmokeElement(
       const Key('player-video-surface'),
     );
-    for (var iteration = 0; iteration < 2; iteration++) {
-      await controller.pause();
-      await controller.seek(const Duration(seconds: 1));
-      await controller.play();
-      final beforeHandoff = controller.state.position;
-      await invokeSmokePlayerAction(const Key('player-more'));
-      await invokeSmokePlayerAction(const Key('player-pip'));
-      await waitFor(
-        () => !controller.preparingSystemPip && device.inPip,
-        'Production page did not enter foreground system PiP',
-      );
-      require(controller.usingSystemPip, 'System PiP did not own playback');
-      require(!backend.state.playing, 'Ordinary decoder kept playing in PiP');
-      require(
-        identical(texture, findSmokeElement(const Key('player-video-surface'))),
-        'Entering PiP replaced the ordinary video texture',
-      );
-      final pip = device.systemPip! as IOSSystemPipPlayback;
-      require(
-        pip.surfaceAttached && pip.readyForDisplay,
-        'Production page PiP source had no displayed frame',
-      );
-      await waitFor(
-        () => pip.state.position > beforeHandoff,
-        'Production page PiP playback did not advance',
-      );
-      windows++;
-      await controller.pause();
-      require(
-        !pip.state.playing,
-        'Production page PiP pause did not stop audio',
-      );
-      await controller.seek(const Duration(seconds: 1));
-      await controller.play();
-      await controller.restoreSystemPip(resume: true);
-      require(
-        !controller.usingSystemPip && !device.inPip,
-        'PiP did not restore',
-      );
-      final restored = controller.state.position;
-      await waitFor(
-        () => backend.state.playing && backend.state.position > restored,
-        'Ordinary decoder did not continue after PiP restoration',
-      );
-      await WidgetsBinding.instance.endOfFrame;
-      require(
-        identical(backend, controller.backend) &&
-            identical(
-              texture,
-              findSmokeElement(const Key('player-video-surface')),
-            ),
-        'PiP restoration recreated the ordinary decoder or texture',
-      );
-      require(
-        findSmokeElement(const Key('player-system-pip-surface')) == null,
-        'Restored player retained the native PiP surface',
-      );
-    }
-    return windows;
+    await controller.pause();
+    await waitFor(() => !controller.state.playing, 'Player did not pause');
+    await controller.seek(const Duration(seconds: 1));
+    await waitFor(
+      () => (controller.state.position.inMilliseconds - 1000).abs() < 500,
+      'Player did not seek',
+    );
+    await controller.setRate(1.5);
+    await waitFor(
+      () => (controller.state.rate - 1.5).abs() < .01,
+      'Player did not change playback speed',
+    );
+    await controller.play();
+    await waitFor(
+      () =>
+          controller.state.playing &&
+          controller.state.position.inMilliseconds > 1200,
+      'Player did not resume after pausing',
+    );
+    await controller.background(pictureInPicture: false);
+    await waitFor(
+      () => !controller.state.playing,
+      'Backgrounding did not pause ordinary playback',
+    );
+    controller.foreground();
+    await controller.play();
+    final resumed = controller.state.position;
+    await waitFor(
+      () => backend.state.playing && backend.state.position > resumed,
+      'Player did not continue after returning to the foreground',
+    );
+    await WidgetsBinding.instance.endOfFrame;
+    require(
+      identical(backend, controller.backend) &&
+          identical(
+            texture,
+            findSmokeElement(const Key('player-video-surface')),
+          ),
+      'Playback controls recreated the decoder or video texture',
+    );
+    require(
+      !controller.usingSystemPip &&
+          findSmokeElement(const Key('player-system-pip-surface')) == null,
+      'Ordinary iOS playback retained a PiP layer',
+    );
   } finally {
     runApp(const MaterialApp(home: SizedBox()));
     await WidgetsBinding.instance.endOfFrame;
@@ -617,16 +436,4 @@ Future<Element> waitForSmokeElement(Key key) async {
     await Future<void>.delayed(const Duration(milliseconds: 50));
   }
   throw StateError('Production player action did not appear: $key');
-}
-
-Future<void> invokeSmokePlayerAction(Key key) async {
-  final element = await waitForSmokeElement(key);
-  final callback = switch (element.widget) {
-    IconButton(:final onPressed) => onPressed,
-    InkWell(:final onTap) => onTap,
-    _ => null,
-  };
-  require(callback != null, 'Production player action was disabled: $key');
-  callback!();
-  await WidgetsBinding.instance.endOfFrame;
 }

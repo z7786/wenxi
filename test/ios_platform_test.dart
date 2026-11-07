@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'package:asterlink/platform/playback_device.dart';
-import 'package:asterlink/playback/playback_state.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -41,7 +40,7 @@ void main() {
     },
   );
   test(
-    'iOS player exposes brightness, rotation and external apps while unsupported PiP remains hidden',
+    'iOS player exposes brightness, rotation and external apps without PiP',
     () async {
       final calls = <String>[];
       messenger.setMockMethodCallHandler(
@@ -57,7 +56,7 @@ void main() {
       expect(device.supportsBrightness, true);
       expect(device.supportsExternalPlayer, true);
       expect(device.externalPlayerNeedsDirectLink, true);
-      expect(device.systemPip, isNotNull);
+      expect(device.systemPip, isNull);
       await device.start(video: true);
       expect(device.supportsPip, false);
       expect(device.supportsSystemVolume, false);
@@ -67,55 +66,37 @@ void main() {
     },
   );
   test(
-    'iOS PiP commands and position events are scoped to the active handoff',
+    'iOS rejects native PiP capability and events without making PiP calls',
     () async {
       const channel = MethodChannel('com.asterlink.app/playback');
       final calls = <MethodCall>[];
-      var nativePip = false;
-      String session = '', pipId = '';
-      messenger.setMockMethodCallHandler(nativeChannel, (_) async => null);
+      String session = '';
       messenger.setMockMethodCallHandler(channel, (call) async {
         calls.add(call);
         final args = Map<String, Object?>.from(call.arguments as Map);
         session = args['session'] as String;
         if (call.method == 'begin') return {'pip': true};
-        if (call.method == 'preparePip') {
-          pipId = args['pipId'] as String;
-          return true;
-        }
-        if (call.method == 'enterPip') {
-          nativePip = true;
-          return true;
-        }
-        if (call.method == 'isPip') return nativePip;
-        if (call.method == 'stopPip') {
-          nativePip = false;
-          return {
-            'pipId': pipId,
-            'positionMs': 64000,
-            'durationMs': 600000,
-            'playing': false,
-          };
-        }
+        if (call.method == 'enterPip' || call.method == 'isPip') return true;
         return null;
       });
       final device = NativePlaybackDevice(targetPlatform: TargetPlatform.iOS);
+      addTearDown(device.finish);
       await device.start(video: true);
-      final pip = device.systemPip!;
-      await pip.prepare(
-        url: 'http://127.0.0.1:12345/local/video',
-        title: 'fixture.mp4',
-        initialState: const PlayerState(duration: Duration(minutes: 10)),
-      );
-      Future<void> emit(String token, String handoff, int position) async {
+      expect(device.supportsPip, isFalse);
+      expect(device.supportsIndependentPlayerWindows, isFalse);
+      expect(device.systemPip, isNull);
+      expect(await device.enterPip(), isFalse);
+      expect(await device.queryPip(), isFalse);
+      await device.exitPip();
+      for (final method in ['pip', 'pipState', 'pipDiagnostic']) {
         await messenger.handlePlatformMessage(
           channel.name,
           const StandardMethodCodec().encodeMethodCall(
-            MethodCall('pipState', {
-              'session': token,
-              'pipId': handoff,
-              'positionMs': position,
-              'durationMs': 600000,
+            MethodCall(method, {
+              'session': session,
+              'pipId': 'previous-handoff',
+              'active': true,
+              'positionMs': 42000,
               'playing': true,
             }),
           ),
@@ -123,20 +104,12 @@ void main() {
         );
       }
 
-      await emit('previous-player', pipId, 9000);
-      await emit(session, 'previous-handoff', 9000);
-      expect(pip.state.position, Duration.zero);
-      await emit(session, pipId, 42000);
-      expect(pip.state.position, const Duration(seconds: 42));
-      expect(await device.enterPip(), true);
-      expect(await device.queryPip(), true);
-      await device.exitPip();
-      expect(calls.last.method, 'exitPip');
-      expect((await pip.stop()).position, const Duration(seconds: 64));
-      expect(device.inPip, false);
-      await emit(session, pipId, 99000);
-      expect(pip.state.position, const Duration(seconds: 64));
+      expect(device.inPip, isFalse);
+      expect(device.supportsPip, isFalse);
+      expect(await device.queryPip(), isFalse);
+      expect(calls.map((call) => call.method), ['begin']);
       await device.finish();
+      expect(calls.map((call) => call.method), ['begin', 'end']);
     },
   );
   test(

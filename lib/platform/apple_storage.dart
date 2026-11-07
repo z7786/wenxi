@@ -114,6 +114,12 @@ Future<void> restoreAppleStorage(
         task.str('destination'),
         task.str('savedPath'),
       ],
+      for (final task in data.list('uploadTasks')) ...[
+        task.str('path'),
+        task.obj('folder').str('location'),
+        for (final file in task.obj('folder').list('files'))
+          file.str('location'),
+      ],
       ...strings(data['downloadCacheRoots']).values,
     ],
   );
@@ -136,6 +142,21 @@ Future<void> restoreAppleStorage(
       path(task, 'savedPath');
     }
     if (draft.containsKey('tasks')) draft['tasks'] = tasks;
+    final uploads = draft.list('uploadTasks');
+    for (final task in uploads) {
+      path(task, 'path');
+      if (task['folder'] is Map) {
+        final folder = task.obj('folder');
+        path(folder, 'location');
+        final files = folder.list('files');
+        for (final file in files) {
+          path(file, 'location');
+        }
+        folder['files'] = files;
+        task['folder'] = folder;
+      }
+    }
+    if (draft.containsKey('uploadTasks')) draft['uploadTasks'] = uploads;
     final roots = draft.obj('downloadCacheRoots');
     for (final key in roots.keys.toList()) {
       path(roots, key);

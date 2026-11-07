@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/domain/playback.dart';
 import 'package:asterlink/platform/playback_device.dart';
@@ -315,6 +317,107 @@ void main() {
     );
     expect(calls.last.arguments['orientation'], 'system');
   });
+
+  test(
+    'Android safe bounds follow rotation and ignore stale viewport replies',
+    () async {
+      const portrait = MediaQueryData(size: Size(393, 864));
+      const landscape = MediaQueryData(size: Size(864, 393));
+      const portraitBounds = {
+        'width': 393.0,
+        'height': 864.0,
+        'left': 0.0,
+        'top': 24.0,
+        'right': 0.0,
+        'bottom': 20.0,
+      };
+      const landscapeBounds = {
+        'width': 864.0,
+        'height': 393.0,
+        'left': 44.0,
+        'top': 24.0,
+        'right': 20.0,
+        'bottom': 0.0,
+      };
+      final responses = <Completer<Object?>>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'begin') return {'systemInsets': portraitBounds};
+        if (call.method == 'systemInsets') {
+          final response = Completer<Object?>();
+          responses.add(response);
+          return response.future;
+        }
+        return null;
+      });
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      expect(
+        device.systemInsetsFor(portrait),
+        const EdgeInsets.only(top: 24, bottom: 20),
+      );
+      expect(device.systemInsetsFor(landscape), isNull);
+      device.didChangeMetrics();
+      await Future<void>.delayed(Duration.zero);
+      device.didChangeMetrics();
+      await Future<void>.delayed(Duration.zero);
+      expect(responses, hasLength(2));
+      responses[1].complete({'systemInsets': landscapeBounds});
+      await Future<void>.delayed(Duration.zero);
+      responses[0].complete({'systemInsets': portraitBounds});
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        device.systemInsetsFor(landscape),
+        const EdgeInsets.fromLTRB(44, 24, 20, 0),
+      );
+      expect(device.systemInsetsFor(portrait), isNull);
+      // Landscape direction can change without changing viewport dimensions.
+      device.didChangeMetrics();
+      await Future<void>.delayed(Duration.zero);
+      responses.last.complete({
+        'systemInsets': {...landscapeBounds, 'left': 20.0, 'right': 44.0},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        device.systemInsetsFor(landscape),
+        const EdgeInsets.fromLTRB(20, 24, 44, 0),
+      );
+      device.didChangeMetrics();
+      await Future<void>.delayed(Duration.zero);
+      final current = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(current.finish);
+      await current.start(video: true);
+      responses.last.complete({'systemInsets': portraitBounds});
+      await Future<void>.delayed(Duration.zero);
+      expect(device.systemInsetsFor(portrait), isNull);
+      expect(
+        current.systemInsetsFor(portrait),
+        const EdgeInsets.only(top: 24, bottom: 20),
+      );
+    },
+  );
+
+  test(
+    'Android keeps its layout fallback when native safe bounds are unavailable',
+    () async {
+      messenger.setMockMethodCallHandler(channel, (call) async => null);
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      device.didChangeMetrics();
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        device.systemInsetsFor(const MediaQueryData(size: Size(393, 864))),
+        isNull,
+      );
+    },
+  );
 
   test(
     'Closing an old player cannot remove the new native session handler',

@@ -72,14 +72,15 @@ jobs:
       - name: Build iOS simulator smoke app
         shell: pwsh
         run: ./tool/build-ios.ps1 -Simulator
-      - name: Test iPhone and iPad startup, player bars and repeated AVKit playback
+      - name: Test iPhone and iPad startup, downloads and ordinary playback
         run: python tool/ios-simulator-smoke.py
       - name: Analyze and test platform compatibility
         run: |
           flutter analyze --no-pub
-          flutter test --no-pub --concurrency=4 test/ios_platform_test.dart test/ios_player_presentation_test.dart test/ios_system_pip_test.dart test/system_pip_test.dart test/external_player_test.dart test/playback_device_test.dart test/account_identity_test.dart test/download_shutdown_test.dart
-          flutter test --no-pub test/player_widget_test.dart --plain-name 'iOS PiP survives a temporary foreground interruption'
+          flutter test --no-pub --concurrency=4 test/ios_platform_test.dart test/ios_player_presentation_test.dart test/system_pip_test.dart test/external_player_test.dart test/playback_device_test.dart test/account_identity_test.dart test/download_shutdown_test.dart
+          flutter test --no-pub test/player_widget_test.dart --plain-name 'iOS player hides PiP'
           flutter test --no-pub --concurrency=4 test/apple_documents_test.dart test/apple_storage_test.dart test/ios_download_save_test.dart test/apple_web_login_test.dart test/lan_discovery_test.dart test/lan_service_test.dart test/lan_qr_test.dart test/cast_protocol_test.dart test/cast_widget_test.dart test/download_protection_page_test.dart test/link_opening_page_test.dart test/web_login_capture_test.dart test/parser_password_web_widget_test.dart
+          flutter test --no-pub --concurrency=4 test/upload_folder_test.dart test/upload_sources_test.dart test/upload_manager_test.dart test/uploads_page_test.dart test/browser_directory_navigation_test.dart
           flutter test --no-pub --concurrency=4 test/remote_control_test.dart test/remote_control_service_test.dart test/remote_control_resilience_test.dart
       - name: Test native storage restoration and existing resume paths
         working-directory: native/gopeed

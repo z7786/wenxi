@@ -13,6 +13,7 @@ import 'package:asterlink/ui/uploads_page.dart';
 import 'package:asterlink/ui/transfers_page.dart';
 import 'package:asterlink/domain/uploads.dart';
 import 'package:asterlink/upload/upload_task.dart';
+import 'package:asterlink/upload/upload_folder.dart';
 import 'upload_manager_test.dart' show QueueConnector, uploadSession;
 import 'support.dart';
 
@@ -47,6 +48,7 @@ void main() {
     bool shell = false,
     bool dark = false,
     bool preview = false,
+    bool folderPreview = false,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;
@@ -122,6 +124,41 @@ void main() {
             modifiedAt: 1,
             error: status == UploadStatus.failed ? '网络连接中断，重新上传会从头开始' : '',
           ),
+        if (folderPreview)
+          UploadTask(
+            id: 'preview-folder',
+            session: services.cloud.bindSession(uploadSession),
+            parent: '0',
+            folderName: '全部文件',
+            accountName: '测试账号',
+            path: 'fixture/资料',
+            name: '资料',
+            size: 100,
+            modifiedAt: 0,
+            createdAt: 1,
+            sent: 40,
+            status: UploadStatus.failed,
+            folder: UploadFolder(
+              location: 'fixture/资料',
+              name: '资料',
+              files: [
+                UploadFolderFile(
+                  location: 'fixture/资料/one.txt',
+                  relativePath: 'one.txt',
+                  size: 40,
+                  modifiedAt: 1,
+                  fileId: 'completed',
+                ),
+                UploadFolderFile(
+                  location: 'fixture/资料/sub/two.mp4',
+                  relativePath: 'sub/two.mp4',
+                  size: 60,
+                  modifiedAt: 1,
+                ),
+              ],
+              directories: ['', 'sub', 'empty'],
+            ),
+          ),
       ];
       await services.store.put(
         'uploadTasks',
@@ -191,6 +228,36 @@ void main() {
     }
     expect(done, isTrue);
   }
+
+  testWidgets(
+    'folder uploads show counts, current file and a continuation action',
+    (tester) async {
+      await setup(
+        tester,
+        preview: true,
+        folderPreview: true,
+        size: const Size(320, 700),
+        scale: 1.8,
+      );
+      try {
+        final task = services.uploads.task('preview-folder')!;
+        task.folder!.currentItem = '资料/sub/two.mp4';
+        final row = find.byKey(const ValueKey('upload-row-preview-folder'));
+        await tester.ensureVisible(row);
+        await tester.pumpAndSettle();
+        expect(find.textContaining('1/2 个文件 · 3 个目录'), findsOneWidget);
+        expect(find.byTooltip('继续上传'), findsOneWidget);
+        await tester.tap(row);
+        await tester.pumpAndSettle();
+        expect(find.text('当前文件'), findsOneWidget);
+        expect(find.text('资料/sub/two.mp4'), findsOneWidget);
+        expect(find.text('继续上传'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await finish(tester);
+      }
+    },
+  );
 
   testWidgets(
     'leaving upload management does not cancel an upload; returning shows completion',

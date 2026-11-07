@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A57000040000000000000001 /* AppleSystemPip.swift in Sources */ = {isa = PBXBuildFile; fileRef = A57000040000000000000002 /* AppleSystemPip.swift */; };
 		A57000050000000000000001 /* AppleExternalPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A57000050000000000000002 /* AppleExternalPlayer.swift */; };
 		A57000030000000000000001 /* ApplePlaybackVolume.swift in Sources */ = {isa = PBXBuildFile; fileRef = A57000030000000000000002 /* ApplePlaybackVolume.swift */; };
 		A57000020000000000000001 /* AppleQrScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A57000020000000000000002 /* AppleQrScanner.swift */; };
@@ -46,7 +45,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		A57000040000000000000002 /* AppleSystemPip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSystemPip.swift; sourceTree = "<group>"; };
 		A57000050000000000000002 /* AppleExternalPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleExternalPlayer.swift; sourceTree = "<group>"; };
 		A57000030000000000000002 /* ApplePlaybackVolume.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplePlaybackVolume.swift; sourceTree = "<group>"; };
 		A57000020000000000000002 /* AppleQrScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleQrScanner.swift; sourceTree = "<group>"; };
@@ -131,7 +129,6 @@
 				A57000010000000000000002 /* AppleDocuments.swift */,
 				A57000020000000000000002 /* AppleQrScanner.swift */,
 				A57000030000000000000002 /* ApplePlaybackVolume.swift */,
-				A57000040000000000000002 /* AppleSystemPip.swift */,
 				A57000050000000000000002 /* AppleExternalPlayer.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
@@ -290,7 +287,6 @@
 				A57000010000000000000001 /* AppleDocuments.swift in Sources */,
 				A57000020000000000000001 /* AppleQrScanner.swift in Sources */,
 				A57000030000000000000001 /* ApplePlaybackVolume.swift in Sources */,
-				A57000040000000000000001 /* AppleSystemPip.swift in Sources */,
 				A57000050000000000000001 /* AppleExternalPlayer.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,

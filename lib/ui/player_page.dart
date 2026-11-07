@@ -2658,26 +2658,28 @@ class _PlayerPageState extends State<PlayerPage>
     final media = MediaQuery.of(context);
     final orientation = media.orientation;
     final previousInsets = _safeInsets[orientation] ?? EdgeInsets.zero;
-    // Android reports smaller padding while system bars animate away. Retain
-    // the safe bounds for this orientation so the controls never jump with it.
-    final insets = EdgeInsets.fromLTRB(
-      math.max(
-        previousInsets.left,
-        math.max(media.viewPadding.left, media.padding.left),
-      ),
-      math.max(
-        previousInsets.top,
-        math.max(media.viewPadding.top, media.padding.top),
-      ),
-      math.max(
-        previousInsets.right,
-        math.max(media.viewPadding.right, media.padding.right),
-      ),
-      math.max(
-        previousInsets.bottom,
-        math.max(media.viewPadding.bottom, media.padding.bottom),
-      ),
-    );
+    // Prefer Android's bounds with hidden bars included. The cached fallback
+    // keeps other platforms and older native bridges stable during bar fades.
+    final insets =
+        device.systemInsetsFor(media) ??
+        EdgeInsets.fromLTRB(
+          math.max(
+            previousInsets.left,
+            math.max(media.viewPadding.left, media.padding.left),
+          ),
+          math.max(
+            previousInsets.top,
+            math.max(media.viewPadding.top, media.padding.top),
+          ),
+          math.max(
+            previousInsets.right,
+            math.max(media.viewPadding.right, media.padding.right),
+          ),
+          math.max(
+            previousInsets.bottom,
+            math.max(media.viewPadding.bottom, media.padding.bottom),
+          ),
+        );
     _safeInsets[orientation] = insets;
     final chromeMedia = media.copyWith(padding: insets, viewPadding: insets);
     return Theme(

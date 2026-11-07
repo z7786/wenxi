@@ -12,7 +12,6 @@ import AsterLinkCore
   private var pendingOpens = [[String: Any]]()
   private var recentOpens = [String: TimeInterval]()
   private let playbackVolume = ApplePlaybackVolume()
-  private let systemPip = AppleSystemPip()
   private let externalPlayer = AppleExternalPlayer()
   private var playbackSession = ""
   private var playbackChannel: FlutterMethodChannel?
@@ -26,8 +25,6 @@ import AsterLinkCore
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     let messenger = engineBridge.applicationRegistrar.messenger()
-    engineBridge.applicationRegistrar.register(
-      ApplePipVideoFactory(playback: systemPip), withId: "com.asterlink.app/pip_video")
     externalChannel = FlutterMethodChannel(name: "com.asterlink.app/external_open", binaryMessenger: messenger)
     externalChannel?.setMethodCallHandler { [weak self] call, result in
       guard call.method == "takeExternalOpens" else { result(FlutterMethodNotImplemented); return }
@@ -98,19 +95,17 @@ import AsterLinkCore
         let args = call.arguments as? [String: Any] ?? [:]
         let session = args["session"] as? String ?? ""
         if call.method != "begin" && session != self.playbackSession { result(nil); return }
-        if self.systemPip.handle(call, arguments: args, result: result) { return }
         switch call.method {
         case "begin":
           if self.originalBrightness == nil { self.originalBrightness = UIScreen.main.brightness }
           self.playbackSession = session
           if let channel = self.playbackChannel {
             self.playbackVolume.begin(session: session, channel: channel)
-            self.systemPip.begin(session: session, channel: channel)
           }
           self.externalPlayer.begin(session: session)
           UIApplication.shared.isIdleTimerDisabled = true
           var values: [String: Any] = self.playbackVolume.values
-          values["pip"] = (args["video"] as? Bool ?? false) && self.systemPip.supported
+          values["pip"] = false
           values["brightness"] = Double(UIScreen.main.brightness)
           result(values)
         case "volume":
@@ -121,7 +116,6 @@ import AsterLinkCore
         case "end":
           if let brightness = self.originalBrightness { UIScreen.main.brightness = brightness }
           self.originalBrightness = nil
-          self.systemPip.end()
           self.externalPlayer.cancel()
           self.playbackVolume.end()
           self.playbackSession = ""
@@ -135,8 +129,7 @@ import AsterLinkCore
 
   func playbackVisible(_ visible: Bool) {
     playbackVolume.active(visible)
-    systemPip.visible(visible)
-    if !visible && !playbackSession.isEmpty && !systemPip.keepsPlayingInBackground {
+    if !visible && !playbackSession.isEmpty {
       playbackChannel?.invokeMethod("action", arguments: ["session": playbackSession, "action": "hidden"])
     }
   }

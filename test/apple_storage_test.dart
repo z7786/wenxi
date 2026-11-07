@@ -71,6 +71,28 @@ void main() {
           'savedPath': '/provider-before/Shared/one.txt',
         },
       ],
+      'uploadTasks': [
+        {
+          'id': 'folder-upload',
+          'path': '$before/Documents/资料',
+          'folder': {
+            'location': '$before/Documents/资料',
+            'directories': ['', '子目录'],
+            'remoteDirectories': {'': 'cloud-root', '子目录': 'cloud-sub'},
+            'files': [
+              {
+                'location': '$before/Documents/资料/子目录/one.txt',
+                'relativePath': '子目录/one.txt',
+                'fileId': 'completed-file',
+              },
+              {
+                'location': '/provider-before/Shared/two.txt',
+                'relativePath': 'two.txt',
+              },
+            ],
+          },
+        },
+      ],
     });
     addTearDown(store.dispose);
     messenger.setMockMethodCallHandler(channel, (call) async {
@@ -107,6 +129,22 @@ void main() {
     expect(
       store.data.list('tasks').last.str('savedPath'),
       '/provider-after/Shared/one.txt',
+    );
+    final upload = store.data.list('uploadTasks').single;
+    expect(upload.str('path'), '$after/Documents/资料');
+    expect(upload.obj('folder').str('location'), '$after/Documents/资料');
+    expect(upload.obj('folder').obj('remoteDirectories'), {
+      '': 'cloud-root',
+      '子目录': 'cloud-sub',
+    });
+    expect(upload.obj('folder').list('files').first, {
+      'location': '$after/Documents/资料/子目录/one.txt',
+      'relativePath': '子目录/one.txt',
+      'fileId': 'completed-file',
+    });
+    expect(
+      upload.obj('folder').list('files').last.str('location'),
+      '/provider-after/Shared/two.txt',
     );
     final snapshot = encoded(store.data);
     await restoreAppleStorage(store, ios: true, channel: channel);
