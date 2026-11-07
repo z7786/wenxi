@@ -1,4 +1,4 @@
-"""Launch the simulator app and verify startup, native downloads and decoding."""
+"""Verify startup, downloads and Apple player behavior on iPhone and iPad."""
 import json
 from pathlib import Path
 import shutil
@@ -8,44 +8,60 @@ import time
 root = Path(__file__).resolve().parent.parent
 local = root / '.local'
 local.mkdir(exist_ok=True)
+
+
 def sim(*args, **kwargs):
     return subprocess.check_output(['xcrun', 'simctl', *args], text=True, **kwargs).strip()
+
+
 runtimes = json.loads(sim('list', 'runtimes', '--json'))['runtimes']
 runtime = next(item for item in reversed(runtimes) if item.get('isAvailable') and 'iOS' in item['name'])
 available = json.loads(sim('list', 'devices', 'available', '--json'))['devices']
-device_type = next(item for item in available[runtime['identifier']]
-                   if item.get('isAvailable') and 'iPhone' in item['name'])
-device = sim('create', 'AsterLink iOS CI', device_type['deviceTypeIdentifier'], runtime['identifier'])
-try:
-    sim('boot', device)
-    sim('bootstatus', device, '-b')
-    sim('install', device, str(root / 'build/ios/iphonesimulator/Runner.app'))
-    container = Path(sim('get_app_container', device, 'com.asterlink.app', 'data'))
-    fixture = container / 'Documents/ios-smoke.mp4'
-    fixture.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(root / 'tool/fixtures/macos-playback.mp4', fixture)
-    sim('launch', '--terminate-running-process', '--stdout=' + str(local / 'ios-stdout.log'),
-        '--stderr=' + str(local / 'ios-stderr.log'), device, 'com.asterlink.app')
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        reports = list(container.rglob('ios-smoke.json'))
-        if reports:
-            report = json.loads(reports[0].read_text())
-            assert 'error' not in report, report
-            assert all(report.get(name) for name in ['startup', 'quickjs', 'download', 'freeSpace', 'playback',
-                                                     'systemPipTransport', 'systemPipPlayback', 'systemPipSeek']), report
-            (local / 'ios-smoke-result.json').write_text(json.dumps(report, indent=2))
-            sim('io', device, 'screenshot', str(local / 'ios-smoke.png'))
-            print('iOS simulator smoke passed:', report)
-            break
-        time.sleep(.5)
-    else:
-        raise AssertionError('iOS simulator did not finish smoke checks in 120 seconds')
-finally:
-    for file in (container.rglob('*.jsonl') if 'container' in locals() else []):
-        shutil.copy2(file, local / ('ios-' + file.name))
-    for name in ['ios-stdout.log', 'ios-stderr.log']:
-        file = local / name
-        if file.exists(): print(file.read_text(errors='replace')[-10000:])
-    subprocess.run(['xcrun', 'simctl', 'shutdown', device], check=False)
-    subprocess.run(['xcrun', 'simctl', 'delete', device], check=False)
+checks = [
+    'startup', 'quickjs', 'download', 'freeSpace', 'playback',
+    'systemPipTransport', 'systemPipPlayback', 'systemPipSeek',
+    'systemPipVisibleLayer', 'systemPipImmediateControls', 'systemPipRepeat',
+    'playerStatusBar',
+]
+reports = {}
+for family in ['iPhone', 'iPad']:
+    device_type = next(item for item in available[runtime['identifier']]
+                       if item.get('isAvailable') and family in item['name'])
+    device = sim('create', 'AsterLink ' + family + ' CI', device_type['deviceTypeIdentifier'], runtime['identifier'])
+    container = None
+    prefix = 'ios-' + family.lower()
+    try:
+        sim('boot', device)
+        sim('bootstatus', device, '-b')
+        sim('install', device, str(root / 'build/ios/iphonesimulator/Runner.app'))
+        container = Path(sim('get_app_container', device, 'com.asterlink.app', 'data'))
+        fixture = container / 'Documents/ios-smoke.mp4'
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / 'tool/fixtures/macos-playback.mp4', fixture)
+        sim('launch', '--terminate-running-process', '--stdout=' + str(local / (prefix + '-stdout.log')),
+            '--stderr=' + str(local / (prefix + '-stderr.log')), device, 'com.asterlink.app')
+        deadline = time.monotonic() + 150
+        while time.monotonic() < deadline:
+            files = list(container.rglob('ios-smoke.json'))
+            if files:
+                report = json.loads(files[0].read_text())
+                assert 'error' not in report, (family, report)
+                assert all(report.get(name) for name in checks), (family, report)
+                reports[family] = report
+                (local / (prefix + '-smoke-result.json')).write_text(json.dumps(report, indent=2))
+                (local / 'ios-smoke-result.json').write_text(json.dumps(reports, indent=2))
+                sim('io', device, 'screenshot', str(local / ('ios-smoke-' + family.lower() + '.png')))
+                print(family + ' simulator smoke passed:', report)
+                break
+            time.sleep(.5)
+        else:
+            raise AssertionError(family + ' simulator did not finish smoke checks in 150 seconds')
+    finally:
+        for file in (container.rglob('*.jsonl') if container is not None else []):
+            shutil.copy2(file, local / (prefix + '-' + file.name))
+        for suffix in ['stdout.log', 'stderr.log']:
+            file = local / (prefix + '-' + suffix)
+            if file.exists():
+                print(file.read_text(errors='replace')[-10000:])
+        subprocess.run(['xcrun', 'simctl', 'shutdown', device], check=False)
+        subprocess.run(['xcrun', 'simctl', 'delete', device], check=False)

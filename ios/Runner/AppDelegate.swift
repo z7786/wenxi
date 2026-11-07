@@ -134,6 +134,7 @@ import AsterLinkCore
 
   func playbackVisible(_ visible: Bool) {
     playbackVolume.active(visible)
+    systemPip.visible(visible)
     if !visible && !playbackSession.isEmpty && !systemPip.keepsPlayingInBackground {
       playbackChannel?.invokeMethod("action", arguments: ["session": playbackSession, "action": "hidden"])
     }

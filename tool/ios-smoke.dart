@@ -12,6 +12,8 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'package:asterlink/platform/playback_device.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/playback.dart';
+import 'package:asterlink/playback/system_pip.dart';
 import 'package:asterlink/playback/external_stream.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/main.dart' as app;
@@ -222,7 +224,7 @@ Future<void> main() async {
     final device = NativePlaybackDevice(targetPlatform: TargetPlatform.iOS);
     try {
       await device.start(video: true);
-      final pip = device.systemPip!;
+      final pip = device.systemPip! as IOSSystemPipPlayback;
       await media.start();
       final preparation = pip.prepare(
         url: media.url,
@@ -254,7 +256,54 @@ Future<void> main() async {
         pip.state.position.inMilliseconds >= 1000,
         'AVKit playback did not advance',
       );
+      Future<void> waitFor(bool Function() ready, String message) async {
+        final deadline = DateTime.now().add(const Duration(seconds: 8));
+        while (!ready() && DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+        require(ready(), message);
+      }
+
+      await waitFor(
+        () => pip.surfaceAttached && pip.readyForDisplay,
+        'AVKit did not attach a visible video layer',
+      );
+      stage = 'playerSystemBars';
+      await device.update(
+        playing: true,
+        width: 1920,
+        height: 1080,
+        orientation: PlaybackOrientation.landscape,
+        controlsVisible: true,
+      );
+      await waitFor(
+        () => pip.statusBarHidden,
+        'Landscape playback did not hide the status bar',
+      );
+      await device.update(
+        playing: true,
+        orientation: PlaybackOrientation.portrait,
+        controlsVisible: true,
+      );
+      await waitFor(
+        () => !pip.statusBarHidden,
+        'Portrait controls did not restore the status bar',
+      );
+      await device.update(
+        playing: true,
+        orientation: PlaybackOrientation.portrait,
+        controlsVisible: false,
+      );
+      await waitFor(
+        () => pip.statusBarHidden,
+        'Hidden player controls did not hide the status bar',
+      );
+      stage = 'systemPipControls';
       await pip.pause();
+      require(
+        !pip.state.playing,
+        'AVKit pause reply did not immediately update playback',
+      );
       await pip.seek(const Duration(milliseconds: 500));
       require(
         (pip.state.position.inMilliseconds - 500).abs() < 250,
@@ -270,6 +319,48 @@ Future<void> main() async {
         stopped.position.inMilliseconds > 0 && !device.inPip,
         'AVKit stop did not return its bookmark',
       );
+      stage = 'systemPipRepeat';
+      for (var iteration = 0; iteration < 2; iteration++) {
+        require(
+          await pip.prepare(
+            url: media.url,
+            title: 'ios-smoke.mp4',
+            initialState: const PlayerState(
+              playing: false,
+              position: Duration(milliseconds: 500),
+            ),
+          ),
+          'AVKit repeat preparation failed',
+        );
+        await pip.play();
+        await waitFor(
+          () =>
+              pip.surfaceAttached &&
+              pip.readyForDisplay &&
+              pip.state.position.inMilliseconds > 800,
+          'Repeated AVKit handoff did not display or play',
+        );
+        await pip.pause();
+        require(
+          !pip.state.playing,
+          'Repeated AVKit pause did not update playback',
+        );
+        await pip.seek(const Duration(milliseconds: 500));
+        require(
+          (pip.state.position.inMilliseconds - 500).abs() < 250,
+          'Repeated AVKit seek failed',
+        );
+        await pip.setRate(1.5);
+        require(
+          (pip.state.rate - 1.5).abs() < .01,
+          'AVKit speed did not update playback',
+        );
+        final finalState = await pip.stop();
+        require(
+          !finalState.playing && finalState.position.inMilliseconds > 0,
+          'Repeated AVKit stop lost the paused bookmark',
+        );
+      }
       await report.writeAsString(
         jsonEncode({
           'startup': true,
@@ -281,6 +372,10 @@ Future<void> main() async {
           'systemPipTransport': true,
           'systemPipPlayback': true,
           'systemPipSeek': true,
+          'systemPipVisibleLayer': true,
+          'systemPipImmediateControls': true,
+          'systemPipRepeat': true,
+          'playerStatusBar': true,
           'systemPipSupported': device.supportsPip,
           'authorizedMediaReads': authorizedReads,
         }),

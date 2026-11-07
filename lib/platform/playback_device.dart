@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:window_manager/window_manager.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
@@ -51,7 +52,7 @@ abstract class PlaybackDevice extends ChangeNotifier {
   }) async => false;
 }
 
-class NativePlaybackDevice extends PlaybackDevice {
+class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   NativePlaybackDevice({
     TargetPlatform? targetPlatform,
     WindowsExternalPlayer? windowsExternalPlayer,
@@ -75,7 +76,9 @@ class NativePlaybackDevice extends PlaybackDevice {
   late final IOSSystemPipPlayback? _systemPip = _ios
       ? IOSSystemPipPlayback(_session, (method, args) async {
           final result = await _invoke<Object?>(method, args);
-          if (method == 'stopPip' && !_closed) {
+          if (method == 'stopPip' &&
+              !_closed &&
+              args.str('pipId') == _systemPip?.pipId) {
             _inPip = false;
             notifyListeners();
           }
@@ -99,6 +102,9 @@ class NativePlaybackDevice extends PlaybackDevice {
   bool _supportsPip = false, _inPip = false, _closed = false, _started = false;
   bool _fullscreen = false, _previousWindowsFullscreen = false;
   bool _video = false;
+  bool _controlsVisible = true, _locked = false;
+  bool? _iosUiHidden;
+  PlaybackOrientation? _iosOrientation;
   double _brightness = .5;
   double _systemVolume = 100;
   bool _supportsSystemVolume = false;
@@ -148,6 +154,10 @@ class NativePlaybackDevice extends PlaybackDevice {
       });
       final values = asJson(await _invoke<Object?>('begin', {'video': video}));
       if (_closed) return;
+      if (_ios && identical(_handlerOwner, this)) {
+        WidgetsBinding.instance.addObserver(this);
+        await _syncIosSystemUi();
+      }
       _supportsPip = values.boolean('pip');
       _brightness = values.number('brightness', .5).clamp(0, 1).toDouble();
       _readSystemVolume(values);
@@ -209,17 +219,25 @@ class NativePlaybackDevice extends PlaybackDevice {
     if (_lastUpdate == signature) return;
     _lastUpdate = signature;
     try {
-      if (_ios && targetOrientation != null) {
-        await SystemChrome.setPreferredOrientations(
-          targetOrientation == PlaybackOrientation.landscape
-              ? [
-                  DeviceOrientation.landscapeLeft,
-                  DeviceOrientation.landscapeRight,
-                ]
-              : targetOrientation == PlaybackOrientation.portrait
-              ? [DeviceOrientation.portraitUp]
-              : [],
-        );
+      if (_ios) {
+        if (!identical(_handlerOwner, this)) return;
+        _controlsVisible = controlsVisible;
+        _locked = locked;
+        if (targetOrientation != null && targetOrientation != _iosOrientation) {
+          _iosOrientation = targetOrientation;
+          await SystemChrome.setPreferredOrientations(
+            targetOrientation == PlaybackOrientation.landscape
+                ? [
+                    DeviceOrientation.landscapeLeft,
+                    DeviceOrientation.landscapeRight,
+                  ]
+                : targetOrientation == PlaybackOrientation.portrait
+                ? [DeviceOrientation.portraitUp]
+                : [],
+          );
+        }
+        await _syncIosSystemUi();
+        if (_closed || !identical(_handlerOwner, this)) return;
       }
       await _invoke<void>('state', {
         'playing': playing,
@@ -231,6 +249,43 @@ class NativePlaybackDevice extends PlaybackDevice {
       });
     } catch (_) {
       _lastUpdate = '';
+      if (_ios) _iosOrientation = null;
+    }
+  }
+
+  Future<void> _syncIosSystemUi({bool force = false}) async {
+    if (!_ios || _closed || !identical(_handlerOwner, this)) return;
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    final size = views.isEmpty ? Size.zero : views.first.physicalSize;
+    final landscape =
+        _iosOrientation == PlaybackOrientation.landscape ||
+        (_iosOrientation == null ||
+                _iosOrientation == PlaybackOrientation.system) &&
+            size.width > size.height;
+    final hidden =
+        _video && (_fullscreen || landscape || _locked || !_controlsVisible);
+    if (!force && _iosUiHidden == hidden) return;
+    _iosUiHidden = hidden;
+    try {
+      await SystemChrome.setEnabledSystemUIMode(
+        SystemUiMode.manual,
+        overlays: hidden ? [] : SystemUiOverlay.values,
+      );
+    } catch (_) {
+      _iosUiHidden = null;
+      rethrow;
+    }
+  }
+
+  @override
+  void didChangeMetrics() {
+    unawaited(_syncIosSystemUi().catchError((Object _) {}));
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_syncIosSystemUi(force: true).catchError((Object _) {}));
     }
   }
 
@@ -246,10 +301,10 @@ class NativePlaybackDevice extends PlaybackDevice {
   Future<void> fullscreen(bool enabled) async {
     if (_closed) return;
     if (_mobile) {
+      _fullscreen = enabled;
       if (_ios) {
-        await SystemChrome.setEnabledSystemUIMode(
-          enabled ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
-        );
+        await _syncIosSystemUi();
+        if (_closed || !identical(_handlerOwner, this)) return;
       }
       await _invoke<void>('fullscreen', {'enabled': enabled});
     } else if (_desktop) {
@@ -264,10 +319,11 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   Future<bool> enterPip() async {
     if (_closed || !supportsPip) return false;
+    final pipId = _ios ? _systemPip?.pipId : null;
     final entered = _windows
         ? await _windowsPip.enter()
-        : await _invoke<bool>('enterPip') ?? false;
-    if (_closed) return false;
+        : await _invoke<bool>('enterPip', {if (_ios) 'pipId': pipId}) ?? false;
+    if (_closed || _ios && pipId != _systemPip?.pipId) return false;
     if (entered) {
       _inPip = true;
       notifyListeners();
@@ -281,7 +337,7 @@ class NativePlaybackDevice extends PlaybackDevice {
     if (_windows) {
       await _windowsPip.exit();
     } else if (_ios) {
-      await _invoke<void>('exitPip');
+      await _invoke<void>('exitPip', {'pipId': _systemPip?.pipId});
     } else {
       return;
     }
@@ -302,13 +358,17 @@ class NativePlaybackDevice extends PlaybackDevice {
           !await windowManager.isMinimized();
     }
     if (_closed || !_mobile) return false;
-    return await _invoke<bool>('isPip') ?? false;
+    return await _invoke<bool>('isPip', {
+          if (_ios) 'pipId': _systemPip?.pipId,
+        }) ??
+        false;
   }
 
   @override
   Future<void> finish() async {
     if (_closed) return;
     _closed = true;
+    if (_ios) WidgetsBinding.instance.removeObserver(this);
     try {
       if (_android) {
         await _nativeChannel.invokeMethod<void>('cancelExternalPlayer', {
@@ -316,9 +376,11 @@ class NativePlaybackDevice extends PlaybackDevice {
         });
       }
       if (_mobile && _started) await _invoke<void>('end');
-      if (_ios) {
+      if (_ios && identical(_handlerOwner, this)) {
         await SystemChrome.setPreferredOrientations([]);
-        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+        if (identical(_handlerOwner, this)) {
+          await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+        }
       }
       if (_windows) await _windowsPip.exit();
       if (_desktop && _fullscreen) {

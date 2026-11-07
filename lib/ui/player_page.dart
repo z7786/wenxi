@@ -860,7 +860,12 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
     if (_pipBusy) return;
-    _pipBusy = true;
+    if (controller.usingSystemPip) {
+      await controller.restoreSystemPip(resume: true);
+      return;
+    }
+    setState(() => _pipBusy = true);
+    _showHud('正在启动画中画');
     try {
       await controller.endBoost();
       final systemPip = device.systemPip;
@@ -871,7 +876,11 @@ class _PlayerPageState extends State<PlayerPage>
         _showHud('当前视频或设备暂时无法进入画中画，已保留内置播放');
       }
     } finally {
-      _pipBusy = false;
+      if (mounted) {
+        setState(() => _pipBusy = false);
+      } else {
+        _pipBusy = false;
+      }
     }
   }
 

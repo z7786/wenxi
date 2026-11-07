@@ -33,6 +33,15 @@ class IOSSystemPipPlayback extends SystemPipPlayback {
   String _pipId = '';
   bool _acceptUpdates = false;
   bool _disposed = false;
+  bool _surfaceAttached = false,
+      _readyForDisplay = false,
+      _statusBarHidden = false;
+  int _revision = 0;
+  Future<PlayerState>? _stopping;
+  String get pipId => _pipId;
+  bool get surfaceAttached => _surfaceAttached;
+  bool get readyForDisplay => _readyForDisplay;
+  bool get statusBarHidden => _statusBarHidden;
   @override
   PlayerState get state => _state;
   @override
@@ -47,7 +56,11 @@ class IOSSystemPipPlayback extends SystemPipPlayback {
 
   void update(Json values, {bool response = false}) {
     if (_disposed) return;
+    if (values.str('pipId') != _pipId) return;
     if (!response && !accepts(values)) return;
+    _surfaceAttached = values.boolean('surfaceAttached', _surfaceAttached);
+    _readyForDisplay = values.boolean('readyForDisplay', _readyForDisplay);
+    _statusBarHidden = values.boolean('statusBarHidden', _statusBarHidden);
     final position = values.number(
       'positionMs',
       _state.position.inMilliseconds.toDouble(),
@@ -92,52 +105,64 @@ class IOSSystemPipPlayback extends SystemPipPlayback {
     required PlayerState initialState,
   }) async {
     if (_disposed) return false;
+    final revision = ++_revision;
+    await _stopping;
+    if (_disposed || revision != _revision) return false;
+    _stopping = null;
     _state = initialState;
     _finished = false;
     _restoreRequested = false;
+    _surfaceAttached = false;
+    _readyForDisplay = false;
+    _statusBarHidden = false;
     _pipId = newId();
     _acceptUpdates = true;
     notifyListeners();
-    return await invoke('preparePip', {
-          'pipId': _pipId,
-          'url': url,
-          'title': title,
-          'positionMs': initialState.position.inMilliseconds,
-          'playing': initialState.playing,
-          'rate': initialState.rate,
-        }) ==
-        true;
-  }
-
-  @override
-  Future<PlayerState> stop() async {
-    _acceptUpdates = false;
-    final values = asJson(await invoke('stopPip', {'pipId': _pipId}));
-    if (values.str('pipId') == _pipId) update(values, response: true);
-    return state;
-  }
-
-  @override
-  Future<void> play() async {
-    await invoke('pipPlay', {'pipId': _pipId});
-  }
-
-  @override
-  Future<void> pause() async {
-    await invoke('pipPause', {'pipId': _pipId});
-  }
-
-  @override
-  Future<void> seek(Duration position) async {
-    await invoke('pipSeek', {
+    final prepared = await invoke('preparePip', {
       'pipId': _pipId,
-      'positionMs': position.inMilliseconds,
+      'url': url,
+      'title': title,
+      'positionMs': initialState.position.inMilliseconds,
+      'playing': initialState.playing,
+      'rate': initialState.rate,
     });
+    return prepared == true && !_disposed && revision == _revision;
   }
 
   @override
-  Future<void> setRate(double value) async {
-    await invoke('pipRate', {'pipId': _pipId, 'rate': value});
+  Future<PlayerState> stop() => _stopping ??= () async {
+    _revision++;
+    final id = _pipId;
+    try {
+      final values = asJson(await invoke('stopPip', {'pipId': id}));
+      if (id == _pipId) update(values, response: true);
+      return state;
+    } finally {
+      if (id == _pipId) {
+        _acceptUpdates = false;
+        if (!_disposed) notifyListeners();
+      }
+    }
+  }();
+
+  @override
+  Future<void> play() => _command('pipPlay');
+
+  @override
+  Future<void> pause() => _command('pipPause');
+
+  @override
+  Future<void> seek(Duration position) =>
+      _command('pipSeek', {'positionMs': position.inMilliseconds});
+
+  @override
+  Future<void> setRate(double value) => _command('pipRate', {'rate': value});
+
+  Future<void> _command(String method, [Json arguments = const {}]) async {
+    if (_disposed || _stopping != null) return;
+    final id = _pipId;
+    final values = asJson(await invoke(method, {'pipId': id, ...arguments}));
+    if (_acceptUpdates && id == _pipId) update(values, response: true);
   }
 
   @override

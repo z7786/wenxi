@@ -14,6 +14,8 @@ class _Pip extends SystemPipPlayback {
   PlayerState value = const PlayerState();
   bool supported = true;
   Future<void>? prepareBarrier;
+  Future<void>? stopBarrier;
+  PlayerState? finalState;
   bool failPrepare = false;
   int stops = 0;
   String url = '';
@@ -42,6 +44,8 @@ class _Pip extends SystemPipPlayback {
   @override
   Future<PlayerState> stop() async {
     stops++;
+    await stopBarrier;
+    if (finalState != null) value = finalState!;
     return state;
   }
 
@@ -62,6 +66,41 @@ class _Pip extends SystemPipPlayback {
 }
 
 void main() {
+  test(
+    'restoring retains the native surface and source lease until stop completes and honors the final pause',
+    () async {
+      final fixture = PlaybackFixture(count: 1);
+      final controller = fixture.controller, pip = _Pip();
+      addTearDown(controller.close);
+      await controller.start();
+      await controller.enterSystemPip(pip, () async => true);
+      final barrier = Completer<void>();
+      pip.stopBarrier = barrier.future;
+      pip.finalState = pip.state.copyWith(
+        playing: false,
+        position: const Duration(seconds: 345),
+      );
+      final restoring = controller.restoreSystemPip(resume: true);
+      final concurrent = controller.restoreSystemPip(resume: true);
+      await until(() => pip.stops == 1);
+      expect(controller.usingSystemPip, isTrue);
+      expect(controller.systemPipPlayback, same(pip));
+      expect(fixture.leases.values.single, 2);
+      expect(fixture.current.state.playing, isFalse);
+      barrier.complete();
+      await Future.wait([restoring, concurrent]);
+      expect(pip.stops, 1);
+      expect(controller.usingSystemPip, isFalse);
+      expect(controller.state.position.inSeconds, 345);
+      expect(controller.state.playing, isFalse);
+      expect(fixture.leases.values.single, 1);
+      pip.stopBarrier = null;
+      pip.finalState = null;
+      expect(await controller.enterSystemPip(pip, () async => true), isTrue);
+      expect(controller.state.position.inSeconds, 345);
+      expect(controller.state.playing, isFalse);
+    },
+  );
   test(
     'system PiP owns audio and progress; returning resumes the original decoder at its final position',
     () async {
