@@ -294,11 +294,27 @@ class Arm64LockTest(unittest.TestCase):
             arm64_lock.prepare(self.root, self.sdk)
         self.assertEqual(self.path.read_bytes(), self.original)
         (self.sdk / 'bin/internal/engine.version').write_text(arm64_lock.ENGINE, encoding='utf-8')
-        invalid = self.original.replace(b'pub.flutter-io.cn', b'pub.dev')
+        invalid = self.original.replace(b'pub.flutter-io.cn', b'packages.invalid').replace(b'pub.dev', b'packages.invalid')
         self.path.write_bytes(invalid)
         with self.assertRaises(ValueError):
             arm64_lock.prepare(self.root, self.sdk)
         self.assertEqual(self.path.read_bytes(), invalid)
+
+    def test_official_registry_keeps_sources_and_non_sdk_packages(self):
+        official = self.original.replace(b'pub.flutter-io.cn', b'pub.dev')
+        self.path.write_bytes(official)
+        arm64_lock.prepare(self.root, self.sdk)
+        adapted = self.path.read_bytes()
+        def other_blocks(data):
+            text = data.decode('utf-8').replace('\r\n', '\n')
+            for name in arm64_lock.PACKAGES:
+                text = __import__('re').sub(r'(?m)^  ' + name + r':\n(?:(?:    .*|)\n)+', '', text)
+            return text
+        self.assertEqual(other_blocks(adapted), other_blocks(official))
+        self.assertNotIn(b'pub.flutter-io.cn', adapted)
+        self.assertIn(b'url: "https://pub.dev"', adapted)
+        arm64_lock.prepare(self.root, self.sdk)
+        self.assertEqual(self.path.read_bytes(), adapted)
 
 
 class SigningSettingsTest(unittest.TestCase):

@@ -22,7 +22,8 @@ def prepare(root, sdk):
     for name, (version, digest) in PACKAGES.items():
         pattern = r'(?m)^  ' + name + r':\n(?:(?:    .*|)\n)+'
         match = re.search(pattern, text)
-        if not match or 'source: hosted' not in match[0] or 'https://pub.flutter-io.cn' not in match[0]:
+        if not match or 'source: hosted' not in match[0] or not re.search(
+                r'(?m)^      url: "https://(?:pub\.dev|pub\.flutter-io\.cn)"$', match[0]):
             raise ValueError('Unexpected SDK package entry: ' + name)
         block = re.sub(r'(?m)^      sha256:.*$', '      sha256: "' + digest + '"', match[0])
         block = re.sub(r'(?m)^    version:.*$', '    version: "' + version + '"', block)
