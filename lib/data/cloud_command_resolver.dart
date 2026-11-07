@@ -41,7 +41,7 @@ class CloudCommandResolver {
     require(text.length <= maximumLength, '口令内容过长，请只复制本次分享文案');
     RequestScope.checkpoint();
     if (platform == CloudPlatform.c139) {
-      final code = C139Passcode.parse(text);
+      final code = C139Passcode.parse(text, allowChineseText: true);
       require(code != null, '未识别到移动云盘口令，请完整复制分享文案');
       return code!.toLink(text);
     }

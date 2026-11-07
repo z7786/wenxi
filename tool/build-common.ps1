@@ -160,7 +160,8 @@ function Get-AsterLinkDartDefines {
 function Test-AsterLinkVersion {
     param([string]$ProjectPath, [string]$Flutter)
     $flutterPath = (Get-Command $Flutter -ErrorAction Stop).Source
-    $dartPath = Join-Path (Split-Path -Parent $flutterPath) 'dart.bat'
+    $dartName = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'dart.bat' } else { 'dart' }
+    $dartPath = Join-Path (Split-Path -Parent $flutterPath) $dartName
     if (-not (Test-Path -LiteralPath $dartPath -PathType Leaf)) { $dartPath = 'dart' }
     Invoke-AsterLinkTool -Command $dartPath -Arguments @((Join-Path $ProjectPath 'tool/sync_version.dart'), '--check') -Failure 'Application version check failed'
 }

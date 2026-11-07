@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
@@ -11,12 +12,41 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/download/download_manager.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/lan/lan_files.dart';
+import 'package:asterlink/lan/lan_download_route.dart';
 import 'package:asterlink/lan/lan_service.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'support.dart';
 
 class _LocalIo extends HttpOverrides {}
+
+class _ReceiverIo extends HttpOverrides {
+  int? blockedPort;
+  @override
+  HttpClient createHttpClient(SecurityContext? context) =>
+      super.createHttpClient(context)
+        ..connectionFactory = ((uri, _, _) {
+          if (uri.port == blockedPort) {
+            throw const SocketException('Injected inbound firewall');
+          }
+          return Socket.startConnect(
+            uri.host,
+            uri.port,
+            sourceAddress: '127.0.0.2',
+          );
+        });
+}
+
+class _SenderIo extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) =>
+      super.createHttpClient(context)
+        ..connectionFactory = ((uri, _, _) => Socket.startConnect(
+          uri.host,
+          uri.port,
+          sourceAddress: '127.0.0.1',
+        ));
+}
 
 class _ObservedFiles extends LanFiles {
   _ObservedFiles() : super(android: false);
@@ -35,6 +65,8 @@ void main() {
     () {
       late Directory root;
       late LanService sender;
+      late LanService receiver;
+      late _ReceiverIo receiverIo;
       late _ObservedFiles sources;
       late StateStore store;
       late DownloadManager manager;
@@ -58,8 +90,14 @@ void main() {
           ),
           cleanups: CleanupOutbox(store, FakeHttp()),
           http: TransferHttp(),
-          refreshSource: (_) async =>
-              throw StateError('LAN transfers must not call a cloud connector'),
+          refreshSource: (spec) async {
+            if (LanDownloadRoute.owns(spec)) {
+              return receiver.resolveDownload(spec);
+            }
+            throw StateError(
+              'Legacy LAN transfers must not call a cloud connector',
+            );
+          },
         );
         await manager.initialize();
       }
@@ -78,15 +116,31 @@ void main() {
         root = Directory(await root.resolveSymbolicLinks());
         destination = p.join(root.path, 'received');
         sources = _ObservedFiles();
-        sender = LanService(
-          store: StateStore.memory(),
-          files: sources,
-          discoveryEnabled: false,
-          requestedPort: 0,
-          bindAddress: InternetAddress.loopbackIPv4,
-          addresses: () async => ['127.0.0.1'],
-        );
-        await sender.start();
+        sender = await HttpOverrides.runWithHttpOverrides(() async {
+          final service = LanService(
+            store: StateStore.memory(),
+            files: sources,
+            discoveryEnabled: false,
+            requestedPort: 0,
+            bindAddress: InternetAddress.loopbackIPv4,
+            addresses: () async => ['127.0.0.1'],
+          );
+          await service.start();
+          return service;
+        }, _SenderIo());
+        receiverIo = _ReceiverIo()..blockedPort = sender.port;
+        receiver = await HttpOverrides.runWithHttpOverrides(() async {
+          final service = LanService(
+            store: StateStore.memory(),
+            files: LanFiles(android: false),
+            discoveryEnabled: false,
+            requestedPort: 0,
+            bindAddress: InternetAddress('127.0.0.2'),
+            addresses: () async => ['127.0.0.2'],
+          );
+          await service.start();
+          return service;
+        }, receiverIo);
         store = StateStore.memory({
           'settings': {
             'threads': 64,
@@ -101,6 +155,7 @@ void main() {
         await manager.close();
         manager.dispose();
         await sender.close();
+        await receiver.close();
         await root.delete(recursive: true);
         HttpOverrides.global = null;
       });
@@ -250,6 +305,69 @@ void main() {
           final failed = await finished(id);
           expect(failed.status, DownloadStatus.failed);
           expect(failed.error, contains('分享已结束或过期'));
+        },
+      );
+
+      test(
+        'Reverse transfer pauses, rebuilds the receiver URL after restart and resumes real native checkpoints',
+        () async {
+          await store.put('settings', {
+            'threads': 4,
+            'concurrent': 1,
+            'retries': 2,
+            'speedLimit': 512 * 1024,
+          });
+          Future<void> pair() => HttpOverrides.runWithHttpOverrides(() async {
+            final peer = await sender.findDevice(receiver.base().toString());
+            await sender.connect(peer, receiver.connectionCode);
+            await until(
+              () => receiver.diagnostics.integer('reverseChannels') == 1,
+            );
+          }, _SenderIo());
+          await pair();
+          final payload = Uint8List.fromList(
+            List.generate(6 * 1024 * 1024 + 3, (i) => (i * 19) % 251),
+          );
+          final file = await File(
+            p.join(root.path, '反向续传.bin'),
+          ).writeAsBytes(payload);
+          final shared = await sender.createShare(
+            await sources.scan([file.path]),
+          );
+          final spec = receiver
+              .prepareDownloads(shared.manifest, sender.base())
+              .single;
+          final id = (await manager.enqueueAll([
+            spec,
+          ], destination: destination)).single;
+          await until(
+            () => manager.task(id)!.downloaded > 0 || !manager.task(id)!.active,
+          );
+          await manager.pause(id);
+          final paused = manager.task(id)!;
+          expect(paused.status, DownloadStatus.paused, reason: paused.error);
+          expect(paused.downloaded, inExclusiveRange(0, payload.length));
+          expect(Uri.parse(paused.spec.url).path, startsWith('/v1/receive/'));
+          await until(
+            () =>
+                sender.activeConnections == 0 &&
+                receiver.diagnostics.integer('reverseRequests') == 0,
+          );
+          await manager.close();
+          manager.dispose();
+          await receiver.stop();
+          await receiver.start();
+          await pair();
+          sources.ranges.clear();
+          await openManager();
+          expect(manager.task(id)!.downloaded, paused.downloaded);
+          await manager.resume(id);
+          final done = await finished(id);
+          expect(done.status, DownloadStatus.completed, reason: done.error);
+          expect(sources.ranges.any((range) => range.$1 > 0), isTrue);
+          expect(LanDownloadRoute.owns(done.spec), isTrue);
+          expect(Uri.parse(done.spec.url).port, receiver.port);
+          expect(await File(done.savedPath!).readAsBytes(), payload);
         },
       );
     },

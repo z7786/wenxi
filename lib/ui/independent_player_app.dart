@@ -9,6 +9,7 @@ import '../core/json.dart';
 import '../domain/playback.dart';
 import '../platform/windows_pip.dart';
 import 'desktop_pip_surface.dart';
+import '../playback/video_output_policy.dart';
 
 class IndependentPlayerApp extends StatelessWidget {
   const IndependentPlayerApp({super.key, required this.endpoint});
@@ -116,6 +117,13 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
           bufferSize: 16 * 1024 * 1024,
         ),
       );
+      if (Platform.environment['ASTERLINK_MACOS_SMOKE'] == '1') {
+        subscriptions.add(
+          decoder.stream.error.listen(
+            (error) => debugPrint('Playback error: $error'),
+          ),
+        );
+      }
       for (final stream in <Stream<Object?>>[
         decoder.stream.position,
         decoder.stream.playing,
@@ -156,11 +164,13 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
       video = VideoController(
         decoder,
         configuration: VideoControllerConfiguration(
-          enableHardwareAcceleration: true,
+          enableHardwareAcceleration: supportsNativeHardwareRendering,
           hwdec: preferences.hardwareAcceleration ? null : 'no',
         ),
       );
       setState(() {});
+      await video!.platform.future;
+      if (!mounted || closing) return;
       await decoder.setRate(preferences.rate);
       if (!mounted || closing) return;
       await decoder.setVolume(preferences.volume);
@@ -178,7 +188,12 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
         const Duration(seconds: 5),
         (_) => unawaited(report()),
       );
-    } catch (_) {
+    } catch (failure, stack) {
+      if (Platform.environment['ASTERLINK_MACOS_SMOKE'] == '1') {
+        debugPrint(
+          'Independent playback initialization failed: $failure\n$stack',
+        );
+      }
       if (mounted && !closing) setState(() => error = '小窗播放失败，请关闭后重新打开');
     }
   }

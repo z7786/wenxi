@@ -38,6 +38,17 @@ flutter pub get --enforce-lockfile
 
 新增 ED2K 需要更新 Gopeed 原生组件。升级已有工作目录时，Android 构建加 `-RebuildNative`（正式入口同样支持该参数），避免沿用旧 AAR；Windows 构建会重建所选架构 helper。源码与验证说明见 [ED2K 下载](ED2K-DOWNLOAD.md)。
 
+## macOS 测试包
+
+macOS 构建需要 Mac 和 Xcode。仓库的 **Actions → Build macOS test app → Run workflow**
+可选择 `arm64`（苹果芯片）或 `x64`（Intel），并使用原有客户端配置。工作流在对应
+架构的 Mac 上编译，检查下载器、解析脚本运行库和播放器架构，并验证启动和视频播放。
+成功后下载 `macos-arm64-test` 或 `macos-x64-test` 附件中的 DMG。
+
+本机 Mac 使用 PowerShell 执行 `./tool/build-macos.ps1 -Architecture x64`，苹果芯片改为
+`-Architecture arm64`；随后执行 `python tool/package-macos.py --app build/macos/Build/Products/Release/文析助手.app --architecture x64`。
+输出位于 `.local/macos-release-assets/`。测试包使用临时签名，未配置 Developer ID 签名与苹果公证。
+
 ## 本机正式版
 
 正式配置放在 `.local/build-config.json`，原签名配置放在 `.local/keystore.properties`。使用原包名与原签名才能覆盖已有安卓正式版。

@@ -343,7 +343,7 @@ class RemoteControlService extends ChangeNotifier {
     }
     final ignored = seen['ignoredUpdates'];
     if (ignored is Map) {
-      for (final platform in ['android', 'windows']) {
+      for (final platform in remoteUpdatePlatforms) {
         final build = ignored[platform];
         if (build is int && build > 0 && build <= 2147483647) {
           _ignoredUpdates[platform] = build;

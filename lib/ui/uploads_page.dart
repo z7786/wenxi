@@ -61,7 +61,11 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
   }
 
   Future<void> cancel(UploadTask t) async {
-    if (await confirm(context, '取消上传', '停止这个文件的上传？重新上传会从头开始。')) {
+    if (await confirm(
+      context,
+      '取消上传',
+      t.isFolder ? '停止这个文件夹的上传？已完成的文件会保留，继续时只上传未完成文件。' : '停止这个文件的上传？重新上传会从头开始。',
+    )) {
       if (mounted) await action(t, () => widget.services.uploads.cancel(t.id));
     }
   }
@@ -96,8 +100,9 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
     _ => secondary(context),
   };
 
-  String _amount(UploadTask t) =>
-      t.status == UploadStatus.running && t.phase == UploadPhase.uploading
+  String _amount(UploadTask t) => t.isFolder
+      ? '${t.folder!.completedFiles}/${t.folder!.files.length} 个文件 · ${t.folder!.directories.length} 个目录 · ${formatBytes(t.sent.clamp(0, t.size))} / ${formatBytes(t.size)}'
+      : t.status == UploadStatus.running && t.phase == UploadPhase.uploading
       ? '${formatBytes(t.sent.clamp(0, t.size))} / ${formatBytes(t.size)}'
       : formatBytes(t.size);
 
@@ -145,7 +150,7 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
                         ? '暂无上传任务'
                         : '暂无${['', '进行中', '已完成', '待处理'][filter]}任务',
                     filter == 0
-                        ? '在网盘文件列表中选择「上传文件」\n离开页面后，上传仍会继续'
+                        ? '在网盘文件列表中选择「上传文件」或「上传文件夹」\n离开页面后，上传仍会继续'
                         : '切换其他分类查看上传记录',
                     icon: CupertinoIcons.cloud_upload,
                   )
@@ -187,6 +192,8 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
             child: Text(
               active > 0
                   ? '传输 ${active - pending} · 等待 $pending'
+                  : all.any((t) => t.isFolder)
+                  ? '共 ${all.length} 个任务'
                   : '共 ${all.length} 个文件',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
@@ -246,9 +253,9 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
             )
           else ...[
             if (task.canRetry)
-              const AppMenuAction(
+              AppMenuAction(
                 value: 'retry',
-                label: '重新上传',
+                label: task.isFolder ? '继续上传' : '重新上传',
                 icon: CupertinoIcons.arrow_clockwise,
               ),
             const AppMenuAction(
@@ -285,7 +292,7 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
           ),
           child: Row(
             children: [
-              FileGlyph(t.name, size: 30),
+              FileGlyph(t.name, directory: t.isFolder, size: 30),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
@@ -360,7 +367,9 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
                 label: t.active
                     ? '取消上传'
                     : t.canRetry
-                    ? '重新上传'
+                    ? t.isFolder
+                          ? '继续上传'
+                          : '重新上传'
                     : '打开目标目录：${t.folderName}',
                 onPressed: locked
                     ? null
@@ -414,7 +423,11 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
                     children: [
                       Row(
                         children: [
-                          FileGlyph(task.name, size: 34),
+                          FileGlyph(
+                            task.name,
+                            directory: task.isFolder,
+                            size: 34,
+                          ),
                           const SizedBox(width: 12),
                           Expanded(
                             child: Text(
@@ -440,6 +453,8 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
                         '${task.session.platform.shortName} · ${task.accountName}',
                       ),
                       _detailLine(context, '目标目录', task.folderName),
+                      if (task.isFolder && task.folder!.currentItem.isNotEmpty)
+                        _detailLine(context, '当前文件', task.folder!.currentItem),
                       _detailLine(context, '创建时间', formatDate(task.createdAt)),
                       if (task.error.isNotEmpty)
                         Container(
@@ -475,7 +490,9 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
                             color: Colors.red,
                           ),
                           title: const Text('取消上传'),
-                          subtitle: const Text('重新上传会从头开始'),
+                          subtitle: Text(
+                            task.isFolder ? '已完成的文件保留，可继续未完成文件' : '重新上传会从头开始',
+                          ),
                           onTap: () => Navigator.pop(context, 'cancel'),
                         )
                       else ...[
@@ -486,7 +503,7 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
                               CupertinoIcons.arrow_clockwise,
                               color: accent,
                             ),
-                            title: const Text('重新上传'),
+                            title: Text(task.isFolder ? '继续上传' : '重新上传'),
                             onTap: () => Navigator.pop(context, 'retry'),
                           ),
                         ListTile(

@@ -9,7 +9,7 @@ import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
 import '../domain/download_retries.dart';
 import '../domain/settings.dart';
-import '../platform/native_engine.dart';
+import '../platform/document_actions.dart';
 import 'common.dart';
 import 'appearance_page.dart';
 import 'remote_control_dialogs.dart';
@@ -122,27 +122,15 @@ class MinePage extends StatelessWidget {
   }
 
   Future<bool> _saveBytes(Uint8List bytes, String name) async {
-    if (Platform.isAndroid && services.platformFeatures) {
-      final result = await nativeChannel.invokeMethod<String>('saveDocument', {
-        'name': name,
-        'bytes': bytes,
-        'mime': 'application/json',
-      });
-      return result != null;
-    }
-    final location = await getSaveLocation(
-      suggestedName: name,
+    final location = await const DocumentActions().saveBytes(
+      bytes,
+      name,
+      mime: 'application/json',
       acceptedTypeGroups: const [
         XTypeGroup(label: 'JSON', extensions: ['json']),
       ],
     );
-    if (location == null) return false;
-    await XFile.fromData(
-      bytes,
-      name: name,
-      mimeType: 'application/json',
-    ).saveTo(location.path);
-    return true;
+    return location != null;
   }
 
   Future<void> _export(BuildContext context) async {
@@ -205,15 +193,7 @@ class MinePage extends StatelessWidget {
   }
 
   Future<void> _restore(BuildContext context) async {
-    final file = await openFile(
-      acceptedTypeGroups: const [
-        XTypeGroup(
-          label: '文析助手备份',
-          extensions: ['json', 'bak'],
-          mimeTypes: ['application/json', 'application/octet-stream'],
-        ),
-      ],
-    );
+    final file = await openFile(acceptedTypeGroups: const [backupFileType]);
     if (file == null || !context.mounted) return;
     if (await file.length() > 16 * 1024 * 1024) {
       if (context.mounted) message(context, '备份文件过大');
@@ -608,12 +588,21 @@ class MinePage extends StatelessWidget {
           ),
         ),
       if (services.platformFeatures &&
-          (Platform.isAndroid || Platform.isWindows))
+          (Platform.isAndroid ||
+              Platform.isIOS ||
+              Platform.isWindows ||
+              Platform.isMacOS))
         _tile(
           context,
           CupertinoIcons.shield_lefthalf_fill,
           '后台下载保护',
-          Platform.isWindows ? '最小化到托盘与自动休眠保护' : '锁屏下载、通知与系统后台设置',
+          Platform.isIOS
+              ? '前台下载与后台续传说明'
+              : Platform.isMacOS
+              ? '最小化窗口与自动休眠保护'
+              : Platform.isWindows
+              ? '最小化到托盘与自动休眠保护'
+              : '锁屏下载、通知与系统后台设置',
           () => Navigator.push<void>(
             context,
             MaterialPageRoute(builder: (_) => const DownloadProtectionPage()),
@@ -685,22 +674,34 @@ class MinePage extends StatelessWidget {
   ]);
 
   Widget _help(BuildContext context) => _section(context, '帮助与诊断', [
-    _tile(
-      context,
-      CupertinoIcons.arrow_down_circle,
-      '检查更新',
-      services.control.checking
-          ? '正在检查…'
-          : services.control.availableUpdate != null
-          ? '发现新版本 ${services.control.availableUpdate!.version}'
-          : '当前版本 ${applicationVersion.split('+').first}',
-      () => checkForAppUpdate(
+    if (services.control.platform == 'ios')
+      _tile(
         context,
-        services.control,
-        launcher: linkLauncher,
-        updater: services.appUpdates,
+        CupertinoIcons.arrow_down_circle,
+        '版本与更新',
+        '当前版本 ${applicationVersion.split('+').first} · iOS 测试版',
+        () => message(
+          context,
+          'iOS 测试版请通过签名安装渠道更新；发布到 TestFlight 或 App Store 后，请通过对应渠道更新。',
+        ),
+      )
+    else
+      _tile(
+        context,
+        CupertinoIcons.arrow_down_circle,
+        '检查更新',
+        services.control.checking
+            ? '正在检查…'
+            : services.control.availableUpdate != null
+            ? '发现新版本 ${services.control.availableUpdate!.version}'
+            : '当前版本 ${applicationVersion.split('+').first}',
+        () => checkForAppUpdate(
+          context,
+          services.control,
+          launcher: linkLauncher,
+          updater: services.appUpdates,
+        ),
       ),
-    ),
     _tile(
       context,
       CupertinoIcons.question_circle,
@@ -788,7 +789,9 @@ class MinePage extends StatelessWidget {
     builder: (context, _) => LayoutBuilder(
       builder: (context, bounds) {
         final settings = services.settings;
-        final desktop = Theme.of(context).platform == TargetPlatform.windows;
+        final desktop =
+            Theme.of(context).platform == TargetPlatform.windows ||
+            Theme.of(context).platform == TargetPlatform.macOS;
         final columns =
             desktop &&
             bounds.maxWidth >= 880 &&

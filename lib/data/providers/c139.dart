@@ -385,19 +385,18 @@ class C139Connector extends CloudConnector {
     final command = C139Passcode.fromLink(link);
     if (command != null) {
       if (c == null) throw const AccountLoginRequired('移动口令解析需要先登录移动云盘');
-      final page = await _commandPage(command, 'root', 1, c);
+      final auth = requiredAuth(c);
       final session = BrowseSession(
         platform: platform,
         mode: BrowseMode.share,
-        title: page.str('lkName').ifEmpty('移动云盘口令分享'),
+        title: '移动云盘口令分享',
         rootId: 'root',
         metadata: {
           'linkCode': command.code,
           'linkCodeType': '${command.codeType}',
-          'linkId': page.str('linkID').ifEmpty(page.str('linkId')),
           'password': command.password ?? '',
-          'authorization': requiredAuth(c),
-          'account': accountId(requiredAuth(c)),
+          'authorization': auth,
+          'account': accountId(auth),
           'cookie': c.primary,
         },
         sourceLink: link,
@@ -445,8 +444,9 @@ class C139Connector extends CloudConnector {
     C139Passcode command,
     String parent,
     int begin,
-    Credential credential,
-  ) async {
+    Credential credential, {
+    required String linkId,
+  }) async {
     final auth = requiredAuth(credential);
     // Web sessions use the signed JSON endpoint and its web protocol key.
     // The app's XML dispatcher rejects those sessions with an empty HTTP 500.
@@ -459,6 +459,7 @@ class C139Connector extends CloudConnector {
         parent: parent,
         begin: begin,
         end: begin + 199,
+        linkId: linkId,
       ),
       auth,
     );
@@ -481,8 +482,8 @@ class C139Connector extends CloudConnector {
       session.meta('linkCode'),
       password: session.meta('password'),
     );
-    // The directory endpoint omits the share ID for command links. The web
-    // detail endpoint resolves it; a command token is not a transfer link ID.
+    // Resolve the real share ID before browsing. Keep it for every child page
+    // and transfer; the command itself is only a lookup token.
     final result = data(
       await share(
         '$shareBase/IOutLink/getOutLinkGeneral',
@@ -835,12 +836,19 @@ class C139Connector extends CloudConnector {
     final dir = parent.ifEmpty('root');
     if (s.mode == BrowseMode.share && s.meta('linkCode').isNotEmpty) {
       if (c == null) throw const AccountLoginRequired('移动口令解析需要先登录移动云盘');
+      final resolved = await _resolveCommandShare(s, c);
       final command = C139Passcode(
-        s.meta('linkCode'),
-        password: s.meta('password'),
+        resolved.meta('linkCode'),
+        password: resolved.meta('password'),
       );
       for (var begin = 1; begin <= 20000; begin += 200) {
-        final page = await _commandPage(command, dir, begin, c);
+        final page = await _commandPage(
+          command,
+          dir,
+          begin,
+          c,
+          linkId: resolved.meta('linkId'),
+        );
         final batch = [
           for (final item in C139PasscodeProtocol.items(
             page,

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import '../data/state_store.dart';
+import 'apple_storage.dart';
 
 const nativeChannel = MethodChannel('com.asterlink.app/native');
 
@@ -44,6 +45,31 @@ class AndroidGopeedTransport extends NativeTransport {
   }
 }
 
+/// iOS hosts the same core in-process; executable subprocesses are unavailable.
+class IOSGopeedTransport extends AndroidGopeedTransport {
+  @override
+  Future<Object?> call(String method, [Json args = const {}]) async {
+    if (method == 'freeSpace') {
+      return await nativeChannel.invokeMethod<Object?>('freeSpace', args);
+    }
+    if (method == 'open') {
+      final storage = asJson(
+        await nativeChannel.invokeMethod<Object?>('restoreStorage'),
+      );
+      final mappings = appleStorageMappings(storage, [
+        args.str('storageDir'),
+        args.str('cacheDir'),
+      ]);
+      return super.call(method, {
+        ...args,
+        'storagePaths': mappings,
+        'storageHome': storage.str('home'),
+      });
+    }
+    return super.call(method, args);
+  }
+}
+
 class DesktopGopeedTransport extends NativeTransport {
   DesktopGopeedTransport({required this.executable, this.launchProcess});
   final String executable;
@@ -59,7 +85,8 @@ class DesktopGopeedTransport extends NativeTransport {
   Future<Process> _start() => _starting.run(() async {
     require(!_disposed, '下载组件已经关闭');
     if (_process != null) return _process!;
-    require(await File(executable).exists(), '缺少 Windows 下载组件，请安装完整版本');
+    final system = Platform.isMacOS ? 'macOS' : 'Windows';
+    require(await File(executable).exists(), '缺少 $system 下载组件，请安装完整版本');
     final Process process;
     try {
       process =
@@ -69,16 +96,17 @@ class DesktopGopeedTransport extends NativeTransport {
       // Keep launch failures distinct from network errors. Changing download
       // URLs or retrying transfers cannot fix Windows application control.
       final blocked =
-          {5, 577, 1260, 1275, 4551}.contains(error.errorCode) ||
-          RegExp(
-            r'应用程序控制|应用控制|application control|blocked.*policy',
-            caseSensitive: false,
-          ).hasMatch(error.message);
+          Platform.isWindows &&
+          ({5, 577, 1260, 1275, 4551}.contains(error.errorCode) ||
+              RegExp(
+                r'应用程序控制|应用控制|application control|blocked.*policy',
+                caseSensitive: false,
+              ).hasMatch(error.message));
       throw AppException(
         blocked
             ? 'Windows 安全策略阻止了下载组件启动（错误 ${error.errorCode}）。'
                   '请检查 Windows 安全中心的保护历史记录或联系系统管理员，处理后重试；下载进度已保留'
-            : 'Windows 下载组件无法启动（错误 ${error.errorCode}），'
+            : '$system 下载组件无法启动（错误 ${error.errorCode}），'
                   '请重新安装完整版本后重试；下载进度已保留',
       );
     }

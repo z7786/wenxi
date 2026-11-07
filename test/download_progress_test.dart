@@ -5,6 +5,7 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/ui/download_progress.dart';
 import 'package:asterlink/domain/uploads.dart';
 import 'package:asterlink/upload/upload_task.dart';
+import 'package:asterlink/upload/upload_folder.dart';
 import 'download_overlay_test.dart' show uploadTask;
 
 DownloadTask task({
@@ -30,6 +31,59 @@ DownloadTask task({
 );
 
 void main() {
+  testWidgets('folder preparation keeps completed bytes visible', (
+    tester,
+  ) async {
+    final source = uploadTask('folder-progress');
+    final plan = UploadFolder(
+      location: 'local',
+      name: '资料',
+      files: [
+        UploadFolderFile(
+          location: 'local/one',
+          relativePath: 'one.txt',
+          size: 40,
+          modifiedAt: 0,
+          fileId: 'done',
+        ),
+        UploadFolderFile(
+          location: 'local/two',
+          relativePath: 'two.txt',
+          size: 60,
+          modifiedAt: 0,
+        ),
+      ],
+    );
+    final upload = UploadTask(
+      id: source.id,
+      session: source.session,
+      parent: source.parent,
+      folderName: source.folderName,
+      accountName: source.accountName,
+      path: plan.location,
+      name: plan.name,
+      size: plan.size,
+      modifiedAt: 0,
+      createdAt: 1,
+      folder: plan,
+      status: UploadStatus.running,
+      phase: UploadPhase.preparing,
+      sent: plan.completedBytes,
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: TransferProgress.upload(upload))),
+    );
+    await tester.pump();
+    final dynamic paint = tester
+        .widget<CustomPaint>(
+          find.byKey(ValueKey('upload-progress-paint-${upload.id}')),
+        )
+        .painter;
+    expect(paint.fill.value, .4);
+    expect(find.text('准备中'), findsOneWidget);
+    expect(paint.flowing, isFalse);
+    await tester.pumpWidget(const SizedBox());
+  });
   testWidgets(
     'Mutable uploads animate byte changes and wait for provider confirmation',
     (tester) async {

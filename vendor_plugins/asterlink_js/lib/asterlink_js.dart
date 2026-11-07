@@ -6,11 +6,15 @@ import 'package:ffi/ffi.dart';
 /// Each instance is confined to one isolate. No Dart callbacks enter QuickJS.
 class SourceJsBridge {
   SourceJsBridge({String? libraryPath}) {
-    final library = DynamicLibrary.open(
-      libraryPath ??
-          Platform.environment['ASTERLINK_JS_LIBRARY'] ??
-          (Platform.isWindows ? 'asterlink_js.dll' : 'libasterlink_js.so'),
-    );
+    final override =
+        libraryPath ?? Platform.environment['ASTERLINK_JS_LIBRARY'];
+    final library = override != null
+        ? DynamicLibrary.open(override)
+        : Platform.isMacOS || Platform.isIOS
+        ? DynamicLibrary.process()
+        : DynamicLibrary.open(
+            Platform.isWindows ? 'asterlink_js.dll' : 'libasterlink_js.so',
+          );
     _new = library
         .lookupFunction<Pointer<Void> Function(), Pointer<Void> Function()>(
           'al_js_new',

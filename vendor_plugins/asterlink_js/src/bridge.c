@@ -9,7 +9,7 @@
 static double now_ms(void) { LARGE_INTEGER t, f; QueryPerformanceCounter(&t); QueryPerformanceFrequency(&f); return 1000.0 * t.QuadPart / f.QuadPart; }
 #else
 #include <time.h>
-#define EXPORT __attribute__((visibility("default")))
+#define EXPORT __attribute__((visibility("default"))) __attribute__((used))
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000.0 + t.tv_nsec / 1000000.0; }
 #endif
 #define MAX_TEXT 1048576

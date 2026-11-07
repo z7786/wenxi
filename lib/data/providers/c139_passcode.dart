@@ -28,6 +28,7 @@ class C139PasscodeProtocol {
     String parent = 'root',
     int begin = 1,
     int end = 200,
+    String linkId = '',
   }) {
     require(
       account.isNotEmpty && parent.isNotEmpty && begin > 0 && end >= begin,
@@ -36,8 +37,12 @@ class C139PasscodeProtocol {
     require(code.code.isNotEmpty && code.code.length <= 128, '移动口令无效');
     return {
       'account': account,
-      'linkCode': code.code,
-      'linkCodeType': code.codeType,
+      if (linkId.isNotEmpty)
+        'linkID': linkId
+      else ...{
+        'linkCode': code.code,
+        'linkCodeType': code.codeType,
+      },
       if (code.password?.isNotEmpty == true) 'passwd': code.password!,
       'pCaID': parent,
       'caSrt': 0,

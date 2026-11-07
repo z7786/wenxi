@@ -7,6 +7,7 @@ import '../core/json.dart';
 import '../data/http.dart';
 import '../platform/file_access.dart';
 import '../platform/native_engine.dart';
+import '../platform/apple_storage.dart';
 import 'lan_models.dart';
 
 class LanLocalFile {
@@ -103,7 +104,9 @@ class LanFiles {
 
   Future<Json> _scanDesktop(String location, bool folder) async {
     final uri = Uri.tryParse(location);
-    final path = uri?.scheme == 'file' ? File.fromUri(uri!).path : location;
+    final path = await resolveAppleDirectory(
+      uri?.scheme == 'file' ? File.fromUri(uri!).path : location,
+    );
     require(p.isAbsolute(path), '文件位置无效');
     final entity = folder ? Directory(path) : File(path);
     final resolved = await entity.resolveSymbolicLinks();
@@ -148,7 +151,9 @@ class LanFiles {
     final stop = end ?? file.size;
     require(start >= 0 && stop >= start && stop <= file.size, '文件读取范围无效');
     if (!android) {
-      yield* File(file.location).openRead(start, stop);
+      yield* File(
+        await resolveAppleDirectory(file.location),
+      ).openRead(start, stop);
       return;
     }
     final handle = await channel.invokeMethod<String>('lanOpenRead', {
@@ -190,12 +195,13 @@ class LanFiles {
         '源文件已修改，请重新创建分享',
       );
     } else {
+      final location = await resolveAppleDirectory(file.location);
       require(
-        await FileSystemEntity.type(file.location, followLinks: false) ==
+        await FileSystemEntity.type(location, followLinks: false) ==
             FileSystemEntityType.file,
         '源文件已变化，请重新创建分享',
       );
-      final stat = await File(file.location).stat();
+      final stat = await File(location).stat();
       require(
         stat.type == FileSystemEntityType.file &&
             stat.size == file.size &&
@@ -233,7 +239,7 @@ class LanFiles {
       });
       return;
     }
-    final root = Directory(destination);
+    final root = Directory(await resolveAppleDirectory(destination));
     await root.create(recursive: true);
     final resolvedRoot = await root.resolveSymbolicLinks();
     for (final directory in directories) {

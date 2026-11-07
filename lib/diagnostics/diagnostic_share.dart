@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' show Rect;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -42,8 +43,9 @@ Future<File> prepareDiagnosticShare(
 
 Future<ShareResultStatus> shareDiagnosticZip(
   Uint8List bytes,
-  String name,
-) async {
+  String name, {
+  Rect? origin,
+}) async {
   final file = await prepareDiagnosticShare(
     await getTemporaryDirectory(),
     bytes,
@@ -54,16 +56,25 @@ Future<ShareResultStatus> shareDiagnosticZip(
       files: [XFile(file.path, mimeType: 'application/zip')],
       title: '分享文析助手日志',
       subject: '文析助手故障日志',
+      sharePositionOrigin: origin,
     ),
   );
   return result.status;
 }
 
 Future<void> openDiagnosticExportLocation(String path) async {
-  if (!Platform.isWindows || !await File(path).exists()) {
+  if ((!Platform.isWindows && !Platform.isMacOS) ||
+      !await File(path).exists()) {
     throw const FileSystemException('导出的日志文件已不存在');
   }
-  await Process.start('explorer.exe', [
-    p.dirname(path),
-  ], mode: ProcessStartMode.detached);
+  if (Platform.isMacOS) {
+    await Process.start('/usr/bin/open', [
+      '-R',
+      path,
+    ], mode: ProcessStartMode.detached);
+  } else {
+    await Process.start('explorer.exe', [
+      p.dirname(path),
+    ], mode: ProcessStartMode.detached);
+  }
 }

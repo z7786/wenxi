@@ -17,11 +17,13 @@ import 'playback_failure.dart';
 import 'playback_selection.dart';
 import 'subtitle_matching.dart';
 import 'external_stream.dart';
+import 'system_pip.dart';
 import 'cast/cast_session.dart';
 import 'cast/dlna.dart';
 import 'cast/cast_platform.dart';
 
 part 'playback_cast.dart';
+part 'playback_pip.dart';
 
 CastSession _managedCastSession(CastDevice device, DownloadSpec source) =>
     CastSession(device, source, managePlatform: false);
@@ -60,7 +62,9 @@ class _Session {
   final subtitleGate = AsyncGate();
   VideoGeometry? geometry;
   PlayerState? castBookmark;
+  PlayerState? pipBookmark;
   Future<void>? closing, retirementPause, retirementSave;
+  Future<void>? pipRestoring;
   Timer? recoveryTimer;
   Duration recoveryPosition = Duration.zero;
   int healthyRecoveryChecks = 0;
@@ -180,6 +184,7 @@ class PlaybackController extends ChangeNotifier {
   bool get remembersFolder => history.remembersFolder(folderKey);
   int index, _generation = 0;
   bool loading = false, closed = false, boosting = false, _background = false;
+  bool _visible = true;
   bool boostLocked = false;
   double? _temporaryBoostRate;
   Future<void>? _boostRateSync;
@@ -203,12 +208,23 @@ class PlaybackController extends ChangeNotifier {
   int _externalRevision = 0;
   bool openingExternalPlayer = false;
   bool get playingExternally => _externalStream != null;
+  _SystemPipSession? _pipSession;
+  RequestScope? _pipScope;
+  int _pipRevision = 0;
+  bool preparingSystemPip = false;
+  Future<void>? _pipClosing;
+  SystemPipPlayback? get systemPipPlayback => _pipSession?.playback;
+  bool get usingSystemPip => _pipSession != null;
   PlaybackEntry get current => entries[index];
   PlaybackBackend? get backend => _session?.backend;
   PlayerState get state {
     final cast = _cast;
     if (cast != null) return cast.state;
-    final value = backend?.state ?? const PlayerState();
+    final value =
+        _pipSession?.state ??
+        _session?.pipBookmark ??
+        backend?.state ??
+        const PlayerState();
     return systemVolumeControl != null && _systemVolume != null
         ? value.copyWith(volume: _systemVolume)
         : value;
@@ -437,6 +453,9 @@ class PlaybackController extends ChangeNotifier {
     final generation = ++_generation, old = _session;
     _externalRevision++;
     _externalScope?.cancel();
+    _pipRevision++;
+    _pipScope?.cancel();
+    if (_pipSession != null) old?.pipBookmark = _pipSession!.state;
     final retiredSelection = _selection?.key == entries[next].key
         ? null
         : _selection;
@@ -464,6 +483,7 @@ class PlaybackController extends ChangeNotifier {
     _temporaryBoostRate = null;
     resumedFrom = Duration.zero;
     _changed();
+    await _stopSystemPip();
     await _stopExternalPlayback();
     await _stopCast(keepPlatform: continueCast != null);
     await _retire(old);
@@ -1047,7 +1067,10 @@ class PlaybackController extends ChangeNotifier {
   void _onState(_Session session) {
     if (!_current(session)) return;
     _rememberGeometry(session);
-    if (casting || connectingCast) {
+    if (casting ||
+        connectingCast ||
+        usingSystemPip ||
+        session.pipBookmark != null) {
       _changed();
       return;
     }
@@ -1181,9 +1204,11 @@ class PlaybackController extends ChangeNotifier {
         return;
       }
     }
-    final state = identical(_session, session) && casting
+    final state = identical(_session, session) && usingSystemPip
+        ? _pipSession!.state
+        : identical(_session, session) && casting
         ? _cast!.state
-        : session.castBookmark ?? session.backend.state;
+        : session.pipBookmark ?? session.castBookmark ?? session.backend.state;
     final finished =
         completed ?? (state.completed || session.completionHandled);
     if (!session.opened ||
@@ -1290,6 +1315,12 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> play() async {
     if (closed) return;
+    if (usingSystemPip) {
+      sleepTimer.acknowledgePlay();
+      _playWhenReady = true;
+      await _pipSession!.playback.play();
+      return;
+    }
     if (casting) {
       sleepTimer.acknowledgePlay();
       _playWhenReady = true;
@@ -1303,6 +1334,11 @@ class PlaybackController extends ChangeNotifier {
     if (_externalStream != null) await _stopExternalPlayback();
     _independentBookmark = null;
     if (closed) return;
+    final session = _session;
+    if (session != null && session.pipBookmark != null) {
+      await _restorePipBookmark(session);
+      if (!_current(session) || !_visible) return;
+    }
     _background = false;
     _playWhenReady = true;
     _session?.playRequested = true;
@@ -1321,6 +1357,12 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> pause({bool save = true}) async {
     if (closed) return;
+    if (usingSystemPip) {
+      _playWhenReady = false;
+      await _pipSession!.playback.pause();
+      if (save) await saveProgress();
+      return;
+    }
     if (casting && _cast!.connected) {
       _playWhenReady = false;
       await _cast!.pause();
@@ -1343,6 +1385,11 @@ class PlaybackController extends ChangeNotifier {
   Future<void> toggle() => state.playing ? pause() : play();
   Future<void> seek(Duration position) async {
     final target = clampPlaybackPosition(position, state.duration);
+    if (usingSystemPip) {
+      await _pipSession!.playback.seek(target);
+      await saveProgress();
+      return;
+    }
     if (casting) {
       await _cast!.seek(target);
       await saveProgress();
@@ -1413,6 +1460,10 @@ class PlaybackController extends ChangeNotifier {
     require(!casting, '电视投屏使用正常速度，倍速请在电视端调整');
     await endBoost();
     await updatePreferences(preferences.copyWith(rate: value));
+    if (usingSystemPip) {
+      await _pipSession!.playback.setRate(effectiveRate);
+      return;
+    }
     await _command((backend) => backend.setRate(effectiveRate));
   }
 
@@ -1450,7 +1501,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> beginBoost() async {
-    if (boosting || !ready || casting) return;
+    if (boosting || !ready || casting || usingSystemPip) return;
     _temporaryBoostRate = preferences.boostRate;
     boostLocked = false;
     boosting = true;
@@ -1694,6 +1745,7 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> background({required bool pictureInPicture}) async {
     if (closed) return;
+    _visible = false;
     _background = !pictureInPicture;
     if (pictureInPicture || casting || connectingCast || _castTarget != null) {
       await saveProgress();
@@ -1703,16 +1755,30 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void foreground() {
+    _visible = true;
     _background = false;
     sleepTimer.checkDeadline();
+    final session = _session;
+    if (session != null && session.pipBookmark != null && !usingSystemPip) {
+      unawaited(
+        _restorePipBookmark(session).catchError((
+          Object error,
+          StackTrace stack,
+        ) {
+          DiagnosticLog.error('player.system_pip_foreground', error, stack);
+        }),
+      );
+    }
   }
 
   Future<bool> openExternalPlayer(
-    Future<bool> Function(String url, String title, Duration position) open,
-  ) async {
+    Future<bool> Function(String url, String title, Duration position) open, {
+    bool directLink = false,
+  }) async {
     require(!closed && !loading && hasVideo, '请等待视频地址准备完成');
     require(!openingExternalPlayer, '正在选择第三方播放器');
     require(!casting && !connectingCast, '请先断开电视投屏');
+    require(!usingSystemPip && !preparingSystemPip, '请先退出画中画');
     checkSource?.call();
     openingExternalPlayer = true;
     final revision = ++_externalRevision, generation = _generation;
@@ -1745,6 +1811,7 @@ class PlaybackController extends ChangeNotifier {
         unowned = await (refresh ?? prepare)(entry, scope);
       }
       check();
+      final directUrl = directLink ? _iosExternalUrl(unowned) : null;
       stream = externalStreamFactory(unowned);
       _externalStream = stream;
       _externalSource = unowned;
@@ -1754,9 +1821,9 @@ class PlaybackController extends ChangeNotifier {
       // the old audio before another app starts, so propagate a retry failure.
       if (state.playing) await backend?.pause();
       check();
-      await stream.start();
+      if (!directLink) await stream.start();
       check();
-      launched = await open(stream.url, entry.name, position);
+      launched = await open(directUrl ?? stream.url, entry.name, position);
       check();
       return launched;
     } finally {
@@ -1824,11 +1891,14 @@ class PlaybackController extends ChangeNotifier {
     ++_generation;
     _externalRevision++;
     _externalScope?.cancel();
+    _pipRevision++;
+    _pipScope?.cancel();
     _scope?.cancel();
     _subtitleScope?.cancel();
     _discardPrepared();
     _saveTimer?.cancel();
     final session = _session;
+    if (_pipSession != null) session?.pipBookmark = _pipSession!.state;
     if (_cast != null) session?.castBookmark = _cast!.state;
     _session = null;
     unawaited(_pauseForRetirement(session));
@@ -1837,6 +1907,7 @@ class PlaybackController extends ChangeNotifier {
     if (session != null) session.retirementSave ??= _save(session);
     final selection = _selection;
     _selection = null;
+    await _stopSystemPip();
     await _stopExternalPlayback();
     await _stopCast();
     await _retire(session);

@@ -1012,6 +1012,14 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
             padding: const EdgeInsets.all(16),
             children: [
               _status(),
+              if (defaultTargetPlatform == TargetPlatform.iOS)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
+                  child: Text(
+                    '设备互传期间请保持应用在前台；锁屏或切后台后，iOS 可能中断连接。',
+                    style: TextStyle(fontSize: 12, color: secondary(context)),
+                  ),
+                ),
               if (_busy)
                 _card(
                   Row(
@@ -1815,7 +1823,10 @@ class _LanReceivePageState extends State<_LanReceivePage> {
         _destination!,
         widget.manifest.directories,
       );
-      final specs = widget.manifest.downloads(widget.origin);
+      final specs = widget.services.lan.prepareDownloads(
+        widget.manifest,
+        widget.origin,
+      );
       await widget.services.store.put('lanDestination', _destination!);
       if (specs.isNotEmpty) {
         await widget.services.downloads.enqueueAll(

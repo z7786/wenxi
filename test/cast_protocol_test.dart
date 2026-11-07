@@ -29,6 +29,64 @@ class _SeekRetryClient extends DlnaClient {
 
 void main() {
   test(
+    'manual television description works without multicast discovery',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final discovery = CastDiscovery();
+      addTearDown(discovery.dispose);
+      final device = await discovery.addAddress(tv.location.toString());
+      expect(device.name, '客厅 & 电视');
+      expect(discovery.devices.single.id, device.id);
+      expect(tv.descriptions, 1);
+    },
+  );
+  test(
+    'manual IP connection discovers a television with unicast SSDP',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      await tv.startSsdp();
+      addTearDown(tv.close);
+      final discovery = CastDiscovery();
+      addTearDown(discovery.dispose);
+      await discovery.addAddress('127.0.0.1:${tv.ssdp!.port}');
+      expect(discovery.devices.single.description, tv.location);
+      expect(tv.descriptions, 1);
+      expect(tv.events.any((e) => e.startsWith('ssdp:M-SEARCH')), isTrue);
+    },
+  );
+  test(
+    'manual connection rejects non-LAN input and closes pending requests',
+    () async {
+      final discovery = CastDiscovery();
+      for (final address in [
+        'https://example.com/root.xml',
+        'http://user@192.168.1.8/root.xml',
+        'file:///root.xml',
+        'http://8.8.8.8/root.xml',
+      ]) {
+        await expectLater(
+          discovery.addAddress(address),
+          throwsA(isA<AppException>()),
+        );
+      }
+      final tv = TestTv();
+      await tv.start();
+      final barrier = Completer<void>();
+      tv.barriers['description'] = barrier.future;
+      final pending = discovery.addAddress(tv.location.toString());
+      final failed = expectLater(pending, throwsA(isA<AppException>()));
+      await castEventually(() => tv.descriptions > 0);
+      discovery.dispose();
+      await failed.timeout(const Duration(seconds: 2));
+      expect(discovery.devices, isEmpty);
+      barrier.complete();
+      await tv.close();
+    },
+  );
+  test(
     'SSDP validates status, sender, LAN location and case-insensitive headers',
     () {
       final sender = InternetAddress('192.168.1.8');

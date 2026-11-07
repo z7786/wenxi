@@ -320,7 +320,7 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
   Widget build(BuildContext context) {
     final paper = Theme.of(context).colorScheme.surface;
     final help = platform == CloudPlatform.c139
-        ? '请复制完整移动云盘口令或分享文案。解析、下载和转存使用本 App 内登录的移动云盘账号，请先登录。'
+        ? '支持移动云盘文字口令、/*…:/ 口令或完整分享文案。解析、下载和转存使用本 App 内登录的移动云盘账号，请先登录。'
         : '请从${platform.shortName}复制口令或完整分享文案，保留原有内容';
     return PopScope(
       canPop: !working,

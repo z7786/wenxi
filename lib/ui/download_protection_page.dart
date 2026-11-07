@@ -123,11 +123,18 @@ class _DownloadProtectionPageState extends State<DownloadProtectionPage>
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            Text('锁屏后继续下载', style: Theme.of(context).textTheme.titleLarge),
+            Text(
+              state?.foregroundOnly == true ? 'iOS 下载与续传' : '锁屏后继续下载',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
             const SizedBox(height: 8),
             Text(
-              state?.desktop == true
-                  ? '下载期间防止系统自动休眠，支持锁屏和托盘下载。任务全部结束或暂停后自动释放保护。'
+              state?.foregroundOnly == true
+                  ? '请保持应用在前台完成下载。切后台或锁屏后，iOS 可能暂停网络和应用运行；这时可返回传输管理继续任务。'
+                  : state?.desktop == true
+                  ? widget.platform.operatingSystem == 'macos'
+                        ? '下载期间防止系统自动休眠，最小化窗口后继续传输。任务全部结束或暂停后自动释放保护。'
+                        : '下载期间防止系统自动休眠，支持锁屏和托盘下载。任务全部结束或暂停后自动释放保护。'
                   : '打开应用后自动显示保活通知。下载时额外启用锁屏保护，全部结束或暂停后释放下载资源，保活通知继续保留。允许以下系统设置，可减少后台中断。',
               style: TextStyle(color: secondary(context), height: 1.6),
             ),
@@ -142,7 +149,18 @@ class _DownloadProtectionPageState extends State<DownloadProtectionPage>
                   child: CircularProgressIndicator(),
                 ),
               )
-            else if (state.desktop) ...[
+            else if (state.foregroundOnly) ...[
+              Icon(
+                CupertinoIcons.info_circle,
+                color: themeAccent(context),
+                size: 32,
+              ),
+              const SizedBox(height: 14),
+              Text(
+                '下载任务和已保存的进度会保留。大文件、BT、ED2K 和设备互传期间，请保持应用打开。',
+                style: TextStyle(color: secondary(context), height: 1.6),
+              ),
+            ] else if (state.desktop) ...[
               Icon(
                 CupertinoIcons.shield_lefthalf_fill,
                 color: themeAccent(context),
@@ -155,7 +173,9 @@ class _DownloadProtectionPageState extends State<DownloadProtectionPage>
               ),
               const SizedBox(height: 12),
               Text(
-                '点击最小化按钮可收起到系统托盘，下载和上传会继续。单击托盘图标恢复窗口，右键可退出。关闭窗口时也可选择“后台传输”。屏幕仍可自动熄灭。',
+                widget.platform.operatingSystem == 'macos'
+                    ? '最小化窗口后下载和上传会继续。传输期间请保持应用运行，屏幕仍可自动熄灭。'
+                    : '点击最小化按钮可收起到系统托盘，下载和上传会继续。单击托盘图标恢复窗口，右键可退出。关闭窗口时也可选择“后台传输”。屏幕仍可自动熄灭。',
                 style: TextStyle(color: secondary(context), height: 1.6),
               ),
             ] else ...[
@@ -226,7 +246,9 @@ class _DownloadProtectionPageState extends State<DownloadProtectionPage>
             ],
             const SizedBox(height: 20),
             Text(
-              state?.desktop == true
+              state?.foregroundOnly == true
+                  ? '重新选择系统“文件”中的下载目录可恢复访问权限。尚未保存的最后少量数据可能需要重新下载。'
+                  : state?.desktop == true
                   ? '手动睡眠、关机或合上盖子触发的睡眠仍由系统处理，唤醒后可继续下载。'
                   : '系统强行停止应用或达到后台运行时限时，下载会保留进度，返回应用后可继续。',
               style: TextStyle(

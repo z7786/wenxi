@@ -152,7 +152,10 @@ void main() {
         'enabled': true,
         'version': '1.0',
         'build': 47,
-        'downloadUrl': 'https://user:supersecret@host.invalid/',
+        'downloadUrl': Uri.https(
+          'host.invalid',
+          '/',
+        ).replace(userInfo: 'user:supersecret').toString(),
       };
       final doc = RemoteControlDocument.parse(json, previous: previous);
       expect(doc.config.announcement!.id, 'new');
@@ -203,7 +206,14 @@ void main() {
       expect(bad.config.cloud(CloudPlatform.uc).enabled, isFalse);
       expect(bad.config.updates['android']!.build, 50);
       expect(bad.config.aboutText, '有效内容');
-      expect(bad.issues.length, CloudPlatform.values.length + 2);
+      expect(
+        bad.issues.length,
+        CloudPlatform.values.length + remoteUpdatePlatforms.length,
+      );
+      expect(
+        bad.issues.map((issue) => issue.section),
+        contains('updates.macos'),
+      );
     },
   );
 

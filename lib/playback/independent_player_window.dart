@@ -24,7 +24,7 @@ class IndependentPlayerWindow {
   Future<void>? _closing;
 
   Future<void> open() async {
-    require(Platform.isWindows, '当前平台不支持独立桌面播放窗口');
+    require(Platform.isWindows || Platform.isMacOS, '当前平台不支持独立桌面播放窗口');
     final server = _server = await HttpServer.bind(
       InternetAddress.loopbackIPv4,
       0,

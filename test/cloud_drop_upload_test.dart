@@ -16,11 +16,33 @@ import 'browser_test_support.dart';
 class _DropConnector extends BrowserTestConnector {
   _DropConnector() : super(CloudPlatform.quark);
   final uploaded = <(String, String, List<int>)>[];
-  bool writable = true;
+  final folders = <CloudFile>[];
+  bool writable = true, foldersWritable = true;
 
   @override
   bool canUploadTo(BrowseSession session, String parent) =>
       writable && super.canUploadTo(session, parent);
+
+  @override
+  bool canCreateFolderIn(BrowseSession session, String parent) =>
+      foldersWritable && super.canCreateFolderIn(session, parent);
+
+  @override
+  Future<CloudFile> createFolder(
+    BrowseSession session,
+    String parent,
+    String name,
+    Credential credential,
+  ) async {
+    final folder = CloudFile(
+      id: 'folder-${folders.length}',
+      name: name,
+      parentId: parent,
+      isDirectory: true,
+    );
+    folders.add(folder);
+    return folder;
+  }
 
   @override
   Future<CloudFile> upload(
@@ -47,6 +69,7 @@ class _DropConnector extends BrowserTestConnector {
     Credential? credential,
   ) async => [
     ...await super.list(session, parent, credential),
+    ...folders.where((f) => f.parentId == parent),
     for (final (target, name, bytes) in uploaded)
       if (target == parent)
         CloudFile(
@@ -63,6 +86,7 @@ void main() {
   const codec = StandardMethodCodec();
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  const selectorChannel = MethodChannel('plugins.flutter.io/file_selector');
   late BrowserUiFixture fixture;
   late _DropConnector connector;
 
@@ -138,9 +162,13 @@ void main() {
   File localFile(String name, [List<int> bytes = const [1, 2, 3, 4]]) =>
       File(p.join(fixture.directory.path, name))..writeAsBytesSync(bytes);
 
-  void scenario(String name, Future<void> Function(WidgetTester) body) {
+  void scenario(
+    String name,
+    Future<void> Function(WidgetTester) body, {
+    TargetPlatform platform = TargetPlatform.windows,
+  }) {
     testWidgets(name, (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      debugDefaultTargetPlatformOverride = platform;
       fixture = await BrowserUiFixture.create(platform: CloudPlatform.quark);
       connector = _DropConnector();
       fixture.services.cloud.connectors[CloudPlatform.quark] = connector;
@@ -152,19 +180,39 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         var closed = false;
         unawaited(fixture.close().then((_) => closed = true));
-        for (var i = 0; i < 100 && !closed; i++) {
+        final cleanupClock = Stopwatch()..start();
+        while (!closed && cleanupClock.elapsed < const Duration(seconds: 15)) {
           await tester.pump(const Duration(milliseconds: 100));
           await tester.runAsync(
-            () => Future<void>.delayed(const Duration(milliseconds: 5)),
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
           );
         }
         debugDefaultTargetPlatformOverride = null;
         tester.view.resetPhysicalSize();
         tester.view.resetDevicePixelRatio();
-        expect(closed, isTrue);
+        expect(closed, isTrue, reason: 'Upload fixture cleanup did not finish');
       }
     });
   }
+
+  scenario(
+    'Finder drops upload files on macOS and clear the drag overlay',
+    (tester) async {
+      await render(tester, empty: true);
+      final file = localFile('Mac 文件.txt');
+      await enter(tester);
+      expect(find.text('松开鼠标上传文件或文件夹'), findsOneWidget);
+      await release(tester, [file.path]);
+      expect(connector.uploaded.single.$2, 'Mac 文件.txt');
+      expect(connector.uploaded.single.$3, [1, 2, 3, 4]);
+      expect(
+        fixture.services.uploads.tasks.single.status,
+        UploadStatus.completed,
+      );
+      expect(find.byKey(const Key('cloud-upload-drop-overlay')), findsNothing);
+    },
+    platform: TargetPlatform.macOS,
+  );
 
   scenario(
     'Explorer drops upload several files into an empty folder and refresh the list',
@@ -174,7 +222,7 @@ void main() {
           second = localFile('photo.png', [8, 9]);
       expect(find.textContaining('将本地文件拖到这里上传'), findsOneWidget);
       await enter(tester);
-      expect(find.text('松开鼠标上传文件'), findsOneWidget);
+      expect(find.text('松开鼠标上传文件或文件夹'), findsOneWidget);
       expect(find.textContaining('上传到“全部文件”'), findsOneWidget);
       await release(tester, [first.path, second.path]);
       final tasks = fixture.services.uploads.tasks;
@@ -273,19 +321,104 @@ void main() {
   );
 
   scenario(
-    'a folder mixed with files rejects the whole drop without partial uploads',
+    'mixed folder and file drops preserve the tree and deduplicate nested selections',
     (tester) async {
       await render(tester, empty: true);
       final file = localFile('valid.txt');
       final directory = Directory(p.join(fixture.directory.path, 'folder'))
         ..createSync();
+      final nested = File(p.join(directory.path, 'sub', 'same.txt'));
+      nested.parent.createSync(recursive: true);
+      nested.writeAsBytesSync([6, 7]);
+      Directory(p.join(directory.path, 'empty')).createSync();
       await enter(tester);
-      await release(tester, [file.path, directory.path]);
-      expect(fixture.services.uploads.tasks, isEmpty);
-      expect(find.text('暂不支持拖拽文件夹，请选择文件夹内的文件'), findsOneWidget);
+      await release(tester, [
+        file.path,
+        nested.path,
+        directory.path,
+        nested.parent.path,
+        directory.path,
+      ]);
+      final tasks = fixture.services.uploads.tasks;
+      expect(tasks, hasLength(2));
+      expect(tasks.every((t) => t.status == UploadStatus.completed), isTrue);
+      expect(tasks.where((t) => t.isFolder).single.folder!.files, hasLength(1));
+      final root = connector.folders.singleWhere((f) => f.name == 'folder');
+      final sub = connector.folders.singleWhere((f) => f.name == 'sub');
+      expect(root.parentId, 'personal-root');
+      expect(sub.parentId, root.id);
+      expect(
+        connector.folders.singleWhere((f) => f.name == 'empty').parentId,
+        root.id,
+      );
+      expect(connector.uploaded.map((f) => (f.$1, f.$2)), [
+        ('personal-root', 'valid.txt'),
+        (sub.id, 'same.txt'),
+      ]);
+      expect(connector.uploaded.map((f) => f.$3).toList(), [
+        [1, 2, 3, 4],
+        [6, 7],
+      ]);
       expect(file.existsSync(), isTrue);
+      expect(nested.readAsBytesSync(), [6, 7]);
     },
   );
+
+  scenario('file-only destinations reject mixed folder drops atomically', (
+    tester,
+  ) async {
+    connector.foldersWritable = false;
+    await render(tester, empty: true);
+    final file = localFile('valid.txt');
+    final folder = Directory(p.join(fixture.directory.path, 'folder'))
+      ..createSync();
+    await enter(tester);
+    expect(find.text('松开鼠标上传文件'), findsOneWidget);
+    await release(tester, [file.path, folder.path]);
+    expect(fixture.services.uploads.tasks, isEmpty);
+    expect(find.text('当前目录不支持上传文件夹'), findsOneWidget);
+  });
+
+  scenario('the add menu folder picker queues the whole selected directory', (
+    tester,
+  ) async {
+    final folder = Directory(p.join(fixture.directory.path, 'picker-folder'))
+      ..createSync();
+    File(p.join(folder.path, 'one.txt')).writeAsBytesSync([4, 5]);
+    messenger.setMockMethodCallHandler(selectorChannel, (call) async {
+      expect(call.method, 'getDirectoryPath');
+      expect(call.arguments['confirmButtonText'], '上传此文件夹');
+      return folder.path;
+    });
+    try {
+      await render(tester, empty: true);
+      await tester.tap(find.byKey(const Key('browser-add-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('上传文件夹'));
+      for (var i = 0; i < 70; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump(const Duration(milliseconds: 20));
+        if (fixture.services.uploads.tasks.isNotEmpty &&
+            fixture.services.uploads.activeCount == 0) {
+          break;
+        }
+      }
+      await tester.pumpAndSettle();
+      final task = fixture.services.uploads.tasks.single;
+      expect(task.isFolder, isTrue);
+      expect(task.status, UploadStatus.completed, reason: task.error);
+      expect(task.name, 'picker-folder');
+      expect(connector.uploaded.single.$2, 'one.txt');
+      expect(connector.uploaded.single.$3, [4, 5]);
+      await tester.tap(find.byKey(const Key('browser-add-menu')));
+      await tester.pumpAndSettle();
+      expect(find.text('上传文件夹'), findsOneWidget);
+    } finally {
+      messenger.setMockMethodCallHandler(selectorChannel, null);
+    }
+  });
 
   scenario('a missing file fails before any upload task is created', (
     tester,
@@ -351,6 +484,9 @@ void main() {
       await render(tester, empty: true);
       expect(find.byType(DropTarget), findsNothing);
       expect(find.byKey(const Key('browser-add-menu')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('browser-add-menu')));
+      await tester.pumpAndSettle();
+      expect(find.text('上传文件夹'), findsOneWidget);
       expect(find.textContaining('将本地文件拖到这里上传'), findsNothing);
     },
   );

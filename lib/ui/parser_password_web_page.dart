@@ -79,7 +79,7 @@ class _ParserPasswordWebPageState extends State<ParserPasswordWebPage> {
         ..userAgent = _userAgent
         // Android implements incognito by deleting the process-wide Cookie
         // jar. Keep this site's verification session when reopening the page.
-        ..incognito = defaultTargetPlatform != TargetPlatform.android
+        ..incognito = defaultTargetPlatform == TargetPlatform.windows
         ..cacheEnabled = true
         ..cacheMode = CacheMode.LOAD_DEFAULT
         ..requestedWithHeaderOriginAllowList = <String>{}

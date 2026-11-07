@@ -48,28 +48,55 @@
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="http"/>
-                <data android:scheme="https"/>
                 <data android:scheme="magnet"/>
             </intent-filter>
+            <!-- Ordinary web links are handled by the switchable cloud aliases below. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="http"/>
                 <data android:scheme="https"/>
-                <data android:mimeType="*/*"/>
+                <data android:mimeType="application/octet-stream"/>
+                <data android:mimeType="application/download"/>
+                <data android:mimeType="application/x-download"/>
+                <data android:mimeType="application/force-download"/>
+                <data android:mimeType="application/vnd.android.package-archive"/>
+                <data android:mimeType="application/zip"/>
+                <data android:mimeType="application/x-zip-compressed"/>
+                <data android:mimeType="application/vnd.rar"/>
+                <data android:mimeType="application/x-rar-compressed"/>
+                <data android:mimeType="application/x-7z-compressed"/>
+                <data android:mimeType="application/gzip"/>
+                <data android:mimeType="application/x-gzip"/>
+                <data android:mimeType="application/x-tar"/>
+                <data android:mimeType="application/x-bittorrent"/>
+                <data android:mimeType="application/pdf"/>
+                <data android:mimeType="application/epub+zip"/>
+                <data android:mimeType="application/msword"/>
+                <data android:mimeType="application/vnd.ms-excel"/>
+                <data android:mimeType="application/vnd.ms-powerpoint"/>
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document"/>
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.presentationml.presentation"/>
+                <data android:mimeType="application/json"/>
+                <data android:mimeType="application/xml"/>
+                <data android:mimeType="application/rtf"/>
+                <data android:mimeType="text/plain"/>
+                <data android:mimeType="text/csv"/>
+                <data android:mimeType="text/xml"/>
+                <data android:mimeType="audio/*"/>
+                <data android:mimeType="image/*"/>
+                <data android:mimeType="video/*"/>
+                <data android:mimeType="application/x-mpegurl"/>
+                <data android:mimeType="application/vnd.apple.mpegurl"/>
+                <data android:mimeType="application/dash+xml"/>
+                <data android:mimeType="application/mp4"/>
+                <data android:mimeType="application/x-matroska"/>
             </intent-filter>
         </activity-alias>
         <activity-alias android:name=".PlayerEntry" android:targetActivity=".MainActivity"
             android:exported="true" android:label="文析助手播放器">
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="http"/>
-                <data android:scheme="https"/>
-            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>

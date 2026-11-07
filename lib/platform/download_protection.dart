@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/services.dart';
 import '../core/json.dart';
 import 'native_engine.dart';
@@ -14,11 +15,13 @@ class DownloadProtectionStatus {
     this.keepAliveRunning = false,
     this.keepAliveNotificationsEnabled = false,
     this.desktop = false,
+    this.foregroundOnly = false,
   });
   final bool batteryUnrestricted, notificationsEnabled, backgroundRestricted;
   final bool powerSaveMode, serviceRunning, wakeLockHeld, recovering;
   final bool keepAliveRunning, keepAliveNotificationsEnabled;
   final bool desktop;
+  final bool foregroundOnly;
 
   factory DownloadProtectionStatus.fromJson(Json value) =>
       DownloadProtectionStatus(
@@ -34,17 +37,31 @@ class DownloadProtectionStatus {
           'keepAliveNotificationsEnabled',
         ),
         desktop: value.boolean('desktop'),
+        foregroundOnly: value.boolean('foregroundOnly'),
       );
 }
 
 class DownloadProtectionPlatform {
-  const DownloadProtectionPlatform();
-  Future<DownloadProtectionStatus> status() async =>
-      DownloadProtectionStatus.fromJson(
-        asJson(
-          await nativeChannel.invokeMethod<Object?>('downloadProtectionStatus'),
-        ),
+  const DownloadProtectionPlatform({String? operatingSystem})
+    : _operatingSystem = operatingSystem;
+  final String? _operatingSystem;
+  String get operatingSystem => _operatingSystem ?? Platform.operatingSystem;
+  Future<DownloadProtectionStatus> status() async {
+    if (operatingSystem == 'ios') {
+      return const DownloadProtectionStatus(
+        batteryUnrestricted: false,
+        notificationsEnabled: false,
+        backgroundRestricted: true,
+        foregroundOnly: true,
       );
+    }
+    return DownloadProtectionStatus.fromJson(
+      asJson(
+        await nativeChannel.invokeMethod<Object?>('downloadProtectionStatus'),
+      ),
+    );
+  }
+
   Future<void> openSettings(String kind) async {
     try {
       await nativeChannel.invokeMethod<void>('downloadProtectionSettings', {

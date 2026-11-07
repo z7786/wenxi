@@ -49,6 +49,7 @@ import 'platform/external_open.dart';
 import 'playback/external_playback.dart';
 import 'platform/windows_pip.dart';
 import 'platform/windows_window_theme.dart';
+import 'platform/desktop_platform.dart';
 
 void main(List<String> arguments) {
   WidgetsFlutterBinding.ensureInitialized();
@@ -81,7 +82,7 @@ void main(List<String> arguments) {
 Future<void> _initializeRuntime() async {
   await DiagnosticRuntime.start();
   MediaKit.ensureInitialized();
-  if (Platform.isWindows) {
+  if (isDesktopPlatform) {
     await windowManager.ensureInitialized();
     unawaited(
       windowManager.waitUntilReadyToShow(
@@ -366,7 +367,7 @@ class _MainShellState extends State<MainShell>
       _externalAvailable();
       if (widget.services.lanNavigation.value > 0) _showLan();
     });
-    if (Platform.isWindows && widget.services.platformFeatures) {
+    if (isDesktopPlatform && widget.services.platformFeatures) {
       windowManager.addListener(this);
       trayManager.addListener(this);
       _desktop();
@@ -605,7 +606,9 @@ class _MainShellState extends State<MainShell>
       await _windowVisibility.run(() async {
         if (!mounted || _exiting) return;
         await windowManager.setPreventClose(true);
-        await trayManager.setIcon('assets/icons/app.ico');
+        await trayManager.setIcon(
+          Platform.isMacOS ? 'assets/icons/app.png' : 'assets/icons/app.ico',
+        );
         await trayManager.setToolTip('文析助手 · 单击打开，右键菜单');
         await trayManager.setContextMenu(
           Menu(
@@ -762,7 +765,7 @@ class _MainShellState extends State<MainShell>
     widget.services.clipboard.setForeground(false);
     widget.services.control.setForeground(false);
     widget.services.announcements.setForeground(false);
-    if (Platform.isWindows && widget.services.platformFeatures) {
+    if (isDesktopPlatform && widget.services.platformFeatures) {
       windowManager.removeListener(this);
       trayManager.removeListener(this);
     }
