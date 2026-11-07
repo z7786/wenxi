@@ -21,7 +21,7 @@ checks = [
     'startup', 'quickjs', 'download', 'coordinatedFileSave', 'freeSpace', 'playback',
     'systemPipTransport', 'systemPipPlayback', 'systemPipSeek',
     'systemPipVisibleLayer', 'systemPipImmediateControls', 'systemPipRepeat',
-    'playerStatusBar',
+    'playerStatusBar', 'playerPageHandoff',
 ]
 reports = {}
 for family in ['iPhone', 'iPad']:
@@ -49,6 +49,7 @@ for family in ['iPhone', 'iPad']:
                 assert all(report.get(name) for name in checks), (family, report)
                 if report.get('systemPipSupported'):
                     assert report.get('systemPipWindows') == 3, (family, report)
+                    assert report.get('playerPagePipWindows') == 2, (family, report)
                 reports[family] = report
                 (local / (prefix + '-smoke-result.json')).write_text(json.dumps(report, indent=2))
                 (local / 'ios-smoke-result.json').write_text(json.dumps(reports, indent=2))

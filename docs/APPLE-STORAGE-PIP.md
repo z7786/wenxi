@@ -37,5 +37,8 @@ an unsigned test IPA still requires user signing. macOS supports DMG/ZIP updates
 
 The iOS workflow verifies native file publication and duplicate-name protection
 in a simulator, along with authenticated AVKit playback and repeated system PiP
-entry/exit. iCloud/File Provider sync, signed device playback and system-window
-button taps require device verification.
+entry/exit. It also invokes the production player page's PiP menu action twice,
+checks that the ordinary decoder pauses, and verifies that restoration continues
+playback with the same decoder and Flutter texture element. iCloud/File Provider
+sync, signed device playback and system-window button taps require device
+verification.

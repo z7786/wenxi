@@ -16,6 +16,11 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback.dart';
 import 'package:asterlink/playback/system_pip.dart';
 import 'package:asterlink/playback/external_stream.dart';
+import 'package:asterlink/playback/media_backend.dart';
+import 'package:asterlink/playback/playback_controller.dart';
+import 'package:asterlink/data/playback_store.dart';
+import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/ui/player_page.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/main.dart' as app;
 
@@ -419,6 +424,12 @@ Future<void> main() async {
           'Repeated AVKit stop lost the paused bookmark',
         );
       }
+      stage = 'playerPageHandoff';
+      await device.finish();
+      final pageHandoffs = await verifyPlayerPageHandoff(
+        media.source,
+        Directory('${folder.path}/ios-smoke-subtitles'),
+      );
       await report.writeAsString(
         jsonEncode({
           'startup': true,
@@ -434,6 +445,8 @@ Future<void> main() async {
           'systemPipVisibleLayer': true,
           'systemPipImmediateControls': true,
           'systemPipRepeat': true,
+          'playerPageHandoff': true,
+          'playerPagePipWindows': pageHandoffs,
           'playerStatusBar': true,
           'systemPipSupported': device.supportsPip,
           'systemPipWindows': systemPipWindows,
@@ -453,4 +466,167 @@ Future<void> main() async {
     );
     rethrow;
   }
+}
+
+// Exercise the production page, controller and both native decoders together.
+// Direct AVKit checks cannot catch Flutter texture replacement during handoff.
+Future<int> verifyPlayerPageHandoff(
+  DownloadSpec source,
+  Directory subtitleDirectory,
+) async {
+  final controller = PlaybackController(
+    entries: const [
+      PlaybackEntry(
+        id: 'ios-page-smoke',
+        key: 'ios-page-smoke',
+        name: 'ios-smoke.mp4',
+        video: true,
+      ),
+    ],
+    initialIndex: 0,
+    history: PlaybackStore(
+      StateStore.memory({
+        'playbackPreferences': {'autoNext': false},
+      }),
+    ),
+    prepare: (_, _) async => source,
+    retain: (_) {},
+    release: (_) async {},
+    backendFactory: (entry, acceleration) =>
+        MediaKitBackend(video: entry.video, hardwareAcceleration: acceleration),
+  );
+  final device = NativePlaybackDevice(targetPlatform: TargetPlatform.iOS);
+  runApp(
+    MaterialApp(
+      home: PlayerPage(
+        controller,
+        subtitleDirectory: subtitleDirectory,
+        device: device,
+      ),
+    ),
+  );
+  Future<void> waitFor(bool Function() ready, String message) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    while (!ready() && DateTime.now().isBefore(deadline)) {
+      require(
+        controller.error.isEmpty,
+        'Player page reported a playback error',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    require(ready(), message);
+  }
+
+  var windows = 0;
+  try {
+    await waitFor(
+      () =>
+          controller.ready &&
+          controller.state.playing &&
+          controller.state.position.inMilliseconds >= 1000,
+      'Production player page did not decode the authenticated stream',
+    );
+    if (!device.supportsPip) return 0;
+    final backend = controller.backend!;
+    final texture = await waitForSmokeElement(
+      const Key('player-video-surface'),
+    );
+    for (var iteration = 0; iteration < 2; iteration++) {
+      await controller.pause();
+      await controller.seek(const Duration(seconds: 1));
+      await controller.play();
+      final beforeHandoff = controller.state.position;
+      await invokeSmokePlayerAction(const Key('player-more'));
+      await invokeSmokePlayerAction(const Key('player-pip'));
+      await waitFor(
+        () => !controller.preparingSystemPip && device.inPip,
+        'Production page did not enter foreground system PiP',
+      );
+      require(controller.usingSystemPip, 'System PiP did not own playback');
+      require(!backend.state.playing, 'Ordinary decoder kept playing in PiP');
+      require(
+        identical(texture, findSmokeElement(const Key('player-video-surface'))),
+        'Entering PiP replaced the ordinary video texture',
+      );
+      final pip = device.systemPip! as IOSSystemPipPlayback;
+      require(
+        pip.surfaceAttached && pip.readyForDisplay,
+        'Production page PiP source had no displayed frame',
+      );
+      await waitFor(
+        () => pip.state.position > beforeHandoff,
+        'Production page PiP playback did not advance',
+      );
+      windows++;
+      await controller.pause();
+      require(
+        !pip.state.playing,
+        'Production page PiP pause did not stop audio',
+      );
+      await controller.seek(const Duration(seconds: 1));
+      await controller.play();
+      await controller.restoreSystemPip(resume: true);
+      require(
+        !controller.usingSystemPip && !device.inPip,
+        'PiP did not restore',
+      );
+      final restored = controller.state.position;
+      await waitFor(
+        () => backend.state.playing && backend.state.position > restored,
+        'Ordinary decoder did not continue after PiP restoration',
+      );
+      await WidgetsBinding.instance.endOfFrame;
+      require(
+        identical(backend, controller.backend) &&
+            identical(
+              texture,
+              findSmokeElement(const Key('player-video-surface')),
+            ),
+        'PiP restoration recreated the ordinary decoder or texture',
+      );
+      require(
+        findSmokeElement(const Key('player-system-pip-surface')) == null,
+        'Restored player retained the native PiP surface',
+      );
+    }
+    return windows;
+  } finally {
+    runApp(const MaterialApp(home: SizedBox()));
+    await WidgetsBinding.instance.endOfFrame;
+    await controller.close();
+    await device.finish();
+  }
+}
+
+Element? findSmokeElement(Key key) {
+  Element? found;
+  void visit(Element element) {
+    if (element.widget.key == key) found = element;
+    if (found == null) element.visitChildren(visit);
+  }
+
+  WidgetsBinding.instance.rootElement?.visitChildren(visit);
+  return found;
+}
+
+Future<Element> waitForSmokeElement(Key key) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 8));
+  while (DateTime.now().isBefore(deadline)) {
+    final element = findSmokeElement(key);
+    if (element != null) return element;
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
+  throw StateError('Production player action did not appear: $key');
+}
+
+Future<void> invokeSmokePlayerAction(Key key) async {
+  final element = await waitForSmokeElement(key);
+  final callback = switch (element.widget) {
+    IconButton(:final onPressed) => onPressed,
+    InkWell(:final onTap) => onTap,
+    _ => null,
+  };
+  require(callback != null, 'Production player action was disabled: $key');
+  callback!();
+  await WidgetsBinding.instance.endOfFrame;
 }
