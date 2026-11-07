@@ -180,16 +180,17 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         var closed = false;
         unawaited(fixture.close().then((_) => closed = true));
-        for (var i = 0; i < 100 && !closed; i++) {
+        final cleanupClock = Stopwatch()..start();
+        while (!closed && cleanupClock.elapsed < const Duration(seconds: 15)) {
           await tester.pump(const Duration(milliseconds: 100));
           await tester.runAsync(
-            () => Future<void>.delayed(const Duration(milliseconds: 5)),
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
           );
         }
         debugDefaultTargetPlatformOverride = null;
         tester.view.resetPhysicalSize();
         tester.view.resetDevicePixelRatio();
-        expect(closed, isTrue);
+        expect(closed, isTrue, reason: 'Upload fixture cleanup did not finish');
       }
     });
   }

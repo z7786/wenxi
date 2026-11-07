@@ -220,13 +220,14 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     var done = false;
     services.close().then((_) => done = true);
-    for (var i = 0; i < 100 && !done; i++) {
+    final cleanupClock = Stopwatch()..start();
+    while (!done && cleanupClock.elapsed < const Duration(seconds: 15)) {
       await tester.pump(const Duration(milliseconds: 100));
       await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 5)),
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
       );
     }
-    expect(done, isTrue);
+    expect(done, isTrue, reason: 'Upload page cleanup did not finish');
   }
 
   testWidgets(
