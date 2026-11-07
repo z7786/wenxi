@@ -18,7 +18,7 @@ runtimes = json.loads(sim('list', 'runtimes', '--json'))['runtimes']
 runtime = next(item for item in reversed(runtimes) if item.get('isAvailable') and 'iOS' in item['name'])
 available = json.loads(sim('list', 'devices', 'available', '--json'))['devices']
 checks = [
-    'startup', 'quickjs', 'download', 'freeSpace', 'playback',
+    'startup', 'quickjs', 'download', 'coordinatedFileSave', 'freeSpace', 'playback',
     'systemPipTransport', 'systemPipPlayback', 'systemPipSeek',
     'systemPipVisibleLayer', 'systemPipImmediateControls', 'systemPipRepeat',
     'playerStatusBar',

@@ -33,6 +33,26 @@ test('Optional in-app update fields roundtrip and count as changed publication c
 });
 const issue = (value, path) => assert.ok(C.validate(value).some(e => e.path === path), `Expected validation error at ${path}`);
 
+test('Apple updates have editable fields, independent policies and legacy defaults', () => {
+  const config = C.normalize(C.parse('{"updates":{"android":{"enabled":false}}}'));
+  assert.deepEqual(native(C.PLATFORMS), ['android','windows','ios','macos']);
+  assert.equal(config.updates.ios.enabled, false);
+  assert.equal(config.updates.macos.enabled, false);
+  for (const platform of ['ios','macos']) {
+    Object.assign(config.updates[platform], {enabled:true, version:'2.2.1', build:221,
+      downloadUrl:`https://example.test/${platform}`, force:platform === 'macos'});
+    valid(config);
+    const changed = C.clone(config);
+    changed.updates[platform].build = 222;
+    assert.equal(C.samePublishedContent(changed,config), false);
+    assert.ok(!C.extras(config).includes(`updates.${platform}`));
+    changed.updates[platform].downloadUrl = 'http://invalid.test/download';
+    issue(changed, `updates.${platform}.downloadUrl`);
+  }
+  assert.match(html, /data-preview-platform="ios"/);
+  assert.match(html, /data-preview-platform="macos"/);
+});
+
 test('announcement mini-program targets validate without relaxing updates or images', () => {
   const config = C.template();
   config.announcement = {enabled:true,title:'活动',content:'![图片](https://example.test/banner.png)',
@@ -148,7 +168,7 @@ test('all controls coexist, with independent normal and forced platform updates'
 });
 
 test('unknown optional metadata and future platform fields survive editing', () => {
-  const original = C.parse('{"schema":1,"revision":2,"metadata":{"nested":[1,{"note":"保留"}]},"__proto__":{"polluted":true},"announcement":{"extra":"保留"},"updates":{"ios":{"enabled":true}}}');
+  const original = C.parse('{"schema":1,"revision":2,"metadata":{"nested":[1,{"note":"保留"}]},"__proto__":{"polluted":true},"announcement":{"extra":"保留"},"updates":{"futureOS":{"enabled":true}}}');
   const config = C.normalize(original);
   config.about.description = '新的介绍';
   const roundTrip = JSON.parse(JSON.stringify(config));
@@ -156,8 +176,8 @@ test('unknown optional metadata and future platform fields survive editing', () 
   assert.equal(roundTrip.__proto__.polluted, true);
   assert.equal({}.polluted, undefined);
   assert.equal(config.announcement.extra, '保留');
-  assert.equal(config.updates.ios.enabled, true);
-  assert.ok(C.extras(config).includes('updates.ios'));
+  assert.equal(config.updates.futureOS.enabled, true);
+  assert.ok(C.extras(config).includes('updates.futureOS'));
   valid(config);
 });
 

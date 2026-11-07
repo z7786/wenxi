@@ -2696,10 +2696,24 @@ void main() {
     'iOS PiP survives a temporary foreground interruption and restores only after returning from background',
     (tester) async {
       final device = _IOSPipDevice();
-      final page = await render(tester, suppliedDevice: device);
+      final fixture = PlaybackFixture(
+        externalStreamFactory: _FixtureExternalStream.new,
+      )..configureBackend = (backend) => backend.videoSurface = true;
+      final page = await render(
+        tester,
+        suppliedDevice: device,
+        suppliedFixture: fixture,
+      );
+      final video = find.byKey(const Key('player-video-surface'));
+      final ordinarySurface = tester.element(video);
       await openMenuAction(tester, find.byKey(const Key('player-pip')));
       expect(page.fixture.controller.usingSystemPip, isTrue);
       expect(page.fixture.current.state.playing, isFalse);
+      expect(tester.element(video), same(ordinarySurface));
+      expect(
+        find.byKey(const Key('player-system-pip-surface')),
+        findsOneWidget,
+      );
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
@@ -2713,6 +2727,8 @@ void main() {
       expect(device.stops, 1);
       expect(page.fixture.current.state.playing, isTrue);
       expect(page.fixture.current.state.position.inSeconds, 125);
+      expect(tester.element(video), same(ordinarySurface));
+      expect(find.byKey(const Key('player-system-pip-surface')), findsNothing);
       await openMenuAction(tester, find.byKey(const Key('player-pip')));
       expect(page.fixture.controller.usingSystemPip, isTrue);
       expect(device.inPip, isTrue);

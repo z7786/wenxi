@@ -10,6 +10,7 @@ abstract class SystemPipPlayback extends ChangeNotifier {
   PlayerState get state;
   bool get finished;
   bool get restoreRequested;
+  String get failureMessage => '';
   Object get surfaceKey => this;
   Widget? buildVideo({required BoxFit fit});
   Future<bool> prepare({
@@ -31,6 +32,7 @@ class IOSSystemPipPlayback extends SystemPipPlayback {
   PlayerState _state = const PlayerState();
   bool _finished = false, _restoreRequested = false;
   String _pipId = '';
+  String _failureCode = '';
   bool _acceptUpdates = false;
   bool _disposed = false;
   bool _surfaceAttached = false,
@@ -42,6 +44,13 @@ class IOSSystemPipPlayback extends SystemPipPlayback {
   bool get surfaceAttached => _surfaceAttached;
   bool get readyForDisplay => _readyForDisplay;
   bool get statusBarHidden => _statusBarHidden;
+  @override
+  String get failureMessage => switch (_failureCode) {
+    'item_failed' => '系统画中画无法读取此视频，已恢复内置播放',
+    'prepare_timeout' => '系统画中画未能准备好视频，已恢复内置播放',
+    'enter_timeout' || 'enter_failed' => '系统画中画未能启动，已恢复内置播放',
+    _ => '',
+  };
   @override
   PlayerState get state => _state;
   @override
@@ -61,6 +70,7 @@ class IOSSystemPipPlayback extends SystemPipPlayback {
     _surfaceAttached = values.boolean('surfaceAttached', _surfaceAttached);
     _readyForDisplay = values.boolean('readyForDisplay', _readyForDisplay);
     _statusBarHidden = values.boolean('statusBarHidden', _statusBarHidden);
+    _failureCode = values.str('failureCode', _failureCode);
     final position = values.number(
       'positionMs',
       _state.position.inMilliseconds.toDouble(),
@@ -115,6 +125,7 @@ class IOSSystemPipPlayback extends SystemPipPlayback {
     _surfaceAttached = false;
     _readyForDisplay = false;
     _statusBarHidden = false;
+    _failureCode = '';
     _pipId = newId();
     _acceptUpdates = true;
     notifyListeners();

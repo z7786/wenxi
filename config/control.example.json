@@ -106,6 +106,28 @@
       "inAppPasscode": "",
       "notes": "",
       "expiresAt": ""
+    },
+    "ios": {
+      "enabled": false,
+      "force": false,
+      "version": "2.2.0",
+      "build": 220,
+      "downloadUrl": "",
+      "inAppDownloadUrl": "",
+      "inAppPasscode": "",
+      "notes": "",
+      "expiresAt": ""
+    },
+    "macos": {
+      "enabled": false,
+      "force": false,
+      "version": "2.2.0",
+      "build": 220,
+      "downloadUrl": "",
+      "inAppDownloadUrl": "",
+      "inAppPasscode": "",
+      "notes": "",
+      "expiresAt": ""
     }
   },
   "help": {
@@ -113,6 +135,6 @@
     "url": ""
   },
   "about": {
-    "description": "网盘文件管理与 Gopeed 下载器\nAndroid · Windows"
+    "description": "网盘文件管理与 Gopeed 下载器\nAndroid · iOS · Windows · macOS"
   }
 }

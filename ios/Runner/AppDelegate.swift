@@ -35,8 +35,9 @@ import AsterLinkCore
       self?.pendingOpens.removeAll()
       result(values)
     }
-    FlutterMethodChannel(name: "com.asterlink.app/native", binaryMessenger: messenger)
-      .setMethodCallHandler { [weak self] call, result in
+    let native = FlutterMethodChannel(name: "com.asterlink.app/native", binaryMessenger: messenger)
+    documents.channel = native
+    native.setMethodCallHandler { [weak self] call, result in
         guard let self else { result(FlutterMethodNotImplemented); return }
         let args = call.arguments as? [String: Any] ?? [:]
         if self.documents.handle(call, result: result) { return }

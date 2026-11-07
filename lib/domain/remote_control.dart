@@ -5,6 +5,8 @@ import 'models.dart';
 
 part 'remote_control_parser.dart';
 
+const remoteUpdatePlatforms = ['android', 'windows', 'ios', 'macos'];
+
 /// Remote configuration only controls the features declared in this schema.
 /// Announcements support Markdown; links are opened only by user action.
 class RemoteControlConfig {
@@ -65,7 +67,7 @@ class RemoteControlConfig {
         },
     },
     'updates': {
-      for (final platform in ['android', 'windows', 'macos'])
+      for (final platform in remoteUpdatePlatforms)
         if (updates[platform] case final update?)
           platform: {
             'enabled': true,

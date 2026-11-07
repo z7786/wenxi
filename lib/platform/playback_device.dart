@@ -6,6 +6,7 @@ import 'package:window_manager/window_manager.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/playback.dart';
+import '../diagnostics/app_log.dart';
 import '../playback/system_pip.dart';
 import 'windows_pip.dart';
 import 'windows_external_player.dart';
@@ -150,6 +151,26 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
           _readSystemVolume(args);
         } else if (call.method == 'pipState') {
           _systemPip?.update(args);
+        } else if (call.method == 'pipDiagnostic' &&
+            _systemPip?.accepts(args) == true) {
+          DiagnosticLog.event(
+            'player.system_pip',
+            fields: {
+              for (final key in [
+                'stage',
+                'phase',
+                'surfaceAttached',
+                'readyForDisplay',
+                'pipPossible',
+                'itemStatus',
+                'videoWidth',
+                'videoHeight',
+                'errorDomain',
+                'errorCode',
+              ])
+                if (args.containsKey(key)) key: args[key],
+            },
+          );
         }
       });
       final values = asJson(await _invoke<Object?>('begin', {'video': video}));

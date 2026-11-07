@@ -2751,24 +2751,24 @@ class _PlayerPageState extends State<PlayerPage>
                       ? 12
                       : controller.preferences.subtitleSize;
                   _syncNativeSubtitles();
-                  final video =
-                      controller.systemPipPlayback?.buildVideo(
-                        fit: BoxFit.contain,
-                      ) ??
-                      backend?.buildVideo(
-                        aspectRatio:
-                            !desktopPip &&
-                                controller.preferences.aspectRatio > 0
-                            ? controller.preferences.aspectRatio
-                            : controller.videoGeometry?.aspectRatio,
-                        fit: desktopPip
-                            ? BoxFit.contain
-                            : switch (controller.preferences.fit) {
-                                PlaybackFit.contain => BoxFit.contain,
-                                PlaybackFit.cover => BoxFit.cover,
-                                PlaybackFit.stretch => BoxFit.fill,
-                              },
-                      );
+                  final systemPipVideo = controller.systemPipPlayback
+                      ?.buildVideo(fit: BoxFit.contain);
+                  // Keep the ordinary texture mounted across AVKit handoffs.
+                  // The transparent native layer covers it only after a frame
+                  // is ready and releases it when PiP finishes or fails.
+                  final video = backend?.buildVideo(
+                    aspectRatio:
+                        !desktopPip && controller.preferences.aspectRatio > 0
+                        ? controller.preferences.aspectRatio
+                        : controller.videoGeometry?.aspectRatio,
+                    fit: desktopPip
+                        ? BoxFit.contain
+                        : switch (controller.preferences.fit) {
+                            PlaybackFit.contain => BoxFit.contain,
+                            PlaybackFit.cover => BoxFit.cover,
+                            PlaybackFit.stretch => BoxFit.fill,
+                          },
+                  );
                   final nativeSubtitles = backend?.buildSubtitleOverlay();
                   return Stack(
                     fit: StackFit.expand,
@@ -2827,6 +2827,13 @@ class _PlayerPageState extends State<PlayerPage>
                                 ),
                               ],
                             ),
+                          ),
+                        ),
+                      if (systemPipVideo != null)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            key: const Key('player-system-pip-surface'),
+                            child: systemPipVideo,
                           ),
                         ),
                       if (controller.hasVideo &&

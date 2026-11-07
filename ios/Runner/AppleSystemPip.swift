@@ -114,7 +114,7 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
   private var channel: FlutterMethodChannel?
   private let player: AVPlayer
   private let playerLayer: AVPlayerLayer
-  private let controller: AVPictureInPictureController?
+  private var controller: AVPictureInPictureController?
   private var phase = Phase.preparing
   private var observations: [NSKeyValueObservation] = []
   private var timeObserver: Any?
@@ -129,12 +129,15 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
   private var initialPosition: CMTime
   private var initiallyPlaying: Bool
   private var itemPrepared = false
+  private var initialSeekFinished = false
+  private var failureCode = ""
   private var completed = false
   private var rate: Float
   private var stopWasPlaying = false
   private var finalValues: [String: Any]?
   private var stopNotified = false
   private weak var host: ApplePipVideoView?
+  private weak var sourceView: UIView?
   var restore = false
 
   var active: Bool { controller?.isPictureInPictureActive == true }
@@ -143,7 +146,8 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
     guard let host = host, let window = host.window else { return false }
     return !host.isHidden && host.alpha > 0 && !window.isHidden &&
       window.windowScene?.activationState == .foregroundActive &&
-      host.bounds.width > 0 && host.bounds.height > 0 && playerLayer.superlayer === host.layer
+      host.bounds.width > 0 && host.bounds.height > 0 &&
+      sourceView?.window === window && playerLayer.superlayer === sourceView?.layer
   }
 
   var values: [String: Any] {
@@ -160,6 +164,7 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
       "finished": phase == .finished, "restore": restore,
       "surfaceAttached": surfaceAttached, "readyForDisplay": playerLayer.isReadyForDisplay,
       "statusBarHidden": host?.window?.windowScene?.statusBarManager?.isStatusBarHidden ?? false,
+      "failureCode": failureCode,
     ]
   }
 
@@ -179,12 +184,11 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
     let player = AVPlayer(playerItem: item)
     let layer = AVPlayerLayer(player: player)
     layer.videoGravity = .resizeAspect
+    layer.opacity = 0
+    layer.needsDisplayOnBoundsChange = true
     self.player = player
     playerLayer = layer
-    controller = AVPictureInPictureController(playerLayer: layer)
     super.init()
-    controller?.delegate = self
-    if #available(iOS 14.2, *) { controller?.canStartPictureInPictureAutomaticallyFromInline = false }
   }
 
   func prepare() {
@@ -205,13 +209,13 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
               if ok && self.initiallyPlaying && UIApplication.shared.applicationState == .active {
                 self.player.playImmediately(atRate: self.rate)
               }
-              self.completePreparation(ok)
+              self.initialSeekFinished = ok
+              if ok { self.displayChanged() }
+              else { self.fail("item_failed") }
             }
           }
         } else if item.status == .failed {
-          self.restore = true
-          self.completePreparation(false)
-          self.stop { _ in }
+          self.fail("item_failed", error: item.error)
         }
       }
     })
@@ -222,13 +226,8 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
       DispatchQueue.main.async { self?.playbackChanged() }
     })
     observations.append(playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] _, _ in
-      DispatchQueue.main.async { self?.attemptEntry() }
+      DispatchQueue.main.async { self?.displayChanged() }
     })
-    if let controller = controller {
-      observations.append(controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] _, _ in
-        DispatchQueue.main.async { self?.attemptEntry() }
-      })
-    }
     timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] _ in
       self?.publish()
     }
@@ -236,9 +235,47 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
       self?.completed = true
       self?.publish()
     }
-    let deadline = DispatchWorkItem { [weak self] in self?.completePreparation(false) }
+    diagnostic("prepare")
+    let deadline = DispatchWorkItem { [weak self] in self?.fail("prepare_timeout") }
     prepareDeadline = deadline
     DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: deadline)
+  }
+
+  private func displayChanged() {
+    guard phase != .stopping && phase != .finished else { return }
+    playerLayer.opacity = playerLayer.isReadyForDisplay ? 1 : 0
+    if phase == .preparing && initialSeekFinished && surfaceAttached && playerLayer.isReadyForDisplay {
+      diagnostic("prepared")
+      completePreparation(true)
+    }
+    attemptEntry()
+  }
+
+  private func fail(_ code: String, error: Error? = nil) {
+    guard phase != .stopping && phase != .finished else { return }
+    failureCode = code
+    restore = true
+    diagnostic(code, error: error)
+    completePreparation(false)
+    completeEntry(false)
+    stop { _ in }
+  }
+
+  private func diagnostic(_ stage: String, error: Error? = nil) {
+    let size = player.currentItem?.presentationSize ?? .zero
+    var value: [String: Any] = [
+      "session": session, "pipId": pipId, "stage": stage, "phase": String(describing: phase),
+      "surfaceAttached": surfaceAttached, "readyForDisplay": playerLayer.isReadyForDisplay,
+      "pipPossible": controller?.isPictureInPicturePossible ?? false,
+      "itemStatus": player.currentItem?.status.rawValue ?? -1,
+      "videoWidth": Double(size.width), "videoHeight": Double(size.height),
+    ]
+    if let error = error {
+      let native = error as NSError
+      value["errorDomain"] = native.domain
+      value["errorCode"] = native.code
+    }
+    channel?.invokeMethod("pipDiagnostic", arguments: value)
   }
 
   private func completePreparation(_ ok: Bool) {
@@ -261,8 +298,7 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
     let deadline = DispatchWorkItem { [weak self] in
       guard let self = self, self.enterResult != nil else { return }
       // A pending foreground request must not turn into an automatic background start.
-      self.completeEntry(false)
-      self.stop { _ in }
+      self.fail("enter_timeout")
     }
     enterDeadline = deadline
     DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: deadline)
@@ -279,6 +315,7 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
     guard surfaceAttached, playerLayer.isReadyForDisplay,
           let controller = controller, controller.isPictureInPicturePossible else { return }
     phase = .starting
+    diagnostic("start")
     controller.startPictureInPicture()
   }
 
@@ -343,20 +380,34 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
   func attach(_ view: ApplePipVideoView) {
     guard view.session == session, view.pipId == pipId, phase != .finished else { return }
     host = view
-    if playerLayer.superlayer !== view.layer {
+    // BetterPlayer mounts its PiP source on the scene's root view. Flutter
+    // platform-view clipping and texture rebuilds must not own this AVKit layer.
+    guard let root = view.window?.rootViewController?.view else { return }
+    sourceView = root
+    if playerLayer.superlayer !== root.layer {
       playerLayer.removeFromSuperlayer()
-      view.layer.addSublayer(playerLayer)
+      root.layer.addSublayer(playerLayer)
+    }
+    if controller == nil && AVPictureInPictureController.isPictureInPictureSupported() {
+      controller = AVPictureInPictureController(playerLayer: playerLayer)
+      controller?.delegate = self
+      if #available(iOS 14.2, *) { controller?.canStartPictureInPictureAutomaticallyFromInline = false }
+      if let controller = controller {
+        observations.append(controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] _, _ in
+          DispatchQueue.main.async { self?.attemptEntry() }
+        })
+      }
     }
     layout(view)
   }
 
   func layout(_ view: ApplePipVideoView) {
-    guard host === view else { return }
+    guard host === view, let root = sourceView, view.window != nil else { return }
     CATransaction.begin()
     CATransaction.setDisableActions(true)
-    playerLayer.frame = view.bounds
+    playerLayer.frame = view.convert(view.bounds, to: root)
     CATransaction.commit()
-    DispatchQueue.main.async { [weak self] in self?.attemptEntry() }
+    DispatchQueue.main.async { [weak self] in self?.displayChanged() }
   }
 
   func stop(_ completion: @escaping ([String: Any]) -> Void) {
@@ -465,6 +516,7 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
     }
     guard phase == .starting else { return }
     phase = .active
+    diagnostic("started")
     publishPip(true)
     publish()
     completeEntry(true)
@@ -473,9 +525,7 @@ private final class ApplePipSession: NSObject, AVPictureInPictureControllerDeleg
   func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController,
     failedToStartPictureInPictureWithError error: Error) {
     guard pictureInPictureController === controller else { return }
-    if phase == .starting { phase = .ready }
-    completeEntry(false)
-    stop { _ in }
+    fail("enter_failed", error: error)
   }
 
   func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
@@ -506,7 +556,8 @@ final class ApplePipVideoView: UIView, FlutterPlatformView {
     self.pipId = pipId
     self.playback = playback
     super.init(frame: frame)
-    backgroundColor = .black
+    backgroundColor = .clear
+    isOpaque = false
     playback.attach(self)
   }
   required init?(coder: NSCoder) { fatalError("Use the platform view factory") }

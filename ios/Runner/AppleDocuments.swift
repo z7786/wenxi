@@ -1,6 +1,7 @@
 import Flutter
 import UIKit
 import Photos
+import Darwin
 
 final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
   private let queue = DispatchQueue(label: "com.asterlink.app.documents")
@@ -11,6 +12,9 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
   private var picker: UIDocumentPickerViewController?
   private var pickerResult: FlutterResult?
   private var exportDirectory: URL?
+  var channel: FlutterMethodChannel?
+  private let transferLock = NSLock()
+  private var transfers = [String: AppleDocumentTransfer]()
 
   override init() {
     super.init()
@@ -48,12 +52,249 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
       }
       result(resolvedPath(path))
     case "saveDocument": export(args, result: result)
+    case "saveDownloadedFile": saveDownload(args, result: result)
+    case "cancelExport":
+      if let id = args["id"] as? String {
+        transferLock.lock()
+        let transfer = transfers[id]
+        transferLock.unlock()
+        transfer?.cancel()
+      }
+      result(nil)
+    case "fileAvailability": inspectFile(args, result: result)
+    case "deleteFile": deleteFile(args, result: result)
     case "savePlayerScreenshot": saveImage(args, result: result)
     case "storageVolume": storageVolume(args, result: result)
     case "createHardLink": createHardLink(args, result: result)
     default: return false
     }
     return true
+  }
+
+  private func fileURL(_ path: String) -> URL {
+    let local = URL(string: path).flatMap { $0.isFileURL ? $0.path : nil } ?? path
+    return URL(fileURLWithPath: resolvedPath(local)).standardizedFileURL
+  }
+
+  private func isLocal(_ url: URL) -> Bool {
+    let home = URL(fileURLWithPath: NSHomeDirectory()).resolvingSymlinksInPath().path
+    let path = url.resolvingSymlinksInPath().path
+    return path == home || path.hasPrefix(home + "/")
+  }
+
+  private func permitted(_ url: URL) -> Bool {
+    if isLocal(url) { return true }
+    let path = url.resolvingSymlinksInPath().path
+    return folders.values.contains {
+      let root = $0.resolvingSymlinksInPath().path
+      return path == root || path.hasPrefix(root + "/")
+    }
+  }
+
+  private func saveDownload(_ args: [String: Any], result: @escaping FlutterResult) {
+    guard let id = args["id"] as? String, !id.isEmpty,
+          let sourcePath = args["source"] as? String, sourcePath.hasPrefix("/"),
+          let targetPath = args["destination"] as? String ?? args["defaultDirectory"] as? String,
+          targetPath.hasPrefix("/"), let name = args["name"] as? String,
+          !name.isEmpty, name == URL(fileURLWithPath: name).lastPathComponent,
+          name != ".", name != ".." else {
+      result(FlutterError(code: "storage", message: "下载文件保存参数无效", details: nil)); return
+    }
+    let relative = args["relativePath"] as? String ?? ""
+    let components = relative.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+    guard !relative.hasPrefix("/"), !relative.contains("\\"),
+          !components.contains(".."), !components.contains("."),
+          !name.contains("\\") else {
+      result(FlutterError(code: "storage", message: "下载路径超出所选目录", details: nil)); return
+    }
+    let source = fileURL(sourcePath), root = fileURL(targetPath)
+    guard permitted(source), permitted(root) else {
+      result(FlutterError(code: "storage", message: "下载目录授权已失效，请重新选择目录；下载内容已保留", details: nil)); return
+    }
+    let transfer = AppleDocumentTransfer()
+    transferLock.lock()
+    let previous = transfers.updateValue(transfer, forKey: id)
+    transferLock.unlock()
+    previous?.cancel()
+    let token = args["token"] as? NSNumber ?? 0
+    queue.async {
+      var saved: URL?
+      do {
+        try transfer.check()
+        let manager = FileManager.default
+        let size = try manager.attributesOfItem(atPath: source.path)[.size] as? NSNumber ?? 0
+        let total = size.int64Value
+        let sourceValues = try source.resourceValues(forKeys: [.isRegularFileKey])
+        guard sourceValues.isRegularFile == true else { throw CocoaError(.fileReadUnknown) }
+        var directory = root
+        var coordinateError: NSError?
+        var operationError: Error?
+        NSFileCoordinator().coordinate(writingItemAt: root, options: [], error: &coordinateError) { located in
+          do {
+            try transfer.check()
+            let realRoot = located.resolvingSymlinksInPath().path
+            directory = components.reduce(located) { $0.appendingPathComponent($1, isDirectory: true) }
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let realDirectory = directory.resolvingSymlinksInPath().path
+            guard realDirectory == realRoot || realDirectory.hasPrefix(realRoot + "/") else {
+              throw CocoaError(.fileWriteNoPermission)
+            }
+          } catch { operationError = error }
+        }
+        if let error = coordinateError { throw error }
+        if let error = operationError { throw error }
+        let original = URL(fileURLWithPath: name)
+        let ext = original.pathExtension, base = original.deletingPathExtension().lastPathComponent
+        for index in 0..<10000 {
+          try transfer.check()
+          let candidate = directory.appendingPathComponent(index == 0 ? name :
+            base + " (\(index))" + (ext.isEmpty ? "" : "." + ext))
+          coordinateError = nil
+          operationError = nil
+          var collision = false
+          NSFileCoordinator().coordinate(readingItemAt: source, options: .withoutChanges,
+            writingItemAt: candidate, options: .forReplacing, error: &coordinateError) { input, output in
+              do {
+                try transfer.check()
+                guard !manager.fileExists(atPath: output.path) else { collision = true; return }
+                // LocalSend completes cached transfers before publication.
+                // Providers require an independent coordinated document, even
+                // when their underlying volume advertises hard-link support.
+                if self.isLocal(input) && self.isLocal(output) {
+                  do {
+                    try manager.linkItem(at: input, to: output)
+                    saved = output
+                    try transfer.check()
+                    self.progress(id, token: token, copied: total, total: total)
+                    return
+                  } catch {
+                    if saved != nil { throw error }
+                    if manager.fileExists(atPath: output.path) { collision = true; return }
+                  }
+                }
+                let inputHandle = try FileHandle(forReadingFrom: input)
+                defer { inputHandle.closeFile() }
+                let descriptor = Darwin.open(output.path, O_WRONLY | O_CREAT | O_EXCL, mode_t(0o600))
+                guard descriptor >= 0 else {
+                  if errno == EEXIST { collision = true; return }
+                  throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                saved = output
+                let outputHandle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+                defer { outputHandle.closeFile() }
+                var copied: Int64 = 0
+                var lastProgress = ProcessInfo.processInfo.systemUptime
+                while copied < total {
+                  try transfer.check()
+                  let bytes = try inputHandle.read(upToCount: 1024 * 1024) ?? Data()
+                  guard !bytes.isEmpty else { throw CocoaError(.fileReadUnknown) }
+                  try outputHandle.write(contentsOf: bytes)
+                  copied += Int64(bytes.count)
+                  let now = ProcessInfo.processInfo.systemUptime
+                  if now - lastProgress >= 0.25 || copied == total {
+                    lastProgress = now
+                    self.progress(id, token: token, copied: copied, total: total)
+                  }
+                }
+                try transfer.check()
+                try outputHandle.synchronize()
+                guard copied == total else { throw CocoaError(.fileWriteUnknown) }
+              } catch {
+                operationError = error
+                if let created = saved { try? manager.removeItem(at: created); saved = nil }
+              }
+            }
+          if let error = coordinateError { throw error }
+          if let error = operationError { throw error }
+          if !collision { break }
+        }
+        guard let saved = saved else { throw CocoaError(.fileWriteFileExists) }
+        // Reply only after handles close and the coordinator publishes changes.
+        DispatchQueue.main.async {
+          self.finishTransfer(id, transfer)
+          result(saved.path)
+        }
+      } catch {
+        DispatchQueue.main.async {
+          self.finishTransfer(id, transfer)
+          let cancelled = transfer.cancelled
+          result(FlutterError(code: cancelled ? "cancelled" : "storage",
+            message: cancelled ? "文件保存已取消，下载内容已保留" :
+              "无法保存到所选目录，请检查文件 App 的目录权限和剩余空间；下载内容已保留",
+            details: nil))
+        }
+      }
+    }
+  }
+
+  private func finishTransfer(_ id: String, _ transfer: AppleDocumentTransfer) {
+    transferLock.lock()
+    if transfers[id] === transfer { transfers.removeValue(forKey: id) }
+    transferLock.unlock()
+  }
+
+  private func progress(_ id: String, token: NSNumber, copied: Int64, total: Int64) {
+    DispatchQueue.main.async {
+      self.channel?.invokeMethod("exportProgress", arguments: [
+        "id": id, "token": token, "copied": copied, "total": total,
+      ])
+    }
+  }
+
+  private func inspectFile(_ args: [String: Any], result: @escaping FlutterResult) {
+    guard let path = args["path"] as? String else { result("missing"); return }
+    let url = fileURL(path)
+    guard permitted(url) else { result("inaccessible"); return }
+    queue.async {
+      var availability = "inaccessible"
+      var coordination: NSError?
+      NSFileCoordinator().coordinate(readingItemAt: url, options: .withoutChanges,
+        error: &coordination) { item in
+          do {
+            let handle = try FileHandle(forReadingFrom: item)
+            handle.closeFile()
+            availability = "present"
+          } catch {
+            let error = error as NSError
+            if error.domain == NSCocoaErrorDomain &&
+               [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code) {
+              availability = "missing"
+            }
+          }
+        }
+      if let error = coordination, error.domain == NSCocoaErrorDomain &&
+          [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code) {
+        availability = "missing"
+      }
+      DispatchQueue.main.async { result(availability) }
+    }
+  }
+
+  private func deleteFile(_ args: [String: Any], result: @escaping FlutterResult) {
+    guard let path = args["path"] as? String else { result(nil); return }
+    let url = fileURL(path)
+    guard permitted(url) else {
+      result(FlutterError(code: "storage", message: "目录权限已失效，请重新选择目录", details: nil)); return
+    }
+    queue.async {
+      var coordination: NSError?, operation: Error?
+      NSFileCoordinator().coordinate(writingItemAt: url, options: .forDeleting,
+        error: &coordination) { item in
+          do {
+            if FileManager.default.fileExists(atPath: item.path) {
+              guard try item.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+                throw CocoaError(.fileWriteNoPermission)
+              }
+              try FileManager.default.removeItem(at: item)
+            }
+          } catch { operation = error }
+        }
+      DispatchQueue.main.async {
+        if coordination != nil || operation != nil {
+          result(FlutterError(code: "storage", message: "文件正在使用或无法删除，下载记录已保留", details: nil))
+        } else { result(nil) }
+      }
+    }
   }
 
   private func resolvedPath(_ path: String) -> String {
@@ -268,7 +509,7 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
         }
         let value: [String: Any] = [
           "id": identifier.stringValue,
-          "hardLinks": values.volumeSupportsHardLinks ?? false
+          "hardLinks": self.isLocal(URL(fileURLWithPath: path)) && (values.volumeSupportsHardLinks ?? false)
         ]
         DispatchQueue.main.async { result(value) }
       } catch {
@@ -297,4 +538,12 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
   deinit {
     for url in folders.values { url.stopAccessingSecurityScopedResource() }
   }
+}
+
+private final class AppleDocumentTransfer {
+  private let lock = NSLock()
+  private var stopped = false
+  var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+  func cancel() { lock.lock(); stopped = true; lock.unlock() }
+  func check() throws { if cancelled { throw CocoaError(.userCancelled) } }
 }

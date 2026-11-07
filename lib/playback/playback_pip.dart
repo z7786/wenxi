@@ -88,7 +88,6 @@ extension PlaybackSystemPip on PlaybackController {
       _changed();
       await active.stream.start();
       check();
-      active.prepared = true;
       final prepared = await playback.prepare(
         url: active.stream.url,
         title: session.entry.name,
@@ -96,9 +95,12 @@ extension PlaybackSystemPip on PlaybackController {
       );
       check();
       if (!prepared) {
-        notice = '系统暂不支持此视频画中画，已恢复内置播放器';
+        notice = playback.failureMessage.isNotEmpty
+            ? playback.failureMessage
+            : '系统暂不支持此视频画中画，已恢复内置播放器';
         return false;
       }
+      active.prepared = true;
       entered = await enter();
       check();
       return entered;

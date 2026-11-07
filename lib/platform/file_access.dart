@@ -134,10 +134,12 @@ class PlatformFileAccess implements FileAccess {
     this.transport,
     this.defaultDirectory, {
     bool? android,
+    bool? ios,
     AppleStorage appleStorage = const AppleStorage(),
   }) : _android = android ?? Platform.isAndroid,
+       _ios = ios ?? Platform.isIOS,
        _appleStorage = appleStorage;
-  final bool _android;
+  final bool _android, _ios;
   final AppleStorage _appleStorage;
   final NativeTransport transport;
   final Directory defaultDirectory;
@@ -244,7 +246,10 @@ class PlatformFileAccess implements FileAccess {
 
   @override
   Future<String?> downloadCacheRoot(String? destination) async {
-    if (_android) return null;
+    // File Providers must receive completed, coordinated documents. Keep new
+    // iOS payloads in the application's cache; persisted legacy roots still
+    // belong to their existing tasks and remain available for resume.
+    if (_android || _ios) return null;
     final target = await resolveAppleDirectory(
       destination ?? defaultDirectory.path,
     );
@@ -305,7 +310,7 @@ class PlatformFileAccess implements FileAccess {
   @override
   Future<FileAvailability> inspect(String? path) async {
     if (path == null || path.isEmpty) return FileAvailability.missing;
-    if (_android) {
+    if (_android || _ios) {
       try {
         return switch (await nativeChannel.invokeMethod<String>(
           'fileAvailability',
@@ -364,7 +369,7 @@ class PlatformFileAccess implements FileAccess {
 
   @override
   Future<void> cancelExport(String id) async {
-    if (Platform.isAndroid) {
+    if (_android || _ios) {
       await nativeChannel.invokeMethod<void>('cancelExport', {'id': id});
     }
   }
@@ -380,18 +385,20 @@ class PlatformFileAccess implements FileAccess {
     void Function(int copied, int total)? onProgress,
   }) async {
     checkpoint();
-    if (_android) {
+    if (_android || _ios) {
       final token = ++_exportGeneration;
       if (onProgress != null) _exportCallbacks[id] = (token, onProgress);
       try {
-        return (await nativeChannel.invokeMethod<String>('saveFile', {
-          'id': id,
-          'source': source.path,
-          'name': safeFileName(name),
-          'relativePath': safeRelativePath(relativePath),
-          'destination': destination,
-          'token': token,
-        }))!;
+        return (await nativeChannel
+            .invokeMethod<String>(_ios ? 'saveDownloadedFile' : 'saveFile', {
+              'id': id,
+              'source': source.path,
+              'name': safeFileName(name),
+              'relativePath': safeRelativePath(relativePath),
+              'destination': destination,
+              'token': token,
+              if (_ios) 'defaultDirectory': defaultDirectory.path,
+            }))!;
       } on PlatformException catch (e) {
         throw AppException(e.message ?? '无法保存文件');
       } finally {
@@ -490,7 +497,7 @@ class PlatformFileAccess implements FileAccess {
   @override
   Future<void> delete(String? path) async {
     if (path == null || path.isEmpty) return;
-    if (_android) {
+    if (_android || _ios) {
       try {
         await nativeChannel.invokeMethod<void>('deleteFile', {'path': path});
       } on PlatformException catch (e) {

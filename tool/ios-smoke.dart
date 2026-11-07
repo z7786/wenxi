@@ -10,6 +10,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/platform/native_engine.dart';
+import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/playback_device.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback.dart';
@@ -129,12 +130,49 @@ Future<void> main() async {
           'Native HTTP download failed: $state',
         );
         if (state.str('status') == 'done') {
+          await transport.call('pause', {'id': 'ios_smoke'});
           final payload = await File(state.str('path')).readAsBytes();
           require(
             payload.length == bytes.length && payload[12345] == bytes[12345],
             'Download contents mismatch',
           );
           final documents = await getApplicationDocumentsDirectory();
+          final files = PlatformFileAccess(
+            transport,
+            Directory('${documents.path}/Downloads'),
+          );
+          require(
+            await files.downloadCacheRoot(documents.path) == null,
+            'An incomplete iOS download would be stored in Files',
+          );
+          final saved = await files.save(
+            id: 'ios-save-smoke',
+            source: File(state.str('path')),
+            name: 'coordinated-download.bin',
+            relativePath: 'smoke',
+            checkpoint: () {},
+          );
+          require(
+            await files.inspect(saved) == FileAvailability.present,
+            'Published iOS document cannot be read',
+          );
+          require(
+            (await File(saved).readAsBytes())[12345] == bytes[12345],
+            'Published document bytes differ from the download',
+          );
+          final duplicate = await files.save(
+            id: 'ios-save-smoke-duplicate',
+            source: File(state.str('path')),
+            name: 'coordinated-download.bin',
+            relativePath: 'smoke',
+            checkpoint: () {},
+          );
+          require(
+            saved != duplicate && File(saved).existsSync(),
+            'Publishing overwrote an existing document',
+          );
+          await files.delete(saved);
+          await files.delete(duplicate);
           movie = '${documents.path}/ios-smoke.mp4';
           break;
         }
@@ -385,7 +423,8 @@ Future<void> main() async {
         jsonEncode({
           'startup': true,
           'quickjs': true,
-          'download': true,
+        'download': true,
+        'coordinatedFileSave': true,
           'freeSpace': true,
           'playback': true,
           'positionMs': decodedPosition,

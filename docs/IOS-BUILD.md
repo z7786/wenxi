@@ -38,7 +38,9 @@ scheme starts from the beginning. External-app progress is not synced back.
   launch. App-container and granted-directory moves update both client task
   paths and native download checkpoints before tasks are loaded. Accounts,
   source links, task IDs and downloaded byte ranges are preserved. Same-volume
-  saves try hard links, then fall back to a copy if space permits.
+  saves inside the app may use hard links. New payloads stay in Application
+  Support until complete; external Files providers receive coordinated copies.
+  Existing download cache roots are preserved for upgrades and resume.
 - Account login and browser search share the persistent WK website store, so
   HttpOnly login cookies can be captured. Starting another account login clears
   that provider's cookies and its known authentication hosts.

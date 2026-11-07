@@ -8,6 +8,33 @@ import 'support.dart' show until;
 
 void main() {
   test(
+    'native video failures explain recovery and reset on a new handoff',
+    () async {
+      final pip = IOSSystemPipPlayback('fixture', (_, _) async => true);
+      addTearDown(pip.dispose);
+      await pip.prepare(
+        url: 'file:///video.mp4',
+        title: 'video',
+        initialState: const PlayerState(),
+      );
+      pip.update({
+        'pipId': pip.pipId,
+        'failureCode': 'item_failed',
+        'finished': true,
+      });
+      expect(pip.failureMessage, contains('已恢复内置播放'));
+      await pip.stop();
+      await pip.prepare(
+        url: 'file:///next.mp4',
+        title: 'next',
+        initialState: const PlayerState(),
+      );
+      expect(pip.failureMessage, isEmpty);
+      expect(pip.finished, isFalse);
+    },
+  );
+
+  test(
     'stop retains its surface and final updates until native PiP finishes, then permits another handoff',
     () async {
       final stopping = Completer<Object?>();
