@@ -1,6 +1,27 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../domain/auth.dart';
+import '../domain/models.dart';
+
+WebLoginTarget webLoginTarget(CloudPlatform cloud, {TargetPlatform? platform}) {
+  final target = WebLoginTarget.targets[cloud]!;
+  if (cloud != CloudPlatform.aliyun ||
+      (platform ?? defaultTargetPlatform) != TargetPlatform.android) {
+    return target;
+  }
+  // Aliyun's Android login/captcha expects a mobile browser. Keep the original
+  // desktop target and token/cookie capture rules for the other clients.
+  return WebLoginTarget(
+    target.platform,
+    target.url,
+    target.cookieDomains,
+    userAgent: WebLoginTarget.mobileUserAgent,
+    desktopMode: false,
+    localStorageKey: target.localStorageKey,
+    clearCookieDomains: target.clearCookieDomains,
+    storageOrigins: target.storageOrigins,
+  );
+}
 
 InAppWebViewSettings webSettings({
   String? userAgent,

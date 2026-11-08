@@ -14,25 +14,28 @@ import 'token_cloud_support.dart';
 const _verification = 'fixture-verification-id-0123456789';
 const _proof = 'fixture-verification-token-0123456789';
 const _captcha = 'fixture-captcha-token-0123456789';
-HttpResult _response(RecordedRequest r, {bool isUser = true}) =>
-    switch (r.uri.path) {
-      '/v1/shield/captcha/init' => jsonResponse({'captcha_token': _captcha}),
-      '/v1/auth/verification' => jsonResponse({
-        'verification_id': _verification,
-        'is_user': isUser,
-        'expires_in': 600,
-      }),
-      '/v1/auth/verification/verify' => jsonResponse({
-        'verification_token': _proof,
-      }),
-      '/v1/auth/signin' || '/v1/auth/signup' => jsonResponse({
-        'access_token': accessToken,
-        'refresh_token': refreshToken,
-        'expires_in': 3600,
-      }),
-      '/assets/v1/get_assets' => guangyaAssetsResponse(),
-      _ => throw StateError('Unexpected SMS endpoint'),
-    };
+HttpResult _response(
+  RecordedRequest r, {
+  bool? isUser = true,
+  String verificationId = _verification,
+}) => switch (r.uri.path) {
+  '/v1/shield/captcha/init' => jsonResponse({'captcha_token': _captcha}),
+  '/v1/auth/verification' => jsonResponse({
+    'verification_id': verificationId,
+    'is_user': ?isUser,
+    'expires_in': 600,
+  }),
+  '/v1/auth/verification/verify' => jsonResponse({
+    'verification_token': _proof,
+  }),
+  '/v1/auth/signin' || '/v1/auth/signup' => jsonResponse({
+    'access_token': accessToken,
+    'refresh_token': refreshToken,
+    'expires_in': 3600,
+  }),
+  '/assets/v1/get_assets' => guangyaAssetsResponse(),
+  _ => throw StateError('Unexpected SMS endpoint'),
+};
 
 void main() {
   test(
@@ -121,6 +124,235 @@ void main() {
     expect(http.calls.last.json['username'], isNull);
     expect(http.calls.last.json['name'], '138****0000');
   });
+
+  test(
+    'verification JWT without is_user is forwarded unchanged to signin',
+    () async {
+      // Synthetic opaque JWT fixture, not a credential or a decoded identity.
+      final jwt = '${'a' * 80}.${'b' * 420}.${'c' * 89}';
+      final http = LoginHttp(
+        (r) => _response(r, isUser: null, verificationId: jwt),
+      );
+      final login = GuangyaSmsLogin(http, now: () => tokenClock);
+      final challenge = await login.sendSms('13800000000');
+      expect(jwt.length, 591);
+      expect(challenge.isUser, isNull);
+      final credential = await login.sms(challenge, '123456');
+      expect(http.calls[2].json['verification_id'], jwt);
+      expect(http.calls.last.uri.path, '/v1/auth/signin');
+      expect(http.calls.where((r) => r.uri.path.endsWith('/signup')), isEmpty);
+      expect(credential.field('refreshToken'), refreshToken);
+      expect(credential.fields.values, isNot(contains('123456')));
+    },
+  );
+
+  test(
+    'unknown account registers once only after explicit user_not_found',
+    () async {
+      final http = LoginHttp(
+        (r) => r.uri.path == '/v1/auth/signin'
+            ? jsonResponse({'error': 'user_not_found'}, 400)
+            : _response(r, isUser: null),
+      );
+      final login = GuangyaSmsLogin(http, now: () => tokenClock);
+      final challenge = await login.sendSms('13800000000');
+      final credential = await login.sms(challenge, '123456');
+      expect(http.calls.map((r) => r.uri.path), [
+        '/v1/shield/captcha/init',
+        '/v1/auth/verification',
+        '/v1/auth/verification/verify',
+        '/v1/shield/captcha/init',
+        '/v1/auth/signin',
+        '/v1/auth/signup',
+      ]);
+      final signup = http.calls.last;
+      expect(signup.json['verification_token'], _proof);
+      expect(signup.json['verification_code'], '123456');
+      expect(signup.json['phone_number'], '+86 13800000000');
+      expect(signup.json['name'], '138****0000');
+      expect(signup.json['username'], isNull);
+      expect(
+        http.calls.map((r) => r.headers['X-Device-Id']).toSet(),
+        hasLength(1),
+      );
+      expect(
+        http.calls.map((r) => r.headers['X-Device-Sign']).toSet(),
+        hasLength(1),
+      );
+      expect(credential.field('refreshToken'), refreshToken);
+      expect(credential.fields.values, isNot(contains('123456')));
+    },
+  );
+
+  for (final (status, error) in [
+    (429, 'too_many_requests'),
+    (429, 'user_not_found'),
+    (400, 'invalid_verification_code'),
+    (400, 'verification_expired'),
+    (400, 'invalid_verification_token'),
+    (403, 'captcha_required'),
+    (403, 'captcha_invalid'),
+    (403, ''),
+    (400, 'invalid_credentials'),
+    (500, 'user_not_found'),
+  ]) {
+    test(
+      'unknown account does not register on signin $status $error',
+      () async {
+        final http = LoginHttp(
+          (r) => r.uri.path == '/v1/auth/signin'
+              ? jsonResponse({
+                  'error': error,
+                  'error_description': 'private: 123456',
+                }, status)
+              : _response(r, isUser: null),
+        );
+        final login = GuangyaSmsLogin(http, now: () => tokenClock);
+        final challenge = await login.sendSms('13800000000');
+        await expectLater(
+          login.sms(challenge, '123456'),
+          throwsA(
+            isA<AppException>().having(
+              (e) => e.message,
+              'message',
+              isNot(contains('123456')),
+            ),
+          ),
+        );
+        expect(
+          http.calls.where((r) => r.uri.path.endsWith('/signup')),
+          isEmpty,
+        );
+        expect(
+          http.calls.where((r) => r.uri.path.endsWith('/signin')),
+          hasLength(1),
+        );
+        expect(
+          http.calls.where((r) => r.uri.path.endsWith('/verify')),
+          hasLength(1),
+        );
+      },
+    );
+  }
+
+  test('a known account never falls back to registration', () async {
+    final http = LoginHttp(
+      (r) => r.uri.path == '/v1/auth/signin'
+          ? jsonResponse({'error': 'user_not_found'}, 400)
+          : _response(r),
+    );
+    final login = GuangyaSmsLogin(http, now: () => tokenClock);
+    final challenge = await login.sendSms('13800000000');
+    await expectLater(
+      login.sms(challenge, '123456'),
+      throwsA(isA<AppException>()),
+    );
+    expect(http.calls.where((r) => r.uri.path.endsWith('/signup')), isEmpty);
+  });
+
+  test('captcha initialization error cannot trigger registration', () async {
+    final http = LoginHttp(
+      (r) =>
+          r.uri.path == '/v1/shield/captcha/init' &&
+              r.json['action'] == 'POST:/v1/auth/signin'
+          ? jsonResponse({'error': 'user_not_found'}, 400)
+          : _response(r, isUser: null),
+    );
+    final login = GuangyaSmsLogin(http, now: () => tokenClock);
+    final challenge = await login.sendSms('13800000000');
+    await expectLater(
+      login.sms(challenge, '123456'),
+      throwsA(isA<AppException>()),
+    );
+    expect(http.calls.where((r) => r.uri.path.endsWith('/signup')), isEmpty);
+    expect(http.calls.where((r) => r.uri.path.endsWith('/signin')), isEmpty);
+  });
+
+  test(
+    'cancelled signin captcha does not register an unknown account',
+    () async {
+      final http = LoginHttp(
+        (r) =>
+            r.uri.path == '/v1/shield/captcha/init' &&
+                r.json['action'] == 'POST:/v1/auth/signin'
+            ? jsonResponse({'url': 'https://captcha.guangyapan.com/verify'})
+            : _response(r, isUser: null),
+      );
+      final login = GuangyaSmsLogin(http, now: () => tokenClock);
+      final challenge = await login.sendSms('13800000000');
+      await expectLater(
+        login.sms(challenge, '123456', verifyCaptcha: (_) async => null),
+        throwsA(isA<AppException>()),
+      );
+      expect(http.calls.where((r) => r.uri.path.endsWith('/signup')), isEmpty);
+      expect(http.calls.where((r) => r.uri.path.endsWith('/signin')), isEmpty);
+    },
+  );
+
+  test('signin timeout cannot register an unknown account', () async {
+    final http = LoginHttp((r) {
+      if (r.uri.path == '/v1/auth/signin') {
+        throw TimeoutException('fixture timeout');
+      }
+      return _response(r, isUser: null);
+    });
+    final login = GuangyaSmsLogin(http, now: () => tokenClock);
+    final challenge = await login.sendSms('13800000000');
+    await expectLater(
+      login.sms(challenge, '123456'),
+      throwsA(isA<TimeoutException>()),
+    );
+    expect(http.calls.where((r) => r.uri.path.endsWith('/signup')), isEmpty);
+  });
+
+  test('leaving during signin prevents a late user_not_found signup', () async {
+    final delayed = Completer<HttpResult>();
+    final http = LoginHttp(
+      (r) => r.uri.path == '/v1/auth/signin'
+          ? delayed.future
+          : _response(r, isUser: null),
+    );
+    final login = GuangyaSmsLogin(http, now: () => tokenClock);
+    final challenge = await login.sendSms('13800000000');
+    final scope = RequestScope();
+    final pending = scope.run(() => login.sms(challenge, '123456'));
+    final failure = expectLater(pending, throwsA(isA<AppException>()));
+    await Future<void>.delayed(Duration.zero);
+    expect(http.calls.last.uri.path, '/v1/auth/signin');
+    scope.cancel();
+    delayed.complete(jsonResponse({'error': 'user_not_found'}, 400));
+    await failure;
+    expect(http.calls.where((r) => r.uri.path.endsWith('/signup')), isEmpty);
+  });
+
+  test(
+    'signup fallback failure is returned without another verification or retry',
+    () async {
+      final http = LoginHttp(
+        (r) => switch (r.uri.path) {
+          '/v1/auth/signin' => jsonResponse({'error': 'user_not_found'}, 400),
+          '/v1/auth/signup' => jsonResponse({
+            'error': 'too_many_requests',
+          }, 429),
+          _ => _response(r, isUser: null),
+        },
+      );
+      final login = GuangyaSmsLogin(http, now: () => tokenClock);
+      final challenge = await login.sendSms('13800000000');
+      await expectLater(
+        login.sms(challenge, '123456'),
+        throwsA(isA<AppException>()),
+      );
+      expect(
+        http.calls.where((r) => r.uri.path.endsWith('/signup')),
+        hasLength(1),
+      );
+      expect(
+        http.calls.where((r) => r.uri.path.endsWith('/verify')),
+        hasLength(1),
+      );
+    },
+  );
 
   test(
     'expired challenge and malformed input never send login requests',

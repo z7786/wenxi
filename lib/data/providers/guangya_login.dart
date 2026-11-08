@@ -103,7 +103,7 @@ class GuangyaSmsChallenge {
     required this.expiresAt,
   });
   final String mobile, verificationId, device, sign;
-  final bool isUser;
+  final bool? isUser;
   final int expiresAt;
 }
 
@@ -132,15 +132,18 @@ class GuangyaSmsLogin {
       onStatus: onStatus,
     );
     require(
-      WebTokens.validToken(data.str('verification_id')) &&
-          data.containsKey('is_user'),
+      WebTokens.validToken(data.str('verification_id')),
       '光鸭未返回短信验证信息，请稍后重试',
     );
     final seconds = data.integer('expires_in', 600).clamp(1, 1800);
     return GuangyaSmsChallenge(
       mobile: mobile,
       verificationId: data.str('verification_id'),
-      isUser: data.boolean('is_user'),
+      isUser: switch (data['is_user']) {
+        true || 'true' || 1 => true,
+        false || 'false' || 0 => false,
+        _ => null,
+      },
       device: attempt.device,
       sign: attempt.sign,
       expiresAt: now() + seconds * 1000,
@@ -168,11 +171,11 @@ class GuangyaSmsLogin {
     final token = verification.str('verification_token');
     require(WebTokens.validToken(token), '光鸭未返回有效验证凭据，请重新获取验证码');
     onStatus?.call('正在登录光鸭云盘…');
-    final data = await attempt.post(
-      challenge.isUser ? '/v1/auth/signin' : '/v1/auth/signup',
+    Future<Json> authenticate({required bool register}) => attempt.post(
+      register ? '/v1/auth/signup' : '/v1/auth/signin',
       {
-        if (challenge.isUser) 'username': '+86 ${challenge.mobile}',
-        if (!challenge.isUser) ...{
+        if (!register) 'username': '+86 ${challenge.mobile}',
+        if (register) ...{
           'phone_number': '+86 ${challenge.mobile}',
           'name':
               '${challenge.mobile.substring(0, 3)}****${challenge.mobile.substring(7)}',
@@ -180,10 +183,24 @@ class GuangyaSmsLogin {
         'verification_code': code.trim(),
         'verification_token': token,
       },
-      mobile: challenge.isUser ? challenge.mobile : null,
+      mobile: register ? null : challenge.mobile,
       verifyCaptcha: verifyCaptcha,
       onStatus: onStatus,
     );
+    Future<Json> signInOrRegister() async {
+      try {
+        return await authenticate(register: challenge.isUser == false);
+      } on _GuangyaSmsError catch (error) {
+        // New verification responses omit is_user. Only an explicit signin
+        // account error may register; captcha, code and transport errors cannot.
+        if (challenge.isUser != null || !error.unregistered) rethrow;
+        RequestScope.checkpoint();
+        require(now() < challenge.expiresAt, '短信验证码已过期，请重新获取');
+        return authenticate(register: true);
+      }
+    }
+
+    final data = await signInOrRegister();
     final seconds = data.integer('expires_in');
     final fields = WebTokens.fields(
       CloudPlatform.guangya,
@@ -205,6 +222,19 @@ class GuangyaSmsLogin {
       'username': challenge.mobile,
     });
   }
+}
+
+class _GuangyaSmsError extends AppException {
+  const _GuangyaSmsError(super.message, this.path, this.status, this.error);
+  final String path, error;
+  final int status;
+
+  bool get unregistered =>
+      path == '/v1/auth/signin' &&
+      status >= 400 &&
+      status < 500 &&
+      status != 429 &&
+      error == 'user_not_found';
 }
 
 class _GuangyaSmsAttempt {
@@ -236,22 +266,27 @@ class _GuangyaSmsAttempt {
     );
     RequestScope.checkpoint();
     final data = response.json;
-    require(
-      response.successful && data.str('error').isEmpty,
-      response.status == 429 || data.str('error') == 'too_many_requests'
-          ? '验证码请求过于频繁，请稍后重试'
-          : switch (data.str('error')) {
-              'captcha_required' || 'captcha_invalid' => '光鸭安全验证未通过，请重试或切换网页登录',
-              'invalid_verification_code' ||
-              'verification_code_invalid' ||
-              'verification_expired' ||
-              'invalid_verification_token' => '短信验证码错误或已过期，请重新获取',
-              _ =>
-                path.endsWith('/verification')
-                    ? '短信发送失败，请稍后重试或切换网页登录'
-                    : '光鸭短信验证失败，请检查验证码或切换网页登录',
-            },
-    );
+    if (!response.successful || data.str('error').isNotEmpty) {
+      throw _GuangyaSmsError(
+        response.status == 429 || data.str('error') == 'too_many_requests'
+            ? '验证码请求过于频繁，请稍后重试'
+            : switch (data.str('error')) {
+                'captcha_required' ||
+                'captcha_invalid' => '光鸭安全验证未通过，请重试或切换网页登录',
+                'invalid_verification_code' ||
+                'verification_code_invalid' ||
+                'verification_expired' ||
+                'invalid_verification_token' => '短信验证码错误或已过期，请重新获取',
+                _ =>
+                  path.endsWith('/verification')
+                      ? '短信发送失败，请稍后重试或切换网页登录'
+                      : '光鸭短信验证失败，请检查验证码或切换网页登录',
+              },
+        path,
+        response.status,
+        data.str('error'),
+      );
+    }
     return data;
   }
 
