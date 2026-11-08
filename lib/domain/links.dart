@@ -45,6 +45,16 @@ class LinkParser {
   static final _codeWhitespace = RegExp(r'[\s\u3000\u00a0]+');
   static final _legacyCode = RegExp(r'^[A-Za-z0-9]{1,12}$');
   static final _punctuation = RegExp('[。，,；;！!)）\\]】}》"\'\u3000]+\$');
+  static final _tianyiCopyStarts = RegExp(
+    ['(', '（', '访', '提', '密', '口']
+        .expand((value) => [value, Uri.encodeComponent(value)])
+        .map(RegExp.escape)
+        .join('|'),
+    caseSensitive: false,
+  );
+  static final _tianyiCopyLabel = RegExp(
+    r'^[（(]?\s*(?:访问码|提取码|密码|口令)\s*(?:为|是)?\s*[:：=]?\s*([A-Za-z0-9]{4})\s*[)）]?$',
+  );
 
   static String normalize(String input) {
     var value = LinkObfuscation.cleanUrl(input.trim());
@@ -120,11 +130,25 @@ class LinkParser {
         if ((platform == CloudPlatform.github ||
                 platform == CloudPlatform.ctfile ||
                 platform == CloudPlatform.aliyun ||
+                platform == CloudPlatform.tianyi ||
                 platform == CloudPlatform.feijipan) &&
             raw.contains('](')) {
           raw = raw.substring(0, raw.indexOf(']('));
           url = normalize(raw);
           uri = Uri.parse(url);
+        }
+        String? copiedCode;
+        if (platform == CloudPlatform.tianyi) {
+          final copied = _tianyiCopiedLink(url);
+          if (copied != null) {
+            raw = raw.substring(
+              0,
+              raw.length - (url.length - copied.url.length),
+            );
+            url = copied.url;
+            uri = Uri.parse(url);
+            copiedCode = copied.passcode;
+          }
         }
         if (platform == CloudPlatform.feijipan && raw.endsWith('`')) {
           raw = raw.replaceFirst(RegExp(r'`+$'), '');
@@ -162,6 +186,7 @@ class LinkParser {
             : unsupported != null
             ? _unsupportedShareId(unsupported, uri)
             : null;
+        final embeddedCode = id == null ? null : _embeddedCode(url, uri);
         candidates.add(
           _LinkCandidate(
             match.start,
@@ -179,8 +204,9 @@ class LinkParser {
               platform: platform,
               unsupportedPlatform: unsupported,
               shareId: id,
-              passcode: id == null ? null : _embeddedCode(url, uri),
+              passcode: id == null ? null : embeddedCode ?? copiedCode,
             ),
+            hasEmbeddedCode: embeddedCode != null,
           ),
         );
       } on AppException {
@@ -457,6 +483,51 @@ class LinkParser {
     return null;
   }
 
+  static String? _tianyiShareId(Uri uri) {
+    final parts = _parts(uri);
+    return (uri.path == '/web/share' ? _queryId([uri], 'code') : null) ??
+        _pathId(parts, r'/t/([A-Za-z0-9]+)') ??
+        _queryId(parts, 'code');
+  }
+
+  static ({String url, String passcode})? _tianyiCopiedLink(String url) {
+    for (final start in _tianyiCopyStarts.allMatches(url)) {
+      String label;
+      try {
+        // Decode only the appended copy label, preserving all URL bytes.
+        label = url
+            .substring(start.start)
+            .replaceAllMapped(
+              RegExp(r'(?:%[0-9a-f]{2})+', caseSensitive: false),
+              (match) => Uri.decodeComponent(match[0]!),
+            );
+      } on FormatException {
+        continue;
+      } on ArgumentError {
+        continue;
+      }
+      final code = _tianyiCopyLabel.firstMatch(label)?[1];
+      if (code == null || !_isCode(code)) continue;
+      final address = url.substring(0, start.start);
+      final uri = Uri.tryParse(address);
+      if (uri == null || _tianyiShareId(uri) == null) continue;
+      // A label inside an unrelated query value is not appended share prose.
+      final question = address.lastIndexOf('?');
+      if (question > address.lastIndexOf('#')) {
+        final field = address.substring(question + 1).split('&').last;
+        final separator = field.indexOf('=');
+        if (separator < 0 ||
+            !_parameters(field).keys.any(
+              (key) => {'code', 'accesscode', ..._codeKeys}.contains(key),
+            )) {
+          continue;
+        }
+      }
+      return (url: address, passcode: code);
+    }
+    return null;
+  }
+
   static String? shareId(CloudPlatform platform, String url) {
     final uri = Uri.tryParse(url);
     if (uri == null ||
@@ -495,10 +566,9 @@ class LinkParser {
         uri.pathSegments
             .where((segment) => segment.trim().isNotEmpty)
             .lastOrNull,
-      CloudPlatform.tianyi =>
-        (uri.path == '/web/share' ? _queryId([uri], 'code') : null) ??
-            _pathId(parts, r'/t/([A-Za-z0-9]+)') ??
-            _queryId(parts, 'code'),
+      CloudPlatform.tianyi => _tianyiShareId(
+        Uri.parse(_tianyiCopiedLink(url)?.url ?? url),
+      ),
       CloudPlatform.pan123 =>
         _pathId(parts, r'/(?:s|123pan)/([A-Za-z0-9_-]+)') ??
             _queryId(parts, 'sk'),
@@ -595,8 +665,8 @@ class LinkParser {
 }
 
 class _LinkCandidate {
-  _LinkCandidate(this.start, this.end, this.link)
-    : hasEmbeddedCode = link.passcode != null;
+  _LinkCandidate(this.start, this.end, this.link, {bool? hasEmbeddedCode})
+    : hasEmbeddedCode = hasEmbeddedCode ?? link.passcode != null;
   final int start, end;
   final bool hasEmbeddedCode;
   ParsedLink link;

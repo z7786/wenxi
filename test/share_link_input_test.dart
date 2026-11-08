@@ -2,12 +2,82 @@ import 'dart:convert';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/providers/c139.dart';
 import 'package:asterlink/data/providers/pan123.dart';
+import 'package:asterlink/data/providers/tianyi.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/links.dart';
+import 'package:asterlink/domain/models.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'support.dart';
 
 void main() {
+  test(
+    'Tianyi H5 encoded copy labels reach anonymous share and child requests',
+    () async {
+      final http = FakeHttp((request) {
+        expect(request.uri.host, 'cloud.189.cn');
+        final parameters = request.uri.queryParameters;
+        expect(
+          request.headers.keys.map((key) => key.toLowerCase()),
+          isNot(contains('authorization')),
+        );
+        if (request.uri.path.endsWith('/getShareInfoByCodeV2.action')) {
+          expect(parameters['shareCode'], 'jy6R3u3YvQB3');
+          return jsonResponse({
+            'res_code': 0,
+            'shareId': '123456',
+            'fileId': '100',
+            'fileName': '分享目录',
+            'isFolder': true,
+            'shareType': 3,
+            'shareMode': '1',
+          });
+        }
+        if (request.uri.path.endsWith('/checkAccessCode.action')) {
+          expect(parameters['shareCode'], 'jy6R3u3YvQB3');
+          expect(parameters['accessCode'], 'm6h5');
+          return jsonResponse({'res_code': 0, 'shareId': '123456'});
+        }
+        expect(request.uri.path, '/api/open/share/listShareDir.action');
+        expect(parameters['shareId'], '123456');
+        expect(parameters['accessCode'], 'm6h5');
+        expect(request.headers['Cookie'], contains('share_123456=m6h5'));
+        final parent = parameters['shareDirFileId'];
+        expect(parameters['fileId'], parent);
+        return jsonResponse({
+          'res_code': 0,
+          'fileListAO': {
+            'count': 1,
+            'folderList': parent == '100'
+                ? [
+                    {'id': '200', 'name': '子目录'},
+                  ]
+                : [],
+            'fileList': parent == '200'
+                ? [
+                    {'id': '300', 'name': '示例.mp4', 'size': '1024'},
+                  ]
+                : [],
+          },
+        });
+      });
+      final connector = TianyiConnector(http);
+      final link = LinkParser.parse(
+        'https://h5.cloud.189.cn/share.html#/t/jy6R3u3YvQB3'
+        '%EF%BC%88%E8%AE%BF%E9%97%AE%E7%A0%81%EF%BC%9Am6h5%EF%BC%89',
+      ).single;
+      expect(link.kind, LinkKind.cloudShare);
+      final session = await connector.openShare(link, null);
+      expect(session.meta('shareCode'), 'jy6R3u3YvQB3');
+      expect(session.meta('accessCode'), 'm6h5');
+      final root = await connector.list(session, session.rootId, null);
+      expect(root.single.id, '200');
+      expect(root.single.isDirectory, isTrue);
+      final child = await connector.list(session, root.single.id, null);
+      expect(child.single.id, '300');
+      expect(child.single.parentId, root.single.id);
+      expect(http.calls, hasLength(4));
+    },
+  );
   for (final host in [
     'www.123684.com',
     'author.share.123pan.com',

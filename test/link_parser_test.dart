@@ -67,6 +67,108 @@ void main() {
     ).single;
     expect(protected.passcode, 'aB12');
   });
+  test('Tianyi H5 copied links separate encoded access-code labels', () {
+    const prefix = 'https://h5.cloud.189.cn/share.html#/t/jy6R3u3YvQB3';
+    const suffix = '%EF%BC%88%E8%AE%BF%E9%97%AE%E7%A0%81%EF%BC%9Am6h5%EF%BC%89';
+    final link = LinkParser.parse('$prefix$suffix').single;
+    expect(link.kind, LinkKind.cloudShare);
+    expect(link.platform, CloudPlatform.tianyi);
+    expect(link.shareId, 'jy6R3u3YvQB3');
+    expect(link.passcode, 'm6h5');
+    expect(link.url, prefix);
+    expect(
+      LinkParser.shareId(CloudPlatform.tianyi, '$prefix$suffix'),
+      link.shareId,
+    );
+    expect(link.source, '$prefix$suffix');
+    final corrected = LinkParser.parse(
+      link.withPasscode('new1').textForCopy,
+    ).single;
+    expect(corrected.shareId, link.shareId);
+    expect(corrected.passcode, 'new1');
+    expect(corrected.url, prefix);
+  });
+  test('Tianyi encoded copy labels work across official share routes', () {
+    for (final prefix in [
+      'https://h5.cloud.189.cn/share.html#/t/jy6R3u3YvQB3',
+      'https://cloud.189.cn/t/jy6R3u3YvQB3',
+      'https://cloud.189.cn/web/share?code=jy6R3u3YvQB3',
+    ]) {
+      for (final suffix in [
+        '（访问码：m6h5）',
+        Uri.encodeComponent('（访问码：m6h5）'),
+        Uri.encodeComponent('(访问码: m6h5)'),
+        '（${Uri.encodeComponent('访问码：m6h5')}）',
+        '${Uri.encodeComponent('（')}访问码：m6h5${Uri.encodeComponent('）')}',
+      ]) {
+        final link = LinkParser.parse('$prefix$suffix').single;
+        expect(link.shareId, 'jy6R3u3YvQB3', reason: suffix);
+        expect(link.passcode, 'm6h5', reason: suffix);
+        expect(link.url, prefix, reason: suffix);
+      }
+    }
+  });
+  test(
+    'Tianyi copied labels keep Markdown, query precedence and code ownership',
+    () {
+      const first = 'https://h5.cloud.189.cn/share.html#/t/First123';
+      const second = 'https://cloud.189.cn/t/Second456';
+      final suffix = Uri.encodeComponent('（访问码：m6h5）');
+      final markdown = LinkParser.parse(
+        '[$first$suffix]($first$suffix)',
+      ).single;
+      expect(markdown.shareId, 'First123');
+      expect(markdown.passcode, 'm6h5');
+      final links = LinkParser.parse(
+        '$first$suffix\n$second${Uri.encodeComponent('（访问码：s456）')}',
+      );
+      expect(links.map((link) => link.passcode), ['m6h5', 's456']);
+      final query = LinkParser.parse(
+        '$first?accessCode=aB12$suffix 提取码：c789',
+      ).single;
+      expect(query.url, '$first?accessCode=aB12');
+      expect(query.passcode, 'aB12');
+      final corrected = LinkParser.parse('$first$suffix\n访问码：n123').single;
+      expect(corrected.passcode, 'n123');
+      final duplicate = LinkParser.parse('$first\n$first$suffix');
+      expect(duplicate, hasLength(1));
+      expect(duplicate.single.passcode, 'm6h5');
+    },
+  );
+  test(
+    'Encoded Tianyi labels cannot rewrite other URLs or invent share routes',
+    () {
+      final suffix = Uri.encodeComponent('（访问码：m6h5）');
+      for (final url in [
+        'https://example.test/file$suffix',
+        'https://h5.cloud.189.cn.evil.test/share.html#/t/First123$suffix',
+        'https://h5.cloud.189.cn/login?redirect=${Uri.encodeComponent('/t/First123')}$suffix',
+      ]) {
+        final link = LinkParser.parse(url).single;
+        expect(link.kind, LinkKind.direct);
+        expect(link.passcode, isNull);
+        expect(link.url, url);
+      }
+      for (final parameter in ['redirect', 'note']) {
+        final url =
+            'https://h5.cloud.189.cn/share.html#/t/First123?$parameter=$suffix';
+        final link = LinkParser.parse(url).single;
+        expect(link.shareId, 'First123');
+        expect(link.passcode, isNull);
+        expect(link.url, url);
+      }
+      for (final label in ['（访问码：abc）', '（访问码：abcde）', '（其他：m6h5）']) {
+        final url =
+            'https://h5.cloud.189.cn/share.html#/t/First123${Uri.encodeComponent(label)}';
+        final link = LinkParser.parse(url).single;
+        expect(link.kind, LinkKind.direct);
+        expect(link.passcode, isNull);
+        expect(link.url, url);
+      }
+      const signed = 'https://example.test/视频%2f.mp4?sig=a%2b&key=1&key=2';
+      expect(LinkParser.parse(signed).single.url, signed);
+    },
+  );
   test('Lanzou labels allow 1 to 12 characters; other clouds require four', () {
     for (final code in ['A', '123', 'a1B2', 'Ab1234567890']) {
       expect(
