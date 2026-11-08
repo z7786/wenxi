@@ -219,6 +219,7 @@ class _DirectFiles extends FileAccess {
       sameVolume = false,
       allowLegacySave = false;
   Future<void> Function()? afterFinish;
+  Future<void> Function(String)? beforeForget;
 
   Directory directoryFor(String? destination) => destination == null
       ? defaults
@@ -389,6 +390,7 @@ class _DirectFiles extends FileAccess {
 
   @override
   Future<void> forgetDownloadTarget(String id) async {
+    await beforeForget?.call(id);
     final record = journal.records[id];
     if (record == null) return;
     require(record.published, '下载尚未完成');
@@ -568,6 +570,67 @@ void main() {
     );
     await root.delete(recursive: true);
   });
+
+  test('native checksum mismatch never publishes the direct target', () async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(_DirectFiles.channel, (call) async {
+      if (call.method == 'verifyDownloadTarget') return '0' * 64;
+      return files.access(call);
+    });
+    final id = await manager.enqueue(
+      DownloadSpec.fromJson({
+        ..._spec.toJson(),
+        'checksumType': 'sha256',
+        'checksumValue': sha256.convert(_content).toString(),
+      }),
+    );
+    await settled(id, DownloadStatus.failed);
+    expect(manager.task(id)!.error, contains('校验失败'));
+    expect(journal.records[id]!.published, isFalse);
+    expect(manager.task(id)!.payloadReady, isFalse);
+    expect(await journal.records[id]!.file.readAsBytes(), _content);
+  });
+
+  test(
+    'pausing native checksum joins the reader and preserves resumable bytes',
+    () async {
+      final entered = Completer<void>(), exited = Completer<String>();
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(_DirectFiles.channel, (call) async {
+        if (call.method == 'verifyDownloadTarget') {
+          entered.complete();
+          return exited.future;
+        }
+        if (call.method == 'cancelDownloadVerification') {
+          exited.completeError(
+            PlatformException(code: 'cancelled', message: '校验已暂停'),
+          );
+          return null;
+        }
+        return files.access(call);
+      });
+      final id = await manager.enqueue(
+        DownloadSpec.fromJson({
+          ..._spec.toJson(),
+          'checksumType': 'sha256',
+          'checksumValue': sha256.convert(_content).toString(),
+        }),
+      );
+      await entered.future.timeout(const Duration(seconds: 5));
+      await manager.pause(id);
+      await settled(id, DownloadStatus.paused);
+      expect(journal.records[id]!.published, isFalse);
+      expect(manager.task(id)!.payloadReady, isFalse);
+      expect(await journal.records[id]!.file.readAsBytes(), _content);
+      messenger.setMockMethodCallHandler(_DirectFiles.channel, files.access);
+      await manager.resume(id);
+      await settled(id, DownloadStatus.completed);
+      expect(manager.task(id)!.savedPath, isNotNull);
+      expect(files.forgotBeforeCommit, isFalse);
+    },
+  );
 
   test(
     'HTTP verifies the granted file and completes without reopening its locator',
@@ -1169,6 +1232,40 @@ void main() {
       expect(await record.file.readAsBytes(), _content);
       expect(files.closedWhileWriting, isFalse);
       expect(files.forgotBeforeCommit, isFalse);
+    },
+  );
+
+  test(
+    'next file can publish while completed cache removal is waiting',
+    () async {
+      final releaseRemoval = Completer<void>();
+      final cleanupEntered = Completer<void>();
+      files.beforeForget = (_) async {
+        if (!cleanupEntered.isCompleted) cleanupEntered.complete();
+        await releaseRemoval.future;
+      };
+      addTearDown(() {
+        if (!releaseRemoval.isCompleted) releaseRemoval.complete();
+      });
+      final first = await manager.enqueue(
+        _spec.copyWith(fileName: 'first.bin'),
+      );
+      await cleanupEntered.future.timeout(const Duration(seconds: 5));
+      expect(persistedTask(first).str('status'), 'completed');
+      final second = await manager.enqueue(
+        _spec.copyWith(fileName: 'second.bin'),
+      );
+      await until(
+        () => manager.task(second)!.status == DownloadStatus.completed,
+      );
+      expect(persistedTask(second).str('status'), 'completed');
+      expect(journal.records[first]!.published, isTrue);
+      expect(journal.records[second]!.published, isTrue);
+      expect(releaseRemoval.isCompleted, isFalse);
+      releaseRemoval.complete();
+      await settled(second, DownloadStatus.completed);
+      expect(files.forgotBeforeCommit, isFalse);
+      expect(files.closedWhileWriting, isFalse);
     },
   );
 

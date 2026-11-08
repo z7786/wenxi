@@ -42,6 +42,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
     private val downloadTargets = DownloadTargetStore(context)
     private val vault = SecureVault(context)
     private val exports = ConcurrentHashMap<String, AtomicBoolean>()
+    private val verifications = ConcurrentHashMap<String, AtomicBoolean>()
     private val cache = File(context.externalCacheDir ?: context.cacheDir, "asterlink_downloads")
     private var nativeStarted = false
     private var parserNativeUsed = false
@@ -265,6 +266,12 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             result.success(null)
             return
         }
+        if (call.method == "cancelDownloadVerification") {
+            val key = "${call.argument<String>("id")}:${call.argument<Number>("token")?.toLong()}"
+            verifications[key]?.set(true)
+            result.success(null)
+            return
+        }
         if (call.method == "foreground") {
             try {
                 val count = call.argument<Int>("active") ?: 0
@@ -278,10 +285,21 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         // Register before queueing IO so a pause can cancel a save that has not
         // yet reached its worker thread.
         if (call.method == "saveFile") call.argument<String>("id")?.let { exports[it] = AtomicBoolean(false) }
+        val verificationKey = if (call.method == "verifyDownloadTarget")
+            "${call.argument<String>("id")}:${call.argument<Number>("token")?.toLong()}" else null
+        val verification = verificationKey?.let { AtomicBoolean(false).also { flag -> verifications[it] = flag } }
         val executor = if (call.method == "gopeed") nativeWorker else io
         executor.execute {
             try {
                 val value: Any? = when (call.method) {
+                    "verifyDownloadTarget" -> {
+                        try {
+                            downloadTargets.digest(requireNotNull(call.argument<String>("id")),
+                                requireNotNull(call.argument<String>("lease")), requireNotNull(call.argument<String>("algorithm"))) {
+                                if (verification!!.get()) throw IOException("校验已暂停")
+                            }
+                        } finally { verifications.remove(requireNotNull(verificationKey), requireNotNull(verification)) }
+                    }
                     "uploadScan" -> uploadFiles.scanUploadDirectory(call.argument<String>("path").orEmpty())
                     "uploadCheckDirectory" -> { uploadFiles.checkDirectory(call.argument<String>("path").orEmpty()); null }
                     "uploadStat" -> uploadFiles.stat(call.argument<String>("path").orEmpty())
@@ -376,7 +394,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
                     "gopeed" -> if (error is EngineKeyStore.Unavailable) error.message else "下载组件操作失败，请重试并检查下载目录"
                     "deleteFile" -> "文件未能删除，请检查目录权限后重试"
                     "saveFile" -> if (error.message == "保存已暂停") "保存已暂停" else "无法保存下载文件，请检查存储空间和目录权限"
-                    "inspectDownloadTarget", "openDownloadTarget", "downloadTargetIo", "finishDownloadTarget", "releaseDownloadTarget", "discardDownloadTarget", "forgetDownloadTarget" ->
+                    "inspectDownloadTarget", "openDownloadTarget", "downloadTargetIo", "verifyDownloadTarget", "finishDownloadTarget", "releaseDownloadTarget", "discardDownloadTarget", "forgetDownloadTarget" ->
                         error.message ?: "无法访问下载目标，请检查存储空间和目录权限"
                     else -> "下载组件操作失败，请重试并检查下载目录"
                 }

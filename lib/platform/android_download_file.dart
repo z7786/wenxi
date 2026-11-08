@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -20,6 +21,56 @@ class AndroidDownloadFile implements File {
   final String id, lease;
   final MethodChannel channel;
   static const chunkSize = 256 * 1024;
+  static int _verificationToken = 0;
+
+  Future<String?> digest(
+    String algorithm, {
+    required Future<void> cancelled,
+  }) async {
+    final token = ++_verificationToken;
+    var finished = false;
+    final operation = channel.invokeMethod<String>('verifyDownloadTarget', {
+      'id': id,
+      'lease': lease,
+      'algorithm': algorithm,
+      'token': token,
+    });
+    unawaited(
+      cancelled.then((_) async {
+        if (finished) return;
+        try {
+          await channel.invokeMethod<void>('cancelDownloadVerification', {
+            'id': id,
+            'token': token,
+          });
+        } catch (_) {
+          // Always join the native reader before the manager releases its lease.
+        }
+      }),
+    );
+    try {
+      final result = await operation;
+      final length = switch (algorithm.toLowerCase().replaceAll('-', '')) {
+        'md5' => 32,
+        'sha1' => 40,
+        'sha256' => 64,
+        _ => 0,
+      };
+      if (result == null ||
+          length == 0 ||
+          result.length != length ||
+          !RegExp(r'^[a-fA-F0-9]+$').hasMatch(result)) {
+        throw FileSystemException('文件校验结果无效', path);
+      }
+      return result;
+    } on MissingPluginException {
+      return null;
+    } on PlatformException catch (error) {
+      throw FileSystemException(error.message ?? '无法校验下载文件', path);
+    } finally {
+      finished = true;
+    }
+  }
 
   Future<T?> access<T>(
     String operation, [

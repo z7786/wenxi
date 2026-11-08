@@ -1,7 +1,7 @@
 name: asterlink
 description: 文析助手，支持网盘解析、下载和 BT 在线播放。
 publish_to: none
-version: 2.2.0+220
+version: 2.2.5+225
 
 environment:
   sdk: '>=3.11.0 <4.0.0'

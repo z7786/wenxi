@@ -20,6 +20,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.UUID
 
 /** The URI is durable; the descriptor locator is valid only for its current lease. */
@@ -54,7 +55,8 @@ class DownloadTargetStore(
         )
     }
 
-    private data class Lease(val descriptor: ParcelFileDescriptor, val path: String, val token: String, val key: String)
+    private data class Lease(val descriptor: ParcelFileDescriptor, val path: String, val token: String, val key: String,
+        var target: Target)
     private val leases = mutableMapOf<String, Lease>()
     private val saver = DownloadFileSaver(context)
 
@@ -105,7 +107,7 @@ class DownloadTargetStore(
             val path = try { descriptorPath(descriptor) } catch (error: Exception) {
                 throw IOException("此目录不支持直接下载所需的随机读写，请选择本机或存储卡目录", error)
             }
-            val lease = Lease(descriptor, path, UUID.randomUUID().toString(), durable.key)
+            val lease = Lease(descriptor, path, UUID.randomUUID().toString(), durable.key, durable)
             leases[id] = lease
             descriptor = null
             return opened(durable, lease)
@@ -142,7 +144,7 @@ class DownloadTargetStore(
         id: String, lease: String, operation: String, offset: Long = 0, length: Long = 0,
         data: ByteArray? = null,
     ): Any? {
-        val target = read(id) ?: throw IOException("下载目标记录不存在")
+        val target = leases[id]?.target ?: throw IOException("下载目标已关闭，请重新继续任务")
         val current = requireLease(id, lease, target)
         val fd = current.descriptor.fileDescriptor
         if (operation in setOf("write", "truncate")) {
@@ -176,6 +178,46 @@ class DownloadTargetStore(
             "flush" -> { syncDescriptor(current.descriptor); null }
             else -> throw IllegalArgumentException("未知下载文件操作")
         }
+    }
+
+    /** Hash the granted descriptor locally. Only bounded positioned reads hold
+     * the store lock; hashing and cancellation never keep other tasks waiting. */
+    fun digest(id: String, lease: String, algorithm: String, checkpoint: () -> Unit = {}): String {
+        val selected = when (algorithm.lowercase().replace("-", "")) {
+            "md5" -> "MD5"
+            "sha1" -> "SHA-1"
+            "sha256" -> "SHA-256"
+            else -> throw IllegalArgumentException("不支持的文件校验类型")
+        }
+        checkpoint()
+        val (target, size) = synchronized(this) {
+            val target = read(id) ?: throw IOException("下载目标记录不存在")
+            val current = requireLease(id, lease, target)
+            requireAvailable(target)
+            target to Os.fstat(current.descriptor.fileDescriptor).st_size
+        }
+        val digest = MessageDigest.getInstance(selected)
+        val buffer = ByteArray(256 * 1024)
+        var offset = 0L
+        while (offset < size) {
+            checkpoint()
+            val count = synchronized(this) {
+                val current = requireLease(id, lease, target)
+                Os.pread(current.descriptor.fileDescriptor, buffer, 0, minOf(buffer.size.toLong(), size - offset).toInt(), offset)
+            }
+            if (count <= 0) throw IOException("校验期间文件内容不完整，请重新下载")
+            digest.update(buffer, 0, count)
+            offset += count
+        }
+        checkpoint()
+        synchronized(this) {
+            val current = requireLease(id, lease, target)
+            requireAvailable(target)
+            if (Os.fstat(current.descriptor.fileDescriptor).st_size != size) {
+                throw IOException("校验期间文件长度发生变化，请重新下载")
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
     @Synchronized
@@ -333,7 +375,12 @@ class DownloadTargetStore(
         }
     }
 
-    private fun persist(target: Target) = writeJournal(journal(target.id), target.json().toString().toByteArray(Charsets.UTF_8))
+    private fun persist(target: Target) {
+        writeJournal(journal(target.id), target.json().toString().toByteArray(Charsets.UTF_8))
+        // Update only after the durable write succeeds, including publishing
+        // state when a later provider/journal operation needs to be retried.
+        leases[target.id]?.target = target
+    }
 
     private fun deleteJournal(id: String) {
         val journal = journal(id)

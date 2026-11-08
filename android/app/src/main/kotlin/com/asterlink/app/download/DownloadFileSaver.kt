@@ -303,7 +303,7 @@ class DownloadFileSaver(private val context: Context) {
 
     private fun copy(source: File, output: OutputStream, checkpoint: (Int) -> Unit) {
         FileInputStream(source).use { input ->
-            val buffer = ByteArray(64 * 1024)
+            val buffer = ByteArray(256 * 1024)
             while (true) {
                 checkpoint(0)
                 val count = input.read(buffer)
