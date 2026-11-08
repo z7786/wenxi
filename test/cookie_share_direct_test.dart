@@ -211,6 +211,11 @@ void main() {
             );
             if (accountMode == 'working') {
               expect((await future)!.cleanup, isNull);
+            } else if (accountMode == 'broken' &&
+                platform == CloudPlatform.quark) {
+              // An optional account direct route may be unavailable; the
+              // caller must remain free to use the ordinary transfer route.
+              expect(await future, isNull);
             } else {
               await expectLater(
                 future,
