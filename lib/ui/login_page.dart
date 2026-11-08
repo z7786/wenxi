@@ -185,7 +185,7 @@ class _LoginEntryPage extends StatelessWidget {
           ),
           _ => WebLoginPage(
             services,
-            WebLoginTarget.targets[platform]!,
+            webLoginTarget(platform),
             accountId: owner,
           ),
         };
@@ -273,7 +273,7 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
     _LoginMethod.sms when widget.platform == CloudPlatform.baidu =>
       WebLoginPage(
         widget.services,
-        WebLoginTarget.targets[CloudPlatform.baidu]!,
+        webLoginTarget(CloudPlatform.baidu),
         key: const ValueKey('baidu-native-login'),
         accountId: widget.accountId,
         baiduNativeLogin: true,
@@ -303,7 +303,7 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
     ),
     _LoginMethod.web => WebLoginPage(
       widget.services,
-      WebLoginTarget.targets[widget.platform]!,
+      webLoginTarget(widget.platform),
       accountId: widget.accountId,
       passwordLogin: _webPassword,
       onUsePassword: () => _switch(_defaultMethod),

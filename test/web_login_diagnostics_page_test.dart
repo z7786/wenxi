@@ -18,6 +18,7 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/weiyun_web_login.dart';
 import 'package:asterlink/domain/tianyi_web_login.dart';
 import 'package:asterlink/ui/login_page.dart';
+import 'package:asterlink/ui/login_webview.dart' show webLoginTarget;
 import 'package:asterlink/ui/guangya_verification_page.dart';
 import 'package:asterlink/ui/ctfile_verification_page.dart';
 import 'package:asterlink/ui/browser_page.dart';
@@ -396,6 +397,7 @@ void main() {
                       {
                         CloudPlatform.xunlei,
                         CloudPlatform.ctfile,
+                        CloudPlatform.aliyun,
                       }.contains(cloud)
                       ? PasswordLoginFlow(services, cloud)
                       : WebLoginPage(services, WebLoginTarget.targets[cloud]!),
@@ -412,7 +414,7 @@ void main() {
     if (cloud == CloudPlatform.xunlei) {
       await tester.tap(find.byKey(const ValueKey('xunlei-login-web')));
       await tester.pumpAndSettle();
-    } else if (cloud == CloudPlatform.ctfile) {
+    } else if (cloud == CloudPlatform.ctfile || cloud == CloudPlatform.aliyun) {
       await tester.tap(find.byKey(const ValueKey('native-login-web')));
       await tester.pumpAndSettle();
     }
@@ -1586,10 +1588,134 @@ void main() {
     },
   );
 
+  for (final device in [TargetPlatform.android, TargetPlatform.windows]) {
+    for (final submitPassword in [false, true]) {
+      testWidgets(
+        '$device Aliyun login entry uses matching layout in main and popup: password=$submitPassword',
+        (tester) async {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () => Navigator.push<void>(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            PasswordLoginFlow(services, CloudPlatform.aliyun),
+                      ),
+                    ),
+                    child: const Text('阿里登录测试'),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.tap(find.text('阿里登录测试'));
+          await tester.pumpAndSettle();
+          if (submitPassword) {
+            await tester.enterText(
+              find.byKey(const ValueKey('native-login-username')),
+              'fixture-user',
+            );
+            await tester.enterText(
+              find.byKey(const ValueKey('native-login-password')),
+              'fixture-password',
+            );
+            await tester.ensureVisible(
+              find.byKey(const ValueKey('native-login-submit')),
+            );
+            await tester.tap(find.byKey(const ValueKey('native-login-submit')));
+          } else {
+            await tester.tap(find.byKey(const ValueKey('native-login-web')));
+          }
+          await tester.pumpAndSettle();
+          final loginPage = tester.widget<WebLoginPage>(
+            find.byType(WebLoginPage),
+          );
+          final mobile = device == TargetPlatform.android;
+          final (main, controller) = attach(401);
+          final expectedAgent = mobile
+              ? WebLoginTarget.mobileUserAgent
+              : WebLoginTarget.desktopUserAgent;
+          final expectedMode = mobile
+              ? UserPreferredContentMode.MOBILE
+              : UserPreferredContentMode.DESKTOP;
+          expect(loginPage.target.desktopMode, !mobile);
+          expect(loginPage.passwordLogin != null, submitPassword);
+          expect(main.params.initialSettings!.userAgent, expectedAgent);
+          expect(
+            main.params.initialSettings!.preferredContentMode,
+            expectedMode,
+          );
+          expect(main.params.initialSettings!.loadWithOverviewMode, !mobile);
+          expect(
+            main.params.initialUserScripts!.where(
+              (s) => s.source == desktopLoginViewportScript,
+            ),
+            hasLength(mobile ? 0 : 1),
+          );
+          final preparation = main.params.initialUserScripts!.where(
+            (s) => s.source.contains(
+              '__asterlink_login_${CloudPlatform.aliyun.key}',
+            ),
+          );
+          expect(preparation, hasLength(1));
+          expect(preparation.single.allowedOriginRules, {
+            'https://www.alipan.com',
+          });
+          if (submitPassword) {
+            final password = loginPage.passwordLogin!;
+            final bootstrap = main.params.initialUserScripts!
+                .where((s) => s.source == password.bootstrapScript)
+                .single;
+            expect(bootstrap.allowedOriginRules, AliyunWebPassword.origins);
+            expect(bootstrap.source, isNot(contains('fixture-password')));
+          }
+          expect(
+            await main.params.onCreateWindow!(
+              controller,
+              CreateWindowAction(
+                windowId: 402,
+                request: URLRequest(
+                  url: WebUri('https://auth.aliyundrive.com/'),
+                ),
+                isForMainFrame: true,
+              ),
+            ),
+            isTrue,
+          );
+          await tester.pumpAndSettle();
+          final popup = platform.views.last;
+          expect(popup.params.windowId, 402);
+          expect(popup.params.initialSettings!.userAgent, expectedAgent);
+          expect(
+            popup.params.initialSettings!.preferredContentMode,
+            expectedMode,
+          );
+          expect(popup.params.initialSettings!.loadWithOverviewMode, !mobile);
+          expect(
+            popup.params.initialSettings!.incognito,
+            device == TargetPlatform.windows,
+          );
+          expect(
+            popup.params.initialUserScripts!.where(
+              (s) => s.source == desktopLoginViewportScript,
+            ),
+            hasLength(mobile ? 0 : 1),
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          expect(tester.takeException(), isNull);
+        },
+        variant: TargetPlatformVariant.only(device),
+      );
+    }
+  }
+
   testWidgets(
-    'Aliyun waits for a clean browser, submits once, then validates and saves tokens',
+    'Android Aliyun mobile login waits for a clean browser, submits once, validates and saves tokens',
     (tester) async {
-      final target = WebLoginTarget.targets[CloudPlatform.aliyun]!;
+      final target = webLoginTarget(CloudPlatform.aliyun);
       final attempt = AliyunWebPassword(
         'fixture-user',
         'private-fixture-password',
@@ -1667,6 +1793,7 @@ void main() {
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
 
   for (final p in [CloudPlatform.aliyun, CloudPlatform.guangya]) {
