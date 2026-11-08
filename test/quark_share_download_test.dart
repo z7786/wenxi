@@ -62,6 +62,7 @@ class _Fixture {
   AppException? outsideError;
   AppException? saveError, directError;
   bool authenticatedDirectAvailable = false, failCleanup = false;
+  int? directUnavailableStatus;
   String? transferCookie;
   bool guestRefreshNeedsLogin = false;
   String? directFileId;
@@ -196,6 +197,9 @@ class _Fixture {
       case '/1/clouddrive/file/download':
         if (r.json.containsKey('pwd_id')) {
           if (directError != null) throw directError!;
+          if (directUnavailableStatus != null) {
+            return HttpResult(directUnavailableStatus!, '{}');
+          }
           if (directExpirations > 0) {
             directExpirations--;
             return jsonResponse({'status': 400, 'code': 41020}, 400);
@@ -370,6 +374,63 @@ void main() {
       },
     );
   }
+
+  for (final status in [404, 405]) {
+    test(
+      'optional account direct HTTP $status still permits normal transfer',
+      () async {
+        final f = _Fixture(directPolicy: (_, authenticated) => authenticated)
+          ..directUnavailableStatus = status;
+        final session = await f.repository.share(f.link);
+        final file = (await f.repository.list(session, session.rootId)).first;
+        final source = await f.repository.prepare(session, file);
+        expect(source.cleanup, isNotNull);
+        expect(source.guestDownload, isFalse);
+        expect(f.calls('/share/sharepage/save'), hasLength(1));
+        expect(
+          f.calls('/file/download').where((r) => r.json.containsKey('pwd_id')),
+          hasLength(2),
+        );
+        expect(
+          f.calls('/file/download').last.json.containsKey('pwd_id'),
+          isFalse,
+        );
+        expect(f.calls('/file/download').last.json['fids'], [
+          'saved-shared-file-1',
+        ]);
+        expect(
+          f.calls('/file/download').last.headers['Cookie'],
+          contains('__pus=fixture-account'),
+        );
+      },
+    );
+  }
+
+  test(
+    'optional direct failures are not retained after disabling the setting',
+    () async {
+      var enabled = true;
+      final f = _Fixture(
+        directPolicy: (_, authenticated) => authenticated && enabled,
+      )..directUnavailableStatus = 404;
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      final first = await f.repository.prepare(session, file);
+      expect(first.cleanup, isNotNull);
+      final count = f
+          .calls('/file/download')
+          .where((r) => r.json.containsKey('pwd_id'))
+          .length;
+      enabled = false;
+      final next = await f.repository.prepare(session, file);
+      expect(next.cleanup, isNotNull);
+      expect(
+        f.calls('/file/download').where((r) => r.json.containsKey('pwd_id')),
+        hasLength(count),
+      );
+      expect(f.calls('/share/sharepage/save'), hasLength(2));
+    },
+  );
 
   test(
     'Quark guest renewal still requests login when no account exists',

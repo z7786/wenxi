@@ -14,6 +14,7 @@ import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback.dart';
+import 'package:asterlink/domain/settings.dart';
 import 'package:asterlink/playback/playback_sources.dart';
 import 'package:asterlink/playback/recent_playback.dart';
 import 'player_support.dart';
@@ -88,6 +89,7 @@ class _Fixture {
       'ucSessionRefreshedAt': '${DateTime.now().millisecondsSinceEpoch}',
     }, updatedAt: 42);
     store = StateStore.memory({
+      'settings': const AppSettings().toJson(),
       'credentials': {
         CloudPlatform.quark.key: account.toJson(),
         CloudPlatform.uc.key: account.toJson(),
@@ -98,7 +100,17 @@ class _Fixture {
       (request) async => await intercept?.call(request) ?? reply(request),
     );
     cleanups = CleanupOutbox(store, http);
-    repository = CloudRepository(http, vault, cleanups);
+    repository = CloudRepository(
+      http,
+      vault,
+      cleanups,
+      directShareDownloadEnabled: (platform, authenticated) =>
+          platform == CloudPlatform.quark &&
+          authenticated &&
+          AppSettings.fromJson(
+            store.data.obj('settings'),
+          ).quarkAuthenticatedDirectDownload,
+    );
   }
   late final Credential account;
   late final StateStore store;
@@ -108,15 +120,26 @@ class _Fixture {
   late final CloudRepository repository;
   FutureOr<HttpResult?> Function(RecordedRequest)? intercept;
   int directories = 0, messages = 0;
+  int fileSize = _file.size;
+  bool capacityExceeded = false;
+  bool directAvailable = true;
   final tasks = <String, String>{};
   final messageFiles = <String, String>{};
 
   List<RecordedRequest> calls(String suffix) =>
       http.calls.where((r) => r.uri.path.endsWith(suffix)).toList();
+  CloudFile get selectedFile =>
+      CloudFile.fromJson({..._file.toJson(), 'size': fileSize});
   Future<DownloadSpec> play([BrowseSession session = _personal]) =>
-      repository.preparePlayback(session, _file);
+      repository.preparePlayback(session, selectedFile);
 
   HttpResult reply(RecordedRequest r) {
+    if (r.uri.host == 'dl.quark.cn') {
+      return HttpResult(206, 'x', {
+        'content-range': ['bytes 0-0/$fileSize'],
+        'content-length': ['1'],
+      });
+    }
     switch (r.uri.path) {
       case '/1/clouddrive/config':
         return _ok({});
@@ -130,7 +153,7 @@ class _Fixture {
               {
                 'fid': file.id,
                 'file_name': file.name,
-                'size': file.size,
+                'size': file.id == _file.id ? fileSize : file.size,
                 'pdir_fid': '0',
                 'share_fid_token': file.token,
                 'dir': false,
@@ -141,6 +164,13 @@ class _Fixture {
       case '/1/clouddrive/file':
         return _ok({'fid': 'temporary-${++directories}'});
       case '/1/clouddrive/share/sharepage/save':
+        if (capacityExceeded) {
+          return jsonResponse({
+            'status': 400,
+            'code': 32003,
+            'message': 'capacity limit[{0}]',
+          }, 400);
+        }
         final id = 'task-${tasks.length + 1}';
         tasks[id] = 'saved-${r.json['fid_list'][0]}-$directories';
         return _ok({'task_id': id});
@@ -162,10 +192,22 @@ class _Fixture {
         return _ok({'token': 'private-dl-token-${r.json['msg_id']}'});
       case '/1/clouddrive/file/download':
         final fid = r.json['fids'][0] as String;
+        if (r.json.containsKey('pwd_id')) {
+          if (!directAvailable) {
+            return jsonResponse({'status': 400, 'code': 23018}, 400);
+          }
+          return _ok([
+            {
+              'fid': fid,
+              'size': fileSize,
+              'download_url': 'https://dl.quark.cn/share-original',
+            },
+          ]);
+        }
         return _ok([
           {
             'fid': fid,
-            'size': _file.size,
+            'size': fileSize,
             'download_url':
                 'https://media.example/$fid?sig=private-url&key=1&key=2',
           },
@@ -598,6 +640,226 @@ void main() {
       expect(f.cleanups.pendingCount, 0);
     },
   );
+
+  for (final enabled in [false, true]) {
+    test(
+      'large share plays after quota rejection with download bypass=$enabled',
+      () async {
+        f.fileSize = 8 * 1024 * 1024 * 1024;
+        f.capacityExceeded = true;
+        await f.store.change(
+          (draft) => draft['settings'] = const AppSettings().update({
+            'quarkAuthenticatedDirectDownload': enabled,
+          }).toJson(),
+        );
+        final settings = encoded(f.store.data['settings']);
+        final source = await f.play(_share);
+        expect(source.url, 'https://dl.quark.cn/share-original');
+        expect(source.expectedSize, f.fileSize);
+        expect(source.guestDownload, isFalse);
+        expect(source.cleanup, isNull);
+        expect(source.headers['Cookie'], contains('__pus=private-account'));
+        expect(f.calls('/batch_send'), isEmpty);
+        final direct = f.calls('/file/download').single;
+        expect(direct.json['fids'], [_file.id]);
+        expect(direct.json['pwd_id'], 'fixture');
+        expect(direct.json['fids_token'], [_file.token]);
+        expect(f.calls('/file/delete').single.json['filelist'], [
+          'temporary-1',
+        ]);
+        await f.cleanups.drain();
+        expect(f.cleanups.pendingCount, 0);
+        expect(encoded(f.store.data['settings']), settings);
+      },
+    );
+  }
+
+  test(
+    'large share playback survives enable then disable in the same app and session',
+    () async {
+      f.fileSize = 8 * 1024 * 1024 * 1024;
+      f.capacityExceeded = true;
+      for (final enabled in [false, true, false]) {
+        await f.store.change(
+          (draft) => draft['settings'] = AppSettings.fromJson(
+            draft.obj('settings'),
+          ).update({'quarkAuthenticatedDirectDownload': enabled}).toJson(),
+        );
+        final source = await f.play(_share);
+        expect(source.url, 'https://dl.quark.cn/share-original');
+        expect(source.cleanup, isNull);
+        expect(source.source!['file']['id'], _file.id);
+        await f.cleanups.drain();
+      }
+      expect(f.calls('/file/download'), hasLength(3));
+      expect(f.calls('/batch_send'), isEmpty);
+      expect(f.cleanups.pendingCount, 0);
+      expect(
+        AppSettings.fromJson(
+          f.store.data.obj('settings'),
+        ).quarkAuthenticatedDirectDownload,
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'quota playback cannot repeatedly transfer when direct access is denied',
+    () async {
+      f.capacityExceeded = true;
+      f.directAvailable = false;
+      await expectLater(
+        f.play(_share),
+        throwsA(
+          isA<AppException>().having(
+            (e) => e.message,
+            'message',
+            contains('免转存播放但未成功'),
+          ),
+        ),
+      );
+      expect(f.calls('/share/sharepage/save'), hasLength(1));
+      expect(f.calls('/file/download'), hasLength(1));
+      expect(f.calls('/batch_send'), isEmpty);
+      await f.cleanups.drain();
+      expect(f.cleanups.pendingCount, 0);
+    },
+  );
+
+  test(
+    'ordinary transfer rejection does not try account direct playback',
+    () async {
+      f.intercept = (r) => r.uri.path.endsWith('/share/sharepage/save')
+          ? jsonResponse({
+              'status': 403,
+              'code': 41017,
+              'message': '分享已失效',
+            }, 403)
+          : null;
+      await expectLater(f.play(_share), throwsA(isA<AppException>()));
+      expect(f.calls('/file/download'), isEmpty);
+      expect(f.calls('/batch_send'), isEmpty);
+    },
+  );
+
+  for (final action in ['cancel', 'switch']) {
+    test(
+      '$action during quota direct playback cannot accept a stale source',
+      () async {
+        f.capacityExceeded = true;
+        final gate = Completer<void>();
+        final scope = RequestScope();
+        f.intercept = (r) async {
+          if (r.uri.path.endsWith('/file/download')) await gate.future;
+          return null;
+        };
+        final pending = scope.run(() => f.play(_share));
+        final failure = expectLater(pending, throwsA(isA<AppException>()));
+        await until(() => f.calls('/file/download').isNotEmpty);
+        if (action == 'cancel') {
+          scope.cancel();
+        } else {
+          await f.vault.putCredential(
+            CloudPlatform.quark,
+            Credential('replacement', {
+              'primary': '__pus=replacement; __puus=replacement',
+            }, updatedAt: 43),
+          );
+        }
+        gate.complete();
+        await failure;
+        expect(f.http.calls.where((r) => r.uri.host == 'dl.quark.cn'), isEmpty);
+        expect(f.calls('/share/sharepage/save'), hasLength(1));
+        expect(f.calls('/file/download'), hasLength(1));
+      },
+    );
+  }
+
+  test(
+    'quota playback refresh and history reopen resolve the share again without saved state',
+    () async {
+      f.capacityExceeded = true;
+      f.fileSize = 8 * 1024 * 1024 * 1024;
+      final directory = Directory.systemTemp.createTempSync(
+        'asterlink-quota-playback-',
+      );
+      final services = AppServices(
+        controlEnabled: false,
+        store: f.store,
+        dataDirectory: directory,
+        cacheDirectory: Directory('${directory.path}/cache'),
+        transport: FakeNative(),
+        files: FakeFiles(directory),
+        http: f.http,
+        platformFeatures: false,
+      );
+      FakePlaybackBackend backend(PlaybackEntry entry, bool hardware) =>
+          FakePlaybackBackend(entry.id, [])..hardwareAcceleration = hardware;
+      final player = cloudPlayback(services, _share, f.selectedFile, [
+        f.selectedFile,
+      ], backendFactory: backend);
+      addTearDown(() async {
+        await player.close();
+        await services.close();
+        directory.deleteSync(recursive: true);
+      });
+      await player.start();
+      expect(player.error, isEmpty);
+      await player.seek(const Duration(seconds: 120));
+      await services.updateSettings({'quarkAuthenticatedDirectDownload': true});
+      await player.load(
+        0,
+        refreshSource: true,
+        startPosition: const Duration(seconds: 120),
+      );
+      expect(player.error, isEmpty);
+      await player.close();
+      final record = PlaybackStore(f.store).recent.single;
+      await services.updateSettings({
+        'quarkAuthenticatedDirectDownload': false,
+      });
+      final restored = await restoreRecentPlayback(
+        services,
+        record,
+        backendFactory: backend,
+      );
+      addTearDown(restored.close);
+      await restored.start();
+      expect(restored.error, isEmpty);
+      expect(f.calls('/file/download'), hasLength(3));
+      expect(
+        f.calls('/file/download').every((r) => r.json.containsKey('pwd_id')),
+        isTrue,
+      );
+      expect(f.calls('/batch_send'), isEmpty);
+      await restored.close();
+      expect(services.cleanups.pendingCount, 0);
+      final history = encoded(f.store.data['playbackHistory']);
+      expect(history, isNot(contains('share-original')));
+      expect(history, isNot(contains('private-old-cookie')));
+    },
+  );
+
+  for (final enabled in [false, true]) {
+    test(
+      'normal share retains fast playback when download bypass=$enabled',
+      () async {
+        await f.store.change(
+          (draft) => draft['settings'] = const AppSettings().update({
+            'quarkAuthenticatedDirectDownload': enabled,
+          }).toJson(),
+        );
+        final source = await f.play(_share);
+        expect(source.cleanup, isNotNull);
+        expect(f.calls('/batch_send'), hasLength(1));
+        expect(f.calls('/file/download').single.json['token'], isNotEmpty);
+        expect(
+          f.calls('/file/download').single.json.containsKey('pwd_id'),
+          isFalse,
+        );
+      },
+    );
+  }
 
   test(
     'An ambiguous share transfer never authorizes an arbitrary saved file',

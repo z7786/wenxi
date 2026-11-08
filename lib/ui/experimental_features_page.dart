@@ -83,7 +83,8 @@ class ExperimentalFeaturesPage extends StatelessWidget {
                 title: '突破文件大小限制',
                 description:
                     '需要登录夸克账号。默认正常转存下载；检测到网盘空间不足时，自动为当前下载尝试免转存，无需手动开启。'
-                    '开启后优先使用免转存下载，正常情况下建议保持关闭。',
+                    '开启后优先使用免转存下载，接口不可用时尝试正常下载。'
+                    '此开关不改变视频播放路线；分享播放遇到网盘空间不足时也会自动尝试免转存播放。',
                 value: authenticatedEnabled,
               ),
             ],

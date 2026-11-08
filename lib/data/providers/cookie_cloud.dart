@@ -405,6 +405,20 @@ class CookieCloudConnector extends QuarkUcConnector {
     try {
       return await recover(credential);
     } on _ShareDirectUnavailable catch (error) {
+      _sessions.checkpoint();
+      if (quark && reason != 'cloud_capacity_limit') {
+        // The optional direct endpoint cannot disable the normal account
+        // route when it disappears or refuses refreshed share credentials.
+        DiagnosticLog.event(
+          'share.download_fallback',
+          fields: {
+            'platform': platform.key,
+            'stage': 'account_transfer',
+            'reason': 'authenticated_direct_unavailable',
+          },
+        );
+        return null;
+      }
       throw AppException(
         '${platform.shortName}分享直链接口暂不可用：${error.message}；请稍后重试',
       );
@@ -627,22 +641,20 @@ class CookieCloudConnector extends QuarkUcConnector {
         forPlayback: forPlayback,
       );
     } on QuarkUcCapacityExceeded {
-      if (!quark ||
-          forPlayback ||
-          session.mode != BrowseMode.share ||
-          credential == null) {
+      if (!quark || session.mode != BrowseMode.share || credential == null) {
         rethrow;
       }
       _sessions.checkpoint();
       // Transfer may have renewed the account cookies. Keep the same account
-      // revision and use its current session for this download only.
+      // revision and use its current session for this operation only. Playback
+      // can stream a shared file without enough quota for a temporary copy.
       final current = _sessions.current!;
       final account = (current.owner ?? credential).withFields({
         'primary': current.cookie,
         _sessions.refreshField: '${current.refreshedAt}',
       }, preserveRevision: true);
       final direct = await OperationProgress.step(
-        OperationStage.downloadLink,
+        forPlayback ? OperationStage.playbackLink : OperationStage.downloadLink,
         () => _tryShareDownload(
           session,
           file,
@@ -654,8 +666,8 @@ class CookieCloudConnector extends QuarkUcConnector {
       );
       _sessions.checkpoint();
       if (direct == null) {
-        throw const QuarkUcCapacityExceeded(
-          '夸克网盘空间不足，已自动尝试免转存下载但未成功，请清理网盘空间后重试',
+        throw QuarkUcCapacityExceeded(
+          '夸克网盘空间不足，已自动尝试免转存${forPlayback ? '播放' : '下载'}但未成功，请清理网盘空间后重试',
         );
       }
       return direct;
