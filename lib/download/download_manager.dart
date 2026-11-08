@@ -23,6 +23,7 @@ import '../domain/github_acceleration.dart';
 import '../domain/settings.dart';
 import '../domain/torrent.dart';
 import '../platform/file_access.dart';
+import '../platform/android_download_file.dart';
 import '../platform/native_engine.dart';
 import '../lan/lan_download_route.dart';
 import 'hls.dart';
@@ -2299,14 +2300,20 @@ class DownloadManager extends ChangeNotifier {
       final readyLength = await output.length();
       await _reserve(id, run, readyLength, readyLength, waitForExport: true);
       run.networkActive = false;
-      await _update(id, {'phase': '等待校验 / 保存', 'speed': 0});
+      await _update(id, {'phase': '等待校验 / 保存', 'speed': 0}, persist: false);
       _schedule();
+      final postClock = Stopwatch()..start();
       await _acquirePost(run);
+      final postQueueMs = postClock.elapsedMilliseconds;
+      late final DownloadSpec completedSpec;
       try {
         run.check();
-        await _update(id, {'phase': '校验文件', 'speed': 0});
+        await _update(id, {'phase': '校验文件', 'speed': 0}, persist: false);
         final task = _tasks[id]!;
+        completedSpec = task.spec;
+        final verifyClock = Stopwatch()..start();
         if (task.hls.isEmpty) await _verify(output, task.spec, run);
+        final verifyMs = verifyClock.elapsedMilliseconds;
         run.check();
         final length = await output.length();
         final target = _directTargets[id];
@@ -2362,6 +2369,8 @@ class DownloadManager extends ChangeNotifier {
             'ref': DiagnosticLog.reference(id),
             'bytes': length,
             'saveMs': saveClock.elapsedMilliseconds,
+            'verifyMs': verifyMs,
+            'postQueueMs': postQueueMs,
             'retries': run.networkRetries,
             'directOutput': target != null,
             'sameVolume': run.storage.cache.id == run.storage.target.id,
@@ -2369,10 +2378,12 @@ class DownloadManager extends ChangeNotifier {
         );
         await _markCompleted(id, newSaved);
         committed = true;
-        await _afterCompleted(id, task.spec);
       } finally {
         _releasePost();
       }
+      // Completed state is durable before releasing the post-processing slot.
+      // Cleanup remains awaited for safe shutdown, but cannot block the next hash.
+      await _afterCompleted(id, completedSpec);
     } catch (e, stack) {
       if (!run.stopped && e is! _Stopped) {
         DiagnosticLog.error(
@@ -3273,16 +3284,22 @@ class DownloadManager extends ChangeNotifier {
       _ => null,
     };
     if (hash == null) return;
-    final digest = await file
-        .openRead()
-        .map((chunk) {
-          run.check();
-          return chunk;
-        })
-        .transform(hash)
-        .first;
+    var digest = file is AndroidDownloadFile
+        ? await file.digest(algorithm!, cancelled: run.wake.future)
+        : null;
+    digest ??=
+        (await file
+                .openRead()
+                .map((chunk) {
+                  run.check();
+                  return chunk;
+                })
+                .transform(hash)
+                .first)
+            .toString();
+    run.check();
     require(
-      digest.toString().toLowerCase() == spec.checksumValue!.toLowerCase(),
+      digest.toLowerCase() == spec.checksumValue!.toLowerCase(),
       '文件校验失败，请删除此任务后重新下载',
     );
   }

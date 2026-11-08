@@ -28,6 +28,10 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
+import java.security.MessageDigest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.IdentityHashMap
 import org.junit.After
 import org.junit.Assert.*
@@ -86,6 +90,77 @@ class DownloadTargetStoreTest {
 
     private fun release(store: DownloadTargetStore, target: Map<String, Any?>, id: String = "task") =
         store.release(id, value(target, "lease"))
+
+    @Test
+    @Config(shadows = [GrantedDescriptorOs::class])
+    fun descriptorDigestHandlesMultipleBlocksShortReadsAndAllSupportedHashes() {
+        provider.onDescriptorOpened = GrantedDescriptorOs::attach
+        val store = store()
+        val target = open(store)
+        val bytes = ByteArray(256 * 1024 * 2 + 31) { (it % 251).toByte() }
+        write(target, bytes)
+        GrantedDescriptorOs.maxRead = 8191
+        for (algorithm in listOf("MD5", "SHA-1", "SHA-256")) {
+            val expected = MessageDigest.getInstance(algorithm).digest(bytes)
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            assertEquals(expected, store.digest("task", value(target, "lease"), algorithm))
+        }
+        assertThrows(IllegalArgumentException::class.java) { store.digest("task", value(target, "lease"), "unknown") }
+        assertThrows(IOException::class.java) { store.digest("task", "foreign", "md5") }
+        release(store, target)
+        assertThrows(IOException::class.java) { store.digest("task", value(target, "lease"), "md5") }
+    }
+
+    @Test
+    @Config(shadows = [GrantedDescriptorOs::class])
+    fun digestCancellationAndLengthChangesDoNotPublishOrLoseResumeData() {
+        provider.onDescriptorOpened = GrantedDescriptorOs::attach
+        val store = store()
+        val target = open(store)
+        val bytes = ByteArray(256 * 1024 + 1) { 7 }
+        write(target, bytes)
+        var checkpoints = 0
+        assertThrows(IOException::class.java) {
+            store.digest("task", value(target, "lease"), "sha256") {
+                if (++checkpoints == 3) throw IOException("cancelled")
+            }
+        }
+        assertArrayEquals(bytes, File(value(target, "path")).readBytes())
+        assertTrue(provider.rows.getValue(value(target, "uri")).pending)
+        checkpoints = 0
+        assertThrows(IOException::class.java) {
+            store.digest("task", value(target, "lease"), "sha256") {
+                if (++checkpoints == 4) RandomAccessFile(value(target, "path"), "rw").use { it.setLength(1) }
+            }
+        }
+        assertFalse(store.inspect("task")!!["published"] as Boolean)
+    }
+
+    @Test
+    @Config(shadows = [GrantedDescriptorOs::class])
+    fun digestCheckpointDoesNotHoldTheStoreLockForOtherDownloads() {
+        provider.onDescriptorOpened = GrantedDescriptorOs::attach
+        val store = store()
+        val target = open(store)
+        write(target, byteArrayOf(1, 2, 3))
+        val other = open(store, id = "other")
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val entered = CountDownLatch(1)
+            var checkpoints = 0
+            store.digest("task", value(target, "lease"), "md5") {
+                if (++checkpoints == 2) {
+                    val operation = pool.submit {
+                        store.access("other", value(other, "lease"), "write", data = byteArrayOf(9))
+                        entered.countDown()
+                    }
+                    assertTrue(entered.await(3, TimeUnit.SECONDS))
+                    operation.get(3, TimeUnit.SECONDS)
+                }
+            }
+            assertArrayEquals(byteArrayOf(9), File(value(other, "path")).readBytes())
+        } finally { pool.shutdownNow() }
+    }
 
     @Test
     @Config(shadows = [GrantedDescriptorOs::class])
@@ -345,6 +420,7 @@ class DownloadTargetStoreTest {
         assertThrows(IOException::class.java) { store.finish("task", value(target, "lease"), "video.mp4") }
         assertFalse(provider.rows.getValue(value(target, "uri")).pending)
         assertTrue(store.inspect("task")!!["publishing"] as Boolean)
+        assertThrows(IOException::class.java) { store.access("task", value(target, "lease"), "truncate", length = 0) }
         assertThrows(IOException::class.java) { store.discard("task") }
         assertThrows(IOException::class.java) { store.validateBinding("task", value(target, "path"), value(target, "key")) }
         store.close()
@@ -563,13 +639,14 @@ class DownloadTargetStoreTest {
 
         companion object {
             private val files = IdentityHashMap<FileDescriptor, Streams>()
+            var maxRead = Int.MAX_VALUE
 
             fun attach(descriptor: ParcelFileDescriptor) {
                 val fd = descriptor.fileDescriptor
                 files[fd] = Streams(FileInputStream(fd), FileOutputStream(fd))
             }
 
-            fun clear() { files.clear() }
+            fun clear() { files.clear(); maxRead = Int.MAX_VALUE }
 
             private fun streams(fd: FileDescriptor): Streams = files[fd]
                 ?: throw ErrnoException("fixture descriptor", OsConstants.EBADF)
@@ -594,7 +671,7 @@ class DownloadTargetStoreTest {
 
             @JvmStatic @Implementation
             fun pread(fd: FileDescriptor, bytes: ByteArray, offset: Int, count: Int, position: Long): Int =
-                streams(fd).input.channel.read(ByteBuffer.wrap(bytes, offset, count), position)
+                streams(fd).input.channel.read(ByteBuffer.wrap(bytes, offset, minOf(count, maxRead)), position)
 
             @JvmStatic @Implementation
             fun pwrite(fd: FileDescriptor, bytes: ByteArray, offset: Int, count: Int, position: Long): Int =

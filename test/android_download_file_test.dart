@@ -111,6 +111,93 @@ void main() {
     messenger.setMockMethodCallHandler(nativeChannel, null);
   });
 
+  test('native digest sends only grant and returns validated hash', () async {
+    final digest = 'a' * 64;
+    messenger.setMockMethodCallHandler(nativeChannel, (call) async {
+      expect(call.method, 'verifyDownloadTarget');
+      final args = asJson(call.arguments);
+      expect(args.str('id'), 'download');
+      expect(args.str('lease'), 'grant-token');
+      expect(args.str('algorithm'), 'sha256');
+      expect(args.integer('token'), greaterThan(0));
+      expect(args.containsKey('data'), isFalse);
+      return digest;
+    });
+    expect(
+      await (file as AndroidDownloadFile).digest(
+        'sha256',
+        cancelled: Completer<void>().future,
+      ),
+      digest,
+    );
+    expect(requests, isEmpty);
+  });
+
+  test(
+    'unsupported host falls back but invalid or failed hashes do not',
+    () async {
+      final target = file as AndroidDownloadFile;
+      final cancelled = Completer<void>().future;
+      messenger.setMockMethodCallHandler(
+        nativeChannel,
+        (_) async => throw MissingPluginException(),
+      );
+      expect(await target.digest('md5', cancelled: cancelled), isNull);
+      for (final bad in [null, 'xyz', 'a' * 63]) {
+        messenger.setMockMethodCallHandler(nativeChannel, (_) async => bad);
+        await expectLater(
+          target.digest('sha256', cancelled: cancelled),
+          throwsA(isA<FileSystemException>()),
+        );
+      }
+      messenger.setMockMethodCallHandler(
+        nativeChannel,
+        (_) async => throw PlatformException(code: 'lease', message: '凭据失效'),
+      );
+      await expectLater(
+        target.digest('md5', cancelled: cancelled),
+        throwsA(isA<FileSystemException>()),
+      );
+    },
+  );
+
+  test('cancelling digest waits for the native reader to exit', () async {
+    final entered = Completer<void>(), cancelled = Completer<void>();
+    final cancelSent = Completer<void>(), exited = Completer<String>();
+    int? token;
+    messenger.setMockMethodCallHandler(nativeChannel, (call) async {
+      final args = asJson(call.arguments);
+      if (call.method == 'verifyDownloadTarget') {
+        token = args.integer('token');
+        entered.complete();
+        return exited.future;
+      }
+      expect(call.method, 'cancelDownloadVerification');
+      expect(args.str('id'), 'download');
+      expect(args.integer('token'), token);
+      cancelSent.complete();
+      return null;
+    });
+    var finished = false;
+    final result = (file as AndroidDownloadFile).digest(
+      'md5',
+      cancelled: cancelled.future,
+    );
+    final checked = expectLater(
+      result,
+      throwsA(isA<FileSystemException>()),
+    ).then((_) => finished = true);
+    await entered.future;
+    cancelled.complete();
+    await cancelSent.future;
+    expect(finished, isFalse);
+    exited.completeError(
+      PlatformException(code: 'cancelled', message: '校验已暂停'),
+    );
+    await checked;
+    expect(finished, isTrue);
+  });
+
   test('large writes and bounded stream reads use the granted file', () async {
     final wanted = List.generate(
       AndroidDownloadFile.chunkSize * 2 + 31,
