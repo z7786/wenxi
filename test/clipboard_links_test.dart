@@ -23,6 +23,26 @@ void main() {
     );
   });
 
+  test(
+    'Tianyi H5 encoded copy labels preserve codes through clipboard replay',
+    () {
+      const url = 'https://h5.cloud.189.cn/share.html#/t/jy6R3u3YvQB3';
+      final suggestion = ClipboardLinkSuggestion.fromText(
+        '$url${Uri.encodeComponent('（访问码：m6h5）')}',
+      )!;
+      final link = suggestion.links.single;
+      expect(link.kind, LinkKind.cloudShare);
+      expect(link.platform, CloudPlatform.tianyi);
+      expect(link.shareId, 'jy6R3u3YvQB3');
+      expect(link.passcode, 'm6h5');
+      expect(link.url, url);
+      final replay = ClipboardLinkSuggestion.fromText(suggestion.text)!;
+      expect(replay.fingerprint, suggestion.fingerprint);
+      expect(replay.links.single.shareId, link.shareId);
+      expect(replay.links.single.passcode, link.passcode);
+    },
+  );
+
   test('New cloud formats keep IDs and codes through clipboard replay', () {
     const text =
         'private note\n'
