@@ -81,9 +81,6 @@ void main(List<String> arguments) {
 
 Future<void> _initializeRuntime() async {
   await DiagnosticRuntime.start();
-  if (Platform.isWindows) {
-    unawaited(_preferDiscreteGpu());
-  }
   MediaKit.ensureInitialized();
   if (isDesktopPlatform) {
     await windowManager.ensureInitialized();
@@ -101,26 +98,6 @@ Future<void> _initializeRuntime() async {
         },
       ),
     );
-  }
-}
-
-/// Windows 双显卡笔记本上，media_kit 的 ANGLE 渲染默认选择 Intel 核显，
-/// 4K 高码率视频掉帧严重（实测 outputDroppedFrames 8000+/分钟）。设置
-/// GpuPreference=2 让 app 优先使用高性能独显（如 NVIDIA/AMD）。
-/// 注册表写入失败不影响启动。
-Future<void> _preferDiscreteGpu() async {
-  try {
-    final exe = Platform.resolvedExecutable;
-    await Process.run('reg', [
-      'add',
-      r'HKCU\Software\Microsoft\DirectX\UserGpuPreferences',
-      '/v', exe,
-      '/t', 'REG_SZ',
-      '/d', 'GpuPreference=2;',
-      '/f',
-    ]);
-  } catch (_) {
-    // 忽略：注册表写入失败不应影响播放器启动
   }
 }
 

@@ -32,6 +32,15 @@ jobs:
         run: ./tool/tests/build-config.test.ps1
       - name: Analyze Flutter
         run: flutter analyze --no-pub
+      - name: Test Windows GPU preference and restoration
+        shell: pwsh
+        run: |
+          cmake -S windows/runner/tests -B .local/gpu-preference-tests -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'GPU preference test configuration failed.' }
+          cmake --build .local/gpu-preference-tests --config Release --target gpu_preference_test
+          if ($LASTEXITCODE -ne 0) { throw 'GPU preference test build failed.' }
+          ctest --test-dir .local/gpu-preference-tests -C Release -R '^gpu_preference$' --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'GPU preference tests failed.' }
       - name: Build the native helper used by integration tests
         shell: pwsh
         run: ./tool/build-native-windows.ps1
