@@ -23,6 +23,7 @@ import '../playback/playback_sleep_timer.dart';
 import '../playback/subtitle_files.dart';
 import '../diagnostics/app_log.dart';
 import 'player_theme.dart';
+import 'windows_gpu_preference_tile.dart';
 import 'player_rate_input.dart';
 import 'player_connections_input.dart';
 import 'player_playlist_panel.dart';
@@ -2001,6 +2002,8 @@ class _PlayerPageState extends State<PlayerPage>
                   : (value) =>
                         _run(() => controller.setHardwareAcceleration(value)),
             ),
+          if (controller.hasVideo && Platform.isWindows)
+            const WindowsGpuPreferenceTile(),
           if (controller.hasVideo)
             SwitchListTile(
               title: const Text('自动适配视频方向'),
