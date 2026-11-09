@@ -46,6 +46,12 @@ jobs:
         run: ./tool/build-native-windows.ps1
       - name: Test Flutter
         run: flutter test --no-pub --concurrency=4 --reporter expanded
+      - name: Verify packaged Windows PGS and text subtitle decoding
+        shell: pwsh
+        run: |
+          ./tool/prepare-player-test.ps1
+          flutter test --no-pub test/native_subtitle_render_test.dart --reporter expanded
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native subtitle regression failed.' }
       - name: Test browser scripts and configuration editor
         run: |
           flutter test --no-pub tool/login_web_scripts_test.dart --reporter expanded

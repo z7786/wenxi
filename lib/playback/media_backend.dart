@@ -482,8 +482,10 @@ class MediaKitBackend extends PlaybackBackend {
     ..._nativeMetrics,
     ..._metrics.fields(_openWatch?.elapsed ?? Duration.zero),
     'effectiveConnections': _proxy?.connections ?? 1,
+    'configuredConnections': _connections,
     'sourceConnectionLimit': ?_sourceConnectionLimit,
     'packetCacheBytes': _bufferPolicy.forwardBytes,
+    'playbackCacheBudgetBytes': _bufferPolicy.byteBudget,
     'proxyCacheLimit': ?_proxy?.maxCacheBytes,
     'preloadSeconds': _enhancedPrefetch
         ? PlaybackBufferPolicy.readaheadSeconds
@@ -582,7 +584,7 @@ class MediaKitBackend extends PlaybackBackend {
   }
 
   String get _proxyDescription => downloadCache == null
-      ? '最多 $_effectiveConnectionLimit 个连接 · $_segmentSizeMiB MiB / 片'
+      ? '最多 $_effectiveConnectionLimit 个连接 · 当前 ${_proxy?.connections ?? _bufferPolicy.connections} 个 · $_segmentSizeMiB MiB / 片'
       : '边下边播 · 优先读取已下载片段';
   @override
   Future<void> setSegmentSizeMiB(int value) async {
@@ -634,6 +636,11 @@ class MediaKitBackend extends PlaybackBackend {
         : null;
     _bufferPolicy = PlaybackBufferPolicy(
       connectionLimit: _effectiveConnectionLimit,
+      desktop: {
+        TargetPlatform.windows,
+        TargetPlatform.macOS,
+        TargetPlatform.linux,
+      }.contains(defaultTargetPlatform),
     );
     _sourceBytes = source.expectedSize;
     _transport = 'pending';
@@ -809,17 +816,35 @@ class MediaKitBackend extends PlaybackBackend {
         }
         if (_closing) return;
         if (proxy != null) {
+          double? nativeBufferedSeconds;
+          try {
+            nativeBufferedSeconds = double.tryParse(
+              await native.getProperty('demuxer-cache-duration'),
+            );
+            if (nativeBufferedSeconds != null &&
+                nativeBufferedSeconds.isFinite &&
+                nativeBufferedSeconds >= 0) {
+              _nativeMetrics['demuxerCacheSeconds'] = nativeBufferedSeconds;
+            } else {
+              nativeBufferedSeconds = null;
+            }
+          } catch (_) {
+            // Some demuxers do not expose a cache duration.
+          }
+          if (_closing) return;
           proxy.connections = _bufferPolicy.observe(
             elapsed: _openWatch!.elapsed,
             receivedBytes: proxy.receivedBytes,
             failures: proxy.segmentFailures,
             status: proxy.lastUpstreamStatus,
             activeRequests: proxy.activeRequests,
+            requestCapacity: proxy.requestCapacity,
             bufferedSeconds:
-                math.max(
-                  0,
-                  (state.buffer - state.position).inMilliseconds / 1000,
-                ) /
+                (nativeBufferedSeconds ??
+                    math.max(
+                      0,
+                      (state.buffer - state.position).inMilliseconds / 1000,
+                    )) /
                 math.max(.25, state.rate),
             buffering: state.buffering,
             playing: _wantsPlay && state.playing,
@@ -830,6 +855,7 @@ class MediaKitBackend extends PlaybackBackend {
                       state.rate
                 : 0,
           );
+          _streamingDescription = _proxyDescription;
         }
       }
       for (final entry in const {

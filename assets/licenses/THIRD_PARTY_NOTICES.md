@@ -80,12 +80,12 @@ Android 使用 libmpv-android-video-build v1.1.7 的 default 构建；构建项�
 mpv：https://github.com/mpv-player/mpv
 FFmpeg：https://github.com/FFmpeg/FFmpeg
 
-Windows 使用 media-kit/libmpv-win32-video-cmake 的 20241021 构建（mpv 0.39 开发快照）及 ANGLE v1.0.1，版本和校验值保留在 Windows media_kit 插件及 tool/prepare-windows-media.ps1 中。升级记录见 vendor_plugins/media_kit_libs_windows_video/ASTERLINK_PATCHES.md。
+Windows x64 使用 zhongfly/mpv-winbuild 的 20261108 基础 x86-64 完整构建，包含 FFmpeg PGS 图形字幕解码器，ANGLE 保持 v1.0.1。版本和校验值保留在 Windows media_kit 插件及 tool/prepare-windows-media.ps1 中；固定压缩包在 native/third_party，避免滚动发布删除后无法构建。来源、GPL 许可说明见 Windows-x64-media-NOTICES.txt 和 Windows-x64-mpv-Copyright.txt，升级记录见 vendor_plugins/media_kit_libs_windows_video/ASTERLINK_PATCHES.md。
 
-Windows mpv 构建源码：https://github.com/media-kit/libmpv-win32-video-cmake
+Windows x64 mpv 构建源码：https://github.com/zhongfly/mpv-winbuild/tree/37b83557ec1cb08a241defc77f60cb151f7b314c
 ANGLE 构建源码：https://github.com/alexmercerind/flutter-windows-ANGLE-OpenGL-ES/tree/v1.0.1
 
-Windows ARM64 构建使用 shinchiro/mpv-winbuild-cmake 的 20261021 ARM64 libmpv，以及 Electron 32.3.3 发布包中的 ARM64 ANGLE、Direct3D 编译器、Vulkan loader 和 SwiftShader；不运行或嵌入 Electron。来源、固定校验值和许可见 Windows-ARM64-media-NOTICES.txt；完整 Electron/Chromium 组件许可随 Windows 安装目录的 licenses 文件夹分发。Android 与 Windows x64 的媒体库版本保持原有固定版本。
+Windows ARM64 构建使用 shinchiro/mpv-winbuild-cmake 的 20261021 ARM64 libmpv，以及 Electron 32.3.3 发布包中的 ARM64 ANGLE、Direct3D 编译器、Vulkan loader 和 SwiftShader；不运行或嵌入 Electron。来源、固定校验值和许可见 Windows-ARM64-media-NOTICES.txt；完整 Electron/Chromium 组件许可随 Windows 安装目录的 licenses 文件夹分发。Android 与 Windows ARM64 的媒体库版本保持原有固定版本。
 
 ## Android NDK / Jetpack
 

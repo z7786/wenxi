@@ -13,10 +13,10 @@ $buildPath = Join-Path $projectPath 'build\windows\x64'
 New-Item -ItemType Directory -Path $cachePath, $buildPath -Force | Out-Null
 $archives = @(
     @{
-        Name = 'mpv-dev-x86_64-20241021-git-0f78584.7z'
-        SHA256 = 'e23701df0adc1fe57c8ede3ff313513b0b80519870058c2d35ff02754284a007'
-        MD5 = '6ecf18e85b093c3f7edb16f3ee6603f3'
-        Url = 'https://gh-proxy.com/https://github.com/media-kit/libmpv-win32-video-cmake/releases/download/20241021/mpv-dev-x86_64-20241021-git-0f78584.7z'
+        Name = 'mpv-dev-x86_64-20261108-git-8bc468896e.7z'
+        SHA256 = 'a36392a8fbd989ae274a37c63d01ef6c51b6070a5ebd2ee26d2715ae88f90ceb'
+        MD5 = 'f6678a79e2526b16b45ff629574fd96f'
+        Url = 'https://gh-proxy.org/https://github.com/zhongfly/mpv-winbuild/releases/download/2026-11-08-8bc468896e/mpv-dev-x86_64-20261108-git-8bc468896e.7z'
     },
     @{
         Name = 'ANGLE.7z'
@@ -30,7 +30,7 @@ foreach ($archive in $archives) {
     $buildFile = Join-Path $buildPath $archive.Name
     $cached = (Test-Path -LiteralPath $cachedFile) -and ((Get-FileHash -LiteralPath $cachedFile -Algorithm SHA256).Hash -eq $archive.SHA256)
     if (-not $cached) {
-        foreach ($candidate in @($buildFile, (Join-Path $projectPath ('.local\player-test\' + $archive.Name)))) {
+        foreach ($candidate in @((Join-Path $projectPath ('native\third_party\' + $archive.Name)), $buildFile, (Join-Path $projectPath ('.local\player-test\' + $archive.Name)))) {
             if ((Test-Path -LiteralPath $candidate) -and ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -eq $archive.SHA256)) {
                 Copy-Item -LiteralPath $candidate -Destination $cachedFile -Force
                 $cached = $true
@@ -39,7 +39,7 @@ foreach ($archive in $archives) {
         }
     }
     if (-not $cached) {
-        Write-Host ('Downloading ' + $archive.Name + ' through gh-proxy.com...')
+        Write-Host ('Downloading ' + $archive.Name + ' from its pinned mirror...')
         $partialFile = $cachedFile + '.download'
         & curl.exe --fail --location --silent --show-error --retry 2 --connect-timeout 20 --max-time 180 --output $partialFile $archive.Url
         if ($LASTEXITCODE -ne 0) { throw ('Download failed: ' + $archive.Name) }
