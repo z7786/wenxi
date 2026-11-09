@@ -243,6 +243,7 @@ class PlaybackStreamProxy {
   int get cachedBytes => _cachedBytes;
   int get bufferedBytes => _cachedBytes + _reservedBytes;
   int get activeRequests => _active;
+  int get requestCapacity => math.max(1, maxCacheBytes ~/ chunkBytes);
   int get receivedBytes => _receivedBytes;
   int get segmentFailures => _segmentFailures;
   int? get lastUpstreamStatus => _lastUpstreamStatus;
@@ -1155,7 +1156,8 @@ class PlaybackStreamProxy {
           // Reuse the interrupted read's partially filled range when the
           // decoder reopens nearby. Distant seeks release unrelated work.
           for (final segment in _segments.values.toList()) {
-            if (segment.bytes == null && segment.owners.isEmpty &&
+            if (segment.bytes == null &&
+                segment.owners.isEmpty &&
                 !(segment.start <= start &&
                     segment.start + segment.size > start)) {
               segment.cancel();

@@ -2,7 +2,8 @@ Windows ARM64 media runtime
 
 Windows ARM64 builds retain media_kit and media_kit_video's MIT-licensed
 integration code. They use the following architecture-specific binaries.
-Android and Windows x64 retain their existing media distributions.
+Android retains its existing media distribution. Windows x64 uses the separate
+full build described in Windows-x64-media-NOTICES.txt.
 
 libmpv: shinchiro/mpv-winbuild-cmake, release 20261021
 Archive: mpv-dev-aarch64-20261021-git-e471496c56.7z
