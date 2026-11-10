@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/downloads.dart';
+import 'package:asterlink/download/download_playback_cache.dart';
 import 'package:asterlink/playback/stream_proxy.dart';
 import 'package:asterlink/playback/playback_failure.dart';
 import 'support.dart';
@@ -228,6 +229,197 @@ void main() {
       expect(await read(8192, 16383), origin.bytes.sublist(8192, 16384));
       expect(origin.calls, [(0, 1023), (8192, 16383)]);
       expect(proxy.diagnosticFields['reusedDownloadBytes'], 8192);
+    },
+  );
+
+  Future<void> useDownloadCache({
+    required int available,
+    bool tailOnly = false,
+  }) async {
+    await proxy.close();
+    final identity = RemoteIdentity(origin.bytes.length, '"stable"', null);
+    proxy = PlaybackStreamProxy(
+      DownloadSpec(
+        url: origin.uri.toString(),
+        fileName: 'movie.mkv',
+        expectedSize: origin.bytes.length,
+      ),
+      connections: 1,
+      chunkBytes: 8192,
+      maxCacheBytes: 16384,
+      cacheSnapshot: () async => DownloadReadableState(identity, [
+        tailOnly
+            ? (origin.bytes.length - available, origin.bytes.length)
+            : (0, available),
+      ]),
+      readCache: (start, end, remote) async {
+        if (!identity.canResume(remote) ||
+            (tailOnly
+                ? start < origin.bytes.length - available
+                : start >= available)) {
+          return null;
+        }
+        final last = tailOnly ? end : math.min(end, available - 1);
+        return Uint8List.sublistView(origin.bytes, start, last + 1);
+      },
+      onFailure: failures.add,
+    );
+  }
+
+  test(
+    'A failed initial probe rechecks ranges the downloader just wrote',
+    () async {
+      await proxy.close();
+      origin.statusFor = (_, _, _) => 403;
+      final identity = RemoteIdentity(origin.bytes.length, '"stable"', null);
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        connections: 1,
+        chunkBytes: 8192,
+        maxCacheBytes: 16384,
+        cacheSnapshot: () async => origin.calls.isEmpty
+            ? null
+            : DownloadReadableState(identity, [(0, 8192)]),
+        readCache: (start, end, remote) async =>
+            end < 8192 && identity.canResume(remote)
+            ? Uint8List.sublistView(origin.bytes, start, end + 1)
+            : null,
+      );
+      expect(await proxy.start(), isTrue);
+      expect(proxy.diagnosticFields['probeResult'], 'download_cache');
+      expect(await read(0, 8191), origin.bytes.sublist(0, 8192));
+      expect(origin.calls, [(0, 1023)]);
+    },
+  );
+
+  test(
+    'Unsupported ranges without verified bytes fail without losing cache access',
+    () async {
+      await proxy.close();
+      origin.ignoreRange = true;
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        cacheSnapshot: () async => null,
+        readCache: (_, _, _) async => null,
+      );
+      await expectLater(
+        proxy.start(),
+        throwsA(
+          isA<PlaybackFailure>().having(
+            (failure) => failure.kind,
+            'kind',
+            PlaybackFailureKind.network,
+          ),
+        ),
+      );
+      expect(proxy.supported, isFalse);
+    },
+  );
+
+  test(
+    'Verified local ranges start without requesting an expired URL',
+    () async {
+      origin.statusFor = (_, _, _) => 403;
+      await useDownloadCache(available: 16384);
+      expect(await proxy.start(), isTrue);
+      expect(proxy.diagnosticFields['probeResult'], 'download_cache');
+      expect(await read(0, 8191), origin.bytes.sublist(0, 8192));
+      expect(origin.calls, isEmpty);
+      expect(failures, isEmpty);
+    },
+  );
+
+  test(
+    'Partial cached prefix is served and only its missing suffix is fetched',
+    () async {
+      origin.statusFor = (start, end, _) => start == 0 ? 403 : 0;
+      await useDownloadCache(available: 2048);
+      expect(await proxy.start(), isTrue);
+      expect(await read(0, 8191), origin.bytes.sublist(0, 8192));
+      expect(origin.calls, [(2048, 8191)]);
+      expect(proxy.diagnosticFields['reusedDownloadBytes'], 2048);
+    },
+  );
+
+  test(
+    'An expired missing tail can be filled by the still-running downloader',
+    () async {
+      origin.statusFor = (_, _, _) => 403;
+      var available = 8192;
+      await proxy.close();
+      final identity = RemoteIdentity(origin.bytes.length, '"stable"', null);
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        connections: 1,
+        chunkBytes: 8192,
+        maxCacheBytes: 16384,
+        cacheSnapshot: () async =>
+            DownloadReadableState(identity, [(0, available)]),
+        readCache: (start, end, remote) async =>
+            identity.canResume(remote) && start < available
+            ? Uint8List.sublistView(
+                origin.bytes,
+                start,
+                math.min(end + 1, available),
+              )
+            : null,
+        onFailure: failures.add,
+      );
+      expect(await proxy.start(), isTrue);
+      final pending = read(8192, 16383);
+      await until(() => origin.faults == 1);
+      available = 16384;
+      expect(
+        await pending.timeout(const Duration(seconds: 2)),
+        origin.bytes.sublist(8192, 16384),
+      );
+      expect(failures, isEmpty);
+    },
+  );
+
+  test(
+    'Closing while waiting for a download hole releases the reader immediately',
+    () async {
+      origin.statusFor = (_, _, _) => 403;
+      await useDownloadCache(available: 8192);
+      expect(await proxy.start(), isTrue);
+      final pending = read(
+        8192,
+        16383,
+      ).then<void>((_) {}, onError: (Object _) {});
+      await until(() => origin.faults == 1);
+      await proxy.close().timeout(const Duration(seconds: 1));
+      await pending;
+      expect(proxy.activeRequests, 0);
+      expect(failures, isEmpty);
+    },
+  );
+
+  test(
+    'Tail-only cache keeps holes on the network and never fabricates a header',
+    () async {
+      await useDownloadCache(available: 8192, tailOnly: true);
+      expect(await proxy.start(), isTrue);
+      final start = origin.bytes.length - 8192;
+      expect(
+        await read(start, origin.bytes.length - 1),
+        origin.bytes.sublist(start),
+      );
+      expect(origin.calls, isEmpty);
+      expect(await read(0, 8191), origin.bytes.sublist(0, 8192));
+      expect(origin.calls, [(0, 8191)]);
+    },
+  );
+
+  test(
+    'Changed network identity cannot fill a hole beside verified local bytes',
+    () async {
+      origin.wrongIdentity = true;
+      await useDownloadCache(available: 2048);
+      expect(await proxy.start(), isTrue);
+      await read(0, 8191).then<void>((_) {}, onError: (Object _) {});
+      await until(() => failures.isNotEmpty);
+      expect(failures.single.kind, PlaybackFailureKind.changed);
     },
   );
 

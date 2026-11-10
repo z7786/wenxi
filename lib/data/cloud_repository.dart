@@ -7,6 +7,7 @@ import '../domain/models.dart';
 import '../domain/baidu_share_route.dart';
 import '../domain/public_share_route.dart';
 import '../domain/uploads.dart';
+import '../domain/rapid_transfer.dart';
 import '../domain/auth.dart';
 import '../domain/ctfile_captcha.dart';
 import '../domain/downloads.dart';
@@ -613,6 +614,65 @@ class CloudRepository {
     return provider.createFolder(session, parent, name, account);
   });
 
+  Future<String?> transferMd5(BrowseSession session, CloudFile file) =>
+      withSession(session, () async {
+        final owner = sessionCredential(session);
+        return RequestScope.guarded(
+          () => connector(session.platform).transferMd5(session, file, owner),
+          () {
+            ensureAvailable(session.platform);
+            require(
+              sessionCredential(session)?.updatedAt == owner?.updatedAt,
+              '来源账号已变化，请重新打开文件列表',
+            );
+          },
+        );
+      });
+
+  Future<RapidTransferResult> rapidTransfer(
+    BrowseSession session,
+    String parent,
+    RapidTransferFile file,
+  ) => withSession(session, () async {
+    require(
+      session.canManageFiles &&
+          connector(session.platform).canRapidTransferTo(session),
+      '目标网盘不支持秒传',
+    );
+    final owner = credential(session.platform);
+    return RequestScope.guarded(
+      () => connector(
+        session.platform,
+      ).rapidTransfer(session, parent, file, owner),
+      () {
+        ensureAvailable(session.platform);
+        require(
+          sessionCredential(session)?.updatedAt == owner.updatedAt,
+          '目标账号已变化，请重新打开文件列表',
+        );
+      },
+    );
+  });
+
+  Future<BrowseSession> reopenTransferSource(BrowseSession previous) =>
+      withSession(previous, () async {
+        if (previous.mode == BrowseMode.personal) return reopenSpace(previous);
+        final link = previous.sourceLink;
+        require(link != null, '分享信息已失效，请重新解析');
+        final fresh = await share(
+          link!,
+          baiduRoute: BaiduShareRoute.fromSession(previous),
+          parserSiteId: previous.meta('parserSiteId').isEmpty
+              ? null
+              : previous.meta('parserSiteId'),
+          parserPasswordGrant: previous.meta('parserPasswordGrant'),
+          ctfileAccessPass: previous.meta('ctfileAccessPass').isEmpty
+              ? null
+              : previous.meta('ctfileAccessPass'),
+        );
+        return fresh.withLink(link).withAccount(previous.accountId);
+      });
+
   Future<CloudFile> upload(
     BrowseSession session,
     String parent,
@@ -715,6 +775,10 @@ class CloudRepository {
 
   Future<DownloadSpec> prepare(BrowseSession session, CloudFile file) =>
       _prepare(_bindNewDownloadSession(session), file, playback: false);
+
+  /// Cross-cloud tasks keep the source account selected at enqueue time.
+  Future<DownloadSpec> prepareTransfer(BrowseSession session, CloudFile file) =>
+      _prepare(session, file, playback: false);
 
   Future<DownloadSpec> preparePlayback(BrowseSession session, CloudFile file) =>
       _prepare(session, file, playback: true);

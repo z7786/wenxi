@@ -28,3 +28,12 @@ target_compile_definitions(gpu_preference_test PRIVATE NOMINMAX UNICODE _UNICODE
 target_compile_options(gpu_preference_test PRIVATE /W4 /WX /EHsc /utf-8)
 target_link_libraries(gpu_preference_test PRIVATE advapi32.lib)
 add_test(NAME gpu_preference COMMAND gpu_preference_test)
+
+if(ASTERLINK_MPV_INTERFACE)
+  add_executable(player_component_loading_test player_component_loading_test.cpp)
+  target_compile_features(player_component_loading_test PRIVATE cxx_std_17)
+  target_compile_options(player_component_loading_test PRIVATE /W4 /WX /utf-8)
+  target_include_directories(player_component_loading_test PRIVATE "${ASTERLINK_MPV_INTERFACE}/include")
+  target_link_libraries(player_component_loading_test PRIVATE "${ASTERLINK_MPV_INTERFACE}/libmpv.dll.a" delayimp.lib)
+  target_link_options(player_component_loading_test PRIVATE "/DELAYLOAD:libmpv-2.dll")
+endif()

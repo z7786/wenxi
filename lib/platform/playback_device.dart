@@ -12,6 +12,7 @@ import 'windows_external_player.dart';
 import 'macos_external_player.dart';
 
 abstract class PlaybackDevice extends ChangeNotifier {
+  bool get isTelevision => false;
   bool get supportsOrientation => false;
 
   /// Safe bounds independent of system bar visibility for the current viewport.
@@ -71,7 +72,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   bool get _macos => _platform == TargetPlatform.macOS;
   bool get _desktop => _windows || _macos;
   @override
-  bool get supportsOrientation => _mobile;
+  bool get supportsOrientation => _mobile && !isTelevision;
   @override
   bool get supportsExternalPlayer => _mobile || _desktop;
   @override
@@ -89,6 +90,9 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   final _actions = StreamController<String>.broadcast();
   final _windowsPip = WindowsPipWindow();
   bool _supportsPip = false, _inPip = false, _closed = false, _started = false;
+  bool _isTelevision = false;
+  @override
+  bool get isTelevision => _isTelevision;
   bool _fullscreen = false, _previousWindowsFullscreen = false;
   bool _video = false;
   bool _controlsVisible = true, _locked = false;
@@ -109,7 +113,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   @override
   bool get supportsIndependentPlayerWindows => _desktop;
   @override
-  bool get supportsBrightness => _mobile;
+  bool get supportsBrightness => _mobile && !isTelevision;
   @override
   bool get supportsSystemVolume => _mobile && _supportsSystemVolume;
   @override
@@ -155,6 +159,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
       });
       final values = asJson(await _invoke<Object?>('begin', {'video': video}));
       if (_closed) return;
+      _isTelevision = _android && values.boolean('television');
       if (identical(_handlerOwner, this)) {
         WidgetsBinding.instance.addObserver(this);
         if (_ios) await _syncIosSystemUi();
@@ -249,7 +254,9 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
       return;
     }
     if (!_mobile) return;
-    final targetOrientation = _video && orientation != null
+    final targetOrientation = isTelevision
+        ? null
+        : _video && orientation != null
         ? orientation
         : playbackOrientation(
             video: _video,

@@ -89,6 +89,17 @@ void main() {
       try {
         await until(() => services.downloads.task('movie')!.downloaded == 2);
         expect(await cache.read(0, 1, identity), [1, 2]);
+        expect((await cache.snapshot())!.identity.canResume(identity), isTrue);
+        expect(await cache.readAvailable(0, 3, identity), [1, 2]);
+        expect(await cache.readAvailable(2, 3, identity), isNull);
+        expect(
+          await cache.readAvailable(
+            0,
+            3,
+            const RemoteIdentity(4, '"changed"', null),
+          ),
+          isNull,
+        );
         expect(await cache.read(2, 3, identity), isNull);
         expect(
           await cache.read(0, 1, const RemoteIdentity(4, '"changed"', null)),

@@ -1,9 +1,15 @@
 part of 'playback_controller.dart';
 
 extension PlaybackCasting on PlaybackController {
-  Future<void> castTo(CastDevice device) {
+  Future<void> castTo(
+    CastDevice device, {
+    bool? playWhenReady,
+    bool reconnect = false,
+  }) {
     require(_castTasks.isEmpty, '正在连接电视，请稍候');
-    final task = _castTo(device);
+    require(!disconnectingCast, '正在返回本机，请稍候');
+    if (!reconnect && _cast?.device.id == device.id) return Future.value();
+    final task = _castTo(device, playWhenReady: playWhenReady);
     _castTasks.add(task);
     unawaited(
       task.then<void>(
@@ -16,22 +22,42 @@ extension PlaybackCasting on PlaybackController {
     return task;
   }
 
-  Future<void> _castTo(CastDevice device) async {
+  Future<void> _castTo(CastDevice device, {bool? playWhenReady}) async {
     require(!closed && !loading && hasVideo, '请等待视频地址准备完成');
     require(!connectingCast && !openingExternalPlayer, '正在连接播放器，请稍候');
     require(!usingSystemPip && !preparingSystemPip, '请先退出画中画');
     checkSource?.call();
-    final position = state.position, duration = state.duration;
+    var position = state.position, duration = state.duration;
+    var remotePlay = playWhenReady ?? _cast?.playWhenReady ?? state.playing;
     final wasPlaying = state.playing && !casting;
     final generation = _generation, sleepRevision = sleepTimer.stopRevision;
     final previousError = error;
     final previousCast = _cast;
     if (previousCast != null) {
+      final previousRevision = _castRevision;
+      connectingCast = true;
+      _changed();
+      await previousCast.refresh();
+      if (closed ||
+          generation != _generation ||
+          previousRevision != _castRevision ||
+          !identical(_cast, previousCast)) {
+        return;
+      }
+      position = previousCast.state.position;
+      duration = previousCast.state.duration;
+      remotePlay = playWhenReady ?? previousCast.playWhenReady;
       await _stopCast(keepPlatform: true);
+      if (closed ||
+          generation != _generation ||
+          _castRevision != previousRevision + 1) {
+        return;
+      }
       if (!closed && generation == _generation) {
         await backend?.seek(position);
         _session?.castBookmark = null;
       }
+      if (_castRevision != previousRevision + 1) return;
     }
     if (closed || generation != _generation) return;
     final revision = ++_castRevision;
@@ -90,11 +116,12 @@ extension PlaybackCasting on PlaybackController {
         title: current.name,
         position: position,
         duration: duration,
+        playWhenReady: remotePlay,
       );
       check();
       started = true;
       error = '';
-      _playWhenReady = true;
+      _playWhenReady = remotePlay;
       _discardPrepared();
       notice = '已连接 ${device.name}，可在此控制电视播放';
       DiagnosticLog.event(
@@ -136,6 +163,7 @@ extension PlaybackCasting on PlaybackController {
     _changed();
     final session = _session;
     if (!connectingCast &&
+        !disconnectingCast &&
         cast.state.completed &&
         session != null &&
         !session.completionHandled) {
@@ -221,11 +249,34 @@ extension PlaybackCasting on PlaybackController {
     );
   }
 
-  Future<void> disconnectCast({bool resumeLocally = false}) async {
+  Future<void> disconnectCast({bool resumeLocally = false}) {
+    final pending = _castDisconnecting;
+    if (pending != null) return pending;
+    final task = _disconnectCast(resumeLocally: resumeLocally);
+    _castDisconnecting = task;
+    _changed();
+    return task.whenComplete(() {
+      if (identical(_castDisconnecting, task)) _castDisconnecting = null;
+      _changed();
+    });
+  }
+
+  Future<void> _disconnectCast({required bool resumeLocally}) async {
     _playWhenReady = false;
     final generation = _generation;
-    final position = state.position;
+    final sleepRevision = sleepTimer.stopRevision;
+    final revision = ++_castRevision;
+    _castScope?.cancel();
     final cast = _cast;
+    if (cast?.connected == true && !connectingCast) {
+      cast!.removeListener(_onCastState);
+      await cast.refresh();
+      if (closed || generation != _generation || revision != _castRevision) {
+        return;
+      }
+    }
+    final position = cast?.state.position ?? state.position;
+    final playLocally = cast?.playWhenReady ?? resumeLocally;
     await _stopCast();
     if (closed || generation != _generation) return;
     if (cast != null) {
@@ -235,10 +286,13 @@ extension PlaybackCasting on PlaybackController {
       _session?.completionHandled = false;
       _session?.positionWasSet = true;
     }
-    if (resumeLocally && !_background && !sleepTimer.stopped) {
+    if (resumeLocally &&
+        !_background &&
+        !sleepTimer.stopped &&
+        sleepRevision == sleepTimer.stopRevision) {
       if (_session?.initializing == true || backend?.failure != null) {
-        await load(index, startPosition: position, playWhenReady: true);
-      } else {
+        await load(index, startPosition: position, playWhenReady: playLocally);
+      } else if (playLocally) {
         await play();
       }
     }

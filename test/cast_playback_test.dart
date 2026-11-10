@@ -8,6 +8,161 @@ import 'cast_support.dart';
 import 'player_support.dart';
 
 void main() {
+  for (final playing in [true, false]) {
+    test(
+      'handoff and return preserve $playing playback and fresh receiver progress',
+      () async {
+        final tv = TestTv();
+        await tv.start();
+        addTearDown(tv.close);
+        final fixture = PlaybackFixture(
+          castSessionFactory: (device, source) => CastSession(
+            device,
+            source,
+            pollInterval: const Duration(days: 1),
+          ),
+        );
+        final controller = fixture.controller;
+        addTearDown(controller.close);
+        await controller.start();
+        await controller.seek(const Duration(seconds: 42));
+        if (!playing) await controller.pause();
+        await controller.castTo(tv.device);
+        await castEventually(() => controller.castSession!.volumeSupported);
+        expect(controller.state.playing, playing);
+        expect(tv.transport, playing ? 'PLAYING' : 'PAUSED_PLAYBACK');
+        expect(tv.position, const Duration(seconds: 42));
+        tv.position = const Duration(seconds: 173);
+        final poll = Completer<void>();
+        tv.barriers['GetPositionInfo'] = poll.future;
+        final polling = controller.castSession!.refresh();
+        await castEventually(() => tv.events.last == 'GetPositionInfo');
+        final returning = controller.disconnectCast(resumeLocally: true);
+        expect(controller.disconnectingCast, isTrue);
+        poll.complete();
+        await polling;
+        await returning;
+        expect(controller.disconnectingCast, isFalse);
+        expect(fixture.current.state.position, const Duration(seconds: 173));
+        expect(fixture.current.state.playing, playing);
+        expect(tv.transport, 'STOPPED');
+      },
+    );
+  }
+
+  test(
+    'reconnecting retains paused progress and selecting the current TV is harmless',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final fixture = PlaybackFixture(
+        castSessionFactory: (device, source) =>
+            CastSession(device, source, pollInterval: const Duration(days: 1)),
+      );
+      final controller = fixture.controller;
+      addTearDown(controller.close);
+      await controller.start();
+      await controller.castTo(tv.device);
+      await castEventually(() => controller.castSession!.volumeSupported);
+      final first = controller.castSession;
+      await controller.castTo(tv.device);
+      expect(controller.castSession, same(first));
+      tv.position = const Duration(seconds: 190);
+      tv.transport = 'PAUSED_PLAYBACK';
+      await controller.castTo(tv.device, reconnect: true);
+      expect(controller.castSession, isNot(same(first)));
+      expect(tv.position, const Duration(seconds: 190));
+      expect(tv.transport, 'PAUSED_PLAYBACK');
+      expect(fixture.current.state.playing, isFalse);
+      expect(fixture.leases.values.single, 2);
+    },
+  );
+
+  test(
+    'return refresh cannot auto-advance at the receiver end of an episode',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final fixture = PlaybackFixture(
+        castSessionFactory: (device, source) =>
+            CastSession(device, source, pollInterval: const Duration(days: 1)),
+      );
+      final controller = fixture.controller;
+      addTearDown(controller.close);
+      await controller.start();
+      await controller.castTo(tv.device);
+      await castEventually(() => controller.castSession!.volumeSupported);
+      tv.position = tv.duration;
+      tv.transport = 'STOPPED';
+      await controller.disconnectCast(resumeLocally: true);
+      expect(controller.index, 0);
+      expect(controller.casting, isFalse);
+      expect(fixture.current.state.playing, isFalse);
+    },
+  );
+
+  test(
+    'timer stopping during a pending return prevents local autoplay',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final fixture = PlaybackFixture(
+        castSessionFactory: (device, source) =>
+            CastSession(device, source, pollInterval: const Duration(days: 1)),
+      );
+      final controller = fixture.controller;
+      addTearDown(controller.close);
+      await controller.start();
+      await controller.castTo(tv.device);
+      await castEventually(() => controller.castSession!.volumeSupported);
+      final poll = Completer<void>();
+      tv.barriers['GetPositionInfo'] = poll.future;
+      final returning = controller.disconnectCast(resumeLocally: true);
+      await castEventually(() => tv.events.last == 'GetPositionInfo');
+      controller.sleepTimer.afterEpisode();
+      final stopping = controller.sleepTimer.finishEpisode();
+      poll.complete();
+      await returning;
+      await stopping;
+      expect(fixture.current.state.playing, isFalse);
+      expect(controller.casting, isFalse);
+    },
+  );
+
+  test(
+    'cancelling reconnect during its last status poll cannot restart the TV',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final fixture = PlaybackFixture(
+        castSessionFactory: (device, source) =>
+            CastSession(device, source, pollInterval: const Duration(days: 1)),
+      );
+      final controller = fixture.controller;
+      addTearDown(controller.close);
+      await controller.start();
+      await controller.castTo(tv.device);
+      await castEventually(() => controller.castSession!.volumeSupported);
+      final loads = tv.events.where((e) => e == 'SetAVTransportURI').length;
+      final poll = Completer<void>();
+      tv.barriers['GetPositionInfo'] = poll.future;
+      final reconnecting = controller.castTo(tv.device, reconnect: true);
+      await castEventually(() => tv.events.last == 'GetPositionInfo');
+      final stopping = controller.disconnectCast();
+      poll.complete();
+      await reconnecting;
+      await stopping;
+      expect(controller.casting, isFalse);
+      expect(controller.connectingCast, isFalse);
+      expect(tv.transport, 'STOPPED');
+      expect(tv.events.where((e) => e == 'SetAVTransportURI').length, loads);
+    },
+  );
+
   test(
     'casting holds source, pauses local audio, controls TV and returns at remote progress',
     () async {

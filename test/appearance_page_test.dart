@@ -13,6 +13,7 @@ import 'package:asterlink/main.dart';
 import 'package:asterlink/ui/appearance_page.dart';
 import 'package:asterlink/ui/app_theme.dart';
 import 'package:asterlink/ui/app_navigation.dart';
+import 'package:asterlink/ui/app_switch.dart';
 import 'support.dart';
 
 void main() {
@@ -175,6 +176,53 @@ void main() {
         ).glassStyle,
         GlassStyle.frosted,
       );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'dark shortcut persists appearance and preserves the current tab',
+    (tester) async {
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+      final services = await render(
+        tester,
+        settings: const AppSettings(
+          theme: 'System',
+          themePalette: AppPalette.mint,
+          glassStyle: GlassStyle.frosted,
+          glassControls: true,
+          threads: 8,
+        ),
+      );
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+      final shell = tester.state(find.byType(MainShell));
+      final downloads = services.downloads;
+      final toggle = find.byKey(const Key('dark-mode-switch'));
+      expect(tester.widget<AppSwitchListTile>(toggle).value, isTrue);
+      expect(find.text('当前跟随系统'), findsOneWidget);
+      await tester.tap(toggle);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 30)),
+      );
+      await tester.pump();
+      expect(find.byKey(const Key('theme-reveal-overlay')), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(services.settings.theme, 'Light');
+      expect(tester.widget<AppSwitchListTile>(toggle).value, isFalse);
+      await tester.tap(toggle);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 30)),
+      );
+      await tester.pumpAndSettle();
+      expect(services.settings.theme, 'Dark');
+      expect(services.settings.themePalette, AppPalette.mint);
+      expect(services.settings.glassStyle, GlassStyle.frosted);
+      expect(services.settings.glassControls, isTrue);
+      expect(services.settings.threads, 8);
+      expect(services.downloads, same(downloads));
+      expect(tester.state(find.byType(MainShell)), same(shell));
+      expect(find.byKey(const Key('theme-reveal-overlay')), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );

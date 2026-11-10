@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import '../app_services.dart';
 import '../domain/uploads.dart';
 import '../upload/upload_task.dart';
+import '../transfer/rapid_transfer_task.dart';
+import 'rapid_transfers_page.dart';
 import 'browser_page.dart';
 import 'common.dart';
 import 'app_context_menu.dart';
@@ -44,6 +46,13 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
   bool accepts(UploadTask t, int value) => switch (value) {
     1 => t.active,
     2 => t.status == UploadStatus.completed,
+    3 => t.canRetry,
+    _ => true,
+  };
+
+  bool acceptsCross(RapidTransferTask t, int value) => switch (value) {
+    1 => t.active,
+    2 => t.status == RapidTaskStatus.completed && !t.canRetry,
     3 => t.canRetry,
     _ => true,
   };
@@ -108,23 +117,39 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: widget.services.uploads,
+    animation: Listenable.merge([
+      widget.services.uploads,
+      widget.services.rapidTransfers,
+    ]),
     builder: (context, _) {
       final all = widget.services.uploads.tasks;
-      final tasks = all.where((t) => accepts(t, filter)).toList()
-        ..sort((a, b) {
-          int rank(UploadTask t) => t.status == UploadStatus.running
-              ? 0
-              : t.active
-              ? 1
-              : t.canRetry
-              ? 2
-              : 3;
-          final order = rank(a).compareTo(rank(b));
-          return order != 0 ? order : b.createdAt.compareTo(a.createdAt);
-        });
+      final cross = widget.services.rapidTransfers.tasks;
+      final tasks =
+          <({UploadTask? upload, RapidTransferTask? cross})>[
+            for (final t in all.where((t) => accepts(t, filter)))
+              (upload: t, cross: null),
+            for (final t in cross.where((t) => acceptsCross(t, filter)))
+              (upload: null, cross: t),
+          ]..sort((a, b) {
+            int rank(({UploadTask? upload, RapidTransferTask? cross}) t) =>
+                t.upload?.status == UploadStatus.running ||
+                    t.cross?.status == RapidTaskStatus.running
+                ? 0
+                : (t.upload?.active ?? t.cross!.active)
+                ? 1
+                : (t.upload?.canRetry ?? t.cross!.canRetry)
+                ? 2
+                : 3;
+            final order = rank(a).compareTo(rank(b));
+            return order != 0
+                ? order
+                : (b.upload?.createdAt ?? b.cross!.createdAt).compareTo(
+                    a.upload?.createdAt ?? a.cross!.createdAt,
+                  );
+          });
       final indices = {
-        for (var i = 0; i < tasks.length; i++) ValueKey(tasks[i].id): i,
+        for (var i = 0; i < tasks.length; i++)
+          ValueKey(tasks[i].upload?.id ?? tasks[i].cross!.id): i,
       };
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -134,7 +159,8 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
               for (var i = 0; i < 4; i++)
                 (
                   ['全部', '进行中', '已完成', '待处理'][i],
-                  all.where((t) => accepts(t, i)).length,
+                  all.where((t) => accepts(t, i)).length +
+                      cross.where((t) => acceptsCross(t, i)).length,
                 ),
             ],
             selected: filter,
@@ -142,7 +168,7 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
             accent: accent,
             keyPrefix: 'upload-filter',
           ),
-          _summary(all),
+          _summary(all, cross),
           Expanded(
             child: tasks.isEmpty
                 ? EmptyPanel(
@@ -161,7 +187,13 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
                     ),
                     itemCount: tasks.length,
                     findChildIndexCallback: (key) => indices[key],
-                    itemBuilder: (context, index) => _task(tasks[index]),
+                    itemBuilder: (context, index) => tasks[index].upload != null
+                        ? _task(tasks[index].upload!)
+                        : CrossTransferCard(
+                            widget.services,
+                            tasks[index].cross!,
+                            key: ValueKey(tasks[index].cross!.id),
+                          ),
                   ),
           ),
         ],
@@ -169,16 +201,27 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
     },
   );
 
-  Widget _summary(List<UploadTask> all) {
-    final active = all.where((t) => t.active).length;
-    final pending = all.where((t) => t.status == UploadStatus.pending).length;
-    final speed = all
-        .where(
-          (t) =>
-              t.status == UploadStatus.running &&
-              t.phase == UploadPhase.uploading,
-        )
-        .fold<int>(0, (n, t) => n + t.speed);
+  Widget _summary(List<UploadTask> all, List<RapidTransferTask> cross) {
+    final active =
+        all.where((t) => t.active).length + cross.where((t) => t.active).length;
+    final pending =
+        all.where((t) => t.status == UploadStatus.pending).length +
+        cross.where((t) => t.status == RapidTaskStatus.pending).length;
+    final speed =
+        all
+            .where(
+              (t) =>
+                  t.status == UploadStatus.running &&
+                  t.phase == UploadPhase.uploading,
+            )
+            .fold<int>(0, (n, t) => n + t.speed) +
+        cross
+            .where(
+              (t) =>
+                  t.active &&
+                  t.entries.any((e) => e.status == RapidEntryStatus.uploading),
+            )
+            .fold<int>(0, (n, t) => n + t.speed);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
       decoration: BoxDecoration(
@@ -192,8 +235,8 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
             child: Text(
               active > 0
                   ? '传输 ${active - pending} · 等待 $pending'
-                  : all.any((t) => t.isFolder)
-                  ? '共 ${all.length} 个任务'
+                  : all.any((t) => t.isFolder) || cross.isNotEmpty
+                  ? '共 ${all.length + cross.length} 个任务'
                   : '共 ${all.length} 个文件',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,

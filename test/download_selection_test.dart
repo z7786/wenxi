@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -235,6 +236,56 @@ void main() {
     await tester.longPress(row(id));
     await tester.pumpAndSettle();
   }
+
+  testWidgets(
+    'Windows completed selection offers copy and move and side-back exits selection',
+    (tester) async {
+      final (services, _, files) = await render(
+        tester,
+        size: const Size(1280, 800),
+      );
+      await tester.runAsync(() => files.directory.create(recursive: true));
+      await select(tester, 'completed-a');
+      await tester.tap(find.byKey(const Key('download-select-completed-b')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('downloads-batch-copy')), findsOneWidget);
+      expect(find.byKey(const Key('downloads-batch-move')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('downloads-batch-copy')));
+      await waitFor(
+        tester,
+        () =>
+            File(p.join(files.directory.path, 'completed-b.mp4')).existsSync(),
+      );
+      expect(
+        services.downloads.task('completed-a')!.savedPath,
+        isNot(contains('saved')),
+      );
+      await select(tester, 'completed-a');
+      await tester.tap(find.byKey(const Key('downloads-batch-move')));
+      await waitFor(
+        tester,
+        () =>
+            services.downloads.task('completed-a')!.savedPath ==
+            p.join(files.directory.path, 'completed-a (1).mp4'),
+      );
+      expect(
+        File(p.join(files.directory.path, 'completed-a (1).mp4')).existsSync(),
+        isTrue,
+      );
+      await select(tester, 'completed-a');
+      final mouse = await tester.createGesture(
+        kind: PointerDeviceKind.mouse,
+        buttons: kBackMouseButton,
+      );
+      await mouse.down(tester.getCenter(row('completed-a')));
+      await mouse.up();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('downloads-batch-copy')), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+    skip: !Platform.isWindows,
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
 
   void background(WidgetTester tester) {
     for (final state in [
@@ -494,9 +545,8 @@ void main() {
       await tester.runAsync(() => File(path).delete());
       files.availability[path] = FileAvailability.inaccessible;
       files.failPaths.add(path);
-      final open = find.descendant(
-        of: row('completed-a'),
-        matching: find.byType(IconButton),
+      final open = find.byKey(
+        const ValueKey('download-primary-action-completed-a'),
       );
       await tester.tap(open);
       await tester.pumpAndSettle();

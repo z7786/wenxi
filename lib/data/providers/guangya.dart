@@ -19,6 +19,8 @@ class GuangyaApiException extends AppException {
 }
 
 class GuangyaConnector extends CloudConnector {
+  @override
+  bool get providesTransferMd5 => true;
   GuangyaConnector(
     this.http,
     CredentialStore store, {

@@ -6,7 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:asterlink/ui/skeleton_loading.dart';
 import 'package:asterlink/app_services.dart';
+import 'package:asterlink/core/json.dart';
 import 'package:asterlink/main.dart' show MainShell;
 import 'package:asterlink/data/resource_search.dart';
 import 'package:asterlink/data/resource_search_api.dart';
@@ -147,6 +149,8 @@ void main() {
     ResourceLinkChecks? linkChecks,
     List<ResourceSearchHit>? recommendations,
     ResourceCatalog? catalog,
+    void Function(SearchApiFixture)? configureApi,
+    bool waitForIdle = true,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;
@@ -186,6 +190,7 @@ void main() {
       api.discover = (_, _) async => recommendations;
     }
     if (catalog != null) api.catalogRespond = (_, _) async => catalog;
+    configureApi?.call(api);
     final service = ResourceSearch(
       store: store,
       api: api,
@@ -268,7 +273,7 @@ void main() {
             : ResourceSearchPage(services, onOpen: onOpen ?? (_) async {}),
       ),
     );
-    if (linkChecks != null && service.searching) {
+    if (!waitForIdle || linkChecks != null && service.searching) {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 50));
     } else {
@@ -292,7 +297,7 @@ void main() {
         );
       }
     });
-    if (linkChecks != null && service.searching) {
+    if (!waitForIdle || linkChecks != null && service.searching) {
       await tester.pump();
     } else {
       await tester.pumpAndSettle();
@@ -312,6 +317,49 @@ void main() {
     });
     return (services, api);
   }
+
+  testWidgets(
+    'Initial recommendations use card skeletons and disappear after failure',
+    (tester) async {
+      final pending = Completer<List<ResourceSearchHit>>();
+      await render(
+        tester,
+        waitForIdle: false,
+        configureApi: (api) => api.discover = (_, _) => pending.future,
+      );
+      expect(
+        find.byKey(const Key('resource-recommendations-skeleton')),
+        findsOneWidget,
+      );
+      pending.completeError(const AppException('推荐暂时不可用'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AppSkeleton), findsNothing);
+      expect(find.text('推荐资源暂时加载失败，点击重试'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'Initial catalog uses cover skeletons and disappears for an empty response',
+    (tester) async {
+      final pending = Completer<ResourceCatalog>();
+      await render(
+        tester,
+        home: true,
+        waitForIdle: false,
+        configureApi: (api) => api.catalogRespond = (_, _) => pending.future,
+      );
+      expect(
+        find.byKey(const Key('resource-catalog-skeleton')),
+        findsOneWidget,
+      );
+      pending.complete(const ResourceCatalog());
+      await tester.pumpAndSettle();
+      expect(find.byType(AppSkeleton), findsNothing);
+      expect(find.text('发现你想要的资源'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets(
     'recommendations refresh in place and resource cards open without displaying a source',
@@ -1284,8 +1332,11 @@ void main() {
     await tester.pump();
     await tester.tap(find.byKey(const Key('resource-search-submit')));
     await tester.pump();
+    expect(find.byKey(const Key('resource-search-skeleton')), findsOneWidget);
     stream.add(ResourceSearchBatch([results().first]));
     await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byType(AppSkeleton), findsNothing);
+    expect(find.byType(ResourceSearchResultRow), findsOneWidget);
     expect(find.text('正在搜索'), findsOneWidget);
     await tester.ensureVisible(find.byKey(const Key('resource-search-stop')));
     await tester.tap(find.byKey(const Key('resource-search-stop')));

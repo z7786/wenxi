@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:asterlink/ui/app_switch.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
@@ -113,7 +114,7 @@ void main() {
         expect(services.downloadShutdown.enabled, isFalse);
         final powerSwitch = find.descendant(
           of: find.byKey(const Key('download-shutdown-option')),
-          matching: find.byType(Switch),
+          matching: find.byType(AppSwitch),
         );
         await tester.tap(powerSwitch);
         await tester.pumpAndSettle();

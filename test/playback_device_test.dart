@@ -110,6 +110,29 @@ void main() {
   );
 
   test(
+    'Android television capabilities disable phone orientation and brightness',
+    () async {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return call.method == 'begin' ? {'television': true} : null;
+      });
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      expect(device.isTelevision, isTrue);
+      expect(device.supportsOrientation, isFalse);
+      expect(device.supportsBrightness, isFalse);
+      await device.update(
+        playing: true,
+        orientation: PlaybackOrientation.portrait,
+      );
+      expect(calls.last.arguments['orientation'], isNull);
+    },
+  );
+
+  test(
     'Android and Windows expose external playback; Android hands off title and position',
     () async {
       final mobile = NativePlaybackDevice(

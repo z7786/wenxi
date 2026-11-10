@@ -8,6 +8,7 @@ import '../../diagnostics/app_log.dart';
 import '../../domain/auth.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
+import '../../domain/rapid_transfer.dart';
 import '../http.dart';
 import '../uploads/upload_io.dart';
 import '../../core/operation_progress.dart';
@@ -933,6 +934,55 @@ class Pan123Connector extends CloudConnector {
     );
     final id = await _temporaryFolder(parent, name, c);
     return CloudFile(id: id, name: name, isDirectory: true, parentId: parent);
+  }
+
+  @override
+  bool get providesTransferMd5 => true;
+
+  @override
+  bool canRapidTransferTo(BrowseSession session) => session.canManageFiles;
+
+  @override
+  Future<RapidTransferResult> rapidTransfer(
+    BrowseSession session,
+    String parent,
+    RapidTransferFile file,
+    Credential credential,
+  ) async {
+    final s = session, c = credential;
+    require(canRapidTransferTo(s), '请在个人网盘中执行秒传');
+    require(int.tryParse(parent) != null, '123 目标目录无效');
+    const path = '/b/api/file/upload_request';
+    final pre = check(
+      await postAuth('https://yun.123pan.cn$path', path, {
+        'driveId': 0,
+        'duplicate': 1,
+        'etag': file.md5,
+        'fileName': file.name,
+        'parentFileId': int.parse(parent),
+        'size': file.size,
+        'type': 0,
+      }, c),
+    ).obj('data');
+    RequestScope.checkpoint();
+    // A miss only initializes an upload; never request object URLs or send data.
+    if (!pre.boolean('Reuse')) return const RapidTransferResult.missed();
+    final info = pre.obj('Info');
+    final id = info.str('FileId').ifEmpty(pre.str('FileId'));
+    require((int.tryParse(id) ?? 0) > 0, '123 秒传回执无效，请刷新目标目录确认');
+    require(
+      !info.containsKey('Size') || info.integer('Size', -1) == file.size,
+      '123 秒传文件大小不一致',
+    );
+    require(
+      info.str('Etag').isEmpty || contentMd5(info.str('Etag')) == file.md5,
+      '123 秒传文件校验值不一致',
+    );
+    require(
+      info.str('ParentFileId').isEmpty || info.str('ParentFileId') == parent,
+      '123 秒传目标目录不一致',
+    );
+    return RapidTransferResult.reused(id);
   }
 
   @override

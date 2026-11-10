@@ -8,12 +8,17 @@ class DownloadPlaybackCache {
   DownloadPlaybackCache({
     required this.source,
     required this.read,
+    required this.readAvailable,
+    required this.snapshot,
     required Future<void> Function() onRelease,
   }) : _onRelease = onRelease;
 
   final DownloadSpec source;
   final Future<Uint8List?> Function(int start, int end, RemoteIdentity identity)
   read;
+  final Future<Uint8List?> Function(int start, int end, RemoteIdentity identity)
+  readAvailable;
+  final Future<DownloadReadableState?> Function() snapshot;
   final Future<void> Function() _onRelease;
   Future<void>? _released;
   Future<void> release() => _released ??= _onRelease();

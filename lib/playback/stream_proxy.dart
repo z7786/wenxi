@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import '../domain/models.dart';
 import '../domain/downloads.dart';
+import '../download/download_playback_cache.dart';
 import '../domain/playback.dart';
 import '../core/json.dart';
 import 'playback_failure.dart';
@@ -152,6 +153,7 @@ class PlaybackStreamProxy {
     this.warmupBytes = 256 * 1024,
     this.onFailure,
     this.readCache,
+    this.cacheSnapshot,
   }) : _connections = _limitConnections(source, connections),
        _maxCacheBytes = maxCacheBytes {
     assert(chunkBytes > 0 && maxCacheBytes >= chunkBytes && warmupBytes >= 0);
@@ -165,6 +167,7 @@ class PlaybackStreamProxy {
     RemoteIdentity identity,
   )?
   readCache;
+  final Future<DownloadReadableState?> Function()? cacheSnapshot;
   final int chunkBytes, warmupBytes;
   int _maxCacheBytes;
   int get maxCacheBytes => _maxCacheBytes;
@@ -328,6 +331,10 @@ class PlaybackStreamProxy {
     _upstream = _sourceUri = parsed;
     _headers = Map.of(source.headers);
     _sourceHeaders = Map.of(_headers);
+    // The downloader has already verified these ranges and keeps the payload
+    // leased. Do not require an expiring cloud URL to re-probe cached media.
+    if (await _startFromCache()) return true;
+    if (_closed || _playlistMime != null) return false;
     final client = _probeClient = _client(1);
     try {
       final result = await _getRange(client, 0, 1023, conditional: false);
@@ -358,6 +365,15 @@ class PlaybackStreamProxy {
         } else {
           await response.listen((_) {}).cancel();
         }
+        if (_playlistMime == null && cacheSnapshot != null) {
+          if (await _startFromCache()) return true;
+          if (!_closed) {
+            throw const PlaybackFailure(
+              '下载片段尚不可读取，当前地址不支持分段，请稍后重试',
+              PlaybackFailureKind.network,
+            );
+          }
+        }
         return false;
       }
       final prefix = await _readBody(response, range.$2 + 1);
@@ -384,33 +400,127 @@ class PlaybackStreamProxy {
       _headers = result.$3;
       _etag = response.headers.value(HttpHeaders.etagHeader);
       _modified = response.headers.value(HttpHeaders.lastModifiedHeader);
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      if (_closed) {
-        _probeResult = 'closed';
-        await server.close(force: true);
-        return false;
-      }
-      _server = server;
-      _streamWatch.start();
-      _fetchClient = _client(connections);
-      server.listen((request) {
-        final task = _serve(request);
-        _handlers.add(task);
-        unawaited(task.whenComplete(() => _handlers.remove(task)));
-      }, onError: (Object _) {});
       _probeResult = 'ready';
-      return true;
-    } on PlaybackFailure {
+      return await _bind();
+    } on PlaybackFailure catch (failure) {
+      if (failure.refreshable && await _startFromCache()) return true;
       _probeResult = 'http_error';
       rethrow;
     } catch (error) {
       _probeResult = _closed ? 'closed' : 'probe_failed';
       _probeErrorType = '${error.runtimeType}';
+      if (!_closed && cacheSnapshot != null) {
+        if (await _startFromCache()) return true;
+        throw const PlaybackFailure(
+          '下载片段尚不可读取，远端连接失败，请稍后重试',
+          PlaybackFailureKind.network,
+        );
+      }
       return false;
     } finally {
       _probeWatch.stop();
       client.close(force: true);
       _probeClient = null;
+    }
+  }
+
+  Future<bool> _startFromCache() async {
+    if (_closed || cacheSnapshot == null || readCache == null) return false;
+    final state = await cacheSnapshot!();
+    if (_closed || state == null || !state.identity.canResume(state.identity)) {
+      return false;
+    }
+    if (source.expectedSize > 0 &&
+        source.expectedSize != state.identity.total) {
+      throw const PlaybackFailure(
+        '下载文件长度已变化，请重新添加下载',
+        PlaybackFailureKind.changed,
+      );
+    }
+    _length = state.identity.total;
+    _etag = state.identity.etag;
+    _modified = state.identity.modified;
+    if (state.ranges.any((range) => range.$1 == 0 && range.$2 > 0)) {
+      final prefix = await readCache!(
+        0,
+        math.min(1023, _length - 1),
+        state.identity,
+      );
+      _playlistMime = _detectPlaylist(prefix ?? const [], null);
+      if (_playlistMime != null) return false;
+    }
+    _probeWatch.stop();
+    _probeResult = 'download_cache';
+    return _bind();
+  }
+
+  Future<bool> _bind() async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    if (_closed) {
+      await server.close(force: true);
+      return false;
+    }
+    _server = server;
+    _streamWatch.start();
+    _fetchClient = _client(connections);
+    server.listen((request) {
+      final task = _serve(request);
+      _handlers.add(task);
+      unawaited(task.whenComplete(() => _handlers.remove(task)));
+    }, onError: (Object _) {});
+    return true;
+  }
+
+  Future<void> _reuseCache(_Segment segment) async {
+    while (segment.received < segment.size) {
+      segment.check();
+      Uint8List? bytes;
+      try {
+        bytes = await readCache?.call(
+          segment.start + segment.received,
+          segment.start + segment.size - 1,
+          RemoteIdentity(_length, _etag, _modified),
+        );
+      } on AppException catch (error) {
+        throw PlaybackFailure(error.message, PlaybackFailureKind.paused);
+      }
+      segment.check();
+      if (bytes == null || bytes.isEmpty) return;
+      if (bytes.length > segment.size - segment.received) {
+        throw const PlaybackFailure(
+          '下载缓存长度异常，请重试播放',
+          PlaybackFailureKind.changed,
+        );
+      }
+      final buffer = segment.buffer ??= Uint8List(segment.size);
+      buffer.setRange(segment.received, segment.received + bytes.length, bytes);
+      _reusedBytes += bytes.length;
+      segment.advance(segment.received + bytes.length);
+    }
+  }
+
+  Future<void> _waitForCache(_Segment segment) async {
+    // A denied/failed playback connection may still have a live download
+    // filling this hole. Wait briefly, with immediate seek/close cancellation.
+    final deadline = DateTime.now().add(const Duration(seconds: 15));
+    while (segment.received < segment.size &&
+        DateTime.now().isBefore(deadline)) {
+      final wake = Completer<void>();
+      final timer = Timer(const Duration(milliseconds: 250), wake.complete);
+      void cancel() {
+        timer.cancel();
+        if (!wake.isCompleted) wake.completeError(_ReadCancelled());
+      }
+
+      segment.cancelBody = cancel;
+      try {
+        segment.check();
+        await wake.future;
+      } finally {
+        timer.cancel();
+        segment.cancelBody = null;
+      }
+      await _reuseCache(segment);
     }
   }
 
@@ -933,34 +1043,14 @@ class PlaybackStreamProxy {
     var networkRetried = false, redirectRetried = false;
     final start = segment.start, end = start + segment.size - 1;
     try {
-      Uint8List? cached;
-      try {
-        cached = await readCache?.call(
-          start,
-          end,
-          RemoteIdentity(_length, _etag, _modified),
-        );
-      } on AppException catch (error) {
-        // A user's paused/deleted download must not trigger automatic source
-        // recovery, which would otherwise resume their explicitly stopped task.
-        throw PlaybackFailure(error.message, PlaybackFailureKind.paused);
-      }
+      await _reuseCache(segment);
       segment.check();
-      if (cached != null) {
-        if (cached.length != segment.size) {
-          throw const PlaybackFailure(
-            '下载缓存长度异常，请重试播放',
-            PlaybackFailureKind.changed,
-          );
-        }
+      if (segment.received == segment.size) {
         _reservedBytes -= segment.size;
         reserved = false;
-        _cachedBytes += cached.length;
-        _reusedBytes += cached.length;
+        _cachedBytes += segment.size;
         _completedSegments++;
-        segment.buffer = cached;
-        segment.received = cached.length;
-        segment.complete(cached);
+        segment.complete(segment.buffer!);
         return;
       }
       while (true) {
@@ -1058,7 +1148,30 @@ class PlaybackStreamProxy {
           networkRetried = true;
         }
       }
-    } catch (error, stack) {
+    } catch (caughtError, caughtStack) {
+      var error = caughtError;
+      var stack = caughtStack;
+      if (cacheSnapshot != null &&
+          error is! _ReadCancelled &&
+          (error is! PlaybackFailure ||
+              error.kind == PlaybackFailureKind.network ||
+              error.kind == PlaybackFailureKind.expired)) {
+        try {
+          await _waitForCache(segment);
+          segment.check();
+          if (segment.received == segment.size) {
+            _reservedBytes -= segment.size;
+            reserved = false;
+            _cachedBytes += segment.size;
+            _completedSegments++;
+            segment.complete(segment.buffer!);
+            return;
+          }
+        } catch (waitError, waitStack) {
+          error = waitError;
+          stack = waitStack;
+        }
+      }
       if (error is! _ReadCancelled) _segmentFailures++;
       if (identical(_segments[segment.key], segment)) {
         _segments.remove(segment.key);

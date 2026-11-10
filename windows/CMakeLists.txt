@@ -60,6 +60,13 @@ add_subdirectory("runner")
 set(CMAKE_DISABLE_FIND_PACKAGE_JNI TRUE)
 include(flutter/generated_plugins.cmake)
 
+if(FLUTTER_TARGET_PLATFORM STREQUAL "windows-x64")
+  # Dart validates and loads the selected libmpv before any video is created.
+  # Use the same module in the renderer instead of preloading the compact DLL.
+  target_link_options(media_kit_video_plugin PRIVATE "/DELAYLOAD:libmpv-2.dll")
+  target_link_libraries(media_kit_video_plugin PRIVATE delayimp.lib)
+endif()
+
 
 # === Installation ===
 # Support files are copied into place next to the executable, so that it can

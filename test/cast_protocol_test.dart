@@ -347,9 +347,12 @@ void main() {
         await session.refresh();
       }
       expect(session.error, contains('连接中断'));
+      expect(session.connectionLost, isTrue);
+      expect(session.playWhenReady, isTrue);
       tv.faults.clear();
       await session.refresh();
       expect(session.error, isEmpty);
+      expect(session.connectionLost, isFalse);
       expect(session.state.playing, isTrue);
       tv.media = 'http://192.168.1.4/somebody-else.mp4';
       await session.refresh();

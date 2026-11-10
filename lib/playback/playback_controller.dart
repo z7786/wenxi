@@ -162,6 +162,8 @@ class PlaybackController extends ChangeNotifier {
   int _castRevision = 0;
   bool connectingCast = false;
   final _castTasks = <Future<void>>{};
+  Future<void>? _castDisconnecting;
+  bool get disconnectingCast => _castDisconnecting != null;
   CastSession? get castSession => _cast;
   bool get casting => _cast != null;
   final VoidCallback? checkSource;
@@ -240,7 +242,10 @@ class PlaybackController extends ChangeNotifier {
   bool get ready =>
       !loading &&
       !connectingCast &&
-      (casting ? _cast!.connected : error.isEmpty && backend != null);
+      !disconnectingCast &&
+      (casting
+          ? _cast!.connected && !_cast!.connectionLost
+          : error.isEmpty && backend != null);
   bool get hasVideo => current.video;
   int get connections => preferences.connectionsFor(current.platform);
   bool get usingSoftwareDecoder =>
@@ -634,7 +639,7 @@ class PlaybackController extends ChangeNotifier {
                 _current(session) &&
                 !sleepTimer.stopped) {
               try {
-                await castTo(continueCast);
+                await castTo(continueCast, playWhenReady: _playWhenReady);
               } catch (e) {
                 if (_current(session)) {
                   notice = e is AppException ? e.message : '下一集投屏失败，请重新连接电视';
@@ -1917,6 +1922,7 @@ class PlaybackController extends ChangeNotifier {
     await Future.wait(_subtitleLoads.toList());
     await Future.wait(_aheadTasks.toList());
     await _settleCastTasks();
+    await _castDisconnecting;
     await sleepTimer.settle();
     await _preferenceGate.run(() async {});
     await history.store.flush();

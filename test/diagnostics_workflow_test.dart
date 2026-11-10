@@ -105,6 +105,56 @@ void main() {
   );
 
   test(
+    'Android symbolic crash trace and memory history survive ZIP export',
+    () async {
+      final log = DiagnosticLog.open(null);
+      addTearDown(log.close);
+      log.record(
+        'player.memory_sample',
+        fields: {
+          'hwdecCurrent': 'mediacodec-copy',
+          'memory': {'rssKb': 1355516, 'graphicsPrivateKb': 150000},
+        },
+      );
+      const trace =
+          '#00 pc 1234 libmpv.so (decoder_process+12) (BuildId: aabbccdd)';
+      final bundle = DiagnosticBundle(
+        log,
+        snapshot: () => {},
+        nativeCall: (_, _) async => {
+          'api': 36,
+          'exits': [
+            {
+              'time': DateTime.now().millisecondsSinceEpoch,
+              'reason': 'native_crash',
+              'signalName': 'SIGSEGV',
+              'faultModule': 'libmpv.so',
+              'faultOffset': '0x1234',
+              'trace': trace,
+            },
+          ],
+        },
+      );
+      final zip = ZipDecoder().decodeBytes(await bundle.build());
+      final files = {
+        for (final file in zip.files)
+          file.name: utf8.decode(file.content as List<int>),
+      };
+      final native = jsonDecode(files['native/system.json']!) as Map;
+      expect((native['exits'] as List).single['trace'], trace);
+      expect(files['summary.txt'], contains('SIGSEGV'));
+      expect(files['summary.txt'], contains('libmpv.so'));
+      expect(
+        files.entries
+            .where((e) => e.key.startsWith('logs/'))
+            .map((e) => e.value)
+            .join(),
+        contains('1355516'),
+      );
+    },
+  );
+
+  test(
     'Summary size and error count remain bounded with long failure messages',
     () async {
       final log = DiagnosticLog.open(null);

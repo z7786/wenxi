@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
+import 'app_switch.dart';
 import '../app_services.dart';
 import '../domain/auth.dart';
 import '../domain/cloud_list_preferences.dart';
@@ -649,7 +650,7 @@ class _CloudListSettingsPageState extends State<CloudListSettingsPage> {
                                     ),
                                   ),
                                 ),
-                                Switch.adaptive(
+                                AppSwitch(
                                   key: ValueKey(
                                     'cloud-visible-${platform.name}',
                                   ),

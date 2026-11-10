@@ -93,8 +93,9 @@ PlaybackController downloadPlayback(
           downloadCache: (source, start, end, identity) async {
             final lease = leases[source];
             require(lease != null, '播放已结束');
-            return lease!.cache.read(start, end, identity);
+            return lease!.cache.readAvailable(start, end, identity);
           },
+          downloadSnapshot: (source) async => leases[source]?.cache.snapshot(),
         ),
   );
 }
@@ -106,11 +107,13 @@ class DownloadMediaBackend extends DelegatingPlaybackBackend {
     required bool video,
     bool hardwareAcceleration = true,
     PlaybackCacheReader? downloadCache,
+    PlaybackCacheSnapshot? downloadSnapshot,
   }) : super(
          createPlaybackBackend(
            video: video,
            hardwareAcceleration: hardwareAcceleration,
            downloadCache: downloadCache,
+           downloadSnapshot: downloadSnapshot,
          ),
        ) {
     downloads.addListener(_downloadChanged);

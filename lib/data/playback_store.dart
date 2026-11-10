@@ -11,6 +11,10 @@ class PlaybackStore {
   );
   static const historyLimit = 200;
   static const torrentCacheBytes = 16 * 1024 * 1024;
+  bool get historyHidden => store.data.boolean('playbackHistoryHidden');
+  Future<void> setHistoryHidden(bool hidden) =>
+      store.put('playbackHistoryHidden', hidden);
+
   List<PlaybackRecord> get recent {
     final bookmarks = {
       for (final entry in store.data.obj('playbackHistory').entries)

@@ -1,5 +1,24 @@
 # AsterLink Windows media runtime
 
+## Optional Windows x64 full component
+
+The application bundles the original compact 20241021 runtime again. The full
+PGS-capable 20261108 archive below remains pinned in source and is installed only
+after a user clicks Download in Player components. Its archive and extracted DLL
+must match SHA-256 before publication to the per-user application support folder.
+The separate preference file does not alter account data or imported backups.
+
+Switching requires a complete application restart. The video plugin delay-loads
+libmpv so Dart and the native renderer resolve the same selected module. Independent
+windows inherit the parent's active variant, including when a pending selection
+has not yet been applied. An unavailable/corrupt full component falls back to the
+bundled compact runtime. Active full DLLs cannot be overwritten or removed.
+
+Unmodified 7-Zip Extra 26.01 x64 7za.exe is packaged in tools/player-7za.exe from
+native/third_party/player-7za-x64-26.01.bin. Both build and runtime verify its
+SHA-256; component extraction does not require an external 7-Zip installation.
+Its source and license links are in Windows-x64-media-NOTICES.txt.
+
 ## 2026-11-09: Windows x64 PGS subtitles (#69)
 
 The x64 runtime now uses `zhongfly/mpv-winbuild`, release

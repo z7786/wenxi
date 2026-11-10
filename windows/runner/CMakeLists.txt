@@ -16,6 +16,7 @@ add_executable(${BINARY_NAME} WIN32
   "diagnostic_bridge.cpp"
   "gpu_preference.cpp"
   "gpu_preference_bridge.cpp"
+  "file_actions_bridge.cpp"
   "main.cpp"
   "utils.cpp"
   "win32_window.cpp"

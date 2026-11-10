@@ -8,12 +8,14 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/downloads.dart';
+import '../download/download_playback_cache.dart';
 import '../domain/playback.dart';
 import 'stream_proxy.dart';
 import 'playback_failure.dart';
 import 'playback_stall_monitor.dart';
 import 'playback_buffer_policy.dart';
 import 'playback_metrics.dart';
+import 'playback_diagnostics.dart';
 import 'subtitle_fonts.dart';
 import 'video_output_policy.dart';
 
@@ -113,6 +115,7 @@ class MediaKitBackend extends PlaybackBackend {
     Player? player,
     SubtitleFontStore? subtitleFonts,
     this.downloadCache,
+    this.downloadSnapshot,
   }) : subtitleFonts = subtitleFonts ?? SubtitleFontStore.shared,
        player =
            player ??
@@ -253,6 +256,7 @@ class MediaKitBackend extends PlaybackBackend {
   PlaybackMetrics _metrics = PlaybackMetrics();
   PlaybackBufferPolicy _bufferPolicy = PlaybackBufferPolicy(connectionLimit: 8);
   final Map<String, Object?> _nativeMetrics = {};
+  final _diagnostics = PlaybackDiagnostics();
   (double, double, double, int?)? _subtitlePresentation;
   Future<void>? _initializing;
   int? _initializedMs;
@@ -454,6 +458,8 @@ class MediaKitBackend extends PlaybackBackend {
     RemoteIdentity identity,
   )?
   downloadCache;
+  final Future<DownloadReadableState?> Function(DownloadSpec source)?
+  downloadSnapshot;
   PlaybackStreamProxy? _proxy;
   Map<String, Object?>? _probeDiagnostics;
   Stopwatch? _openWatch;
@@ -473,6 +479,7 @@ class MediaKitBackend extends PlaybackBackend {
   @override
   Map<String, Object?> get diagnosticFields => {
     'engine': engineName,
+    ..._diagnostics.context,
     'transport': _transport,
     'networkTimeoutSeconds': ?_networkTimeoutSeconds,
     'openElapsedMs': ?_openWatch?.elapsedMilliseconds,
@@ -628,6 +635,11 @@ class MediaKitBackend extends PlaybackBackend {
     _cancelTransportChecks();
     _performanceTimer?.cancel();
     _openWatch = Stopwatch()..start();
+    _diagnostics.begin({
+      'playbackSource': DiagnosticLog.reference(
+        '${source.fileName}|${source.url}',
+      ),
+    });
     _nativeMetrics.clear();
     _metrics = PlaybackMetrics();
     final sourceLimit = source.maxPlaybackConnections;
@@ -688,6 +700,9 @@ class MediaKitBackend extends PlaybackBackend {
             ? null
             : (start, end, identity) =>
                   downloadCache!(source, start, end, identity),
+        cacheSnapshot: downloadSnapshot == null
+            ? null
+            : () => downloadSnapshot!(source),
         onFailure: (failure) => _reportFailure(failure, origin: 'proxy'),
       );
       bool available;
@@ -877,7 +892,12 @@ class MediaKitBackend extends PlaybackBackend {
           // Properties unavailable for this track or older cores are optional.
         }
       }
-      if (!_closing) notifyListeners();
+      if (!_closing) {
+        unawaited(
+          _diagnostics.sample(_openWatch!.elapsed, () => diagnosticFields),
+        );
+        notifyListeners();
+      }
     } catch (e, stack) {
       if (!_closing) DiagnosticLog.error('player.performance_sample', e, stack);
     } finally {
@@ -993,10 +1013,12 @@ class MediaKitBackend extends PlaybackBackend {
   @override
   Future<void> close() => _closeFuture ??= _close();
   Future<void> _close() async {
+    final closeFields = diagnosticFields;
     if (_openWatch != null) {
       DiagnosticLog.event('player.transport_closed', fields: diagnosticFields);
     }
     _closing = true;
+    _diagnostics.stop();
     _performanceTimer?.cancel();
     _cancelTransportChecks();
     _openWatch?.stop();
@@ -1009,6 +1031,16 @@ class MediaKitBackend extends PlaybackBackend {
         await _proxy?.close();
       } finally {
         await player.dispose();
+        final diagnostics = _diagnostics;
+        if (diagnostics.supported && DiagnosticLog.active?.enabled == true) {
+          unawaited(diagnostics.afterClose(closeFields));
+          // libmpv termination is deferred for five seconds by media_kit. A
+          // second process sample distinguishes that grace period from growth
+          // that remains after teardown; neither sample delays route dismissal.
+          Timer(const Duration(seconds: 8), () {
+            unawaited(diagnostics.afterClose(closeFields, phase: 'settled'));
+          });
+        }
       }
     } finally {
       super.dispose();

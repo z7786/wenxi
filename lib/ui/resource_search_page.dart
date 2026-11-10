@@ -10,6 +10,7 @@ import '../data/resource_link_checks.dart';
 import '../domain/models.dart';
 import '../domain/resource_search.dart';
 import 'common.dart';
+import 'skeleton_loading.dart';
 import 'resource_search_bar.dart';
 import 'resource_preferences.dart';
 
@@ -734,9 +735,12 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
           ),
           const SizedBox(height: 10),
           if (search.recommendationsLoading && search.recommendations.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 30),
-              child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+            AppSkeleton(
+              key: const Key('resource-recommendations-skeleton'),
+              layout: SkeletonLayout.recommendations,
+              itemCount: 4,
+              active: widget.active,
+              semanticLabel: '正在加载推荐资源',
             )
           else if (search.recommendationsError.isNotEmpty)
             Padding(
@@ -1009,8 +1013,10 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
         child: Semantics(
           selected: selected,
           child: Material(
-            color: selected ? themeAccent(context) : Colors.transparent,
-            borderRadius: BorderRadius.circular(26),
+            color: selected
+                ? themeAccent(context).withValues(alpha: .1)
+                : fill(context),
+            borderRadius: BorderRadius.circular(12),
             clipBehavior: Clip.antiAlias,
             child: InkWell(
               key: ValueKey('resource-filter-${name ?? 'all'}'),
@@ -1035,18 +1041,30 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                             ? FontWeight.w600
                             : FontWeight.w400,
                         color: selected
-                            ? themeOnAccent(context)
+                            ? themeAccent(context)
                             : secondary(context),
                       ),
                     ),
                     const SizedBox(width: 5),
-                    Text(
-                      '${name == null ? search.allItems.length : counts[name] ?? 0}',
-                      style: TextStyle(
-                        fontSize: 10,
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
                         color: selected
-                            ? themeOnAccent(context).withValues(alpha: .8)
-                            : secondary(context),
+                            ? themeAccent(context).withValues(alpha: .1)
+                            : backgroundSurface(context),
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                      child: Text(
+                        '${name == null ? search.allItems.length : counts[name] ?? 0}',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: selected
+                              ? themeAccent(context)
+                              : secondary(context),
+                        ),
                       ),
                     ),
                   ],
@@ -1204,7 +1222,10 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                   const TextSpan(text: '共找到 '),
                   TextSpan(
                     text: '$count',
-                    style: const TextStyle(fontWeight: FontWeight.w700),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: themeAccent(context),
+                    ),
                   ),
                   TextSpan(
                     text:
@@ -1212,7 +1233,10 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                   ),
                 ],
               ),
-              style: TextStyle(fontSize: 13, color: secondary(context)),
+              style: TextStyle(
+                fontSize: 14,
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
             ),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -1255,19 +1279,37 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
         if (phaseText.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: Text(
-              phaseText,
-              maxLines: search.linkChecks != null ? 1 : null,
-              overflow: search.linkChecks != null
-                  ? TextOverflow.ellipsis
-                  : null,
-              style: TextStyle(
-                fontSize: 11,
-                height: search.linkChecks != null ? 1.6 : null,
-                color: search.searching
-                    ? themeAccent(context)
-                    : secondary(context),
-              ),
+            child: Row(
+              children: [
+                Icon(
+                  search.searching
+                      ? CupertinoIcons.clock
+                      : search.phase == ResourceSearchPhase.failed
+                      ? CupertinoIcons.exclamationmark_circle
+                      : search.phase == ResourceSearchPhase.stopped
+                      ? CupertinoIcons.stop_circle
+                      : CupertinoIcons.checkmark_circle,
+                  size: 13,
+                  color: search.searching
+                      ? themeAccent(context)
+                      : secondary(context),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    phaseText,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      height: 1.6,
+                      color: search.searching
+                          ? themeAccent(context)
+                          : secondary(context),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         if (advanced) advancedFilters(wide),
@@ -1521,11 +1563,28 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                                         ),
                                       ),
                                     ),
-                                  if (items.isEmpty) empty(),
+                                  if (items.isEmpty && !search.searching)
+                                    empty(),
                                 ],
                               ]),
                             ),
                           ),
+                          if (!idle && items.isEmpty && search.searching)
+                            SliverPadding(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: wide ? 28 : 14,
+                              ),
+                              sliver: SliverToBoxAdapter(
+                                child: AppSkeleton(
+                                  key: const Key('resource-search-skeleton'),
+                                  layout: SkeletonLayout.searchResults,
+                                  wide: wide,
+                                  itemCount: 4,
+                                  active: widget.active,
+                                  semanticLabel: '正在查找资源，结果会陆续显示',
+                                ),
+                              ),
+                            ),
                           if (!idle && items.isNotEmpty)
                             SliverPadding(
                               padding: EdgeInsets.symmetric(
@@ -1657,34 +1716,28 @@ class _CloudBadge extends StatelessWidget {
   const _CloudBadge(this.hit);
   final ResourceSearchHit hit;
   @override
-  Widget build(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    final color = switch (hit.platform) {
-      CloudPlatform.baidu => const Color(0xff3478ef),
-      CloudPlatform.quark => const Color(0xff6464dc),
-      CloudPlatform.aliyun => const Color(0xff6758d6),
-      CloudPlatform.uc => const Color(0xffd66c25),
-      CloudPlatform.pan123 => const Color(0xff0a8b9a),
-      CloudPlatform.xunlei => const Color(0xff1e87d6),
-      _ => const Color(0xff738096),
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: dark ? .2 : .09),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        _cloudLabel(hit.cloudName),
-        style: TextStyle(
-          fontSize: 10,
-          height: 1.2,
-          fontWeight: FontWeight.w500,
-          color: dark ? Color.lerp(color, Colors.white, .35) : color,
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      if (hit.platform != null)
+        PlatformMark(platform: hit.platform, size: 20)
+      else
+        Icon(CupertinoIcons.link, size: 18, color: secondary(context)),
+      const SizedBox(width: 7),
+      Flexible(
+        child: Text(
+          _cloudLabel(hit.cloudName),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            color: secondary(context),
+          ),
         ),
       ),
-    );
-  }
+    ],
+  );
 }
 
 class _TrackedResourceRow extends StatefulWidget {
@@ -1745,20 +1798,44 @@ class _ResourceHealthBadge extends StatelessWidget {
       ResourceLinkState.checking => themeAccent(context),
       _ => secondary(context),
     };
+    final icon = switch (health.state) {
+      ResourceLinkState.valid => CupertinoIcons.checkmark_circle_fill,
+      ResourceLinkState.invalid => CupertinoIcons.xmark_circle_fill,
+      ResourceLinkState.locked => CupertinoIcons.lock_fill,
+      ResourceLinkState.checking ||
+      ResourceLinkState.pending => CupertinoIcons.clock,
+      _ => CupertinoIcons.question_circle,
+    };
     return Tooltip(
       message: health.message.isEmpty ? health.label : health.message,
       child: Semantics(
         label: '链接状态：${health.label}',
         excludeSemantics: true,
-        child: Text(
-          health.label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            fontSize: 10,
-            height: 1.3,
-            color: color,
-            fontWeight: FontWeight.w500,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: .09),
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 12, color: color),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  health.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    height: 1.3,
+                    color: color,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -1825,8 +1902,9 @@ class ResourceSearchResultRow extends StatelessWidget {
       r'\b\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|TiB|GiB|MiB)\b',
       caseSensitive: false,
     ).firstMatch(description)?.group(0);
+    final colors = Theme.of(context).colorScheme;
     final large = MediaQuery.textScalerOf(context).scale(14) > 23;
-    final content = Column(
+    final titleAndDescription = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text.rich(
@@ -1834,13 +1912,13 @@ class ResourceSearchResultRow extends StatelessWidget {
           maxLines: large ? 4 : 2,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(
-            fontSize: 15,
+            fontSize: 16,
             fontWeight: FontWeight.w600,
-            height: 1.5,
+            height: 1.4,
           ),
         ),
         if (description.isNotEmpty) ...[
-          const SizedBox(height: 7),
+          const SizedBox(height: 6),
           Text(
             description,
             maxLines: 2,
@@ -1848,48 +1926,97 @@ class ResourceSearchResultRow extends StatelessWidget {
             style: TextStyle(
               fontSize: 12,
               height: 1.5,
-              color: secondary(context),
+              color: colors.onSurfaceVariant,
             ),
           ),
         ],
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 10,
-          runSpacing: 6,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            _CloudBadge(hit),
-            if (size != null)
-              Text(
-                size,
-                style: TextStyle(fontSize: 11, color: secondary(context)),
+      ],
+    );
+    final metadata = Wrap(
+      spacing: 12,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        if (hit.password.isNotEmpty)
+          _ResourceMetadata(
+            icon: CupertinoIcons.lock,
+            text: '提取码 ${hit.password}',
+          ),
+        if (size != null)
+          _ResourceMetadata(icon: CupertinoIcons.doc, text: size),
+        if (hit.date.isNotEmpty)
+          _ResourceMetadata(
+            icon: CupertinoIcons.clock,
+            text: hit.date.split(RegExp(r'[ T]')).first,
+          ),
+      ],
+    );
+    final actions = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          key: ValueKey('resource-copy-${hit.identity}'),
+          tooltip: '复制分享链接',
+          onPressed: onCopy,
+          icon: Icon(
+            CupertinoIcons.doc_on_doc,
+            size: 17,
+            color: colors.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(width: 4),
+        TextButton(
+          key: ValueKey('resource-open-${hit.identity}'),
+          onPressed: enabled ? onOpen : null,
+          style: TextButton.styleFrom(
+            minimumSize: const Size(96, 40),
+            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
+            backgroundColor: colors.primary.withValues(alpha: .09),
+            foregroundColor: colors.primary,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              ExcludeSemantics(
+                excluding: opening,
+                child: Opacity(
+                  opacity: opening ? 0 : 1,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        canOpen ? '打开资源' : '查看链接',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                      const SizedBox(width: 5),
+                      const Icon(CupertinoIcons.arrow_up_right, size: 12),
+                    ],
+                  ),
+                ),
               ),
-            if (health != null)
-              SizedBox(
-                width: MediaQuery.textScalerOf(context).scale(10) * 7,
-                child: _ResourceHealthBadge(health!),
-              ),
-            if (hit.password.isNotEmpty)
-              Text(
-                '提取码 ${hit.password}',
-                style: TextStyle(fontSize: 11, color: secondary(context)),
-              ),
-            if (hit.date.isNotEmpty)
-              Text(
-                hit.date.split(RegExp(r'[ T]')).first,
-                style: TextStyle(fontSize: 10, color: secondary(context)),
-              ),
-          ],
+              if (opening)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+            ],
+          ),
         ),
       ],
     );
+    final hasMetadata =
+        hit.password.isNotEmpty || size != null || hit.date.isNotEmpty;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.only(bottom: 12),
       child: Material(
         color: backgroundSurface(context),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: themeAccent(context).withValues(alpha: .13)),
+          side: BorderSide(color: colors.outlineVariant.withValues(alpha: .8)),
         ),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -1897,75 +2024,72 @@ class ResourceSearchResultRow extends StatelessWidget {
           child: Semantics(
             label: '查看资源详情',
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(15, 16, 12, 8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+              padding: const EdgeInsets.fromLTRB(16, 13, 12, 10),
+              child: LayoutBuilder(
+                builder: (context, bounds) {
+                  final inline = wide && bounds.maxWidth >= 680 && !large;
+                  // The status slot keeps its size while the check state changes.
+                  final provider = Row(
                     children: [
-                      if (!large) ...[
-                        Container(
-                          width: wide ? 66 : 54,
-                          height: wide ? 78 : 68,
-                          decoration: BoxDecoration(
-                            color: themeAccent(context).withValues(alpha: .07),
-                            borderRadius: BorderRadius.circular(13),
-                          ),
-                          child: Icon(
-                            Icons.folder_outlined,
-                            size: 29,
-                            color: themeAccent(context),
-                          ),
+                      Expanded(child: _CloudBadge(hit)),
+                      if (health != null) ...[
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          width:
+                              MediaQuery.textScalerOf(context).scale(11) * 10.5,
+                          child: _ResourceHealthBadge(health!),
                         ),
-                        const SizedBox(width: 13),
                       ],
-                      Expanded(child: content),
                     ],
-                  ),
-                  const SizedBox(height: 5),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
+                  );
+                  final information = Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      IconButton(
-                        key: ValueKey('resource-copy-${hit.identity}'),
-                        tooltip: '复制分享链接',
-                        onPressed: onCopy,
-                        icon: Icon(
-                          Icons.copy_outlined,
-                          size: 17,
-                          color: secondary(context),
-                        ),
-                      ),
-                      const SizedBox(width: 3),
-                      TextButton(
-                        key: ValueKey('resource-open-${hit.identity}'),
-                        onPressed: enabled ? onOpen : null,
-                        style: TextButton.styleFrom(
-                          minimumSize: const Size(64, 40),
-                          backgroundColor: themeAccent(
-                            context,
-                          ).withValues(alpha: .07),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                        ),
-                        child: opening
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : Text(
-                                canOpen ? '打开资源' : '查看链接',
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                      ),
+                      provider,
+                      const SizedBox(height: 10),
+                      titleAndDescription,
                     ],
-                  ),
-                ],
+                  );
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (inline)
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Expanded(child: information),
+                            const SizedBox(width: 28),
+                            actions,
+                          ],
+                        )
+                      else
+                        information,
+                      if (inline && hasMetadata) ...[
+                        const SizedBox(height: 10),
+                        metadata,
+                      ],
+                      if (!inline) ...[
+                        const SizedBox(height: 10),
+                        if (bounds.maxWidth >= 350 && !large)
+                          Row(
+                            children: [
+                              Expanded(child: metadata),
+                              const SizedBox(width: 8),
+                              actions,
+                            ],
+                          )
+                        else ...[
+                          if (hasMetadata) metadata,
+                          if (hasMetadata) const SizedBox(height: 4),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: actions,
+                          ),
+                        ],
+                      ],
+                    ],
+                  );
+                },
               ),
             ),
           ),
@@ -1973,6 +2097,26 @@ class ResourceSearchResultRow extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ResourceMetadata extends StatelessWidget {
+  const _ResourceMetadata({required this.icon, required this.text});
+  final IconData icon;
+  final String text;
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 12, color: secondary(context)),
+      const SizedBox(width: 4),
+      Flexible(
+        child: Text(
+          text,
+          style: TextStyle(fontSize: 11, color: secondary(context)),
+        ),
+      ),
+    ],
+  );
 }
 
 class ResourceSearchEntry extends StatelessWidget {

@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.media.AudioManager
 import android.net.Uri
@@ -111,6 +112,9 @@ class PlaybackBridge internal constructor(
     }
     private fun supportsPip(): Boolean = video && Build.VERSION.SDK_INT >= 26 &&
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+    private fun isTelevision(): Boolean =
+        context.resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_TELEVISION ||
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
 
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
         val token = call.argument<String>("session")
@@ -143,7 +147,7 @@ class PlaybackBridge internal constructor(
                     val brightness = if (originalBrightness >= 0) originalBrightness
                         else runCatching { Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128) / 255f }
                             .getOrDefault(.5f)
-                    result.success(mapOf("pip" to supportsPip(), "brightness" to brightness.toDouble(),
+                    result.success(mapOf("pip" to supportsPip(), "television" to isTelevision(), "brightness" to brightness.toDouble(),
                         "systemVolumeSupported" to volume.supported, "systemVolume" to volume.volume,
                         "systemInsets" to systemInsets(current)))
                 }
@@ -241,6 +245,7 @@ class PlaybackBridge internal constructor(
         val current = activity ?: return
         if (session == null || (Build.VERSION.SDK_INT >= 26 && current.isInPictureInPictureMode)) return
         val requested = when {
+            isTelevision() -> originalOrientation
             orientationLocked -> ActivityInfo.SCREEN_ORIENTATION_LOCKED
             !video -> originalOrientation
             desiredOrientation == "landscape" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE

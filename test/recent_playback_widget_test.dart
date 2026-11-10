@@ -134,4 +134,83 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+
+  scenario(
+    'Hiding on home persists across navigation without deleting playback progress',
+    (tester) async {
+      await prepare();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: RecentPlaybackSummary(services, desktop: false)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('旅行视频.mp4'), findsOneWidget);
+      await tester.tap(find.byTooltip('隐藏最近播放'));
+      await tester.pumpAndSettle();
+      expect(find.text('旅行视频.mp4'), findsNothing);
+      expect(find.byKey(const Key('parse-recent-resume')), findsNothing);
+      expect(find.byType(RecentPlaybackPage), findsNothing);
+      final saved = PlaybackStore(services.store);
+      expect(saved.historyHidden, isTrue);
+      expect(saved.bookmark('video')!.position, const Duration(seconds: 60));
+      expect(
+        PlaybackStore(StateStore.memory(services.store.data)).historyHidden,
+        isTrue,
+      );
+
+      await tester.tap(find.byKey(const Key('parse-recent')));
+      await tester.pumpAndSettle();
+      expect(find.byType(RecentPlaybackPage), findsOneWidget);
+      expect(find.text('旅行视频.mp4'), findsNothing);
+      expect(find.text('清空'), findsNothing);
+      await tester.tap(find.byTooltip('显示最近播放').hitTestable());
+      await tester.pumpAndSettle();
+      expect(find.text('旅行视频.mp4'), findsOneWidget);
+      expect(find.textContaining('已播放 01:00'), findsOneWidget);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.text('旅行视频.mp4'), findsOneWidget);
+      expect(find.byTooltip('隐藏最近播放'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  scenario(
+    'Desktop summary stays hidden when new playback is recorded and can reveal all records',
+    (tester) async {
+      await prepare();
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(252, 640);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: RecentPlaybackSummary(services, desktop: true)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('隐藏最近播放'));
+      await tester.pumpAndSettle();
+      await PlaybackStore(services.store).save(
+        'next',
+        const PlaybackBookmark(
+          name: '第二集.mp4',
+          source: PlaybackSource.local(path: 'next.mp4'),
+          position: Duration(seconds: 30),
+          duration: Duration(minutes: 10),
+          updatedAt: 2,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('第二集.mp4'), findsNothing);
+      expect(find.text('旅行视频.mp4'), findsNothing);
+      expect(PlaybackStore(services.store).recent, hasLength(2));
+      await tester.tap(find.byTooltip('显示最近播放'));
+      await tester.pumpAndSettle();
+      expect(find.text('第二集.mp4'), findsOneWidget);
+      expect(find.byKey(const Key('parse-recent-resume')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

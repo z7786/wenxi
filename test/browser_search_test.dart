@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/ui/skeleton_loading.dart';
 import 'browser_test_support.dart';
 import 'cloud_accounts_favorites_test.dart' show addFixtureAccount;
 import 'support.dart';
@@ -200,6 +201,25 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('cloud-search-history-报告')));
       await tester.pumpAndSettle();
       expect(find.text('搜索完成 · 共 4 项'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  browserTest(
+    'Empty pending search uses the skeleton then displays the first batch',
+    (tester) async {
+      await fixture.render(tester);
+      await recursive(tester);
+      await search(tester, '报告');
+      final pending = connector.pending['personal-root'] =
+          Completer<List<CloudFile>>();
+      await tester.tap(find.byTooltip('重新搜索'));
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(find.byKey(const Key('cloud-search-skeleton')), findsOneWidget);
+      pending.complete(connector.tree['personal-root']);
+      await tester.pumpAndSettle();
+      expect(find.byType(AppSkeleton), findsNothing);
+      expect(find.text('当前报告.txt'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
   );

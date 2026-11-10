@@ -346,6 +346,8 @@ class PlaybackFixture {
 
 class FakePlaybackDevice extends PlaybackDevice {
   @override
+  bool isTelevision = false;
+  @override
   bool supportsExternalPlayer = false;
   Future<bool> Function(String, String, Duration)? externalPlayer;
   @override

@@ -217,6 +217,47 @@ void main() {
   }
 
   testWidgets(
+    'Windows punctuation adjusts rate and middle mouse toggles fullscreen',
+    (tester) async {
+      final page = await render(tester, size: const Size(1280, 800));
+      final controller = page.fixture.controller;
+      await tester.sendKeyEvent(LogicalKeyboardKey.comma);
+      await tester.pumpAndSettle();
+      expect(controller.preferences.rate, 1.5);
+      await tester.sendKeyEvent(LogicalKeyboardKey.period);
+      await tester.pumpAndSettle();
+      expect(controller.preferences.rate, 1);
+      await controller.setRate(PlaybackPreferences.maxRate);
+      await tester.sendKeyEvent(LogicalKeyboardKey.comma);
+      await tester.pumpAndSettle();
+      expect(controller.preferences.rate, PlaybackPreferences.maxRate);
+      final pointer = await tester.createGesture(
+        kind: PointerDeviceKind.mouse,
+        buttons: kMiddleMouseButton,
+      );
+      await pointer.down(
+        tester.getCenter(find.byKey(const Key('player-gesture-surface'))),
+      );
+      await pointer.up();
+      await tester.pumpAndSettle();
+      expect(page.device.calls, contains('fullscreen:true'));
+      await pointer.down(
+        tester.getCenter(find.byKey(const Key('player-gesture-surface'))),
+      );
+      await pointer.up();
+      await tester.pumpAndSettle();
+      expect(page.device.calls, contains('fullscreen:false'));
+      await tap(tester, find.byKey(const Key('player-more')));
+      final rate = controller.preferences.rate;
+      await tester.sendKeyEvent(LogicalKeyboardKey.period);
+      await tester.pumpAndSettle();
+      expect(controller.preferences.rate, rate);
+    },
+    skip: !Platform.isWindows,
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
+
+  testWidgets(
     'Windows playback settings read GPU preference without writing',
     (tester) async {
       const channel = MethodChannel('com.asterlink.app/gpu_preference');

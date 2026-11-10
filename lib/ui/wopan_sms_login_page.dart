@@ -9,6 +9,7 @@ import '../data/providers/wopan.dart';
 import '../data/providers/wopan_login.dart';
 import '../domain/models.dart';
 import 'common.dart';
+import 'cloud_login_layout.dart';
 
 class WopanSmsLoginPage extends StatefulWidget {
   const WopanSmsLoginPage(
@@ -189,180 +190,113 @@ class _WopanSmsLoginPageState extends State<WopanSmsLoginPage> {
     },
     child: PageFrame(
       title: '联通登录',
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
-          child: AutofillGroup(
-            onDisposeAction: AutofillContextAction.cancel,
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(24, 28, 24, 28),
-              children: [
-                Row(
-                  children: [
-                    const PlatformMark(platform: CloudPlatform.wopan, size: 52),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            '手机号验证码登录',
-                            style: TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 5),
-                          Text(
-                            '联通云盘',
-                            style: TextStyle(
-                              color: secondary(context),
-                              fontSize: 14,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 32),
-                TextField(
-                  key: const ValueKey('wopan-sms-mobile'),
-                  controller: _mobile,
-                  enabled: !_busy,
-                  keyboardType: TextInputType.phone,
-                  textInputAction: TextInputAction.next,
-                  autofillHints: const [AutofillHints.telephoneNumberNational],
-                  inputFormatters: [
-                    FilteringTextInputFormatter.digitsOnly,
-                    LengthLimitingTextInputFormatter(11),
-                  ],
-                  decoration: const InputDecoration(
-                    labelText: '手机号',
-                    prefixIcon: Icon(CupertinoIcons.phone, size: 20),
-                    prefixText: '+86 ',
-                  ),
-                ),
-                const SizedBox(height: 18),
-                TextField(
-                  key: const ValueKey('wopan-sms-code'),
-                  controller: _code,
-                  enabled: !_busy,
-                  keyboardType: TextInputType.number,
-                  textInputAction: TextInputAction.done,
-                  autofillHints: const [AutofillHints.oneTimeCode],
-                  inputFormatters: [
-                    FilteringTextInputFormatter.digitsOnly,
-                    LengthLimitingTextInputFormatter(6),
-                  ],
-                  onSubmitted: (_) => _login(),
-                  decoration: InputDecoration(
-                    labelText: '短信验证码',
-                    prefixIcon: const Icon(CupertinoIcons.lock, size: 20),
-                    suffixIcon: TextButton(
-                      key: const ValueKey('wopan-sms-send'),
-                      onPressed: _busy || _seconds > 0 ? null : _send,
-                      child: Text(_seconds > 0 ? '${_seconds}s 后重发' : '获取验证码'),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Checkbox(
-                      key: const ValueKey('wopan-sms-agreement'),
-                      value: _agreed,
-                      onChanged: _busy
-                          ? null
-                          : (value) => setState(() => _agreed = value == true),
-                    ),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const SizedBox(height: 8),
-                          Text(
-                            '我已阅读并同意，未注册手机号将自动注册',
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: secondary(context),
-                            ),
-                          ),
-                          Wrap(
-                            children: [
-                              TextButton(
-                                onPressed: () =>
-                                    _policy('wocloud_web_service.html'),
-                                child: const Text('《用户协议》'),
-                              ),
-                              TextButton(
-                                onPressed: () =>
-                                    _policy('wocloud_web_privacy.html'),
-                                child: const Text('《隐私政策》'),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                if (_error.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 18),
-                    child: Semantics(
-                      liveRegion: true,
-                      child: Text(
-                        _error,
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                        ),
-                      ),
-                    ),
-                  ),
-                FilledButton(
-                  key: const ValueKey('wopan-sms-submit'),
-                  onPressed: _busy ? null : _login,
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size.fromHeight(50),
-                  ),
-                  child: _busy
-                      ? const SizedBox(
-                          width: 22,
-                          height: 22,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text('登录'),
-                ),
-                const SizedBox(height: 16),
-                if (_status.isNotEmpty)
-                  Text(
-                    _status,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: secondary(context), fontSize: 13),
-                  ),
-                const SizedBox(height: 14),
-                TextButton.icon(
-                  key: const ValueKey('native-login-web'),
-                  onPressed: () => _switch(widget.onUseWeb),
-                  icon: const Icon(CupertinoIcons.globe, size: 18),
-                  label: const Text('切换网页登录'),
-                ),
-                TextButton.icon(
-                  key: const ValueKey('native-login-manual'),
-                  onPressed: () => _switch(widget.onUseManual),
-                  icon: const Icon(CupertinoIcons.doc_on_clipboard, size: 18),
-                  label: const Text('手动提交登录信息'),
-                ),
-              ],
+      child: CloudLoginLayout(
+        platform: CloudPlatform.wopan,
+        method: '手机号登录',
+        children: [
+          TextField(
+            key: const ValueKey('wopan-sms-mobile'),
+            controller: _mobile,
+            enabled: !_busy,
+            keyboardType: TextInputType.phone,
+            textInputAction: TextInputAction.next,
+            autofillHints: const [AutofillHints.telephoneNumberNational],
+            inputFormatters: [
+              FilteringTextInputFormatter.digitsOnly,
+              LengthLimitingTextInputFormatter(11),
+            ],
+            decoration: const InputDecoration(
+              labelText: '手机号',
+              prefixIcon: CloudLoginFieldIcon(
+                CupertinoIcons.device_phone_portrait,
+              ),
+              prefixText: '+86 ',
             ),
           ),
-        ),
+          const SizedBox(height: 18),
+          TextField(
+            key: const ValueKey('wopan-sms-code'),
+            controller: _code,
+            enabled: !_busy,
+            keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.done,
+            autofillHints: const [AutofillHints.oneTimeCode],
+            inputFormatters: [
+              FilteringTextInputFormatter.digitsOnly,
+              LengthLimitingTextInputFormatter(6),
+            ],
+            onSubmitted: (_) => _login(),
+            decoration: InputDecoration(
+              labelText: '验证码',
+              prefixIcon: const CloudLoginFieldIcon(CupertinoIcons.shield),
+              suffixIcon: CloudLoginCodeAction(
+                child: TextButton(
+                  key: const ValueKey('wopan-sms-send'),
+                  onPressed: _busy || _seconds > 0 ? null : _send,
+                  child: Text(_seconds > 0 ? '${_seconds}s 后重发' : '获取验证码'),
+                ),
+              ),
+            ),
+          ),
+          CloudLoginAgreement(
+            checkboxKey: const ValueKey('wopan-sms-agreement'),
+            value: _agreed,
+            onChanged: _busy
+                ? null
+                : (value) => setState(() => _agreed = value == true),
+            onService: () => _policy('wocloud_web_service.html'),
+            onPrivacy: () => _policy('wocloud_web_privacy.html'),
+          ),
+
+          if (_error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 18),
+              child: Semantics(
+                liveRegion: true,
+                child: Text(
+                  _error,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            ),
+          FilledButton(
+            key: const ValueKey('wopan-sms-submit'),
+            onPressed: _busy ? null : _login,
+            child: _busy
+                ? SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: themeOnAccent(context),
+                    ),
+                  )
+                : const Text('登录 / 注册'),
+          ),
+          const SizedBox(height: 16),
+          if (_status.isNotEmpty)
+            Text(
+              _status,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: secondary(context), fontSize: 13),
+            ),
+          CloudLoginAlternatives(
+            children: [
+              TextButton.icon(
+                key: const ValueKey('native-login-web'),
+                onPressed: () => _switch(widget.onUseWeb),
+                icon: const Icon(CupertinoIcons.globe, size: 18),
+                label: const Text('网页登录'),
+              ),
+              TextButton.icon(
+                key: const ValueKey('native-login-manual'),
+                onPressed: () => _switch(widget.onUseManual),
+                icon: const Icon(CupertinoIcons.doc_on_clipboard, size: 18),
+                label: const Text('手动提交'),
+              ),
+            ],
+          ),
+        ],
       ),
     ),
   );

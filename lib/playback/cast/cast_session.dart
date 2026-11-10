@@ -42,7 +42,11 @@ class CastSession extends ChangeNotifier {
   ExternalPlaybackStream? _stream;
   Timer? _timer;
   Future<void>? _closing;
-  bool _closed = false, _polling = false, _ownsTransport = false;
+  bool _closed = false, _ownsTransport = false;
+  Future<void>? _refreshing;
+  bool _playWhenReady = true;
+  bool get playWhenReady => _playWhenReady;
+  bool get connectionLost => _failures >= 3;
   bool _controllerPlatform = false;
   bool get _ownsPlatform => managePlatform && !_controllerPlatform;
   void useControllerPlatform() {
@@ -82,8 +86,10 @@ class CastSession extends ChangeNotifier {
     required String title,
     required Duration position,
     required Duration duration,
+    bool playWhenReady = true,
   }) => _commands.run(() async {
     _check();
+    _playWhenReady = playWhenReady;
     _state = PlayerState(
       position: position,
       duration: duration,
@@ -133,6 +139,13 @@ class CastSession extends ChangeNotifier {
       }
     }
     _check();
+    // DLNA receivers often need Play before Seek. Pause after preparation when
+    // the handoff came from paused playback, rather than losing that intent.
+    if (!playWhenReady) {
+      await client.transport(device, 'Pause');
+      _check();
+      _state = _state.copyWith(playing: false);
+    }
     connected = true;
     _elapsed.start();
     _changed();
@@ -154,6 +167,7 @@ class CastSession extends ChangeNotifier {
     await client.transport(device, 'Play', {'Speed': '1'});
     _check();
     _state = _state.copyWith(playing: true, completed: false);
+    _playWhenReady = true;
     error = '';
     _changed();
   });
@@ -162,6 +176,7 @@ class CastSession extends ChangeNotifier {
     await client.transport(device, 'Pause');
     _check();
     _state = _state.copyWith(playing: false);
+    _playWhenReady = false;
     _changed();
   });
   Future<void> seek(Duration position) => _commands.run(() async {
@@ -194,9 +209,13 @@ class CastSession extends ChangeNotifier {
     _changed();
   });
 
-  Future<void> refresh() async {
-    if (_closed || _polling || !connected || transportReplaced) return;
-    _polling = true;
+  Future<void> refresh() {
+    if (_closed || !connected || transportReplaced) return Future.value();
+    // Return the pending poll so handoff/return can await its latest position.
+    return _refreshing ??= _refresh().whenComplete(() => _refreshing = null);
+  }
+
+  Future<void> _refresh() async {
     try {
       await _commands.run(() async {
         _check();
@@ -233,6 +252,10 @@ class CastSession extends ChangeNotifier {
           return;
         }
         final status = transport['CurrentTransportState'];
+        if (status == 'PLAYING') _playWhenReady = true;
+        if (status == 'PAUSED_PLAYBACK' || status == 'STOPPED') {
+          _playWhenReady = false;
+        }
         final duration = parseCastTime(position['TrackDuration']);
         final elapsed = parseCastTime(position['RelTime']);
         final total = duration != null && duration > Duration.zero
@@ -289,12 +312,9 @@ class CastSession extends ChangeNotifier {
       });
     } catch (_) {
       if (!_closed && ++_failures >= 3) {
-        error = '与电视连接中断，请检查 Wi-Fi，或断开后重新连接';
-        _state = _state.copyWith(playing: false, buffering: false);
+        error = '与电视连接中断，正在自动重试；请检查 Wi-Fi，或点击重新连接';
         _changed();
       }
-    } finally {
-      _polling = false;
     }
   }
 

@@ -3,6 +3,8 @@ package com.asterlink.app
 import android.app.Activity
 import android.app.PictureInPictureParams
 import android.content.Context
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.view.View
 import android.view.ViewGroup
 import androidx.core.graphics.Insets as CompatInsets
@@ -20,6 +22,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.nio.ByteBuffer
 
@@ -69,6 +72,22 @@ class PlaybackLifecycleTest {
     }
 
     @After fun cleanup() { bridge.detach(activity) }
+
+    @Test fun leanbackDevicesReportTelevisionAndIgnorePhoneRotation() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        shadowOf(context.packageManager).setSystemFeature(PackageManager.FEATURE_LEANBACK, true)
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        val values = messenger.call("begin", mapOf("session" to "tv-player", "video" to true)) as Map<*, *>
+        assertEquals(true, values["television"])
+        messenger.call("state", mapOf("session" to "tv-player", "playing" to true, "orientation" to "portrait"))
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, activity.requestedOrientation)
+    }
+
+    @Test fun televisionUiModeIsDetectedWithoutLeanbackHardware() {
+        RuntimeEnvironment.setQualifiers("television")
+        val values = messenger.call("begin", mapOf("session" to "tv-player", "video" to true)) as Map<*, *>
+        assertEquals(true, values["television"])
+    }
 
     @Test fun activityPauseReportsHiddenBeforeActivityStop() {
         bridge.paused(activity)

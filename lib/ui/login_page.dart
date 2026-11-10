@@ -23,6 +23,7 @@ import '../domain/tianyi_web_login.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/web_login_diagnostics.dart';
 import 'common.dart';
+import 'cloud_login_layout.dart';
 import 'loading_indicator.dart';
 import 'native_password_login_page.dart';
 import 'github_login_page.dart';
@@ -1965,119 +1966,99 @@ class _ManualLoginPageState extends State<ManualLoginPage> {
     final platform = widget.platform;
     return PageFrame(
       title: '${platform.shortName}登录信息',
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: SizedBox(
-          width: 560,
-          child: ListView(
-            padding: const EdgeInsets.all(24),
-            children: [
-              Row(
-                children: [
-                  PlatformMark(platform: platform),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Text(
-                      platform == CloudPlatform.baidu
-                          ? '登录信息保存在本机应用私有目录；下载和播放时，必要凭据会加密发送至取链服务，用你的账号获取下载地址'
-                          : '登录信息保存在本机应用私有目录',
-                      style: TextStyle(fontSize: 13, color: secondary(context)),
-                    ),
-                  ),
+      child: CloudLoginLayout(
+        platform: platform,
+        method: '手动提交登录信息',
+        children: [
+          if (platform == CloudPlatform.pan123)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 20),
+              child: SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('网页登录 Token')),
+                  ButtonSegment(value: true, label: Text('账号密码')),
                 ],
+                selected: {passwordMode},
+                onSelectionChanged: working
+                    ? null
+                    : (v) => setState(() {
+                        passwordMode = v.first;
+                        primary.clear();
+                        secondaryInput.clear();
+                      }),
               ),
-              const SizedBox(height: 24),
-              if (platform == CloudPlatform.pan123)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 20),
-                  child: SegmentedButton<bool>(
-                    segments: const [
-                      ButtonSegment(value: false, label: Text('网页登录 Token')),
-                      ButtonSegment(value: true, label: Text('账号密码')),
-                    ],
-                    selected: {passwordMode},
-                    onSelectionChanged: working
-                        ? null
-                        : (v) => setState(() {
-                            passwordMode = v.first;
-                            primary.clear();
-                            secondaryInput.clear();
-                          }),
-                  ),
-                ),
-              _field(
-                primary,
-                platform == CloudPlatform.ctfile
-                    ? 'Session Token'
-                    : platform == CloudPlatform.xunlei
-                    ? 'Access Token'
-                    : platform == CloudPlatform.pan123
-                    ? passwordMode
-                          ? '账号'
-                          : 'authorToken'
-                    : platform == CloudPlatform.aliyun
-                    ? 'Refresh Token 或登录凭据 JSON'
-                    : platform == CloudPlatform.wopan
-                    ? 'Refresh Token 或登录凭据 JSON'
-                    : platform == CloudPlatform.ilanzou ||
-                          platform == CloudPlatform.feijipan
-                    ? 'appToken 或登录凭据 JSON'
-                    : platform == CloudPlatform.guangya
-                    ? '登录凭据 JSON 或 Access Token'
-                    : '完整 Cookie',
-                secret: !passwordMode,
-              ),
-              if (platform == CloudPlatform.pan123 && passwordMode)
-                _field(secondaryInput, '密码', secret: true),
-              if (platform == CloudPlatform.baidu)
-                _field(appId, '应用 ID（可选，默认 ${BaiduConnector.defaultAppId}）'),
-              if (platform == CloudPlatform.c139)
-                _field(
-                  secondaryInput,
-                  'Authorization（Cookie 中缺失时填写）',
-                  secret: true,
-                ),
-              if (platform == CloudPlatform.xunlei) ...[
-                _field(secondaryInput, 'Refresh Token（可选）', secret: true),
-                _field(deviceId, 'Device ID（可选）'),
-                _field(clientId, 'Client ID'),
-                _field(clientSecret, 'Client Secret', secret: true),
-              ],
-              Text(
-                platform == CloudPlatform.xunlei ||
-                        platform == CloudPlatform.pan123 && passwordMode
-                    ? '验证成功后会保存账号信息。'
-                    : LoginCredentials.hint(platform),
-                style: TextStyle(fontSize: 12, color: secondary(context)),
-              ),
-              const SizedBox(height: 20),
-              if (error.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Text(error, style: const TextStyle(color: Colors.red)),
-                ),
-              FilledButton(
-                onPressed: working ? null : _save,
-                child: Text(working ? '正在验证…' : '验证并保存'),
-              ),
-              if (widget.onUsePassword != null)
-                TextButton.icon(
-                  key: const ValueKey('manual-login-password'),
-                  onPressed: () {
-                    widget.services.login.invalidate(platform);
-                    widget.onUsePassword!();
-                  },
-                  icon: const Icon(CupertinoIcons.keyboard, size: 18),
-                  label: Text(widget.nativeLoginLabel),
-                ),
-              if (working)
-                const Padding(
-                  padding: EdgeInsets.only(top: 16),
-                  child: LinearProgressIndicator(),
-                ),
-            ],
+            ),
+          _field(
+            primary,
+            platform == CloudPlatform.ctfile
+                ? 'Session Token'
+                : platform == CloudPlatform.xunlei
+                ? 'Access Token'
+                : platform == CloudPlatform.pan123
+                ? passwordMode
+                      ? '账号'
+                      : 'authorToken'
+                : platform == CloudPlatform.aliyun
+                ? 'Refresh Token 或登录凭据 JSON'
+                : platform == CloudPlatform.wopan
+                ? 'Refresh Token 或登录凭据 JSON'
+                : platform == CloudPlatform.ilanzou ||
+                      platform == CloudPlatform.feijipan
+                ? 'appToken 或登录凭据 JSON'
+                : platform == CloudPlatform.guangya
+                ? '登录凭据 JSON 或 Access Token'
+                : '完整 Cookie',
+            secret: !passwordMode,
           ),
-        ),
+          if (platform == CloudPlatform.pan123 && passwordMode)
+            _field(secondaryInput, '密码', secret: true),
+          if (platform == CloudPlatform.baidu)
+            _field(appId, '应用 ID（可选，默认 ${BaiduConnector.defaultAppId}）'),
+          if (platform == CloudPlatform.c139)
+            _field(
+              secondaryInput,
+              'Authorization（Cookie 中缺失时填写）',
+              secret: true,
+            ),
+          if (platform == CloudPlatform.xunlei) ...[
+            _field(secondaryInput, 'Refresh Token（可选）', secret: true),
+            _field(deviceId, 'Device ID（可选）'),
+            _field(clientId, 'Client ID'),
+            _field(clientSecret, 'Client Secret', secret: true),
+          ],
+          Text(
+            platform == CloudPlatform.xunlei ||
+                    platform == CloudPlatform.pan123 && passwordMode
+                ? '验证成功后会保存账号信息。'
+                : LoginCredentials.hint(platform),
+            style: TextStyle(fontSize: 12, color: secondary(context)),
+          ),
+          const SizedBox(height: 20),
+          if (error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(error, style: const TextStyle(color: Colors.red)),
+            ),
+          FilledButton(
+            onPressed: working ? null : _save,
+            child: Text(working ? '正在验证…' : '验证并保存'),
+          ),
+          if (widget.onUsePassword != null)
+            TextButton.icon(
+              key: const ValueKey('manual-login-password'),
+              onPressed: () {
+                widget.services.login.invalidate(platform);
+                widget.onUsePassword!();
+              },
+              icon: const Icon(CupertinoIcons.keyboard, size: 18),
+              label: Text(widget.nativeLoginLabel),
+            ),
+          if (working)
+            const Padding(
+              padding: EdgeInsets.only(top: 16),
+              child: LinearProgressIndicator(),
+            ),
+        ],
       ),
     );
   }
@@ -2232,135 +2213,131 @@ class _XunleiLoginPageState extends State<XunleiLoginPage> {
   @override
   Widget build(BuildContext context) => PageFrame(
     title: '迅雷网盘登录',
-    actions: [
-      TextButton(
-        key: const ValueKey('xunlei-login-web'),
-        onPressed: _useWeb,
-        child: const Text('网页登录'),
-      ),
-    ],
-    child: Align(
-      alignment: Alignment.topCenter,
-      child: SizedBox(
-        width: 560,
-        child: ListView(
-          padding: const EdgeInsets.all(24),
+    child: CloudLoginLayout(
+      platform: CloudPlatform.xunlei,
+      method: smsMode ? '手机号登录' : '账号密码登录',
+      children: [
+        SegmentedButton<bool>(
+          segments: const [
+            ButtonSegment(value: false, label: Text('账号密码')),
+            ButtonSegment(value: true, label: Text('短信登录')),
+          ],
+          selected: {smsMode},
+          onSelectionChanged: working
+              ? null
+              : (v) => setState(() {
+                  smsMode = v.first;
+                  error = '';
+                }),
+        ),
+        const SizedBox(height: 24),
+        if (!smsMode) ...[
+          TextField(
+            key: const ValueKey('xunlei-login-username'),
+            controller: username,
+            enabled: !working,
+            decoration: const InputDecoration(
+              labelText: '手机号 / 邮箱',
+              prefixIcon: CloudLoginFieldIcon(CupertinoIcons.person),
+            ),
+            keyboardType: TextInputType.emailAddress,
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            key: const ValueKey('xunlei-login-password'),
+            controller: password,
+            enabled: !working,
+            obscureText: !visible,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: InputDecoration(
+              labelText: '密码',
+              prefixIcon: const CloudLoginFieldIcon(CupertinoIcons.shield),
+              suffixIcon: IconButton(
+                onPressed: () => setState(() => visible = !visible),
+                icon: Icon(
+                  visible ? CupertinoIcons.eye_slash : CupertinoIcons.eye,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          FilledButton(
+            key: const ValueKey('xunlei-login-submit'),
+            onPressed: working ? null : _login,
+            child: const Text('登录'),
+          ),
+        ] else ...[
+          TextField(
+            controller: mobile,
+            enabled: !working,
+            keyboardType: TextInputType.phone,
+            decoration: const InputDecoration(
+              labelText: '账号绑定的手机号',
+              prefixIcon: CloudLoginFieldIcon(
+                CupertinoIcons.device_phone_portrait,
+              ),
+            ),
+            onChanged: (_) {
+              challenge = null;
+              code.clear();
+            },
+          ),
+          const SizedBox(height: 16),
+
+          TextField(
+            controller: code,
+            enabled: !working,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: '短信验证码',
+              prefixIcon: const CloudLoginFieldIcon(CupertinoIcons.shield),
+              suffixIcon: CloudLoginCodeAction(
+                child: TextButton(
+                  onPressed: working || cooldown > 0 ? null : _send,
+                  child: Text(cooldown > 0 ? '$cooldown 秒后重新发送' : '发送验证码'),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          FilledButton(
+            onPressed: working || challenge == null
+                ? null
+                : () => _login(sms: true),
+            child: const Text('验证并登录'),
+          ),
+          if (verification?.url.isNotEmpty == true)
+            OutlinedButton(
+              onPressed: working ? null : _verifyWeb,
+              child: const Text('打开网页安全验证'),
+            ),
+        ],
+        if (working)
+          const Padding(
+            padding: EdgeInsets.only(top: 20),
+            child: LinearProgressIndicator(),
+          ),
+        if (error.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 20),
+            child: Text(
+              error,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
+
+        CloudLoginAlternatives(
           children: [
-            const Row(
-              children: [
-                PlatformMark(platform: CloudPlatform.xunlei),
-                SizedBox(width: 14),
-                Expanded(
-                  child: Text(
-                    '登录后浏览和管理网盘文件',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 28),
-            SegmentedButton<bool>(
-              segments: const [
-                ButtonSegment(value: false, label: Text('账号密码')),
-                ButtonSegment(value: true, label: Text('短信登录')),
-              ],
-              selected: {smsMode},
-              onSelectionChanged: working
-                  ? null
-                  : (v) => setState(() {
-                      smsMode = v.first;
-                      error = '';
-                    }),
-            ),
-            const SizedBox(height: 24),
-            if (!smsMode) ...[
-              TextField(
-                key: const ValueKey('xunlei-login-username'),
-                controller: username,
-                enabled: !working,
-                decoration: const InputDecoration(labelText: '手机号 / 邮箱'),
-                keyboardType: TextInputType.emailAddress,
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                key: const ValueKey('xunlei-login-password'),
-                controller: password,
-                enabled: !working,
-                obscureText: !visible,
-                autocorrect: false,
-                enableSuggestions: false,
-                decoration: InputDecoration(
-                  labelText: '密码',
-                  suffixIcon: IconButton(
-                    onPressed: () => setState(() => visible = !visible),
-                    icon: Icon(
-                      visible ? CupertinoIcons.eye_slash : CupertinoIcons.eye,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              FilledButton(
-                key: const ValueKey('xunlei-login-submit'),
-                onPressed: working ? null : _login,
-                child: const Text('登录'),
-              ),
-            ] else ...[
-              TextField(
-                controller: mobile,
-                enabled: !working,
-                keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(labelText: '账号绑定的手机号'),
-                onChanged: (_) {
-                  challenge = null;
-                  code.clear();
-                },
-              ),
-              const SizedBox(height: 16),
-              OutlinedButton(
-                onPressed: working || cooldown > 0 ? null : _send,
-                child: Text(cooldown > 0 ? '$cooldown 秒后重新发送' : '发送验证码'),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: code,
-                enabled: !working,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: '短信验证码'),
-              ),
-              const SizedBox(height: 20),
-              FilledButton(
-                onPressed: working || challenge == null
-                    ? null
-                    : () => _login(sms: true),
-                child: const Text('验证并登录'),
-              ),
-              if (verification?.url.isNotEmpty == true)
-                OutlinedButton(
-                  onPressed: working ? null : _verifyWeb,
-                  child: const Text('打开网页安全验证'),
-                ),
-            ],
-            if (working)
-              const Padding(
-                padding: EdgeInsets.only(top: 20),
-                child: LinearProgressIndicator(),
-              ),
-            if (error.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 20),
-                child: Text(error, style: const TextStyle(color: Colors.red)),
-              ),
-            const SizedBox(height: 20),
-            Text(
-              smsMode
-                  ? '短信需由你主动发送并填写验证码。'
-                  : '账号密码保存在本机应用私有目录，下次自动保持登录，需要安全验证时会提示你完成。',
-              style: TextStyle(fontSize: 12, color: secondary(context)),
+            TextButton.icon(
+              key: const ValueKey('xunlei-login-web'),
+              onPressed: _useWeb,
+              icon: const Icon(CupertinoIcons.globe, size: 18),
+              label: const Text('网页登录'),
             ),
           ],
         ),
-      ),
+      ],
     ),
   );
 }
