@@ -73,7 +73,7 @@ void main() {
           await tester.tap(find.text(p.label));
           await tester.pumpAndSettle();
           if (p == CloudPlatform.guangya || p == CloudPlatform.wopan) {
-            expect(find.text('手机号验证码登录'), findsOneWidget);
+            expect(find.text('手机号登录'), findsOneWidget);
             expect(
               find.byKey(ValueKey('${p.name}-sms-mobile')),
               findsOneWidget,

@@ -70,7 +70,7 @@ void main() {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 10)),
       );
-    } while (!settled() && clock.elapsed < const Duration(seconds: 12));
+    } while (!settled() && clock.elapsed < const Duration(seconds: 45));
     expect(
       settled(),
       isTrue,

@@ -412,9 +412,17 @@ void main() {
     await tester.tap(find.text('登录测试'));
     await tester.pumpAndSettle();
     if (cloud == CloudPlatform.xunlei) {
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('xunlei-login-web')),
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('xunlei-login-web')));
       await tester.pumpAndSettle();
     } else if (cloud == CloudPlatform.ctfile || cloud == CloudPlatform.aliyun) {
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('native-login-web')),
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('native-login-web')));
       await tester.pumpAndSettle();
     }
@@ -1627,6 +1635,10 @@ void main() {
             );
             await tester.tap(find.byKey(const ValueKey('native-login-submit')));
           } else {
+            await tester.ensureVisible(
+              find.byKey(const ValueKey('native-login-web')),
+            );
+            await tester.pumpAndSettle();
             await tester.tap(find.byKey(const ValueKey('native-login-web')));
           }
           await tester.pumpAndSettle();
