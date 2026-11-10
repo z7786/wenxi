@@ -261,13 +261,25 @@ void main() {
         isNot(contains('saved')),
       );
       await select(tester, 'completed-a');
+      final originalPath = services.downloads.task('completed-a')!.savedPath;
       await tester.tap(find.byKey(const Key('downloads-batch-move')));
       await waitFor(
         tester,
-        () =>
-            services.downloads.task('completed-a')!.savedPath ==
-            p.join(files.directory.path, 'completed-a (1).mp4'),
+        () => services.downloads.task('completed-a')!.savedPath != originalPath,
       );
+      final moved = File(services.downloads.task('completed-a')!.savedPath!);
+      expect(p.basename(moved.path), 'completed-a (1).mp4');
+      await tester.runAsync(() async {
+        expect(
+          p.equals(
+            p.dirname(await moved.resolveSymbolicLinks()),
+            await files.directory.resolveSymbolicLinks(),
+          ),
+          isTrue,
+        );
+        expect(await moved.readAsBytes(), [1, 2, 3, 4]);
+        expect(await File(originalPath!).exists(), isFalse);
+      });
       expect(
         File(p.join(files.directory.path, 'completed-a (1).mp4')).existsSync(),
         isTrue,
