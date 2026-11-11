@@ -101,41 +101,87 @@ void main() {
     test(
       'prepared TV stream uses bounded parallel ranges, respects limit $limit and cancels abandoned reads',
       () async {
-        final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-        addTearDown(() => origin.close(force: true));
+        final origin = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(origin.close);
         const total = 8 * 1024 * 1024;
         var active = 0, peak = 0, upstreamBytes = 0;
-        origin.listen((request) async {
-          active++;
-          if (active > peak) peak = active;
-          try {
-            expect(request.headers.value('Cookie'), 'account=private');
-            final range = RegExp(
-              r'bytes=(\d+)-(\d+)',
-            ).firstMatch(request.headers.value('Range')!)!;
-            final start = int.parse(range[1]!),
-                end = int.parse(range[2]!).clamp(0, total - 1);
-            request.response.statusCode = 206;
-            request.response.headers.set(
-              'content-range',
-              'bytes $start-$end/$total',
-            );
-            request.response.headers.contentType = ContentType('video', 'mp4');
-            request.response.contentLength = end - start + 1;
-            for (var at = start; at <= end; at += 16 * 1024) {
-              final size = (end - at + 1).clamp(0, 16 * 1024);
-              request.response.add(List.filled(size, 7));
-              upstreamBytes += size;
-              await request.response.flush();
-              await Future<void>.delayed(const Duration(milliseconds: 3));
+        final sockets = <Socket>[];
+        final tasks = <Future<void>>[];
+        origin.listen((socket) {
+          sockets.add(socket);
+          tasks.add(() async {
+            final headers = Completer<String>();
+            var input = '', disconnected = false, counted = false;
+            void ended() {
+              disconnected = true;
+              if (counted) {
+                active--;
+                counted = false;
+              }
+              if (!headers.isCompleted) headers.complete('');
             }
-          } catch (_) {
-          } finally {
-            active--;
+
+            final subscription = socket.listen(
+              (bytes) {
+                input += latin1.decode(bytes);
+                if (!headers.isCompleted && input.contains('\r\n\r\n')) {
+                  headers.complete(input);
+                }
+              },
+              onDone: ended,
+              onError: (Object _) => ended(),
+            );
             try {
-              await request.response.close();
-            } catch (_) {}
+              final request = await headers.future;
+              if (disconnected) return;
+              expect(
+                request.toLowerCase(),
+                contains('cookie: account=private'),
+              );
+              final range = RegExp(
+                r'range: bytes=(\d+)-(\d+)',
+                caseSensitive: false,
+              ).firstMatch(request)!;
+              final start = int.parse(range[1]!),
+                  end = int.parse(range[2]!).clamp(0, total - 1);
+              active++;
+              counted = true;
+              if (active > peak) peak = active;
+              socket.add(
+                ascii.encode(
+                  'HTTP/1.1 206 Partial Content\r\n'
+                  'Content-Range: bytes $start-$end/$total\r\n'
+                  'Content-Type: video/mp4\r\n'
+                  'Content-Length: ${end - start + 1}\r\n'
+                  'Connection: close\r\n\r\n',
+                ),
+              );
+              for (
+                var at = start;
+                at <= end && !disconnected;
+                at += 16 * 1024
+              ) {
+                final size = (end - at + 1).clamp(0, 16 * 1024);
+                socket.add(List.filled(size, 7));
+                upstreamBytes += size;
+                await socket.flush();
+                if (at + size <= end) {
+                  await Future<void>.delayed(const Duration(milliseconds: 3));
+                }
+              }
+            } catch (_) {
+            } finally {
+              ended();
+              await subscription.cancel();
+              socket.destroy();
+            }
+          }());
+        });
+        addTearDown(() async {
+          for (final socket in sockets) {
+            socket.destroy();
           }
+          await Future.wait(tasks);
         });
         final stream = ExternalPlaybackStream.lan(
           DownloadSpec(
