@@ -1235,13 +1235,19 @@ void main() {
       expect(origin.peak, lessThanOrEqualTo(4));
       expect(proxy.cachedBytes, lessThanOrEqualTo(32768));
       expect(origin.cookies, everyElement('fixture=private'));
-      final count = origin.calls.length;
+      // Speculative reads beyond the consumed range may start while this
+      // request closes. Only overlapping requests indicate a cache miss.
+      bool overlapsSeek((int, int) range) =>
+          range.$1 <= 175000 && range.$2 >= 172100;
+      final count = origin.calls.where(overlapsSeek).length;
       expect(await read(172100, 175000), origin.bytes.sublist(172100, 175001));
       expect(
-        origin.calls.length,
+        origin.calls.where(overlapsSeek).length,
         count,
         reason: 'A nearby seek reuses bounded cached segments',
       );
+      await until(() => proxy.activeRequests == 0);
+      final allRequests = origin.calls.length;
       final request = await client.getUrl(
         proxy.uri.replace(path: '/untrusted'),
       );
@@ -1250,7 +1256,7 @@ void main() {
       expect(response.headers.value('cookie'), isNull);
       expect(response.headers.value('location'), isNull);
       await response.drain<void>();
-      expect(origin.calls.length, count);
+      expect(origin.calls.length, allRequests);
     },
   );
 
