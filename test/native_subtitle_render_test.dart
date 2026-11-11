@@ -18,6 +18,79 @@ void main() {
     '.local/player-test/libmpv/libmpv-2.dll',
   ].whereType<String>().where((path) => File(path).existsSync()).firstOrNull;
 
+  test(
+    'Windows runtime decodes and renders embedded PGS bitmap subtitles',
+    () async {
+      MediaKit.ensureInitialized(libmpv: library);
+      final player = Player(
+        configuration: const PlayerConfiguration(libass: true, vo: 'null'),
+      );
+      final backend = MediaKitBackend(video: false, player: player);
+      addTearDown(backend.close);
+      final native = player.platform as NativePlayer;
+      await native.setProperty('ao', 'null');
+      await native.setProperty('vid', 'auto');
+      await native.setProperty('hwdec', 'no');
+      final errors = <String>[];
+      final subscription = player.stream.log.listen((line) {
+        if ({'error', 'fatal'}.contains(line.level)) errors.add(line.text);
+      });
+      addTearDown(subscription.cancel);
+      await backend.open(
+        DownloadSpec(
+          url: File('test/fixtures/player-pgs.mkv').absolute.path,
+          fileName: 'player-pgs.mkv',
+        ),
+        Duration.zero,
+      );
+      await backend.play();
+      await until(() => player.state.position.inMilliseconds >= 800);
+      await backend.pause();
+      final track = player.state.tracks.subtitle.firstWhere(
+        (track) => track.codec == 'hdmv_pgs_subtitle',
+      );
+      expect(player.state.track.subtitle.id, isNot('no'));
+      Future<int> greenPixels() async {
+        final png = await backend.screenshot(includeSubtitles: true);
+        expect(png, isNotNull);
+        final codec = await ui.instantiateImageCodec(png!);
+        final frame = (await codec.getNextFrame()).image;
+        final pixels = (await frame.toByteData())!.buffer.asUint8List();
+        var green = 0;
+        for (var i = 0; i < pixels.length; i += 4) {
+          if (pixels[i + 1] > pixels[i] + 60 &&
+              pixels[i + 1] > pixels[i + 2] + 60) {
+            green++;
+          }
+        }
+        frame.dispose();
+        codec.dispose();
+        return green;
+      }
+
+      expect(await greenPixels(), greaterThan(2000));
+      await backend.setSubtitleTrack(SubtitleTrack.no());
+      expect(await greenPixels(), 0);
+      await backend.setSubtitleTrack(track);
+      // Selecting a bitmap track while paused may need the next decoded
+      // packet before the PGS display set is restored.
+      await backend.play();
+      await until(() => player.state.position.inMilliseconds >= 1400);
+      await backend.pause();
+      expect(await greenPixels(), greaterThan(2000));
+      expect(
+        errors.where(
+          (line) => line.contains('Could not find subtitle decoder'),
+        ),
+        isEmpty,
+      );
+      expect(backend.failure, isNull);
+    },
+    skip: library == null
+        ? 'Requires the pinned Windows libmpv runtime.'
+        : false,
+  );
+
   for (final source in ['system', 'cache', 'late-download']) {
     test(
       'Native libass renders Chinese ASS from $source without implicit system fonts or a Flutter overlay',
@@ -256,6 +329,9 @@ Dialogue: 0,0:00:00.00,0:00:08.00,Default,,0,0,0,,{\an7\pos(16,20)}原生中文�
       final native = player.platform as NativePlayer;
       await native.setProperty('ao', 'null');
       await native.setProperty('vid', 'auto');
+      // Measure box opacity in RGB instead of clipping saturated colors
+      // through the video's limited-range YUV planes.
+      await native.setProperty('vf', 'format=fmt=rgb24');
       await backend.open(
         DownloadSpec(
           url: File('test/fixtures/player-sample.mkv').absolute.path,
@@ -298,6 +374,16 @@ Dialogue: 0,0:00:00.00,0:00:08.00,Default,,0,0,0,,{\an7\pos(16,20)}原生中文�
       }
 
       final none = await pixels('no-background');
+      // Compare box opacity against the video itself. The no-background
+      // subtitle image also contains text outlines underneath the box.
+      final cleanPng = (await backend.screenshot())!;
+      final cleanCodec = await ui.instantiateImageCodec(cleanPng);
+      final cleanFrame = (await cleanCodec.getNextFrame()).image;
+      final clean = List<int>.of(
+        (await cleanFrame.toByteData())!.buffer.asUint8List(),
+      );
+      cleanFrame.dispose();
+      cleanCodec.dispose();
       expect(double.parse(await native.getProperty('sub-shadow-offset')), 0);
       expect(double.parse(await native.getProperty('sub-border-size')), 4);
       await backend.setSubtitlePresentation(
@@ -334,7 +420,7 @@ Dialogue: 0,0:00:00.00,0:00:08.00,Default,,0,0,0,,{\an7\pos(16,20)}原生中文�
         }
         backgroundPixels++;
         for (var c = 0; c < 3; c++) {
-          final expected = (opaque[i + c] + none[i + c]) / 2;
+          final expected = (opaque[i + c] + clean[i + c]) / 2;
           opacityError += (half[i + c] - expected).abs();
         }
       }

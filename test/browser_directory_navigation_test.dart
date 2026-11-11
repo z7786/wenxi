@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/ui/browser_page.dart';
+import 'package:asterlink/ui/skeleton_loading.dart';
 import 'browser_test_support.dart';
 
 class _DirectoryConnector extends BrowserTestConnector {
@@ -74,6 +77,41 @@ Future<void> back(WidgetTester tester) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets(
+    'Windows back mouse returns one directory and restores its position',
+    (tester) async {
+      final fixture = (await tester.runAsync(BrowserUiFixture.create))!;
+      final provider = _DirectoryConnector();
+      fixture.services.cloud.connectors[CloudPlatform.tianyi] = provider;
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      try {
+        await fixture.render(tester);
+        await scrollDown(tester);
+        final offset = controller(tester).offset;
+        await tester.tap(visibleFolder());
+        await settle(tester);
+        final mouse = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          buttons: kBackMouseButton,
+        );
+        await mouse.down(tester.getCenter(fileList()));
+        await mouse.up();
+        await settle(tester);
+        expect(controller(tester).offset, closeTo(offset, .01));
+        expect(provider.pages, hasLength(2));
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+        await tester.runAsync(fixture.close);
+      }
+    },
+    skip: !Platform.isWindows,
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
 
   for (final view in ['list', 'grid']) {
     testWidgets(
@@ -248,6 +286,45 @@ void main() {
       } finally {
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pumpAndSettle();
+        await tester.runAsync(fixture.close);
+      }
+    },
+  );
+
+  testWidgets(
+    'Refreshing retains visible files while a new directory uses the skeleton',
+    (tester) async {
+      final fixture = (await tester.runAsync(BrowserUiFixture.create))!;
+      final provider = _DirectoryConnector();
+      fixture.services.cloud.connectors[CloudPlatform.tianyi] = provider;
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      try {
+        await fixture.render(tester);
+        final refresh = provider.pending['personal-root'] =
+            Completer<CloudFilePage>();
+        await tester.tap(find.byTooltip('刷新文件'));
+        await tester.pump(const Duration(milliseconds: 120));
+        expect(find.text('目录 000'), findsOneWidget);
+        expect(find.byType(AppSkeleton), findsNothing);
+        refresh.complete(CloudFilePage(provider.files('personal-root', 0, 90)));
+        provider.pending.remove('personal-root');
+        await settle(tester);
+        final child = provider.pending['personal-root-folder-0'] =
+            Completer<CloudFilePage>();
+        await tester.tap(find.text('目录 000'));
+        await tester.pump(const Duration(milliseconds: 120));
+        expect(find.byKey(const Key('browser-files-skeleton')), findsOneWidget);
+        child.complete(
+          CloudFilePage(provider.files('personal-root-folder-0', 0, 3)),
+        );
+        await settle(tester);
+        expect(find.byType(AppSkeleton), findsNothing);
+        expect(find.text('目录 002'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
         await tester.runAsync(fixture.close);
       }
     },

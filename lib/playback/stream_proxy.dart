@@ -5,9 +5,12 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import '../domain/models.dart';
 import '../domain/downloads.dart';
+import '../domain/download_network_policy.dart';
+import '../download/download_playback_cache.dart';
 import '../domain/playback.dart';
 import '../core/json.dart';
 import 'playback_failure.dart';
+import 'playback_range_plan.dart';
 
 class _ReadCancelled implements Exception {}
 
@@ -19,9 +22,11 @@ class _Reader {
     this.generation,
     this.byteStart,
     this.byteEnd,
+    this.plan,
   ) : cursor = first;
   final int first, last, generation;
   final int byteStart, byteEnd;
+  final PlaybackRangePlan plan;
   final bool metadata;
   int cursor;
   final cancelled = Completer<void>();
@@ -152,6 +157,7 @@ class PlaybackStreamProxy {
     this.warmupBytes = 256 * 1024,
     this.onFailure,
     this.readCache,
+    this.cacheSnapshot,
   }) : _connections = _limitConnections(source, connections),
        _maxCacheBytes = maxCacheBytes {
     assert(chunkBytes > 0 && maxCacheBytes >= chunkBytes && warmupBytes >= 0);
@@ -165,9 +171,11 @@ class PlaybackStreamProxy {
     RemoteIdentity identity,
   )?
   readCache;
+  final Future<DownloadReadableState?> Function()? cacheSnapshot;
   final int chunkBytes, warmupBytes;
   int _maxCacheBytes;
   int get maxCacheBytes => _maxCacheBytes;
+  Future<bool> resizeCacheAsync(int bytes) async => resizeCache(bytes);
   bool resizeCache(int bytes) {
     if (_closed || bytes < chunkBytes || !_makeRoom(0, limit: bytes)) {
       return false;
@@ -226,6 +234,8 @@ class PlaybackStreamProxy {
   bool _seekPending = false;
   bool _seekReadInterrupted = false;
   bool _interleavedReads = false;
+  int _alternations = 0;
+  bool _interleavedDeficit = false;
   int? _lastMediaFirst, _previousMediaFirst;
   final _probeWatch = Stopwatch();
   String _probeResult = 'not_started';
@@ -243,6 +253,7 @@ class PlaybackStreamProxy {
   int get cachedBytes => _cachedBytes;
   int get bufferedBytes => _cachedBytes + _reservedBytes;
   int get activeRequests => _active;
+  int get requestCapacity => math.max(1, maxCacheBytes ~/ chunkBytes);
   int get receivedBytes => _receivedBytes;
   int get segmentFailures => _segmentFailures;
   int? get lastUpstreamStatus => _lastUpstreamStatus;
@@ -284,6 +295,7 @@ class PlaybackStreamProxy {
     'connectionLimit': connections,
     'fileBytes': _length,
     'interleavedReads': _interleavedReads,
+    'interleavedThroughputDeficit': _interleavedDeficit,
   };
   Uri get uri => Uri.parse('http://127.0.0.1:${_server!.port}$_path');
   int get _budget => math.min(
@@ -303,11 +315,12 @@ class PlaybackStreamProxy {
     math.max(1, maxCacheBytes ~/ chunkBytes),
   );
 
-  static HttpClient _client(int connections) => HttpClient()
-    ..autoUncompress = false
-    ..connectionTimeout = const Duration(seconds: 10)
-    ..idleTimeout = const Duration(seconds: 10)
-    ..maxConnectionsPerHost = connections;
+  HttpClient _client(int connections) =>
+      (source.networkPolicy?.client() ?? HttpClient())
+        ..autoUncompress = false
+        ..connectionTimeout = const Duration(seconds: 10)
+        ..idleTimeout = const Duration(seconds: 10)
+        ..maxConnectionsPerHost = connections;
 
   /// A small Range probe proves byte addressing and file identity. Ignored
   /// ranges, encoded responses and HLS/DASH keep the original media source.
@@ -325,8 +338,17 @@ class PlaybackStreamProxy {
     _probeResult = 'probing';
     _probeWatch.start();
     _upstream = _sourceUri = parsed;
+    try {
+      source.networkPolicy?.checkedUrl(source.url);
+    } on DownloadNetworkPolicyException catch (error) {
+      throw PlaybackFailure(error.message, PlaybackFailureKind.restricted);
+    }
     _headers = Map.of(source.headers);
     _sourceHeaders = Map.of(_headers);
+    // The downloader has already verified these ranges and keeps the payload
+    // leased. Do not require an expiring cloud URL to re-probe cached media.
+    if (await _startFromCache()) return true;
+    if (_closed || _playlistMime != null) return false;
     final client = _probeClient = _client(1);
     try {
       final result = await _getRange(client, 0, 1023, conditional: false);
@@ -357,6 +379,15 @@ class PlaybackStreamProxy {
         } else {
           await response.listen((_) {}).cancel();
         }
+        if (_playlistMime == null && cacheSnapshot != null) {
+          if (await _startFromCache()) return true;
+          if (!_closed) {
+            throw const PlaybackFailure(
+              '下载片段尚不可读取，当前地址不支持分段，请稍后重试',
+              PlaybackFailureKind.network,
+            );
+          }
+        }
         return false;
       }
       final prefix = await _readBody(response, range.$2 + 1);
@@ -383,33 +414,158 @@ class PlaybackStreamProxy {
       _headers = result.$3;
       _etag = response.headers.value(HttpHeaders.etagHeader);
       _modified = response.headers.value(HttpHeaders.lastModifiedHeader);
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      if (_closed) {
-        _probeResult = 'closed';
-        await server.close(force: true);
-        return false;
-      }
-      _server = server;
-      _streamWatch.start();
-      _fetchClient = _client(connections);
-      server.listen((request) {
-        final task = _serve(request);
-        _handlers.add(task);
-        unawaited(task.whenComplete(() => _handlers.remove(task)));
-      }, onError: (Object _) {});
       _probeResult = 'ready';
-      return true;
-    } on PlaybackFailure {
+      return await _bind();
+    } on DownloadNetworkPolicyException catch (error) {
+      _probeResult = 'network_restricted';
+      throw PlaybackFailure(error.message, PlaybackFailureKind.restricted);
+    } on PlaybackFailure catch (failure) {
+      if (failure.refreshable && await _startFromCache()) return true;
       _probeResult = 'http_error';
       rethrow;
     } catch (error) {
       _probeResult = _closed ? 'closed' : 'probe_failed';
       _probeErrorType = '${error.runtimeType}';
+      if (!_closed && cacheSnapshot != null) {
+        if (await _startFromCache()) return true;
+        throw const PlaybackFailure(
+          '下载片段尚不可读取，远端连接失败，请稍后重试',
+          PlaybackFailureKind.network,
+        );
+      }
       return false;
     } finally {
       _probeWatch.stop();
       client.close(force: true);
       _probeClient = null;
+    }
+  }
+
+  Future<bool> _startFromCache() async {
+    if (_closed || cacheSnapshot == null || readCache == null) return false;
+    final DownloadReadableState? state;
+    try {
+      state = await cacheSnapshot!();
+    } on AppException catch (error) {
+      throw PlaybackFailure(error.message, PlaybackFailureKind.paused);
+    }
+    if (_closed || state == null || !state.identity.canResume(state.identity)) {
+      return false;
+    }
+    if (source.expectedSize > 0 &&
+        source.expectedSize != state.identity.total) {
+      throw const PlaybackFailure(
+        '下载文件长度已变化，请重新添加下载',
+        PlaybackFailureKind.changed,
+      );
+    }
+    _length = state.identity.total;
+    _etag = state.identity.etag;
+    _modified = state.identity.modified;
+    if (state.ranges.any((range) => range.$1 == 0 && range.$2 > 0)) {
+      final prefix = await readCache!(
+        0,
+        math.min(1023, _length - 1),
+        state.identity,
+      );
+      _playlistMime = _detectPlaylist(prefix ?? const [], null);
+      if (_playlistMime != null) return false;
+    }
+    _probeWatch.stop();
+    _probeResult = 'download_cache';
+    return _bind();
+  }
+
+  Future<bool> _bind() async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    if (_closed) {
+      await server.close(force: true);
+      return false;
+    }
+    _server = server;
+    _streamWatch.start();
+    _fetchClient = _client(connections);
+    server.listen((request) {
+      final task = _serve(request);
+      _handlers.add(task);
+      unawaited(task.whenComplete(() => _handlers.remove(task)));
+    }, onError: (Object _) {});
+    return true;
+  }
+
+  Future<void> _reuseCache(_Segment segment) async {
+    while (segment.received < segment.size) {
+      segment.check();
+      Uint8List? bytes;
+      try {
+        bytes = await readCache?.call(
+          segment.start + segment.received,
+          segment.start + segment.size - 1,
+          RemoteIdentity(_length, _etag, _modified),
+        );
+      } on AppException catch (error) {
+        throw PlaybackFailure(error.message, PlaybackFailureKind.paused);
+      }
+      segment.check();
+      if (bytes == null || bytes.isEmpty) return;
+      if (bytes.length > segment.size - segment.received) {
+        throw const PlaybackFailure(
+          '下载缓存长度异常，请重试播放',
+          PlaybackFailureKind.changed,
+        );
+      }
+      final buffer = segment.buffer ??= Uint8List(segment.size);
+      buffer.setRange(segment.received, segment.received + bytes.length, bytes);
+      _reusedBytes += bytes.length;
+      segment.advance(segment.received + bytes.length);
+    }
+  }
+
+  Future<int> _missingEnd(_Segment segment) async {
+    final start = segment.start + segment.received;
+    var end = segment.start + segment.size - 1;
+    if (cacheSnapshot == null || readCache == null) return end;
+    final DownloadReadableState? state;
+    try {
+      state = await cacheSnapshot!();
+    } on AppException catch (error) {
+      throw PlaybackFailure(error.message, PlaybackFailureKind.paused);
+    }
+    segment.check();
+    if (state == null ||
+        !state.identity.canResume(RemoteIdentity(_length, _etag, _modified))) {
+      return end;
+    }
+    for (final range in state.ranges) {
+      if (range.$2 > range.$1 && range.$1 > start && range.$1 <= end) {
+        end = range.$1 - 1;
+      }
+    }
+    return end;
+  }
+
+  Future<void> _waitForCache(_Segment segment) async {
+    // A denied/failed playback connection may still have a live download
+    // filling this hole. Wait briefly, with immediate seek/close cancellation.
+    final deadline = DateTime.now().add(const Duration(seconds: 15));
+    while (segment.received < segment.size &&
+        DateTime.now().isBefore(deadline)) {
+      final wake = Completer<void>();
+      final timer = Timer(const Duration(milliseconds: 250), wake.complete);
+      void cancel() {
+        timer.cancel();
+        if (!wake.isCompleted) wake.completeError(_ReadCancelled());
+      }
+
+      segment.cancelBody = cancel;
+      try {
+        segment.check();
+        await wake.future;
+      } finally {
+        timer.cancel();
+        segment.cancelBody = null;
+      }
+      await _reuseCache(segment);
     }
   }
 
@@ -428,6 +584,7 @@ class PlaybackStreamProxy {
     for (var redirects = 0; redirects <= 5; redirects++) {
       if (_closed) throw _ReadCancelled();
       segment?.check();
+      source.networkPolicy?.checkedUrl(url.toString());
       final request = await client.getUrl(url);
       if (segment != null) {
         segment.request = request;
@@ -474,12 +631,15 @@ class PlaybackStreamProxy {
         throw const HttpException('Invalid video redirect');
       }
       final next = url.resolve(location);
+      source.networkPolicy?.checkedUrl(next.toString());
       if (!{'http', 'https'}.contains(next.scheme) ||
           next.userInfo.isNotEmpty ||
           (url.scheme == 'https' && next.scheme != 'https')) {
         throw const HttpException('Invalid video redirect');
       }
-      if (next.scheme != url.scheme ||
+      if (source.networkPolicy != null) {
+        headers = DownloadNetworkPolicy.redirectedHeaders(url, next, headers);
+      } else if (next.scheme != url.scheme ||
           next.host != url.host ||
           next.port != url.port) {
         headers = Map.of(headers)
@@ -632,7 +792,9 @@ class PlaybackStreamProxy {
               );
               received += data.length;
               onBytes?.call(data.length);
-              segment?.advance(offset + received);
+              // Validate each hole's whole HTTP body before exposing its last
+              // byte, even when cached bytes follow it in the same segment.
+              segment?.advance(offset + math.min(received, expected - 1));
             }
           },
           onError: fail,
@@ -641,6 +803,7 @@ class PlaybackStreamProxy {
             if (received != expected) {
               done.completeError(const HttpException('Video range truncated'));
             } else {
+              segment?.advance(offset + received);
               done.complete(bytes);
             }
           },
@@ -688,9 +851,14 @@ class PlaybackStreamProxy {
   /// cutting it here can leave the player buffering after that cache runs out.
   void prepareSeek() {
     if (_closed) return;
+    _interleavedReads = _interleavedDeficit = false;
+    _alternations = 0;
+    _lastMediaFirst = _previousMediaFirst = null;
     _seekPending = true;
     _seekReadInterrupted = false;
   }
+
+  Future<void> prepareSeekAsync() async => prepareSeek();
 
   /// Wake a demuxer whose seek is waiting inside its current HTTP read. Keep
   /// upstream requests and partial cache bytes for the replacement read.
@@ -724,10 +892,29 @@ class PlaybackStreamProxy {
     // Non-interleaved MP4 stores audio far from video. A deep window for each
     // short-lived HTTP read repeatedly speculates into the wrong track.
     // Keep one nearby chunk ready per region within the same session budget.
-    if (_interleavedReads) return math.min(2, _budget);
+    if (_interleavedReads && !_interleavedDeficit) return math.min(2, _budget);
     // Download-backed playback leaves preloading to its download task.
     if (readCache != null || _deliveredBytes < warmupBytes) return _budget;
     return math.max(1, maxCacheBytes ~/ chunkBytes);
+  }
+
+  /// A short interleaved window is only useful while it meets media demand.
+  /// Latch expansion until the next seek to avoid oscillating every sample.
+  void observeThroughput({
+    required double receivedBytesPerSecond,
+    required double requiredBytesPerSecond,
+    required bool buffering,
+  }) {
+    if (_closed || !_interleavedReads || _interleavedDeficit) return;
+    if (buffering ||
+        requiredBytesPerSecond > 0 &&
+            receivedBytesPerSecond < requiredBytesPerSecond * 1.2) {
+      _interleavedDeficit = true;
+      for (final reader in _readers.toList()) {
+        _scheduleAhead(reader);
+      }
+      _pump();
+    }
   }
 
   void _scheduleAhead(_Reader reader) {
@@ -760,8 +947,13 @@ class PlaybackStreamProxy {
         segment.started &&
         (segment.demanders.contains(reader) && segment.received > 0 ||
             _interleavedReads && index == reader.cursor + 1);
+    if (!identical(reader.pending[reader.cursor], segment)) {
+      segment.demanders.remove(reader);
+    }
+    // A cached large range can cover several of this reader's small startup
+    // chunks. Keep ownership until its last pending reference is released.
+    if (reader.pending.values.any((value) => identical(value, segment))) return;
     segment.owners.remove(reader);
-    segment.demanders.remove(reader);
     if (segment.owners.isEmpty && segment.bytes == null && !useful) {
       segment.cancel();
       if (identical(_segments[segment.key], segment)) {
@@ -784,16 +976,9 @@ class PlaybackStreamProxy {
 
   _Segment _requestSegment(_Reader reader, int index, {required bool demand}) {
     final segment = reader.pending.putIfAbsent(index, () {
-      final aligned = index * chunkBytes;
       // A seek can start late within a large segment. Request its first byte
       // directly instead of downloading a discarded prefix on a slow source.
-      final start = math.max(reader.byteStart, aligned);
-      final end = reader.metadata
-          ? math.min(
-              reader.byteEnd,
-              math.min(_length, aligned + chunkBytes) - 1,
-            )
-          : math.min(_length, aligned + chunkBytes) - 1;
+      final (start, end) = reader.plan.range(index);
       final key = (start, end - start + 1);
       // Media can rejoin an in-flight covering range when switching tracks.
       // Footer probes only share available bytes so they never wait behind a
@@ -815,7 +1000,7 @@ class PlaybackStreamProxy {
       }
       final shared = _segments.putIfAbsent(
         key,
-        () => _Segment(index, start, _generation, end - start + 1),
+        () => _Segment(start, start, _generation, end - start + 1),
       );
       shared.owners.add(reader);
       return shared;
@@ -844,7 +1029,7 @@ class PlaybackStreamProxy {
       return false;
     }
     int edge(_Segment s) =>
-        s.index == 0 || s.index >= (_length - 1) ~/ chunkBytes - 1 ? 1 : 0;
+        s.start < chunkBytes || s.start >= _length - 2 * chunkBytes ? 1 : 0;
     candidates.sort((a, b) {
       final ownership = (a.owners.isEmpty ? 0 : 1).compareTo(
         b.owners.isEmpty ? 0 : 1,
@@ -860,7 +1045,7 @@ class PlaybackStreamProxy {
     });
     for (final victim in candidates) {
       for (final owner in victim.owners.toList()) {
-        owner.pending.remove(victim.index);
+        owner.pending.removeWhere((_, value) => identical(value, victim));
       }
       victim.owners.clear();
       _segments.remove(victim.key);
@@ -906,9 +1091,7 @@ class PlaybackStreamProxy {
           if (victim != null) {
             _metadataPreemption = victim;
             for (final owner in victim.owners.toList()) {
-              if (identical(owner.pending[victim.index], victim)) {
-                owner.pending.remove(victim.index);
-              }
+              owner.pending.removeWhere((_, value) => identical(value, victim));
             }
             victim.owners.clear();
             _segments.remove(victim.key);
@@ -930,48 +1113,22 @@ class PlaybackStreamProxy {
   Future<void> _fetch(_Segment segment) async {
     var reserved = true;
     var networkRetried = false, redirectRetried = false;
-    final start = segment.start, end = start + segment.size - 1;
+    final start = segment.start;
     try {
-      Uint8List? cached;
-      try {
-        cached = await readCache?.call(
-          start,
-          end,
-          RemoteIdentity(_length, _etag, _modified),
-        );
-      } on AppException catch (error) {
-        // A user's paused/deleted download must not trigger automatic source
-        // recovery, which would otherwise resume their explicitly stopped task.
-        throw PlaybackFailure(error.message, PlaybackFailureKind.paused);
-      }
-      segment.check();
-      if (cached != null) {
-        if (cached.length != segment.size) {
-          throw const PlaybackFailure(
-            '下载缓存长度异常，请重试播放',
-            PlaybackFailureKind.changed,
-          );
-        }
-        _reservedBytes -= segment.size;
-        reserved = false;
-        _cachedBytes += cached.length;
-        _reusedBytes += cached.length;
-        _completedSegments++;
-        segment.buffer = cached;
-        segment.received = cached.length;
-        segment.complete(cached);
-        return;
-      }
       while (true) {
+        await _reuseCache(segment);
         segment.check();
+        if (segment.received == segment.size) {
+          _reservedBytes -= segment.size;
+          reserved = false;
+          _cachedBytes += segment.size;
+          _completedSegments++;
+          segment.complete(segment.buffer!);
+          return;
+        }
         try {
           final offset = segment.received;
-          if (offset >= segment.size) {
-            throw const PlaybackFailure(
-              '视频分段读取中断，请刷新链接重试',
-              PlaybackFailureKind.network,
-            );
-          }
+          final end = await _missingEnd(segment);
           _upstreamAttempts++;
           final revision = _routeRevision, redirected = _upstream != _sourceUri;
           final response = (await _getRange(
@@ -1005,9 +1162,9 @@ class PlaybackStreamProxy {
               PlaybackFailureKind.changed,
             );
           }
-          final bytes = await _readBody(
+          await _readBody(
             response,
-            segment.size - offset,
+            end - (start + offset) + 1,
             segment: segment,
             onBytes: (count) {
               _receivedBytes += count;
@@ -1018,12 +1175,6 @@ class PlaybackStreamProxy {
           if (_closed || segment.generation != _generation) {
             throw _ReadCancelled();
           }
-          _reservedBytes -= segment.size;
-          reserved = false;
-          _cachedBytes += bytes.length;
-          _completedSegments++;
-          segment.complete(bytes);
-          return;
         } on SocketException {
           if (networkRetried) {
             throw const PlaybackFailure(
@@ -1057,7 +1208,32 @@ class PlaybackStreamProxy {
           networkRetried = true;
         }
       }
-    } catch (error, stack) {
+    } catch (caughtError, caughtStack) {
+      var error = caughtError is DownloadNetworkPolicyException
+          ? PlaybackFailure(caughtError.message, PlaybackFailureKind.restricted)
+          : caughtError;
+      var stack = caughtStack;
+      if (cacheSnapshot != null &&
+          error is! _ReadCancelled &&
+          (error is! PlaybackFailure ||
+              error.kind == PlaybackFailureKind.network ||
+              error.kind == PlaybackFailureKind.expired)) {
+        try {
+          await _waitForCache(segment);
+          segment.check();
+          if (segment.received == segment.size) {
+            _reservedBytes -= segment.size;
+            reserved = false;
+            _cachedBytes += segment.size;
+            _completedSegments++;
+            segment.complete(segment.buffer!);
+            return;
+          }
+        } catch (waitError, waitStack) {
+          error = waitError;
+          stack = waitStack;
+        }
+      }
       if (error is! _ReadCancelled) _segmentFailures++;
       if (identical(_segments[segment.key], segment)) {
         _segments.remove(segment.key);
@@ -1121,10 +1297,26 @@ class PlaybackStreamProxy {
         );
       }
       if (request.method == 'HEAD') return;
-      final first = start ~/ chunkBytes, last = end ~/ chunkBytes;
+      final mediaFirst = start ~/ chunkBytes;
       final metadata =
           end - start + 1 <= math.min(64 * 1024, 2 * chunkBytes) &&
-          (first == 0 || start >= _length - 2 * chunkBytes);
+          (mediaFirst == 0 || start >= _length - 2 * chunkBytes);
+      // Ordinary small bounded reads retain a full cache chunk for reuse.
+      final plan = PlaybackRangePlan(
+        start,
+        metadata
+            ? end
+            : math.min(
+                _length - 1,
+                chunkBytes <= PlaybackRangePlan.initialBytes
+                    ? ((end ~/ chunkBytes + 1) * chunkBytes - 1)
+                    : end,
+              ),
+        chunkBytes,
+        metadata: metadata,
+      );
+      const first = 0;
+      final last = plan.last;
       final seeking = _seekPending;
       final interrupted = _seekReadInterrupted;
       _seekPending = false;
@@ -1134,15 +1326,18 @@ class PlaybackStreamProxy {
         if (!seeking &&
             previous != null &&
             beforePrevious != null &&
-            (first - previous).abs() > 4 &&
-            (first - beforePrevious).abs() <= 4) {
-          _interleavedReads = true;
+            (mediaFirst - previous).abs() > 4 &&
+            (mediaFirst - beforePrevious).abs() <= 4) {
+          _alternations++;
+          _interleavedReads = _alternations >= 3;
           for (final activeReader in _readers) {
             _trimWindow(activeReader);
           }
+        } else {
+          _alternations = 0;
         }
         _previousMediaFirst = seeking ? null : previous;
-        _lastMediaFirst = first;
+        _lastMediaFirst = mediaFirst;
       }
       // Containers may alternate distant audio/video ranges during ordinary
       // demuxing. Byte distance cannot distinguish that from a user seek:
@@ -1155,7 +1350,8 @@ class PlaybackStreamProxy {
           // Reuse the interrupted read's partially filled range when the
           // decoder reopens nearby. Distant seeks release unrelated work.
           for (final segment in _segments.values.toList()) {
-            if (segment.bytes == null && segment.owners.isEmpty &&
+            if (segment.bytes == null &&
+                segment.owners.isEmpty &&
                 !(segment.start <= start &&
                     segment.start + segment.size > start)) {
               segment.cancel();
@@ -1169,7 +1365,7 @@ class PlaybackStreamProxy {
       if (seeking && _paused) {
         _pausedAllowance = math.min(connections, maxCacheBytes ~/ chunkBytes);
       }
-      if (!metadata) _cursor = first;
+      if (!metadata) _cursor = start;
       final current = reader = _Reader(
         first,
         last,
@@ -1177,6 +1373,7 @@ class PlaybackStreamProxy {
         _generation,
         start,
         end,
+        plan,
       );
       _readers.add(current);
       // HttpResponse.done only finishes when the outgoing body is closed.
@@ -1198,14 +1395,15 @@ class PlaybackStreamProxy {
       for (var index = first; index <= last; index++) {
         current.check();
         current.cursor = index;
-        if (!metadata) _cursor = index;
+        if (!metadata) _cursor = plan.range(index).$1;
         _trimWindow(current);
         final demanded = _requestSegment(current, index, demand: true);
         _scheduleAhead(current);
         _pump();
         final offset = demanded.start;
-        final from = math.max(0, start - offset),
-            to = math.min(demanded.size, end - offset + 1);
+        final wanted = plan.range(index);
+        final from = math.max(0, wanted.$1 - offset),
+            to = math.min(wanted.$2, end) - offset + 1;
         var cursor = from;
         while (cursor < to) {
           final available = await current.wait(

@@ -30,6 +30,7 @@ class TestTv {
   final requests =
       <({String name, Map<String, String> args, HttpHeaders headers})>[];
   final faults = <String, int>{};
+  final faultSequences = <String, List<int>>{};
   final barriers = <String, Future<void>>{};
   final _tasks = <Future<void>>{};
   int descriptions = 0;
@@ -38,6 +39,7 @@ class TestTv {
   Duration position = Duration.zero, duration = const Duration(minutes: 10);
   double volume = 35;
   bool malformed = false;
+  bool ignoreSeek = false;
   Uri get location => Uri.parse('http://$host:${server.port}/device/root.xml');
   String get description =>
       '<root xmlns="urn:schemas-upnp-org:device-1-0">'
@@ -111,7 +113,11 @@ class TestTv {
         request.response.write('invalid xml');
         return;
       }
-      final fault = faults[name];
+      final sequence = faultSequences[name];
+      final sequenced = sequence != null && sequence.isNotEmpty
+          ? sequence.removeAt(0)
+          : null;
+      final fault = sequenced == 0 ? null : sequenced ?? faults[name];
       if (fault != null) {
         request.response.statusCode = 500;
         request.response.write(
@@ -131,7 +137,7 @@ class TestTv {
         case 'Stop':
           transport = 'STOPPED';
         case 'Seek':
-          position = parseCastTime(args['Target'])!;
+          if (!ignoreSeek) position = parseCastTime(args['Target'])!;
         case 'SetVolume':
           volume = double.parse(args['DesiredVolume']!);
         case 'GetVolume':

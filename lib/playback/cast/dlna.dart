@@ -24,9 +24,23 @@ String _child(XmlElement node, String name) =>
 bool castEndpoint(Uri uri) =>
     uri.scheme == 'http' &&
     uri.userInfo.isEmpty &&
-    isLanAddress(uri.host) &&
+    isCastAddress(uri.host) &&
     !uri.hasFragment &&
     uri.port > 0;
+
+bool isCastAddress(String host) {
+  if (isLanAddress(host)) return true;
+  final address = InternetAddress.tryParse(host);
+  if (address == null) return false;
+  final bytes = address.rawAddress;
+  if (address.type == InternetAddressType.IPv4) {
+    // Some home networks use the shared address space internally.
+    return bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127;
+  }
+  return address.isLoopback ||
+      (bytes[0] & 0xfe) == 0xfc ||
+      bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80;
+}
 
 class CastService {
   const CastService(this.type, this.control);
@@ -174,8 +188,16 @@ class DlnaClient {
     require(!_closed && castEndpoint(service.control), '投屏连接已关闭');
     final request = await _http.postUrl(service.control).timeout(timeout);
     request.followRedirects = false;
-    request.headers.contentType = ContentType('text', 'xml', charset: 'utf-8');
-    request.headers.set('SOAPAction', '"${service.type}#$name"');
+    request.headers.set(
+      'Content-Type',
+      'text/xml; charset=utf-8',
+      preserveHeaderCase: true,
+    );
+    request.headers.set(
+      'SOAPAction',
+      '"${service.type}#$name"',
+      preserveHeaderCase: true,
+    );
     final body =
         '<?xml version="1.0" encoding="utf-8"?>'
         '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
@@ -183,7 +205,9 @@ class DlnaClient {
         '<s:Body><u:$name xmlns:u="${xmlText(service.type)}">'
         '${arguments.entries.map((e) => '<${e.key}>${xmlText(e.value)}</${e.key}>').join()}'
         '</u:$name></s:Body></s:Envelope>';
-    request.add(utf8.encode(body));
+    final bytes = utf8.encode(body);
+    request.contentLength = bytes.length;
+    request.add(bytes);
     try {
       final response = await request.close().timeout(timeout);
       final text = await _read(response).timeout(timeout);
@@ -239,15 +263,20 @@ class DlnaClient {
     String url,
     String title,
     String mime,
-    Duration duration,
-  ) async {
+    Duration duration, {
+    int? size,
+  }) async {
+    final features = mime.toLowerCase().contains('mpegurl')
+        ? 'DLNA.ORG_OP=00;DLNA.ORG_CI=0'
+        : 'DLNA.ORG_OP=01;DLNA.ORG_CI=0';
     final metadata =
         '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
         'xmlns:dc="http://purl.org/dc/elements/1.1/" '
         'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
         '<item id="0" parentID="-1" restricted="1"><dc:title>${xmlText(title)}</dc:title>'
         '<upnp:class>object.item.videoItem</upnp:class>'
-        '<res protocolInfo="http-get:*:${xmlText(mime)}:*"'
+        '<res protocolInfo="http-get:*:${xmlText(mime)}:$features"'
+        '${size != null && size > 0 ? ' size="$size"' : ''}'
         '${duration > Duration.zero ? ' duration="${castTime(duration)}"' : ''}>'
         '${xmlText(url)}</res></item></DIDL-Lite>';
     await transport(device, 'SetAVTransportURI', {

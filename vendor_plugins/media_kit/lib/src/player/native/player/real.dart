@@ -1282,6 +1282,8 @@ class NativePlayer extends PlatformPlayer {
       return result;
     }
 
+    // Missing optional properties are polled during playback diagnostics too.
+    calloc.free(name);
     return "";
   }
 

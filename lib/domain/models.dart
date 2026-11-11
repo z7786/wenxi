@@ -2,6 +2,7 @@ import 'dart:math';
 import '../core/json.dart';
 import 'download_network_policy.dart';
 import 'uploads.dart';
+import 'rapid_transfer.dart';
 
 String newId() {
   final bytes = List<int>.generate(16, (_) => Random.secure().nextInt(256));
@@ -599,6 +600,20 @@ abstract class CloudConnector {
   bool canMoveFile(BrowseSession session, CloudFile file) =>
       session.canManageFiles;
   bool canDownloadFile(BrowseSession session, CloudFile file) => true;
+  bool get providesTransferMd5 => false;
+  bool canRapidTransferTo(BrowseSession session) => false;
+  Future<String?> transferMd5(
+    BrowseSession session,
+    CloudFile file,
+    Credential? credential,
+  ) async =>
+      file.hashType?.toLowerCase() == 'md5' ? contentMd5(file.hashValue) : null;
+  Future<RapidTransferResult> rapidTransfer(
+    BrowseSession session,
+    String parent,
+    RapidTransferFile file,
+    Credential credential,
+  ) async => throw const AppException('该网盘暂不支持跨盘秒传');
   Future<CloudAccount> account(Credential credential);
   Future<BrowseSession> openShare(ParsedLink link, Credential? credential);
   Future<BrowseSession> openPersonal(Credential credential);

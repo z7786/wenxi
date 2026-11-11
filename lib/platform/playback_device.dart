@@ -12,6 +12,7 @@ import 'windows_external_player.dart';
 import 'macos_external_player.dart';
 
 abstract class PlaybackDevice extends ChangeNotifier {
+  bool get isTelevision => false;
   bool get supportsOrientation => false;
 
   /// Safe bounds independent of system bar visibility for the current viewport.
@@ -34,6 +35,7 @@ abstract class PlaybackDevice extends ChangeNotifier {
     required bool playing,
     int? width,
     int? height,
+    double? frameRate,
     bool autoRotate = true,
     PlaybackOrientation? orientation,
     bool locked = false,
@@ -71,7 +73,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   bool get _macos => _platform == TargetPlatform.macOS;
   bool get _desktop => _windows || _macos;
   @override
-  bool get supportsOrientation => _mobile;
+  bool get supportsOrientation => _mobile && !isTelevision;
   @override
   bool get supportsExternalPlayer => _mobile || _desktop;
   @override
@@ -89,6 +91,9 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   final _actions = StreamController<String>.broadcast();
   final _windowsPip = WindowsPipWindow();
   bool _supportsPip = false, _inPip = false, _closed = false, _started = false;
+  bool _isTelevision = false;
+  @override
+  bool get isTelevision => _isTelevision;
   bool _fullscreen = false, _previousWindowsFullscreen = false;
   bool _video = false;
   bool _controlsVisible = true, _locked = false;
@@ -109,7 +114,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   @override
   bool get supportsIndependentPlayerWindows => _desktop;
   @override
-  bool get supportsBrightness => _mobile;
+  bool get supportsBrightness => _mobile && !isTelevision;
   @override
   bool get supportsSystemVolume => _mobile && _supportsSystemVolume;
   @override
@@ -155,6 +160,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
       });
       final values = asJson(await _invoke<Object?>('begin', {'video': video}));
       if (_closed) return;
+      _isTelevision = _android && values.boolean('television');
       if (identical(_handlerOwner, this)) {
         WidgetsBinding.instance.addObserver(this);
         if (_ios) await _syncIosSystemUi();
@@ -238,6 +244,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
     required bool playing,
     int? width,
     int? height,
+    double? frameRate,
     bool autoRotate = true,
     PlaybackOrientation? orientation,
     bool locked = false,
@@ -249,7 +256,9 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
       return;
     }
     if (!_mobile) return;
-    final targetOrientation = _video && orientation != null
+    final targetOrientation = isTelevision
+        ? null
+        : _video && orientation != null
         ? orientation
         : playbackOrientation(
             video: _video,
@@ -257,8 +266,18 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
             width: width,
             height: height,
           );
+    final cadence =
+        _android &&
+            _video &&
+            playing &&
+            frameRate != null &&
+            frameRate.isFinite &&
+            frameRate >= 1 &&
+            frameRate <= 240
+        ? (frameRate * 1000).round() / 1000.0
+        : 0.0;
     final signature =
-        '$playing/$width/$height/${targetOrientation?.name}/$locked/$controlsVisible';
+        '$playing/$width/$height/$cadence/${targetOrientation?.name}/$locked/$controlsVisible';
     if (_lastUpdate == signature) return;
     _lastUpdate = signature;
     try {
@@ -286,6 +305,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
         'playing': playing,
         'width': width,
         'height': height,
+        if (_android) 'frameRate': cadence,
         'orientation': targetOrientation?.name,
         'locked': locked,
         'controlsVisible': controlsVisible,

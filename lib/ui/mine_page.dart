@@ -3,6 +3,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'app_switch.dart';
 import '../app_services.dart';
 import '../data/backup.dart';
 import '../diagnostics/app_log.dart';
@@ -10,8 +11,10 @@ import '../diagnostics/diagnostic_bundle.dart';
 import '../domain/download_retries.dart';
 import '../domain/settings.dart';
 import '../platform/document_actions.dart';
+import '../playback/windows_player_components.dart';
 import 'common.dart';
 import 'appearance_page.dart';
+import 'theme_mode_switch.dart';
 import 'remote_control_dialogs.dart';
 import 'diagnostics_page.dart';
 import 'download_protection_page.dart';
@@ -22,6 +25,7 @@ import 'font_size_page.dart';
 import 'download_concurrency_dialog.dart';
 import 'contact_author_dialog.dart';
 import 'link_opening_page.dart';
+import 'player_components_page.dart';
 
 class MinePage extends StatelessWidget {
   const MinePage(this.services, {super.key, this.linkLauncher});
@@ -337,6 +341,7 @@ class MinePage extends StatelessWidget {
     AppSettings settings,
     bool desktop,
   ) => _section(context, '外观', [
+    ThemeModeSwitch(services, icon: _settingIcon(context, CupertinoIcons.moon)),
     _tile(
       context,
       CupertinoIcons.paintbrush,
@@ -419,7 +424,7 @@ class MinePage extends StatelessWidget {
         MaterialPageRoute(builder: (_) => const LinkOpeningPage()),
       ),
     ),
-    SwitchListTile.adaptive(
+    AppSwitchListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       secondary: _settingIcon(context, CupertinoIcons.doc_on_clipboard),
       title: const Text('自动识别剪贴板链接', style: TextStyle(fontSize: 14)),
@@ -434,6 +439,32 @@ class MinePage extends StatelessWidget {
   ]);
 
   Widget _experimental(BuildContext context) => _section(context, '更多设置', [
+    if (WindowsPlayerComponents.isSupported &&
+        Theme.of(context).platform == TargetPlatform.windows)
+      AnimatedBuilder(
+        animation: WindowsPlayerComponents.shared,
+        builder: (context, _) {
+          final components = WindowsPlayerComponents.shared;
+          return KeyedSubtree(
+            key: const Key('player-components-settings'),
+            child: _tile(
+              context,
+              Icons.extension_outlined,
+              '播放器组件',
+              '${components.active == WindowsPlayerVariant.full ? '完整版' : '精简版'}'
+                  '${components.restartRequired ? ' · 重启后切换' : ' · 可按需下载完整版'}',
+              () => Navigator.push<void>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => PlayerComponentsPage(
+                    acceleration: () => services.settings.githubAcceleration,
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
     _tile(
       context,
       CupertinoIcons.lab_flask,
@@ -468,7 +499,7 @@ class MinePage extends StatelessWidget {
       ),
       _platformThreads(context, settings),
       if (services.mobileDataDownloads.supported)
-        SwitchListTile.adaptive(
+        AppSwitchListTile(
           key: const ValueKey('mobile-data-download-warning-setting'),
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 16,

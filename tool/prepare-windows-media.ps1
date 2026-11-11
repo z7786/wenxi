@@ -30,7 +30,7 @@ foreach ($archive in $archives) {
     $buildFile = Join-Path $buildPath $archive.Name
     $cached = (Test-Path -LiteralPath $cachedFile) -and ((Get-FileHash -LiteralPath $cachedFile -Algorithm SHA256).Hash -eq $archive.SHA256)
     if (-not $cached) {
-        foreach ($candidate in @($buildFile, (Join-Path $projectPath ('.local\player-test\' + $archive.Name)))) {
+        foreach ($candidate in @((Join-Path $projectPath ('native\third_party\' + $archive.Name)), $buildFile, (Join-Path $projectPath ('.local\player-test\' + $archive.Name)))) {
             if ((Test-Path -LiteralPath $candidate) -and ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -eq $archive.SHA256)) {
                 Copy-Item -LiteralPath $candidate -Destination $cachedFile -Force
                 $cached = $true
@@ -39,7 +39,7 @@ foreach ($archive in $archives) {
         }
     }
     if (-not $cached) {
-        Write-Host ('Downloading ' + $archive.Name + ' through gh-proxy.com...')
+        Write-Host ('Downloading ' + $archive.Name + ' from its pinned mirror...')
         $partialFile = $cachedFile + '.download'
         & curl.exe --fail --location --silent --show-error --retry 2 --connect-timeout 20 --max-time 180 --output $partialFile $archive.Url
         if ($LASTEXITCODE -ne 0) { throw ('Download failed: ' + $archive.Name) }

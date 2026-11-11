@@ -7,6 +7,7 @@ import '../core/json.dart';
 import '../data/resource_link_checks.dart';
 import '../domain/resource_search.dart';
 import 'common.dart';
+import 'skeleton_loading.dart';
 import 'resource_search_bar.dart';
 import 'resource_preferences.dart';
 import 'resource_search_page.dart';
@@ -534,19 +535,25 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                                   ],
                                 ),
                               ),
-                            if (loading.contains('') && !loaded)
-                              const Padding(
-                                padding: EdgeInsets.symmetric(vertical: 32),
-                                child: Center(
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                ),
-                              ),
                           ],
                         ),
                       ),
                     ),
+                    if (loading.contains('') &&
+                        catalog.popular.isEmpty &&
+                        catalog.categories.every((c) => c.resources.isEmpty))
+                      SliverPadding(
+                        padding: EdgeInsets.symmetric(horizontal: padding),
+                        sliver: SliverToBoxAdapter(
+                          child: AppSkeleton(
+                            key: const Key('resource-catalog-skeleton'),
+                            layout: SkeletonLayout.resourceCatalog,
+                            wide: width >= 800,
+                            active: widget.active,
+                            semanticLabel: '正在加载资源推荐',
+                          ),
+                        ),
+                      ),
                     if (catalog.popular.isNotEmpty) ...[
                       SliverPadding(
                         padding: EdgeInsets.symmetric(horizontal: padding),
@@ -574,6 +581,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                         grid(category.resources, false),
                       ],
                     if (loaded &&
+                        !loading.contains('') &&
                         catalog.popular.isEmpty &&
                         catalog.categories.every((c) => c.resources.isEmpty))
                       SliverFillRemaining(

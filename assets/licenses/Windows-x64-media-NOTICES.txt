@@ -1,0 +1,44 @@
+Windows x64 media runtime
+
+The Flutter media_kit and media_kit_video integration remains MIT licensed.
+Windows x64 bundles the compact media-kit 20241021 runtime. Users can install
+the optional baseline x86-64 full build below for PGS bitmap subtitle decoding.
+No x86-64-v3 CPU requirement is introduced. Installed components are retained in
+the application support directory independently of application updates.
+
+Compact runtime: https://github.com/media-kit/libmpv-win32-video-cmake/releases/tag/20241021
+Compact archive: mpv-dev-x86_64-20241021-git-0f78584.7z
+Compact SHA-256: e23701df0adc1fe57c8ede3ff313513b0b80519870058c2d35ff02754284a007
+Compact DLL SHA-256: 56f9a69200863c2dcd2fb6367427ffedc35550d26f947d6c36eab37bd2a65fd5
+
+Distribution: https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-11-08-8bc468896e
+Archive: mpv-dev-x86_64-20261108-git-8bc468896e.7z
+SHA-256: a36392a8fbd989ae274a37c63d01ef6c51b6070a5ebd2ee26d2715ae88f90ceb
+DLL SHA-256: 7eb6d202bb3aa5d311aef32d6f56543fc160d1d3e976667ab99e2503e3ca5b57
+Build configuration: https://github.com/zhongfly/mpv-winbuild/tree/37b83557ec1cb08a241defc77f60cb151f7b314c
+Build record and dependency logs: https://github.com/zhongfly/mpv-winbuild/actions/runs/42478239987
+mpv source: https://github.com/mpv-player/mpv/tree/8bc468896ec711cc5a3ac33dae9cbc0e266bcfa4
+FFmpeg revision: cc583787b (https://github.com/FFmpeg/FFmpeg)
+
+The full build includes GPL components. Preserve component notices and provide
+corresponding source for distributed binaries under their applicable licenses.
+mpv's copyright, GPLv2 and FFmpeg's GPLv3 texts accompany the runtime in the
+licenses directory.
+The verified development archive is kept at native/third_party in this project's
+source to preserve optional downloads after the upstream rolling release is removed.
+That archive contains binaries and API headers, not complete component source.
+
+ANGLE remains v1.0.1 from:
+https://github.com/alexmercerind/flutter-windows-ANGLE-OpenGL-ES/tree/v1.0.1
+Vulkan loader is supplied by that verified ANGLE distribution and is bundled
+alongside libmpv; libmpv imports it even when rendering through ANGLE.
+Vulkan loader source: https://github.com/KhronosGroup/Vulkan-Loader
+
+Android and Windows ARM64 keep their existing native runtime versions.
+
+Component extraction uses unmodified 7-Zip Extra 26.01 (x64) 7za.exe.
+Source: https://www.7-zip.org/a/7z2601-src.7z
+Distribution: https://www.7-zip.org/a/7z2601-extra.7z
+License information: 7-Zip-Extra-NOTICES.txt and 7-Zip-LGPL-2.1.txt
+(LGPL 2.1 or later; BSD components).
+SHA-256: 5bea5af5215089d97749d438351d7288310d0b8a472616edbe1b34168ad1001c

@@ -6,9 +6,39 @@ Android、Windows 播放器支持局域网 DLNA / UPnP AVTransport 电视和接�
 
 连接后，播放器的播放、暂停和进度控制作用于电视。投屏面板支持电视音量（接收器支持时）、切换设备、结束投屏和返回本机播放。切集及自动下一集沿用当前电视；返回本机时恢复电视回传的进度。定时停止和退出播放器会停止电视播放并关闭中转。
 
-网盘 Cookie、Authorization 等请求头留在应用内，由当前设备中转视频。电视使用每次会话生成的随机地址读取视频。支持远程普通 HTTP 视频、HLS 播放列表及其密钥/分片，也支持单个本地视频文件（含 Android 文件授权 URI）。中转支持 HEAD、字节 Range，按流读取，不会先完整下载整个视频。
+切到电视时保留原来的播放/暂停状态。由于部分 DLNA 电视需要先播放才能定位，暂停来源会在准备视频并定位后向电视发送暂停；电视若不支持暂停，会报告连接失败。切换接收器、重新连接或返回本机前会等待电视状态查询完成，尽量取得最新进度；无法查询时使用最后一次成功回传的进度。返回本机保留电视的播放/暂停状态，已播放结束的内容保持停止。
 
-投屏期间保持应用运行和网络连接。Android 使用前台播放服务和唤醒锁维持锁屏后的中转，结束时释放。Windows 防火墙需允许应用使用专用网络。访客 Wi-Fi、路由器设备隔离、VPN 或电视未打开接收功能可能阻止搜索或读取视频。
+连接连续查询失败时显示自动重试；恢复网络后继续控制。持续失败约 45 秒后结束会话、保存最后可信进度并释放服务及保活。电视回报不支持状态/进度查询，或同一查询连续返回三次 501 时，降级对应查询，不将其视为网络断开；两种查询均不可用时通过设备描述接口确认连接。
+
+「重新连接」会先准备新视频传输，原会话在此期间继续运行。新会话开始发送媒体地址时才暂停旧会话查询；连接失败时尝试恢复旧地址、进度和播放/暂停状态。恢复也失败时释放会话并保留进度。切换电视成功前不会向旧电视发送停止命令。网盘上游返回 401/403 时，每集自动刷新一次链接并重连，防止重复刷新；手动重新连接也会刷新已失效的链接。
+
+电视中途停止、清空媒体或准备播放时回报零，不会将书签清零；用户主动拖到零仍会保存零。续播 Seek 接收到 701 后重试一次，其它 SOAP 定位失败保留连接与原书签并提示遥控器定位。电视接受但未执行 Seek 时核验回传位置、最多补发一次，保留原书签直至定位确认或实际播放赶上。暂停命令同样对暂未就绪的 701 重试。电视遥控器继续播放会同步连播意图；STOPPED 与 NO_MEDIA_PRESENT 均参与看完判定，默认轮询允许结尾约 6 秒的误差。手动停止发生在这一区间时，DLNA 无法与自然结束完全区分。
+
+## Android TV 播放
+
+应用识别电视 UI 模式及 Leanback 设备，在播放器中使用电视控制栏：52 dp 按钮、明显的焦点边框、进度条和选集/字幕/设置入口。控件位于屏幕边缘约 5% 的安全区域，视频保持全屏。电视不使用手机的自动旋转和屏幕亮度功能。
+
+Android TV 启动器可显示应用入口和电视横幅，触摸屏标记为可选；手机仍使用原来的启动入口。
+
+- 控件显示时：方向键移动焦点，确认键操作当前控件，进度条上左右键调节进度。
+- 控件隐藏时：左右键后退/前进 15 秒，上下键显示控件，确认键切换播放/暂停。
+- 播放时控件闲置 4 秒自动隐藏，同时移除隐藏控件的焦点。
+- 返回键先收起控件，再按一次退出播放器；菜单键打开设置。
+- 遥控器的播放、暂停、快进、快退和上一集/下一集媒体键可直接控制播放，在面板打开时仍有效。
+
+交互设计参考 [mpvRx](https://github.com/Riteshp2001/mpvRx) 的 `CastPlaybackController`、`TvPlayerRemotePolicy` 和电视安全区域规则（参考提交 `4f0b913ae6f3e716735f0efda275659d53b60fa5`），在现有 Flutter / DLNA 架构中独立实现。此改动覆盖播放器和播放面板；应用其他页面仍沿用现有布局。
+
+网盘 Cookie、Authorization 等请求头留在应用内，由当前设备中转视频。电视使用每次会话生成的随机地址读取视频。支持远程普通 HTTP 视频、HLS 播放列表及其密钥/分片，也支持单个本地视频文件（含 Android 文件授权 URI）。电视断开、探测后放弃请求或拖动时，取消上游响应流并释放连接槽，避免继续下载剩余影片。
+
+连接前探测远程视频类型及字节 Range。支持可靠 Range 的普通媒体沿用本地播放器的独立 isolate 分段调度，使用当前网盘的连接设置，并遵循源声明的并发上限；分片为 1 MiB，缓存预算 32 MiB。HLS 与不支持 Range 的源回退到流式透传，识别无扩展名 HLS 后再发送匹配的 DIDL MIME。不会先完整下载影片。HEAD 探测通过源 GET 的响应头返回并立即取消正文，兼容只签名 GET 的链接。电视附加查询参数不影响随机路径鉴权，也不会改变网盘请求地址。
+
+SOAP 使用 UTF-8 固定 Content-Length，保留 Content-Type/SOAPAction 头名。DIDL 在已知时附带大小和 Range 能力；不凭文件扩展名声称支持某个 DLNA 解码 profile。媒体地址比较允许同一主机、端口及会话路径附加查询参数/片段，真正切换路径会结束本会话，避免停止别人的视频。
+
+投屏期间保持应用运行和网络连接。Android 使用前台播放服务和唤醒锁维持锁屏后的中转，结束时释放。Windows 使用按投屏会话持有的独立系统电源请求，防止本地播放器暂停导致电脑自动休眠；与下载保活分别释放。Windows 防火墙需允许应用使用专用网络。访客 Wi-Fi、路由器设备隔离、VPN 或电视未打开接收功能可能阻止搜索或读取视频。
+
+自动搜索仍使用 IPv4 SSDP，支持常见私有网段、链路本地地址及 CGNAT 地址。IPv6 ULA/链路本地设备可尝试输入完整 HTTP 描述地址；IPv6 组播搜索、带 scope 的链路本地地址和电视地址改写为其它主机的行为仍需设备验证。缺少 IPv4 接口时明确提示搜索限制，不再笼统显示未连接局域网。
+
+诊断日志记录搜索、连接与重连、上游错误及刷新、Seek 确认/失败、轮询降级/断线和中转请求的状态码、取消标记、字节量及耗时。使用会话/设备散列标识，不记录源 URL、签名参数、账号请求头或媒体标题。
 
 电视负责解码和音轨、内嵌字幕的选择；应用不会转码。Chromecast 专用协议、AirPlay、DASH、本地 M3U8 播放列表及应用侧外挂字幕暂不在支持范围。电视不支持 Seek 或音量接口时，会提示使用遥控器。
 
@@ -17,7 +47,7 @@ Android、Windows 播放器支持局域网 DLNA / UPnP AVTransport 电视和接�
 协议、来源中转、取消/关闭时的资源持有、自动切集和面板布局测试：
 
 ```powershell
-flutter test --concurrency=1 test/cast_protocol_test.dart test/cast_stream_test.dart test/cast_playback_test.dart test/cast_widget_test.dart
+flutter test --concurrency=1 test/cast_protocol_test.dart test/cast_stream_test.dart test/cast_playback_test.dart test/cast_widget_test.dart test/playback_device_test.dart test/player_widget_test.dart
 ```
 
 Android 前台服务、通知、唤醒锁及独立组播锁测试：
@@ -25,6 +55,16 @@ Android 前台服务、通知、唤醒锁及独立组播锁测试：
 ```powershell
 cd android
 .\gradlew.bat :app:testDebugUnitTest --tests com.asterlink.app.CastServiceTest
+.\gradlew.bat :app:testDebugUnitTest --tests com.asterlink.app.PlaybackLifecycleTest
+```
+
+当前环境的清华 Flutter 引擎镜像返回 HTTP 403；验证时仅为该命令切换到官方源，并限定 ARM64：
+
+```powershell
+$env:FLUTTER_STORAGE_BASE_URL = 'https://storage.googleapis.com'
+.\gradlew.bat :app:testDebugUnitTest --tests com.asterlink.app.CastServiceTest --tests com.asterlink.app.PlaybackLifecycleTest -Ptarget-platform=android-arm64
 ```
 
 模拟接收器使用真实 UDP / HTTP / SOAP，覆盖协议与应用逻辑。不同电视的格式兼容性、Wi-Fi 隔离和锁屏后的系统行为仍需在真机验证。
+
+2026-11-11 修复验证：投屏、外部播放器、来源网络权限、分段代理、边下边播、来源恢复与播放器界面共 331 个不同用例通过；相关 Dart 静态检查通过。Windows Release runner 编译通过，系统电源请求的 5 项检查通过（包含真实 Windows API）。新异常用例覆盖电视读取 1 MiB 后断开及单连接槽释放、分段投屏并发上限、无扩展名 HLS 描述、进度归零、忽略 Seek、Pause 701、遥控续播连播、重连回滚、首连/播放中 403 刷新、长期断线资源释放及诊断脱敏。本轮没有 Android 真机/真实电视验证。

@@ -14,6 +14,9 @@ add_executable(${BINARY_NAME} WIN32
   "external_download_bridge.cpp"
   "native_diagnostics.cpp"
   "diagnostic_bridge.cpp"
+  "gpu_preference.cpp"
+  "gpu_preference_bridge.cpp"
+  "file_actions_bridge.cpp"
   "main.cpp"
   "utils.cpp"
   "win32_window.cpp"
@@ -46,6 +49,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "advapi32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "wevtapi.lib" "shell32.lib" "ole32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 

@@ -54,12 +54,15 @@ class FileOpening(
         return localUri(file)
     }
 
-    fun open(path: String, name: String, share: Boolean, complete: (FileOpenFailure?) -> Unit) {
+    fun open(path: String, name: String, share: Boolean, complete: (FileOpenFailure?) -> Unit) =
+        open(path, name, share, false, complete)
+
+    fun open(path: String, name: String, share: Boolean, chooseApp: Boolean, complete: (FileOpenFailure?) -> Unit) {
         try {
             val file = prepare(path, name)
-            if (share || file.mime != APK_MIME) {
+            if (share || chooseApp || file.mime != APK_MIME) {
                 val intent = readableIntent(file, share)
-                launch(Intent.createChooser(intent, if (share) "分享文件" else "打开文件"))
+                launch(Intent.createChooser(intent, if (share) "分享文件" else "用其他应用打开"))
                 complete(null)
             } else if (pending != null) {
                 complete(FileOpenFailure("busy", "请先完成当前的安装授权"))
@@ -149,11 +152,12 @@ class FileOpening(
 
         fun mimeType(name: String, stored: String?): String {
             val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
-            // Document providers sometimes return a generic or incorrect type for an APK.
+            // Providers can return a generic or incorrect type for APKs and videos.
             if (extension == "apk") return APK_MIME
-            return stored?.substringBefore(';')?.trim()?.lowercase(Locale.ROOT)
+            return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+                ?: stored?.substringBefore(';')?.trim()?.lowercase(Locale.ROOT)
                 ?.takeUnless { it.isBlank() || it == "application/octet-stream" || it == "*/*" }
-                ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "*/*"
+                ?: "*/*"
         }
 
         fun readableIntent(file: OpenFile, share: Boolean): Intent {

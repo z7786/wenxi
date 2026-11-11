@@ -36,12 +36,16 @@ bool FlutterWindow::OnCreate() {
   NativeDiagnostics::Instance().InstallExceptionHandler();
   diagnostics_ = std::make_unique<DiagnosticBridge>(
       flutter_controller_->engine()->messenger());
+  gpu_preference_ = std::make_unique<GpuPreferenceBridge>(
+      flutter_controller_->engine()->messenger());
   external_downloads_ = std::make_unique<ExternalDownloadBridge>(
       flutter_controller_->engine()->messenger());
   player_images_ = std::make_unique<PlayerImageBridge>(
       flutter_controller_->engine()->messenger(), GetHandle());
   download_power_ = std::make_unique<DownloadPowerBridge>(
       flutter_controller_->engine()->messenger());
+  file_actions_ = std::make_unique<FileActionsBridge>(
+      flutter_controller_->engine()->messenger(), GetHandle());
   theme_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
           flutter_controller_->engine()->messenger(),
@@ -87,9 +91,11 @@ void FlutterWindow::OnDestroy() {
     theme_channel_.reset();
   }
   download_power_.reset();
+  file_actions_.reset();
   external_downloads_.reset();
   player_images_.reset();
   diagnostics_.reset();
+  gpu_preference_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

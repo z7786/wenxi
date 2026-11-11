@@ -35,6 +35,7 @@ void main() {
       late String url;
       late Completer<void> continueDownloads;
       int rejected = 0;
+      bool rejectPlayer = false;
 
       setUpAll(() => MediaKit.ensureInitialized(libmpv: library));
       setUp(() async {
@@ -43,11 +44,18 @@ void main() {
         bytes = await File('test/fixtures/player-sample.mkv').readAsBytes();
         continueDownloads = Completer<void>();
         rejected = 0;
+        rejectPlayer = false;
         server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
         server.listen((request) async {
           try {
             if (request.headers.value('Cookie') !=
                 'download-fixture=local-only') {
+              rejected++;
+              request.response.statusCode = 403;
+              return;
+            }
+            if (rejectPlayer &&
+                request.headers.value('X-Fixture-Reader') == 'player') {
               rejected++;
               request.response.statusCode = 403;
               return;
@@ -121,113 +129,139 @@ void main() {
         HttpOverrides.global = null;
       });
 
-      test(
-        'Starts before completion, seeks, reuses cache and saves exact original bytes',
-        () async {
-          await services.downloads.enqueue(
-            DownloadSpec(
-              url: url,
-              fileName: 'fixture.mkv',
-              expectedSize: bytes.length,
-              headers: const {'Cookie': 'download-fixture=local-only'},
-              checksumType: 'sha256',
-              checksumValue: sha256.convert(bytes).toString(),
-            ),
-          );
-          final id = services.downloads.tasks.single.id;
-          final cache = await services.downloads.acquirePlayback(id);
-          await until(() => services.downloads.task(id)!.downloaded > 0);
-          expect(services.downloads.task(id)!.status, DownloadStatus.running);
-          expect(
-            services.downloads.task(id)!.downloaded,
-            lessThan(bytes.length),
-          );
-          const identity = RemoteIdentity(0, '"local-video"', null);
-          final reference = RemoteIdentity(bytes.length, identity.etag, null);
-          final prefix = await cache.read(0, 16383, reference);
-          expect(prefix, bytes.sublist(0, 16384));
-          final proxy = PlaybackStreamProxy(
-            cache.source,
-            connections: 2,
-            chunkBytes: 16384,
-            maxCacheBytes: 65536,
-            readCache: cache.read,
-          );
-          final client = HttpClient();
-          try {
-            expect(await proxy.start(), isTrue);
-            final request = await client.getUrl(proxy.uri);
-            request.headers.set('Range', 'bytes=0-16383');
-            final response = await request.close();
-            final data = await response.fold<List<int>>(
-              [],
-              (all, next) => all..addAll(next),
+      for (final cachedOnly in [false, true]) {
+        test(
+          cachedOnly
+              ? 'Real player starts and seeks from cache while playback URL returns 403'
+              : 'Starts before completion, seeks, reuses cache and saves exact original bytes',
+          () async {
+            await services.downloads.enqueue(
+              DownloadSpec(
+                url: url,
+                fileName: 'fixture.mkv',
+                expectedSize: bytes.length,
+                headers: const {'Cookie': 'download-fixture=local-only'},
+                checksumType: 'sha256',
+                checksumValue: sha256.convert(bytes).toString(),
+              ),
             );
-            expect(data, prefix);
-            expect(
-              proxy.diagnosticFields['reusedDownloadBytes'],
-              greaterThan(0),
-            );
-          } finally {
-            client.close(force: true);
-            await proxy.close();
-          }
-
-          final player = Player(
-            configuration: const PlayerConfiguration(
-              title: 'Download playback test',
-            ),
-          );
-          await (player.platform as NativePlayer).setProperty('ao', 'null');
-          final backend = MediaKitBackend(
-            video: false,
-            player: player,
-            downloadCache: (_, start, end, identity) =>
-                cache.read(start, end, identity),
-          );
-          try {
-            await backend.open(
-              DownloadSpec.fromJson({
-                ...cache.source.toJson(),
-                'headers': {
-                  ...cache.source.headers,
-                  'X-Fixture-Reader': 'player',
-                },
-              }),
-              Duration.zero,
-            );
-            await until(
-              () => backend.state.duration >= const Duration(seconds: 8),
-            );
-            await backend.play();
-            await until(
-              () => backend.state.position > const Duration(milliseconds: 500),
-            );
+            final id = services.downloads.tasks.single.id;
+            final cache = await services.downloads.acquirePlayback(id);
+            await until(() => services.downloads.task(id)!.downloaded > 0);
             expect(services.downloads.task(id)!.status, DownloadStatus.running);
-            await backend.seek(const Duration(seconds: 5));
-            await until(
-              () => backend.state.position >= const Duration(seconds: 5),
-            );
-            continueDownloads.complete();
-            await until(
-              () =>
-                  services.downloads.task(id)!.status ==
-                      DownloadStatus.completed &&
-                  services.downloads.activeCount == 0,
-            );
-            final saved = File(services.downloads.task(id)!.savedPath!);
             expect(
-              sha256.convert(await saved.readAsBytes()),
-              sha256.convert(bytes),
+              services.downloads.task(id)!.downloaded,
+              lessThan(bytes.length),
             );
-            expect(backend.failure, isNull);
-            expect(rejected, 0);
-          } finally {
-            await backend.close();
-            await cache.release();
-          }
-        },
-      );
+            const identity = RemoteIdentity(0, '"local-video"', null);
+            final reference = RemoteIdentity(bytes.length, identity.etag, null);
+            final prefix = await cache.read(0, 16383, reference);
+            expect(prefix, bytes.sublist(0, 16384));
+            final proxy = PlaybackStreamProxy(
+              cache.source,
+              connections: 2,
+              chunkBytes: 16384,
+              maxCacheBytes: 65536,
+              readCache: cache.read,
+            );
+            final client = HttpClient();
+            try {
+              expect(await proxy.start(), isTrue);
+              final request = await client.getUrl(proxy.uri);
+              request.headers.set('Range', 'bytes=0-16383');
+              final response = await request.close();
+              final data = await response.fold<List<int>>(
+                [],
+                (all, next) => all..addAll(next),
+              );
+              expect(data, prefix);
+              expect(
+                proxy.diagnosticFields['reusedDownloadBytes'],
+                greaterThan(0),
+              );
+            } finally {
+              client.close(force: true);
+              await proxy.close();
+            }
+
+            final player = Player(
+              configuration: const PlayerConfiguration(
+                title: 'Download playback test',
+              ),
+            );
+            await (player.platform as NativePlayer).setProperty('ao', 'null');
+            final backend = MediaKitBackend(
+              video: false,
+              player: player,
+              downloadCache: (_, start, end, identity) =>
+                  cache.readAvailable(start, end, identity),
+              downloadSnapshot: (_) => cache.snapshot(),
+            );
+            try {
+              rejectPlayer = cachedOnly;
+              if (cachedOnly) {
+                // Complete via the original downloader before requesting the
+                // footer. The playback lease keeps the native payload readable.
+                Timer(const Duration(milliseconds: 500), () {
+                  if (!continueDownloads.isCompleted) {
+                    continueDownloads.complete();
+                  }
+                });
+              }
+              await backend.open(
+                DownloadSpec.fromJson({
+                  ...cache.source.toJson(),
+                  'headers': {
+                    ...cache.source.headers,
+                    'X-Fixture-Reader': 'player',
+                  },
+                }),
+                Duration.zero,
+              );
+              await until(
+                () => backend.state.duration >= const Duration(seconds: 8),
+              );
+              expect(backend.diagnosticFields['transport'], 'segmented');
+              expect(
+                (backend.diagnosticFields['proxy'] as Map)['probeResult'],
+                'download_cache',
+              );
+              await backend.play();
+              await until(
+                () =>
+                    backend.state.position > const Duration(milliseconds: 500),
+              );
+              if (!cachedOnly) {
+                expect(
+                  services.downloads.task(id)!.status,
+                  DownloadStatus.running,
+                );
+              }
+              await backend.seek(const Duration(seconds: 5));
+              await until(
+                () => backend.state.position >= const Duration(seconds: 5),
+              );
+              if (!continueDownloads.isCompleted) continueDownloads.complete();
+              await until(
+                () =>
+                    services.downloads.task(id)!.status ==
+                        DownloadStatus.completed &&
+                    services.downloads.activeCount == 0,
+              );
+              final saved = File(services.downloads.task(id)!.savedPath!);
+              expect(
+                sha256.convert(await saved.readAsBytes()),
+                sha256.convert(bytes),
+              );
+              expect(backend.failure, isNull);
+              if (!cachedOnly) expect(rejected, 0);
+            } finally {
+              await backend.close();
+              await cache.release();
+            }
+          },
+        );
+      }
     },
     skip:
         !Platform.isWindows ||

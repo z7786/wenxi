@@ -29,7 +29,11 @@ void main() {
           await tester.tap(find.text(platform.label));
           await tester.pumpAndSettle();
           if (platform == CloudPlatform.wopan) {
-            await tester.tap(find.text('切换网页登录'));
+            await tester.ensureVisible(
+              find.byKey(const ValueKey('native-login-web')),
+            );
+            await tester.pumpAndSettle();
+            await tester.tap(find.byKey(const ValueKey('native-login-web')));
             await tester.pumpAndSettle();
           }
           final page = tester.widget<WebLoginPage>(find.byType(WebLoginPage));

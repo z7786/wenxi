@@ -8,23 +8,31 @@ class NavigationTransferStatus {
   const NavigationTransferStatus({
     this.downloads = 0,
     this.uploads = 0,
+    this.rapid = 0,
     this.progress = -1,
     this.completion = 0,
   });
 
-  final int downloads, uploads, progress, completion;
-  int get active => downloads + uploads;
+  final int downloads, uploads, rapid, progress, completion;
+  int get active => downloads + uploads + rapid;
   String get description => active == 0
       ? ''
-      : '${[if (downloads > 0) '$downloads 个下载', if (uploads > 0) '$uploads 个上传'].join('，')}正在传输${progress < 0 ? '' : '，本批进度 $progress%'}';
+      : '${[if (downloads > 0) '$downloads 个下载', if (uploads > 0) '$uploads 个上传', if (rapid > 0) '$rapid 个跨盘任务'].join('，')}正在传输${progress < 0 ? '' : '，本批进度 $progress%'}';
 
   @override
   bool operator ==(Object other) =>
       other is NavigationTransferStatus &&
-      (downloads, uploads, progress, completion) ==
-          (other.downloads, other.uploads, other.progress, other.completion);
+      (downloads, uploads, rapid, progress, completion) ==
+          (
+            other.downloads,
+            other.uploads,
+            other.rapid,
+            other.progress,
+            other.completion,
+          );
   @override
-  int get hashCode => Object.hash(downloads, uploads, progress, completion);
+  int get hashCode =>
+      Object.hash(downloads, uploads, rapid, progress, completion);
 }
 
 /// Observes the current batch only. Old history and removing records never
@@ -36,6 +44,7 @@ class NavigationTransfers extends ValueNotifier<NavigationTransferStatus> {
     required this.uploads,
     required this.downloadById,
     required this.uploadById,
+    this.rapid,
   }) : super(const NavigationTransferStatus()) {
     changes.addListener(_sync);
     _sync();
@@ -46,11 +55,13 @@ class NavigationTransfers extends ValueNotifier<NavigationTransferStatus> {
   final Iterable<UploadTask> Function() uploads;
   final DownloadTask? Function(String) downloadById;
   final UploadTask? Function(String) uploadById;
+  final int Function()? rapid;
   Map<String, ({String id, bool upload, int total})> _previous = {};
   final _interrupted = <String>{};
   int _finishedBytes = 0;
 
   void _sync() {
+    final matching = rapid?.call() ?? 0;
     final current = <String, ({String id, bool upload, int total})>{};
     var down = 0, up = 0, bytes = 0, total = 0;
     var known = true;
@@ -99,7 +110,9 @@ class NavigationTransfers extends ValueNotifier<NavigationTransferStatus> {
 
     var completion = value.completion;
     if (current.isEmpty) {
-      if (_previous.isNotEmpty && _interrupted.isEmpty) completion++;
+      if (_previous.isNotEmpty && _interrupted.isEmpty && matching == 0) {
+        completion++;
+      }
       _finishedBytes = 0;
       _interrupted.clear();
     }
@@ -108,7 +121,8 @@ class NavigationTransfers extends ValueNotifier<NavigationTransferStatus> {
     value = NavigationTransferStatus(
       downloads: down,
       uploads: up,
-      progress: current.isNotEmpty && known && denominator > 0
+      rapid: matching,
+      progress: matching == 0 && current.isNotEmpty && known && denominator > 0
           ? ((bytes + _finishedBytes) * 100 ~/ denominator).clamp(0, 99)
           : -1,
       completion: completion,

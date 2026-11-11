@@ -82,6 +82,11 @@ macOS 构建需要 Mac 和 Xcode。仓库的 **Actions → Build macOS test app 
 Android、Windows x64 / ARM64 内置播放恢复为仓库原有的 media_kit 1.2.6、
 media_kit_video 2.0.1 和 libmpv。继续使用 `vendor_plugins/` 中的本地补丁、
 固定原生依赖及 Windows ARM64 媒体准备脚本；当前构建不使用 MDK / FVP。
+Windows x64 默认打包精简版；“我的 → 更多设置 → 播放器组件”和播放设置
+可下载带 PGS 图形字幕支持的完整组件。下载约 31.4 MiB，安装约 117 MiB，
+下载后需手动选择并完全退出重启。组件保存在应用支持目录，独立小窗继承
+主进程当前使用的组件。下载、解压和启动均验证固定 SHA-256；失败保留
+精简版播放。7-Zip 解压工具随 Windows x64 包提供，其他平台不增加该组件。
 播放器界面、网盘取链、BT、边下边播和投屏沿用现有逻辑。系统音量同步、
 切后台/切集先暂停、播放进度保存和后台释放播放器的优化继续保留。
 

@@ -20,6 +20,7 @@ class UploadFile {
     this.mimeType = 'application/octet-stream',
     DateTime? modifiedAt,
     this.validate,
+    this.verifiedHashes = const {},
   }) : modifiedAt = modifiedAt ?? DateTime.now() {
     require(size >= 0, '无法读取本地文件大小');
     require(
@@ -35,6 +36,9 @@ class UploadFile {
   final DateTime modifiedAt;
   final Stream<List<int>> Function(int start, int end) read;
   final Future<void> Function()? validate;
+
+  /// Whole-file hashes computed from the verified relay payload.
+  final Map<String, String> verifiedHashes;
 
   Stream<List<int>> openRead([int start = 0, int? end]) async* {
     final stop = end ?? size;
@@ -55,6 +59,7 @@ class UploadFile {
     size: size,
     mimeType: mimeType,
     modifiedAt: modifiedAt,
+    verifiedHashes: verifiedHashes,
     validate: () async {
       checkpoint();
       await validate?.call();

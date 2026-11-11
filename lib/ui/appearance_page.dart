@@ -1,12 +1,14 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'app_switch.dart';
 import '../app_services.dart';
 import '../domain/appearance.dart';
 import '../domain/settings.dart';
 import 'appearance_preview.dart';
 import 'background_page.dart';
 import 'common.dart';
+import 'theme_reveal.dart';
 
 class AppearancePage extends StatefulWidget {
   const AppearancePage(this.services, {super.key});
@@ -19,6 +21,7 @@ class AppearancePage extends StatefulWidget {
 class _AppearancePageState extends State<AppearancePage> {
   late AppSettings _draft = widget.services.settings;
   bool _saving = false;
+  final _applyControl = GlobalKey();
 
   static const modes = [
     ('System', '跟随系统', CupertinoIcons.device_desktop),
@@ -41,14 +44,23 @@ class _AppearancePageState extends State<AppearancePage> {
     if (_saving || !_changed) return;
     setState(() => _saving = true);
     try {
-      await widget.services.updateAppearance(
-        mode: _draft.theme,
-        palette: _draft.themePalette,
-        glassStyle: _draft.glassStyle,
-        glassControls: _draft.glassControls,
-        glassLowPower: _draft.glassLowPower,
-        background: _draft.background,
-        hideResourceNavigation: _draft.hideResourceNavigation,
+      await ThemeRevealHost.change(
+        context,
+        origin: _applyControl.currentContext,
+        dark: switch (_draft.theme) {
+          'Dark' => true,
+          'Light' => false,
+          _ => MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+        },
+        update: () => widget.services.updateAppearance(
+          mode: _draft.theme,
+          palette: _draft.themePalette,
+          glassStyle: _draft.glassStyle,
+          glassControls: _draft.glassControls,
+          glassLowPower: _draft.glassLowPower,
+          background: _draft.background,
+          hideResourceNavigation: _draft.hideResourceNavigation,
+        ),
       );
       if (mounted) message(context, '主题已应用');
     } catch (error) {
@@ -101,7 +113,7 @@ class _AppearancePageState extends State<AppearancePage> {
                     color: fill(context),
                     borderRadius: BorderRadius.circular(16),
                     clipBehavior: Clip.antiAlias,
-                    child: SwitchListTile.adaptive(
+                    child: AppSwitchListTile(
                       key: const Key('appearance-hide-resource-navigation'),
                       secondary: SvgPicture.asset(
                         'assets/navigation/search.svg',
@@ -238,6 +250,7 @@ class _AppearancePageState extends State<AppearancePage> {
                 ),
                 const SizedBox(width: 16),
                 Expanded(
+                  key: _applyControl,
                   child: FilledButton(
                     key: const Key('appearance-apply'),
                     onPressed: _saving || !_changed ? null : _apply,
@@ -464,7 +477,7 @@ class _AppearancePageState extends State<AppearancePage> {
             ),
           ),
         ),
-      SwitchListTile.adaptive(
+      AppSwitchListTile(
         key: const Key('appearance-glass-controls'),
         contentPadding: EdgeInsets.zero,
         title: const Text('按钮与搜索框玻璃效果'),
@@ -474,7 +487,7 @@ class _AppearancePageState extends State<AppearancePage> {
             ? null
             : (value) => _update({'glassControls': value}),
       ),
-      SwitchListTile.adaptive(
+      AppSwitchListTile(
         key: const Key('appearance-glass-low-power'),
         contentPadding: EdgeInsets.zero,
         title: const Text('轻量模式'),

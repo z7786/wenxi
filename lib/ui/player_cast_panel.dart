@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/json.dart';
 import '../domain/playback.dart' show playbackTime;
 import '../playback/cast/cast_discovery.dart';
+import '../playback/cast/dlna.dart';
 import '../playback/playback_controller.dart';
 
 class PlayerCastPanel extends StatefulWidget {
@@ -78,8 +79,14 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
     final active = cast?.connected == true;
     final state = controller.state;
     final max = state.duration.inMilliseconds.toDouble();
-    final enabled = active && !busy && !controller.connectingCast;
+    final available =
+        !busy && !controller.connectingCast && !controller.disconnectingCast;
+    final enabled = active && available && cast?.connectionLost != true;
     final canSeek = enabled && cast?.seekSupported == true;
+    final devices = <String, CastDevice>{
+      if (cast != null) cast.device.id: cast.device,
+      for (final device in discovery.devices) device.id: device,
+    }.values;
     return ListView(
       shrinkWrap: true,
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
@@ -101,8 +108,19 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
           ),
           const SizedBox(height: 4),
           Text(
-            controller.connectingCast
+            controller.current.name,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            controller.disconnectingCast
+                ? '正在同步电视进度并结束投屏…'
+                : controller.connectingCast
                 ? '正在连接电视…'
+                : cast.connectionLost
+                ? '连接中断 · 正在自动重试'
                 : state.buffering
                 ? '电视正在加载视频…'
                 : state.completed
@@ -208,16 +226,29 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
             const SizedBox(height: 8),
             FilledButton.icon(
               key: const Key('cast-resume-local'),
-              onPressed: busy ? null : widget.onResumeLocal,
+              onPressed: available ? widget.onResumeLocal : null,
               icon: const Icon(Icons.play_circle_outline),
               label: const Text('返回本机播放'),
             ),
           ],
+          if (active)
+            OutlinedButton.icon(
+              key: const Key('cast-reconnect'),
+              onPressed: available
+                  ? () => _run(
+                      () => controller.castTo(cast.device, reconnect: true),
+                    )
+                  : null,
+              icon: const Icon(Icons.refresh),
+              label: const Text('重新连接'),
+            ),
           TextButton(
             key: const Key('cast-disconnect'),
             onPressed: controller.connectingCast
                 ? () => controller.disconnectCast()
-                : () => _run(controller.disconnectCast),
+                : available
+                ? () => _run(controller.disconnectCast)
+                : null,
             child: Text(controller.connectingCast ? '取消连接' : '结束投屏'),
           ),
           const Divider(height: 24),
@@ -250,7 +281,7 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
         ),
         if (discovery.scanning) const LinearProgressIndicator(minHeight: 2),
         if (discovery.error.isNotEmpty) _message(discovery.error),
-        for (final device in discovery.devices)
+        for (final device in devices)
           ListTile(
             key: ValueKey('cast-device-${device.id}'),
             contentPadding: EdgeInsets.zero,
@@ -260,6 +291,8 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
             title: Text(device.name),
             subtitle: Text(
               [
+                if (cast?.device.id == device.id) '已连接',
+                'DLNA',
                 if (device.model.isNotEmpty) device.model,
                 device.description.host,
               ].join(' · '),
@@ -267,10 +300,13 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
             trailing: cast?.device.id == device.id
                 ? const Icon(Icons.check, size: 20)
                 : null,
-            enabled: !busy && !controller.connectingCast && !controller.loading,
-            onTap: () => _run(() => controller.castTo(device)),
+            selected: cast?.device.id == device.id,
+            enabled: available && !controller.loading,
+            onTap: cast?.device.id == device.id
+                ? null
+                : () => _run(() => controller.castTo(device)),
           ),
-        if (discovery.devices.isEmpty && !discovery.scanning)
+        if (devices.isEmpty && !discovery.scanning)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 16),
             child: Text(

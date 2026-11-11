@@ -12,7 +12,7 @@ interface DownloadServiceOwner {
     val downloadKeepAlive: DownloadKeepAlive
 }
 
-data class DownloadNotice(val active: Int, val text: String, val progress: Int = -1, val uploads: Int = 0, val lan: Int = 0) {
+data class DownloadNotice(val active: Int, val text: String, val progress: Int = -1, val uploads: Int = 0, val lan: Int = 0, val rapid: Int = 0) {
     companion object {
         val IDLE = DownloadNotice(0, "")
         val RECOVERING = DownloadNotice(1, "正在恢复中断的下载…")
@@ -21,7 +21,8 @@ data class DownloadNotice(val active: Int, val text: String, val progress: Int =
             (arguments["text"] as? String ?: "正在下载").take(256),
             ((arguments["progress"] as? Number)?.toInt() ?: -1).coerceIn(-1, 100),
             ((arguments["uploads"] as? Number)?.toInt() ?: 0).coerceIn(0, 10000),
-            ((arguments["lan"] as? Number)?.toInt() ?: 0).coerceIn(0, 1)
+            ((arguments["lan"] as? Number)?.toInt() ?: 0).coerceIn(0, 1),
+            ((arguments["rapid"] as? Number)?.toInt() ?: 0).coerceIn(0, 10000)
         )
     }
 }

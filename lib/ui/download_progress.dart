@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import '../domain/downloads.dart';
 import '../domain/uploads.dart';
 import '../upload/upload_task.dart';
+import '../transfer/rapid_transfer_task.dart';
 
 class DownloadProgress extends StatelessWidget {
   const DownloadProgress({
@@ -113,6 +114,102 @@ class TransferProgress extends StatefulWidget {
       _ => TransferProgressStatus.paused,
     },
   );
+
+  factory TransferProgress.cross(
+    RapidTransferTask task, {
+    bool enabled = true,
+    bool compact = false,
+  }) {
+    final movingData = task.entries.any(
+      (e) =>
+          e.status == RapidEntryStatus.downloading ||
+          e.status == RapidEntryStatus.uploading,
+    );
+    // Cross-drive progress includes matching and both relay phases. Use units
+    // of work rather than pretend these values are uploaded byte counts.
+    final fraction = task.progress;
+    final total = fraction == null ? 0 : task.entries.length * 1000000;
+    return TransferProgress._(
+      id: task.id,
+      total: total,
+      transferred: ((fraction ?? 0) * total).round(),
+      speed: movingData ? task.speed : 0,
+      enabled: enabled,
+      compact: compact,
+      direction: 'cross-transfer',
+      stage: task.stage,
+      processingLabel: task.scanned ? '匹配中' : '扫描中',
+      status: switch (task.status) {
+        RapidTaskStatus.pending => TransferProgressStatus.pending,
+        RapidTaskStatus.running =>
+          movingData
+              ? TransferProgressStatus.running
+              : TransferProgressStatus.processing,
+        RapidTaskStatus.completed =>
+          task.canRetry
+              ? TransferProgressStatus.failed
+              : TransferProgressStatus.completed,
+        RapidTaskStatus.failed => TransferProgressStatus.failed,
+        _ => TransferProgressStatus.paused,
+      },
+    );
+  }
+  factory TransferProgress.crossPhase(
+    RapidTransferTask task, {
+    required bool upload,
+    bool enabled = true,
+    bool compact = false,
+    List<RapidTransferEntry>? entries,
+  }) {
+    final relay = (entries ?? task.entries)
+        .where(
+          (e) =>
+              e.method == CrossTransferMethod.relay &&
+              e.status != RapidEntryStatus.reused &&
+              e.status != RapidEntryStatus.duplicate,
+        )
+        .toList();
+    final total = relay.fold<int>(0, (n, e) => n + e.size);
+    final completed =
+        relay.isNotEmpty &&
+        relay.every(
+          (e) => upload
+              ? e.status == RapidEntryStatus.uploaded
+              : e.payloadReady || e.status == RapidEntryStatus.uploaded,
+        );
+    final moving = relay.any(
+      (e) =>
+          e.status ==
+          (upload ? RapidEntryStatus.uploading : RapidEntryStatus.downloading),
+    );
+    final transferred = relay.fold<int>(
+      0,
+      (n, e) =>
+          n +
+          (e.status == RapidEntryStatus.uploaded
+              ? e.size
+              : upload
+              ? e.sent.clamp(0, e.size)
+              : e.downloaded.clamp(0, e.size)),
+    );
+    return TransferProgress._(
+      id: task.id,
+      total: total,
+      transferred: transferred,
+      speed: moving ? task.speed : 0,
+      status: completed
+          ? TransferProgressStatus.completed
+          : moving && task.active
+          ? TransferProgressStatus.running
+          : !task.active && task.canRetry
+          ? TransferProgressStatus.failed
+          : TransferProgressStatus.pending,
+      stage: upload ? '上传' : '下载',
+      direction: upload ? 'cross-upload' : 'cross-download',
+      enabled: enabled,
+      compact: compact,
+    );
+  }
   @override
   State<TransferProgress> createState() => _TransferProgressState();
 }
@@ -280,7 +377,12 @@ class _TransferProgressState extends State<TransferProgress>
 
   @override
   Widget build(BuildContext context) {
-    if (_complete && !_celebrating) return const SizedBox.shrink();
+    if (_complete &&
+        !_celebrating &&
+        widget.direction != 'cross-download' &&
+        widget.direction != 'cross-upload') {
+      return const SizedBox.shrink();
+    }
     final task = widget;
     final failed = task.status == TransferProgressStatus.failed;
     final paused = task.status == TransferProgressStatus.paused;
@@ -290,7 +392,7 @@ class _TransferProgressState extends State<TransferProgress>
         ? const Color(0xffed625a)
         : paused
         ? const Color(0xff98a2b3)
-        : task.direction == 'upload'
+        : task.direction != 'download'
         ? Theme.of(context).colorScheme.secondary
         : Theme.of(context).colorScheme.primary;
     final percent = task.total > 0
@@ -306,7 +408,11 @@ class _TransferProgressState extends State<TransferProgress>
         ? '排队中'
         : percent;
     return Semantics(
-      label: task.direction == 'upload' ? '上传进度' : '下载进度',
+      label: task.direction == 'cross-transfer'
+          ? '跨盘传输进度'
+          : task.direction == 'upload' || task.direction == 'cross-upload'
+          ? '上传进度'
+          : '下载进度',
       value:
           '${task.stage}，${_complete
               ? '100%'
@@ -386,6 +492,60 @@ class _TransferProgressState extends State<TransferProgress>
           ),
         ),
       ),
+    );
+  }
+}
+
+class CrossTransferProgress extends StatelessWidget {
+  const CrossTransferProgress(
+    this.task, {
+    super.key,
+    this.enabled = true,
+    this.compact = false,
+    this.entries,
+  });
+  final RapidTransferTask task;
+  final bool enabled, compact;
+  final List<RapidTransferEntry>? entries;
+
+  @override
+  Widget build(BuildContext context) {
+    final relay = (entries ?? task.entries).any(
+      (e) =>
+          e.method == CrossTransferMethod.relay &&
+          e.status != RapidEntryStatus.reused &&
+          e.status != RapidEntryStatus.duplicate,
+    );
+    if (!relay || entries == null && !task.active && !task.canRetry) {
+      return TransferProgress.cross(task, enabled: enabled, compact: compact);
+    }
+    return Column(
+      children: [
+        for (final upload in [false, true])
+          Row(
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(right: 6, top: 2),
+                child: Text(
+                  upload ? '上传' : '下载',
+                  style: TextStyle(
+                    fontSize: compact ? 9 : 11,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: TransferProgress.crossPhase(
+                  task,
+                  upload: upload,
+                  enabled: enabled,
+                  compact: compact,
+                  entries: entries,
+                ),
+              ),
+            ],
+          ),
+      ],
     );
   }
 }

@@ -12,6 +12,7 @@ import 'package:asterlink/ui/cloud_accounts_page.dart';
 import 'package:asterlink/ui/cloud_favorites_page.dart';
 import 'package:asterlink/ui/common.dart';
 import 'package:asterlink/ui/loading_indicator.dart';
+import 'package:asterlink/ui/skeleton_loading.dart';
 import 'package:asterlink/ui/native_password_login_page.dart';
 import 'package:asterlink/ui/parse_page.dart';
 import 'package:asterlink/ui/recent_playback_page.dart';
@@ -186,11 +187,8 @@ void main() {
       final old = connector.pendingFolder = Completer<List<CloudFile>>();
       await tap(tester, find.text('假期相册'), settle: false);
       expect(find.text('正在加载网盘文件…'), findsOneWidget);
-      expect(find.byType(AppLoadingIndicator), findsAtLeastNWidgets(1));
-      expect(
-        tester.getCenter(find.byType(AppLoadingIndicator)).dx,
-        tester.view.physicalSize.width / 2,
-      );
+      expect(find.byType(AppSkeleton), findsOneWidget);
+      expect(find.byKey(const Key('browser-files-skeleton')), findsOneWidget);
       expect(
         tester.getCenter(find.text('正在加载网盘文件…')).dx,
         tester.view.physicalSize.width / 2,
@@ -200,6 +198,7 @@ void main() {
       expect(find.text('家庭账号-10.mp4'), findsOneWidget);
       old.complete([const CloudFile(id: 'stale', name: '不应显示的旧文件.mp4')]);
       await tester.pumpAndSettle();
+      expect(find.byType(AppSkeleton), findsNothing);
       expect(find.text('不应显示的旧文件.mp4'), findsNothing);
       expect(find.text('家庭账号-10.mp4'), findsOneWidget);
       expect(fixture.services.vault.activeAccountId(platform), second);

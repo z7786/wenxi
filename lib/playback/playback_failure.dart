@@ -8,6 +8,7 @@ enum PlaybackFailureKind {
   decoder,
   unknown,
   paused,
+  restricted,
 }
 
 class PlaybackFailure extends AppException {

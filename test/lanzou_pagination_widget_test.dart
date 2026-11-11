@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/ui/browser_page.dart';
+import 'package:asterlink/ui/cloud_favorites_page.dart';
 import 'browser_test_support.dart';
 import 'lanzou_pagination_test.dart' show pagedFixture, rootPages;
 import 'lanzou_folder_support.dart';
@@ -24,7 +25,12 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  Future<void> render(WidgetTester tester, {String view = 'list'}) async {
+  Future<void> render(
+    WidgetTester tester, {
+    String view = 'list',
+    String? favorite,
+    bool summary = false,
+  }) async {
     tester.view.physicalSize = const Size(1100, 850);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -38,18 +44,44 @@ void main() {
       app.services.cloud.connectors[CloudPlatform.lanzou] = fixture.connector;
       session = await app.services.cloud.share(fixture.folderLink());
       first = await app.services.cloud.listPage(session, session.rootId);
+      if (favorite == 'share') {
+        await app.services.favorites.toggleShare(session);
+      } else if (favorite != null) {
+        await app.services.favorites.toggle(
+          session,
+          favorite == 'file'
+              ? const CloudFile(id: 'iExample123', name: '后页目标.zip')
+              : CloudFile(
+                  id: session.rootId,
+                  name: session.title,
+                  isDirectory: true,
+                ),
+          [(session.rootId, '全部文件')],
+        );
+      }
+      if (favorite != null) fixture.http.calls.clear();
     });
     await tester.pumpWidget(
       MaterialApp(
-        home: BrowserPage(
-          app.services,
-          session,
-          initialItems: first.files,
-          initialCursor: first.nextCursor,
-        ),
+        home: favorite != null
+            ? summary
+                  ? Scaffold(
+                      body: CloudFavoritesSummary(app.services, desktop: true),
+                    )
+                  : CloudFavoritesPage(app.services)
+            : BrowserPage(
+                app.services,
+                session,
+                initialItems: first.files,
+                initialCursor: first.nextCursor,
+              ),
       ),
     );
     await settle(tester);
+    if (favorite != null) {
+      await tester.tap(find.text(app.services.favorites.all.single.name).last);
+      await settle(tester);
+    }
   }
 
   Future<void> finish(WidgetTester tester) async {
@@ -63,6 +95,80 @@ void main() {
       );
     }
   }
+
+  for (final summary in [false, true]) {
+    testWidgets(
+      'Lanzou ${summary ? 'home favorite grid' : 'favorites page'} opens the first batch and loads more on scroll',
+      (tester) async {
+        final view = summary ? 'grid' : 'list';
+        await render(
+          tester,
+          view: view,
+          favorite: summary ? 'share' : 'folder',
+          summary: summary,
+        );
+        try {
+          expect(rootPages(fixture), ['1']);
+          final browser = tester.widget<BrowserPage>(find.byType(BrowserPage));
+          expect(browser.initialItems, hasLength(51));
+          expect(browser.initialCursor, isNotNull);
+          expect(find.byKey(const Key('browser-page-status')), findsOneWidget);
+          final list = find
+              .descendant(
+                of: find.byType(BrowserPage),
+                matching: summary
+                    ? find.byType(GridView)
+                    : find.byType(ListView),
+              )
+              .last;
+          final controller = summary
+              ? tester.widget<GridView>(list).controller!
+              : tester.widget<ListView>(list).controller!;
+          controller.jumpTo(controller.position.maxScrollExtent);
+          await settle(tester);
+          expect(rootPages(fixture), ['1', '2']);
+          expect(find.textContaining('已加载 52 项'), findsOneWidget);
+          expect(tester.takeException(), isNull);
+        } finally {
+          await finish(tester);
+        }
+      },
+    );
+  }
+
+  testWidgets(
+    'A later-page file favorite remains highlighted and can continue loading',
+    (tester) async {
+      await render(tester, favorite: 'file');
+      try {
+        expect(rootPages(fixture), ['1', '2']);
+        final browser = tester.widget<BrowserPage>(find.byType(BrowserPage));
+        expect(browser.initialItems, hasLength(52));
+        expect(browser.initialCursor, isNotNull);
+        expect(browser.highlightedFileId, 'iExample123');
+        expect(
+          find.byKey(const ValueKey('browser-file-iExample123')),
+          findsOneWidget,
+        );
+        await tester.tap(find.byTooltip('清除搜索，显示全部文件'));
+        await settle(tester);
+        final list = find
+            .descendant(
+              of: find.byType(BrowserPage),
+              matching: find.byType(ListView),
+            )
+            .last;
+        final controller = tester.widget<ListView>(list).controller!;
+        controller.jumpTo(controller.position.maxScrollExtent);
+        await settle(tester);
+        expect(rootPages(fixture), ['1', '2', '3']);
+        expect(find.byKey(const Key('browser-page-status')), findsNothing);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await finish(tester);
+      }
+    },
+  );
 
   for (final view in ['list', 'grid']) {
     testWidgets(

@@ -13,6 +13,7 @@ import '../domain/file_types.dart';
 import '../download/mobile_data_download_guard.dart';
 import 'operation_progress_view.dart';
 import 'app_theme.dart';
+import 'desktop_mouse_back.dart';
 export '../domain/file_types.dart';
 export '../download/mobile_data_download_guard.dart'
     show DownloadConfirmationCancelled;
@@ -410,14 +411,16 @@ class PageFrame extends StatelessWidget {
   final Widget child;
   final List<Widget>? actions;
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text(title), actions: actions),
-    body: SafeArea(
-      top: false,
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 1120),
-          child: child,
+  Widget build(BuildContext context) => DesktopMouseBack(
+    child: Scaffold(
+      appBar: AppBar(title: Text(title), actions: actions),
+      body: SafeArea(
+        top: false,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 1120),
+            child: child,
+          ),
         ),
       ),
     ),

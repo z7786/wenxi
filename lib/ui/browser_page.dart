@@ -40,7 +40,10 @@ import 'login_page.dart';
 import 'preview_page.dart';
 import 'cloud_favorites_page.dart';
 import 'loading_indicator.dart';
+import 'skeleton_loading.dart';
 import 'cloud_upload_drop_target.dart';
+import '../data/state_store.dart' show CloudAccountProfile;
+import '../transfer/rapid_transfer_task.dart';
 import 'uc_video_download.dart';
 
 class BrowserPage extends StatefulWidget {
@@ -163,6 +166,7 @@ class _BrowserPageState extends State<BrowserPage> {
   List<(String, String)> _trailFor(CloudFile file) =>
       _hit(file)?.trail ?? stack;
   late bool loading = !widget.searchPage && widget.initialItems == null;
+  bool _retainLoadingContent = false;
   bool changingAccount = false, pickingUpload = false;
   bool _selectionMode = false;
   bool get _selecting => _selectionMode || selected.isNotEmpty;
@@ -200,6 +204,7 @@ class _BrowserPageState extends State<BrowserPage> {
   int generation = 0;
   RequestScope? request;
   StreamSubscription<UploadTask>? _uploadChanges;
+  StreamSubscription<RapidTransferTask>? _rapidChanges;
   Timer? _uploadRefresh;
   (BrowseSession, List<(String, String)>)? _pickedDestination;
   late bool _available = widget.services.control.cloudEnabled(session.platform);
@@ -259,6 +264,28 @@ class _BrowserPageState extends State<BrowserPage> {
         }
       });
     });
+    _rapidChanges = widget.services.rapidTransfers.completions.stream.listen((
+      task,
+    ) {
+      if (!mounted ||
+          task.target.platform != session.platform ||
+          task.target.accountId != session.accountId ||
+          session.isFamily) {
+        return;
+      }
+      _invalidateDirectoryFiles();
+      if (!_searchResults &&
+          task.parent != stack.last.$1 &&
+          !task.directories.containsValue(stack.last.$1)) {
+        return;
+      }
+      _uploadRefresh?.cancel();
+      _uploadRefresh = Timer(const Duration(milliseconds: 400), () {
+        if (mounted && task.target.accountId == session.accountId) {
+          unawaited(_refresh(preserveSelection: true));
+        }
+      });
+    });
     if (!widget.searchPage && widget.initialItems == null) _load();
   }
 
@@ -269,6 +296,7 @@ class _BrowserPageState extends State<BrowserPage> {
     widget.services.control.removeListener(_controlChanged);
     widget.services.store.removeListener(_profileChanged);
     _uploadChanges?.cancel();
+    _rapidChanges?.cancel();
     _uploadRefresh?.cancel();
     _searchPaint?.cancel();
     _deepSearch.dispose();
@@ -657,7 +685,7 @@ class _BrowserPageState extends State<BrowserPage> {
     if (_searchResults && _includeSubfolders) {
       await _startSearch(refresh: true);
     } else if (!widget.searchPage) {
-      await _load(preserveSelection: preserveSelection);
+      await _load(preserveSelection: preserveSelection, retainContent: true);
     }
   }
 
@@ -701,6 +729,7 @@ class _BrowserPageState extends State<BrowserPage> {
 
   Future<void> _load({
     bool preserveSelection = false,
+    bool retainContent = false,
     double? initialOffset,
     int minimumItems = 0,
   }) async {
@@ -725,6 +754,7 @@ class _BrowserPageState extends State<BrowserPage> {
         parent = stack.last.$1;
     setState(() {
       loading = !preserveSelection;
+      _retainLoadingContent = retainContent && items.isNotEmpty;
       error = '';
       if (!preserveSelection) {
         selected.clear();
@@ -1043,12 +1073,131 @@ class _BrowserPageState extends State<BrowserPage> {
     );
   }
 
+  Future<void> _rapidTransfer(List<CloudFile> files) async {
+    final cloud = widget.services.cloud;
+    final source = session;
+    final revision = accountRevision;
+    final accounts = [
+      for (final p in CloudPlatform.values)
+        for (final account in widget.services.vault.profiles(p))
+          if ((p != source.platform || account.id != source.accountId) &&
+              widget.services.vault.credentialFor(p, account.id) != null &&
+              widget.services.control.cloudEnabled(p))
+            account,
+    ];
+    if (accounts.isEmpty) {
+      message(context, '请先在账号管理中登录目标网盘账号');
+      return;
+    }
+    final choice = await showModalBottomSheet<CloudAccountProfile>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * .7,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  '跨盘传输 · 选择目标账号',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Text(
+                  '自动判断秒传；不可用时经本机下载后上传。保留文件夹结构，同名文件跳过。',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final account in accounts)
+                      ListTile(
+                        leading: const Icon(CupertinoIcons.cloud),
+                        title: Text(account.platform.label),
+                        subtitle: Text(account.name),
+                        onTap: () => Navigator.pop(context, account),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    final personal = await busy(
+      context,
+      () => cloud.personal(choice.platform, accountId: choice.id),
+      label: '正在读取目标网盘…',
+    );
+    if (!mounted || personal == null) return;
+    BrowseSession target = personal;
+    List<(String, String)> trail = [];
+    final parent = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => BrowserPage(
+          widget.services,
+          personal,
+          picking: true,
+          onDestinationPicked: (s, path) {
+            target = s;
+            trail = List.of(path);
+          },
+        ),
+      ),
+    );
+    if (!mounted || parent == null) return;
+    if (!await confirmBaiduDownload(
+          context,
+          widget.services,
+          source.platform,
+          session: source,
+        ) ||
+        !mounted) {
+      return;
+    }
+    final id = await busy(context, () async {
+      require(
+        session == source && accountRevision == revision,
+        '来源账号或目录已变化，请重新选择',
+      );
+      return widget.services.rapidTransfers.enqueue(
+        source,
+        files,
+        target,
+        parent,
+        trail.isEmpty ? '全部文件' : trail.last.$2,
+      );
+    });
+    if (!mounted || id == null) return;
+    _finishSelection();
+    message(
+      context,
+      '已加入跨盘传输任务，可离开页面 · 查看',
+      onTap: widget.services.requestRapidTransferManager,
+    );
+  }
+
   Future<void> _operate(String action, List<CloudFile> files) async {
     if (files.isEmpty) return;
     if (!allowCloudAction(context, widget.services.control, session.platform)) {
       return;
     }
     _deepSearch.stop();
+    if (action == 'rapid-transfer') {
+      await _rapidTransfer(files);
+      return;
+    }
     final connector = widget.services.cloud.connector(session.platform);
     if (action == 'locate') {
       await _locate(files.first);
@@ -1279,6 +1428,12 @@ class _BrowserPageState extends State<BrowserPage> {
                   title: const Text('下载'),
                   onTap: () => Navigator.pop(context, 'download'),
                 ),
+              if (file.isDirectory || _provider.canDownloadFile(session, file))
+                ListTile(
+                  leading: const Icon(Icons.bolt_rounded),
+                  title: const Text('跨盘传输'),
+                  onTap: () => Navigator.pop(context, 'rapid-transfer'),
+                ),
               if (canDownloadUcPlayable(session, file))
                 ListTile(
                   leading: const Icon(CupertinoIcons.film),
@@ -1387,6 +1542,14 @@ class _BrowserPageState extends State<BrowserPage> {
           value: 'download',
           label: '下载$count',
           icon: CupertinoIcons.arrow_down_circle,
+        ),
+      if (files.every(
+        (f) => f.isDirectory || _provider.canDownloadFile(session, f),
+      ))
+        AppMenuAction(
+          value: 'rapid-transfer',
+          label: '跨盘传输$count',
+          icon: Icons.bolt_rounded,
         ),
       if (single && canDownloadUcPlayable(session, file))
         const AppMenuAction(
@@ -2321,8 +2484,62 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   Widget _fileList(List<CloudFile> files, BoxConstraints constraints) {
-    return _folderContextMenu(_fileListContent(files, constraints));
+    return IgnorePointer(
+      ignoring: loading && _retainLoadingContent,
+      child: _folderContextMenu(_fileListContent(files, constraints)),
+    );
   }
+
+  Widget _fileLoading({bool searching = false}) => LayoutBuilder(
+    builder: (context, constraints) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: AppSkeleton(
+            key: Key(
+              searching ? 'cloud-search-skeleton' : 'browser-files-skeleton',
+            ),
+            layout: view == 'grid' && !widget.picking
+                ? SkeletonLayout.fileGrid
+                : SkeletonLayout.fileList,
+            showSelection:
+                (_selecting || constraints.maxWidth >= 750) && !widget.picking,
+            semanticLabel: searching ? '正在查找文件' : '正在加载网盘文件',
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          child: searching
+              ? Text(
+                  '找到的文件会陆续显示在这里',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, color: secondary(context)),
+                )
+              : ValueListenableBuilder<List<OperationStep>>(
+                  valueListenable: _progress,
+                  builder: (context, steps, _) {
+                    final read = steps
+                        .where((step) => step.stage == OperationStage.readFiles)
+                        .lastOrNull;
+                    final label = read?.waitingForRetry == true
+                        ? '请求较频繁，正在等待重试…'
+                        : '正在加载网盘文件…';
+                    final count = read?.itemsRead;
+                    return Text(
+                      count == null ? label : '$label\n已读取 $count 项',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.5,
+                        color: secondary(context),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    ),
+  );
 
   Widget _fileListContent(List<CloudFile> files, BoxConstraints constraints) {
     final footer = _hasMore && !_searchResults && !widget.searchPage;
@@ -2409,49 +2626,69 @@ class _BrowserPageState extends State<BrowserPage> {
 
   Widget _listRow(CloudFile file, bool wide) {
     final checked = selected.contains(_fileKey(file));
+    final searching = widget.searchPage || _searchResults;
+    final tile = ListTile(
+      key: ValueKey('browser-file-${_fileKey(file)}'),
+      dense: true,
+      minVerticalPadding: searching ? 14 : 11,
+      contentPadding: searching
+          ? const EdgeInsets.symmetric(horizontal: 12)
+          : null,
+      selected: checked || file.id == highlight,
+      selectedTileColor: themeAccent(context).withValues(alpha: .07),
+      leading: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if ((_selecting || wide) && !widget.picking)
+            Checkbox(value: checked, onChanged: (_) => _toggle(file)),
+          CloudThumbnail(
+            file,
+            session.platform,
+            credential: _thumbnailCredential,
+          ),
+        ],
+      ),
+      title: widget.searchPage
+          ? CloudSearchFileName(file.name, search.text)
+          : Text(
+              file.name,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 14),
+            ),
+      subtitle: _fileMetadata(file),
+      trailing: widget.picking
+          ? const Icon(CupertinoIcons.chevron_right, size: 14)
+          : IconButton(
+              tooltip: '${file.name}操作',
+              icon: const Icon(CupertinoIcons.ellipsis, size: 20),
+              onPressed: () => _menu(file),
+            ),
+      onLongPress: widget.picking ? null : () => _toggle(file),
+      onTap: () => _open(file),
+    );
     return AppContextMenu<String>(
       key: ValueKey('file-context-${_fileKey(file)}'),
       enabled: !widget.picking,
       identity: _fileContextIdentity(file),
       actions: () => _fileContextActions(file),
       onSelected: (action) => _fileContextAction(file, action),
-      child: ListTile(
-        key: ValueKey('browser-file-${_fileKey(file)}'),
-        dense: true,
-        minVerticalPadding: 11,
-        selected: checked || file.id == highlight,
-        selectedTileColor: themeAccent(context).withValues(alpha: .07),
-        leading: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if ((_selecting || wide) && !widget.picking)
-              Checkbox(value: checked, onChanged: (_) => _toggle(file)),
-            CloudThumbnail(
-              file,
-              session.platform,
-              credential: _thumbnailCredential,
-            ),
-          ],
-        ),
-        title: widget.searchPage
-            ? CloudSearchFileName(file.name, search.text)
-            : Text(
-                file.name,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 14),
+      child: searching
+          ? Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 9),
+              child: Material(
+                color: backgroundSurface(context),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  side: BorderSide(
+                    color: border(context).withValues(alpha: .8),
+                  ),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: tile,
               ),
-        subtitle: _fileMetadata(file),
-        trailing: widget.picking
-            ? const Icon(CupertinoIcons.chevron_right, size: 14)
-            : IconButton(
-                tooltip: '${file.name}操作',
-                icon: const Icon(CupertinoIcons.ellipsis, size: 20),
-                onPressed: () => _menu(file),
-              ),
-        onLongPress: widget.picking ? null : () => _toggle(file),
-        onTap: () => _open(file),
-      ),
+            )
+          : tile,
     );
   }
 
@@ -2620,11 +2857,26 @@ class _BrowserPageState extends State<BrowserPage> {
         if (_hit(file) case final hit?)
           Padding(
             padding: const EdgeInsets.only(top: 3),
-            child: Text(
-              hit.path,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: style,
+            child: Tooltip(
+              message: hit.path,
+              child: Row(
+                children: [
+                  Icon(
+                    CupertinoIcons.folder,
+                    size: 12,
+                    color: secondary(context),
+                  ),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      hit.path,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: style,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
       ],
@@ -2838,7 +3090,12 @@ class _BrowserPageState extends State<BrowserPage> {
     };
     return Container(
       key: const Key('browser-search-status'),
-      padding: const EdgeInsets.fromLTRB(20, 5, 6, 5),
+      margin: const EdgeInsets.fromLTRB(14, 8, 14, 12),
+      padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+      decoration: BoxDecoration(
+        color: fill(context),
+        borderRadius: BorderRadius.circular(14),
+      ),
       child: Row(
         children: [
           Expanded(
@@ -3101,6 +3358,18 @@ class _BrowserPageState extends State<BrowserPage> {
                         ),
                       ],
                     ),
+                    if (selection.every(
+                      (f) =>
+                          f.isDirectory ||
+                          _provider.canDownloadFile(session, f),
+                    ))
+                      TextButton.icon(
+                        onPressed: selection.isEmpty
+                            ? null
+                            : () => _operate('rapid-transfer', selection),
+                        icon: const Icon(Icons.bolt_rounded, size: 18),
+                        label: const Text('跨盘传输'),
+                      ),
                     FilledButton.icon(
                       onPressed:
                           selection.isEmpty ||
@@ -3138,15 +3407,15 @@ class _BrowserPageState extends State<BrowserPage> {
                 ),
               )
             : files.isEmpty
-            ? EmptyPanel(
-                _deepSearch.running ? '正在查找文件…' : '暂未找到匹配的文件',
-                _deepSearch.running
-                    ? '找到的文件会陆续显示在这里'
-                    : _deepSearch.phase == CloudSearchPhase.completed
-                    ? '试试其他关键词、文件类型或搜索范围'
-                    : '结果可能不完整，可以重新搜索或查看搜索问题',
-                icon: CupertinoIcons.search,
-              )
+            ? _deepSearch.running
+                  ? _fileLoading(searching: true)
+                  : EmptyPanel(
+                      '暂未找到匹配的文件',
+                      _deepSearch.phase == CloudSearchPhase.completed
+                          ? '试试其他关键词、文件类型或搜索范围'
+                          : '结果可能不完整，可以重新搜索或查看搜索问题',
+                      icon: CupertinoIcons.search,
+                    )
             : RefreshIndicator(
                 onRefresh: _refresh,
                 child: LayoutBuilder(
@@ -3526,6 +3795,18 @@ class _BrowserPageState extends State<BrowserPage> {
                               style: const TextStyle(fontSize: 12),
                             ),
                             const SizedBox(width: 8),
+                            if (selection.every(
+                              (f) =>
+                                  f.isDirectory ||
+                                  _provider.canDownloadFile(session, f),
+                            ))
+                              TextButton(
+                                onPressed: selection.isEmpty
+                                    ? null
+                                    : () =>
+                                          _operate('rapid-transfer', selection),
+                                child: const Text('跨盘传输'),
+                              ),
                             TextButton(
                               onPressed:
                                   selection.isEmpty ||
@@ -3593,54 +3874,8 @@ class _BrowserPageState extends State<BrowserPage> {
                       folderName: stack.last.$2,
                       onFilesDropped: (files) =>
                           unawaited(_upload(droppedFiles: files)),
-                      child: loading
-                          ? Center(
-                              child: SingleChildScrollView(
-                                padding: const EdgeInsets.all(24),
-                                child: ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxWidth: 360,
-                                  ),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const AppLoadingIndicator(size: 40),
-                                      const SizedBox(height: 16),
-                                      ValueListenableBuilder<
-                                        List<OperationStep>
-                                      >(
-                                        valueListenable: _progress,
-                                        builder: (context, steps, _) {
-                                          final read = steps
-                                              .where(
-                                                (step) =>
-                                                    step.stage ==
-                                                    OperationStage.readFiles,
-                                              )
-                                              .lastOrNull;
-                                          final label =
-                                              read?.waitingForRetry == true
-                                              ? '请求较频繁，正在等待重试…'
-                                              : '正在加载网盘文件…';
-                                          final count = read?.itemsRead;
-                                          return Text(
-                                            count == null
-                                                ? label
-                                                : '$label\n已读取 $count 项',
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                              fontSize: 14,
-                                              height: 1.5,
-                                              color: secondary(context),
-                                            ),
-                                          );
-                                        },
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            )
+                      child: loading && !_retainLoadingContent
+                          ? _fileLoading()
                           : error.isNotEmpty
                           ? EmptyPanel(
                               '文件列表读取失败',
@@ -3650,6 +3885,10 @@ class _BrowserPageState extends State<BrowserPage> {
                                 child: const Text('重试'),
                               ),
                             )
+                          : files.isEmpty &&
+                                _searchResults &&
+                                _deepSearch.running
+                          ? _fileLoading(searching: true)
                           : files.isEmpty && !_hasMore
                           ? _folderContextMenu(
                               EmptyPanel(

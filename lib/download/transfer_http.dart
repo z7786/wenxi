@@ -142,6 +142,14 @@ class TransferHttp {
     zoneValues: {_policyKey: spec.networkPolicy},
   );
 
+  Future<Response<ResponseBody>> streamDownload(
+    DownloadSpec spec, {
+    CancelToken? cancel,
+  }) => runZoned(
+    () => stream(spec.url, headers(spec.headers), cancel: cancel),
+    zoneValues: {_policyKey: spec.networkPolicy},
+  );
+
   static Dio _createClient({DownloadNetworkPolicy? policy}) =>
       Dio(
           BaseOptions(

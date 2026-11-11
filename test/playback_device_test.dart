@@ -52,6 +52,31 @@ void main() {
   });
 
   test(
+    'Android cadence updates are deduplicated and cleared on pause or unknown media',
+    () async {
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      await device.update(playing: true, frameRate: 24000 / 1001);
+      expect(calls.last.arguments['frameRate'], 23.976);
+      final count = calls.length;
+      await device.update(playing: true, frameRate: 24000 / 1001);
+      expect(calls.length, count);
+      await device.update(playing: true, frameRate: 48);
+      expect(calls.last.arguments['frameRate'], 48);
+      await device.update(playing: false, frameRate: 48);
+      expect(calls.last.arguments['frameRate'], 0);
+      await device.update(playing: true, frameRate: double.nan);
+      expect(calls.last.arguments['frameRate'], 0);
+      await device.update(playing: true, frameRate: 60);
+      await device.update(playing: true);
+      expect(calls.last.arguments['frameRate'], 0);
+    },
+  );
+
+  test(
     'Android volume uses native media steps and ignores stale session updates',
     () async {
       final device = NativePlaybackDevice(
@@ -106,6 +131,29 @@ void main() {
       expect(device.supportsSystemVolume, isFalse);
       await device.setSystemVolume(20);
       expect(calls.where((call) => call.method == 'volume'), isEmpty);
+    },
+  );
+
+  test(
+    'Android television capabilities disable phone orientation and brightness',
+    () async {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return call.method == 'begin' ? {'television': true} : null;
+      });
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      expect(device.isTelevision, isTrue);
+      expect(device.supportsOrientation, isFalse);
+      expect(device.supportsBrightness, isFalse);
+      await device.update(
+        playing: true,
+        orientation: PlaybackOrientation.portrait,
+      );
+      expect(calls.last.arguments['orientation'], isNull);
     },
   );
 

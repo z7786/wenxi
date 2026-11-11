@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import '../app_services.dart';
 import '../domain/uploads.dart';
 import '../upload/upload_task.dart';
+import '../transfer/rapid_transfer_task.dart';
+import 'rapid_transfers_page.dart';
 import 'browser_page.dart';
 import 'common.dart';
 import 'app_context_menu.dart';
@@ -21,8 +23,8 @@ class UploadsPage extends StatefulWidget {
 
 class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
   int filter = 0;
-  bool foreground = true, detailsOpen = false;
-  final busyIds = <String>{};
+  bool foreground = true, detailsOpen = false, continuing = false;
+  final busyIds = <String>{}, busyCrossIds = <String>{};
   Color get accent => themeCompanion(context);
   @override
   void initState() {
@@ -48,8 +50,15 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
     _ => true,
   };
 
+  bool acceptsCross(RapidTransferTask t, int value) => switch (value) {
+    1 => t.active,
+    2 => t.status == RapidTaskStatus.completed && !t.canRetry,
+    3 => t.canRetry,
+    _ => true,
+  };
+
   Future<void> action(UploadTask t, Future<void> Function() work) async {
-    if (!mounted || !busyIds.add(t.id)) return;
+    if (!mounted || continuing || !busyIds.add(t.id)) return;
     setState(() {});
     try {
       await work();
@@ -57,6 +66,57 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
       if (mounted) message(context, errorText(e));
     } finally {
       if (mounted) setState(() => busyIds.remove(t.id));
+    }
+  }
+
+  Future<void> _continueAll() async {
+    if (!mounted ||
+        continuing ||
+        busyIds.isNotEmpty ||
+        busyCrossIds.isNotEmpty) {
+      return;
+    }
+    final uploads = widget.services.uploads;
+    final transfers = widget.services.rapidTransfers;
+    // Capture once: a task that fails again must wait for the next user action.
+    final candidates = [
+      for (final t in uploads.tasks.where((t) => t.canRetry))
+        (id: t.id, cross: false),
+      for (final t in transfers.tasks.where((t) => t.canRetry))
+        (id: t.id, cross: true),
+    ];
+    if (candidates.isEmpty) return;
+    setState(() => continuing = true);
+    var queued = 0, failed = 0;
+    String? firstError;
+    try {
+      for (final candidate in candidates) {
+        final retryable = candidate.cross
+            ? transfers.task(candidate.id)?.canRetry == true
+            : uploads.task(candidate.id)?.canRetry == true;
+        if (!retryable) continue;
+        try {
+          if (candidate.cross) {
+            await transfers.retry(candidate.id);
+          } else {
+            await uploads.retry(candidate.id);
+          }
+          queued++;
+        } catch (e) {
+          failed++;
+          firstError ??= errorText(e);
+        }
+      }
+      if (mounted) {
+        message(
+          context,
+          failed == 0
+              ? '已加入队列 $queued 个任务'
+              : '已加入队列 $queued 个任务；$failed 个未能继续：$firstError',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => continuing = false);
     }
   }
 
@@ -108,23 +168,39 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: widget.services.uploads,
+    animation: Listenable.merge([
+      widget.services.uploads,
+      widget.services.rapidTransfers,
+    ]),
     builder: (context, _) {
       final all = widget.services.uploads.tasks;
-      final tasks = all.where((t) => accepts(t, filter)).toList()
-        ..sort((a, b) {
-          int rank(UploadTask t) => t.status == UploadStatus.running
-              ? 0
-              : t.active
-              ? 1
-              : t.canRetry
-              ? 2
-              : 3;
-          final order = rank(a).compareTo(rank(b));
-          return order != 0 ? order : b.createdAt.compareTo(a.createdAt);
-        });
+      final cross = widget.services.rapidTransfers.tasks;
+      final tasks =
+          <({UploadTask? upload, RapidTransferTask? cross})>[
+            for (final t in all.where((t) => accepts(t, filter)))
+              (upload: t, cross: null),
+            for (final t in cross.where((t) => acceptsCross(t, filter)))
+              (upload: null, cross: t),
+          ]..sort((a, b) {
+            int rank(({UploadTask? upload, RapidTransferTask? cross}) t) =>
+                t.upload?.status == UploadStatus.running ||
+                    t.cross?.status == RapidTaskStatus.running
+                ? 0
+                : (t.upload?.active ?? t.cross!.active)
+                ? 1
+                : (t.upload?.canRetry ?? t.cross!.canRetry)
+                ? 2
+                : 3;
+            final order = rank(a).compareTo(rank(b));
+            return order != 0
+                ? order
+                : (b.upload?.createdAt ?? b.cross!.createdAt).compareTo(
+                    a.upload?.createdAt ?? a.cross!.createdAt,
+                  );
+          });
       final indices = {
-        for (var i = 0; i < tasks.length; i++) ValueKey(tasks[i].id): i,
+        for (var i = 0; i < tasks.length; i++)
+          ValueKey(tasks[i].upload?.id ?? tasks[i].cross!.id): i,
       };
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -134,7 +210,8 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
               for (var i = 0; i < 4; i++)
                 (
                   ['全部', '进行中', '已完成', '待处理'][i],
-                  all.where((t) => accepts(t, i)).length,
+                  all.where((t) => accepts(t, i)).length +
+                      cross.where((t) => acceptsCross(t, i)).length,
                 ),
             ],
             selected: filter,
@@ -142,7 +219,7 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
             accent: accent,
             keyPrefix: 'upload-filter',
           ),
-          _summary(all),
+          _summary(all, cross),
           Expanded(
             child: tasks.isEmpty
                 ? EmptyPanel(
@@ -161,7 +238,26 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
                     ),
                     itemCount: tasks.length,
                     findChildIndexCallback: (key) => indices[key],
-                    itemBuilder: (context, index) => _task(tasks[index]),
+                    itemBuilder: (context, index) => tasks[index].upload != null
+                        ? _task(tasks[index].upload!)
+                        : CrossTransferRow(
+                            widget.services,
+                            tasks[index].cross!,
+                            key: ValueKey(tasks[index].cross!.id),
+                            active: widget.active && foreground,
+                            enabled: !continuing,
+                            onBusyChanged: (busy) {
+                              if (!mounted) return;
+                              setState(() {
+                                final id = tasks[index].cross!.id;
+                                if (busy) {
+                                  busyCrossIds.add(id);
+                                } else {
+                                  busyCrossIds.remove(id);
+                                }
+                              });
+                            },
+                          ),
                   ),
           ),
         ],
@@ -169,16 +265,76 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
     },
   );
 
-  Widget _summary(List<UploadTask> all) {
-    final active = all.where((t) => t.active).length;
-    final pending = all.where((t) => t.status == UploadStatus.pending).length;
-    final speed = all
-        .where(
-          (t) =>
-              t.status == UploadStatus.running &&
-              t.phase == UploadPhase.uploading,
-        )
-        .fold<int>(0, (n, t) => n + t.speed);
+  Widget _summary(List<UploadTask> all, List<RapidTransferTask> cross) {
+    final active =
+        all.where((t) => t.active).length + cross.where((t) => t.active).length;
+    final pending =
+        all.where((t) => t.status == UploadStatus.pending).length +
+        cross.where((t) => t.status == RapidTaskStatus.pending).length;
+    final speed =
+        all
+            .where(
+              (t) =>
+                  t.status == UploadStatus.running &&
+                  t.phase == UploadPhase.uploading,
+            )
+            .fold<int>(0, (n, t) => n + t.speed) +
+        cross
+            .where(
+              (t) =>
+                  t.active &&
+                  t.entries.any((e) => e.status == RapidEntryStatus.uploading),
+            )
+            .fold<int>(0, (n, t) => n + t.speed);
+    final canContinue =
+        all.any((t) => t.canRetry) || cross.any((t) => t.canRetry);
+    final summary = Row(
+      children: [
+        Expanded(
+          child: Text(
+            active > 0
+                ? '传输 ${active - pending} · 等待 $pending'
+                : all.any((t) => t.isFolder) || cross.isNotEmpty
+                ? '共 ${all.length + cross.length} 个任务'
+                : '共 ${all.length} 个文件',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 11, color: secondary(context)),
+          ),
+        ),
+        if (active > 0) ...[
+          const SizedBox(width: 8),
+          Icon(CupertinoIcons.arrow_up, size: 12, color: accent),
+          const SizedBox(width: 4),
+          Text(
+            speed > 0 ? '${formatBytes(speed)}/s' : '准备中',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11,
+              color: accent,
+              fontFeatures: const [ui.FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ],
+    );
+    final button = TextButton.icon(
+      key: const ValueKey('upload-continue-all'),
+      onPressed: continuing || busyIds.isNotEmpty || busyCrossIds.isNotEmpty
+          ? null
+          : _continueAll,
+      icon: const Icon(CupertinoIcons.play_fill, size: 13),
+      label: Text(continuing ? '正在继续…' : '一键继续'),
+      style: TextButton.styleFrom(
+        foregroundColor: accent,
+        minimumSize: const Size(0, 36),
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        textStyle: Theme.of(
+          context,
+        ).textTheme.labelLarge?.copyWith(fontSize: 12),
+      ),
+    );
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
       decoration: BoxDecoration(
@@ -186,37 +342,24 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
           horizontal: BorderSide(color: border(context), width: .5),
         ),
       ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              active > 0
-                  ? '传输 ${active - pending} · 等待 $pending'
-                  : all.any((t) => t.isFolder)
-                  ? '共 ${all.length} 个任务'
-                  : '共 ${all.length} 个文件',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 11, color: secondary(context)),
+      child: !canContinue && !continuing
+          ? summary
+          : LayoutBuilder(
+              builder: (context, constraints) =>
+                  constraints.maxWidth < 340 ||
+                      MediaQuery.textScalerOf(context).scale(12) > 16
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [summary, const SizedBox(height: 4), button],
+                    )
+                  : Row(
+                      children: [
+                        Expanded(child: summary),
+                        const SizedBox(width: 12),
+                        button,
+                      ],
+                    ),
             ),
-          ),
-          if (active > 0) ...[
-            const SizedBox(width: 8),
-            Icon(CupertinoIcons.arrow_up, size: 12, color: accent),
-            const SizedBox(width: 4),
-            Text(
-              speed > 0 ? '${formatBytes(speed)}/s' : '准备中',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 11,
-                color: accent,
-                fontFeatures: const [ui.FontFeature.tabularFigures()],
-              ),
-            ),
-          ],
-        ],
-      ),
     );
   }
 
@@ -227,7 +370,7 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
       identity: t.id,
       actions: () {
         final task = widget.services.uploads.task(t.id);
-        if (task == null || busyIds.contains(t.id)) return [];
+        if (task == null || continuing || busyIds.contains(t.id)) return [];
         return [
           const AppMenuAction(
             value: 'details',
@@ -274,118 +417,72 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
 
   Widget _taskContent(UploadTask t) {
     final manager = widget.services.uploads;
-    final locked = busyIds.contains(t.id);
+    final locked = continuing || busyIds.contains(t.id);
     final tint = _tint(t);
-    return Material(
+    return TransferTaskRow(
       key: ValueKey(t.id),
-      color: Colors.transparent,
-      child: InkWell(
-        key: ValueKey('upload-row-${t.id}'),
-        onTap: () => _details(t.id),
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 66),
-          padding: const EdgeInsets.fromLTRB(16, 8, 10, 8),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: border(context), width: .5),
+      rowKey: ValueKey('upload-row-${t.id}'),
+      name: t.name,
+      directory: t.isFolder,
+      onTap: () => _details(t.id),
+      platformMark: PlatformMark(platform: t.session.platform, size: 14),
+      subtitle: Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: t.stage,
+              style: TextStyle(color: tint),
             ),
-          ),
-          child: Row(
-            children: [
-              FileGlyph(t.name, directory: t.isFolder, size: 30),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            t.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              height: 1.3,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        PlatformMark(platform: t.session.platform, size: 14),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text.rich(
-                      TextSpan(
-                        children: [
-                          TextSpan(
-                            text: t.stage,
-                            style: TextStyle(color: tint),
-                          ),
-                          TextSpan(text: ' · ${_amount(t)}'),
-                          if (t.active &&
-                              t.phase == UploadPhase.uploading &&
-                              t.speed > 0)
-                            TextSpan(
-                              text: ' · ${formatBytes(t.speed)}/s',
-                              style: TextStyle(color: accent),
-                            ),
-                        ],
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: secondary(context),
-                        fontFeatures: const [ui.FontFeature.tabularFigures()],
-                      ),
-                    ),
-                    TransferProgress.upload(
-                      t,
-                      compact: true,
-                      enabled:
-                          widget.active &&
-                          foreground &&
-                          ModalRoute.of(context)?.isCurrent != false,
-                    ),
-                  ],
-                ),
+            TextSpan(text: ' · ${_amount(t)}'),
+            if (t.active && t.phase == UploadPhase.uploading && t.speed > 0)
+              TextSpan(
+                text: ' · ${formatBytes(t.speed)}/s',
+                style: TextStyle(color: accent),
               ),
-              const SizedBox(width: 6),
-              TransferActionButton(
-                key: ValueKey('upload-action-${t.id}'),
-                color: t.active || t.canRetry
-                    ? accent
-                    : const Color(0xff30b866),
-                icon: t.active
-                    ? CupertinoIcons.stop
-                    : t.canRetry
-                    ? CupertinoIcons.arrow_clockwise
-                    : CupertinoIcons.folder,
-                label: t.active
-                    ? '取消上传'
-                    : t.canRetry
-                    ? t.isFolder
-                          ? '继续上传'
-                          : '重新上传'
-                    : '打开目标目录：${t.folderName}',
-                onPressed: locked
-                    ? null
-                    : () {
-                        if (t.active) {
-                          cancel(t);
-                        } else if (t.canRetry) {
-                          action(t, () => manager.retry(t.id));
-                        } else {
-                          action(t, () => openFolder(t));
-                        }
-                      },
-              ),
-            ],
-          ),
+          ],
         ),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11,
+          color: secondary(context),
+          fontFeatures: const [ui.FontFeature.tabularFigures()],
+        ),
+      ),
+      progress: TransferProgress.upload(
+        t,
+        compact: true,
+        enabled:
+            widget.active &&
+            foreground &&
+            ModalRoute.of(context)?.isCurrent != false,
+      ),
+      trailing: TransferActionButton(
+        key: ValueKey('upload-action-${t.id}'),
+        color: t.active || t.canRetry ? accent : const Color(0xff30b866),
+        icon: t.active
+            ? CupertinoIcons.stop
+            : t.canRetry
+            ? CupertinoIcons.arrow_clockwise
+            : CupertinoIcons.folder,
+        label: t.active
+            ? '取消上传'
+            : t.canRetry
+            ? t.isFolder
+                  ? '继续上传'
+                  : '重新上传'
+            : '打开目标目录：${t.folderName}',
+        onPressed: locked
+            ? null
+            : () {
+                if (t.active) {
+                  cancel(t);
+                } else if (t.canRetry) {
+                  action(t, () => manager.retry(t.id));
+                } else {
+                  action(t, () => openFolder(t));
+                }
+              },
       ),
     );
   }

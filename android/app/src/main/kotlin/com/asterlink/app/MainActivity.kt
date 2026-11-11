@@ -52,6 +52,7 @@ class MainActivity : FlutterActivity() {
     }
     override fun onResume() {
         super.onResume()
+        host.playback.resumed(this)
         host.bridge.fileOpening.resumed()
         host.bridge.downloadOverlay.resumed()
         host.downloadKeepAlive.appVisible()

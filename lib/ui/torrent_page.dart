@@ -23,6 +23,7 @@ class TorrentPage extends StatefulWidget {
 class _TorrentPageState extends State<TorrentPage> {
   late TorrentSession session;
   final selected = <int>{};
+  final _filesScroll = ScrollController();
   bool _initialized = false, _adding = false, _playing = false;
   String _error = '';
   @override
@@ -50,6 +51,7 @@ class _TorrentPageState extends State<TorrentPage> {
   void dispose() {
     session.removeListener(_changed);
     session.dispose();
+    _filesScroll.dispose();
     super.dispose();
   }
 
@@ -167,22 +169,37 @@ class _TorrentPageState extends State<TorrentPage> {
             : Column(
                 children: [
                   ListTile(
+                    dense: true,
+                    minTileHeight: 64,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                    horizontalTitleGap: 12,
                     leading: Icon(
                       CupertinoIcons.arrow_down_circle,
                       color: themeAccent(context),
                     ),
-                    title: Text(
-                      info.name,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+                    title: Tooltip(
+                      message: info.name,
+                      child: Text(
+                        info.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
                     subtitle: Text(
-                      '${info.files.length} 个文件 · ${formatBytes(info.size)}${info.files.any((file) => file.playable) ? '\n点击播放按钮即可在线播放' : ''}',
+                      '${info.files.length} 个文件 · ${formatBytes(info.size)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12),
                     ),
                   ),
                   Row(
                     children: [
                       TextButton(
+                        style: _selectionButtonStyle,
                         onPressed: _adding
                             ? null
                             : () => setState(
@@ -193,58 +210,46 @@ class _TorrentPageState extends State<TorrentPage> {
                         child: const Text('全选'),
                       ),
                       TextButton(
+                        style: _selectionButtonStyle,
                         onPressed: _adding
                             ? null
                             : () => setState(selected.clear),
                         child: const Text('清空选择'),
                       ),
                       Expanded(
-                        child: Text(
-                          '已选 ${selected.length} 个',
-                          textAlign: TextAlign.end,
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 8),
+                          child: Text(
+                            '已选 ${selected.length} 个',
+                            textAlign: TextAlign.end,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: secondary(context),
+                            ),
+                          ),
                         ),
                       ),
                       const SizedBox(width: 20),
                     ],
                   ),
                   Expanded(
-                    child: ListView.builder(
-                      itemCount: info.files.length,
-                      itemBuilder: (context, index) {
-                        final file = info.files[index];
-                        return CheckboxListTile(
-                          key: ValueKey('torrent-file-$index'),
-                          value: selected.contains(file.index),
-                          onChanged: _adding
-                              ? null
-                              : (value) => setState(() {
-                                  if (value == true) {
-                                    selected.add(file.index);
-                                  } else {
-                                    selected.remove(file.index);
-                                  }
-                                }),
-                          title: Text(file.name),
-                          subtitle: Text(
-                            '${file.path}\n${formatBytes(file.size)}',
-                          ),
-                          controlAffinity: ListTileControlAffinity.leading,
-                          secondary: file.playable
-                              ? IconButton(
-                                  key: ValueKey('torrent-play-${file.index}'),
-                                  tooltip: '在线播放 ${file.name}',
-                                  onPressed: _adding || _playing
-                                      ? null
-                                      : () => _play(file),
-                                  color: themeAccent(context),
-                                  icon: const Icon(
-                                    CupertinoIcons.play_circle_fill,
-                                    size: 30,
-                                  ),
-                                )
-                              : null,
-                        );
-                      },
+                    child: ScrollConfiguration(
+                      behavior: ScrollConfiguration.of(
+                        context,
+                      ).copyWith(scrollbars: false),
+                      child: Scrollbar(
+                        controller: _filesScroll,
+                        child: ListView.builder(
+                          key: const PageStorageKey('torrent-files'),
+                          controller: _filesScroll,
+                          padding: const EdgeInsets.only(bottom: 4),
+                          itemCount: info.files.length,
+                          itemBuilder: (context, index) =>
+                              _fileRow(info.files[index], index),
+                        ),
+                      ),
                     ),
                   ),
                   if (_error.isNotEmpty)
@@ -260,7 +265,7 @@ class _TorrentPageState extends State<TorrentPage> {
                   SafeArea(
                     top: false,
                     child: Padding(
-                      padding: const EdgeInsets.all(18),
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                       child: SizedBox(
                         width: double.infinity,
                         child: FilledButton.icon(
@@ -268,7 +273,15 @@ class _TorrentPageState extends State<TorrentPage> {
                           onPressed: selected.isEmpty || _adding ? null : _add,
                           icon: const Icon(CupertinoIcons.arrow_down),
                           label: Text(
-                            _adding ? '正在加入队列…' : '下载选中 ${selected.length} 个文件',
+                            _adding
+                                ? '正在加入队列…'
+                                : MediaQuery.sizeOf(context).width < 400 &&
+                                      MediaQuery.textScalerOf(
+                                            context,
+                                          ).scale(14) >
+                                          20
+                                ? '下载 ${selected.length} 个文件'
+                                : '下载选中 ${selected.length} 个文件',
                           ),
                         ),
                       ),
@@ -279,4 +292,75 @@ class _TorrentPageState extends State<TorrentPage> {
       ),
     );
   }
+
+  ButtonStyle get _selectionButtonStyle => TextButton.styleFrom(
+    textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 12),
+    padding: const EdgeInsets.symmetric(horizontal: 10),
+    minimumSize: const Size(48, 48),
+  );
+
+  Widget _fileRow(TorrentFile file, int index) => CheckboxListTile(
+    key: ValueKey('torrent-file-$index'),
+    dense: true,
+    minTileHeight: 60,
+    minVerticalPadding: 6,
+    horizontalTitleGap: 8,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+    value: selected.contains(file.index),
+    onChanged: _adding
+        ? null
+        : (value) => setState(() {
+            if (value == true) {
+              selected.add(file.index);
+            } else {
+              selected.remove(file.index);
+            }
+          }),
+    title: Tooltip(
+      message: file.path,
+      excludeFromSemantics: true,
+      child: Text(
+        file.name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        semanticsLabel: file.path,
+        style: const TextStyle(fontSize: 14, height: 1.3),
+      ),
+    ),
+    subtitle: Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: Row(
+        children: [
+          Text(
+            formatBytes(file.size),
+            style: TextStyle(fontSize: 12, color: secondary(context)),
+          ),
+          if (file.directory.isNotEmpty) ...[
+            Text(
+              ' · ',
+              style: TextStyle(fontSize: 12, color: secondary(context)),
+            ),
+            Expanded(
+              child: Text(
+                file.directory,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: secondary(context)),
+              ),
+            ),
+          ],
+        ],
+      ),
+    ),
+    controlAffinity: ListTileControlAffinity.leading,
+    secondary: file.playable
+        ? IconButton(
+            key: ValueKey('torrent-play-${file.index}'),
+            tooltip: '在线播放 ${file.name}',
+            onPressed: _adding || _playing ? null : () => _play(file),
+            color: themeAccent(context),
+            icon: const Icon(CupertinoIcons.play_circle_fill, size: 26),
+          )
+        : null,
+  );
 }

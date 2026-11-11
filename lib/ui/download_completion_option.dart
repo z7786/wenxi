@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'app_switch.dart';
 import '../download/download_shutdown.dart';
 import 'common.dart';
 
@@ -33,7 +34,7 @@ class DownloadCompletionOption extends StatelessWidget {
       );
       final toggle = Semantics(
         label: '下载完成后自动${controller.action.label}',
-        child: Switch.adaptive(
+        child: AppSwitch(
           key: const Key('download-completion-enabled'),
           value: enabled,
           onChanged: controller.executing ? null : controller.setEnabled,

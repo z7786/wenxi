@@ -113,7 +113,7 @@ Android 可通过通知栏和传输悬浮窗查看后台任务；桌面端传输
 
 ## 下载
 
-在 [Releases](https://github.com/z7786/wenxi/releases) 页面获取安装包。当前版本为 [2.2.0+220](https://github.com/z7786/wenxi/releases/tag/v2.2.0%2B220)，附 `SHA256SUMS.txt` 校验文件。
+在 [Releases](https://github.com/z7786/wenxi/releases) 页面获取安装包。当前版本为 [2.3.0+230](https://github.com/z7786/wenxi/releases/tag/v2.3.0%2B230)，附 `SHA256SUMS.txt` 校验文件。
 
 | 平台 | 安装包 | 系统要求 |
 | --- | --- | --- |

@@ -12,6 +12,7 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback.dart';
 import 'package:asterlink/platform/playback_device.dart';
 import 'package:asterlink/playback/media_backend.dart';
+import 'package:asterlink/playback/playback_screen_info.dart';
 import 'package:asterlink/playback/playback_controller.dart';
 import 'package:asterlink/playback/playback_failure.dart';
 import 'package:asterlink/playback/subtitle_matching.dart';
@@ -19,6 +20,7 @@ import 'package:asterlink/playback/external_stream.dart';
 import 'package:asterlink/playback/cast/cast_session.dart';
 import 'package:asterlink/playback/cast/dlna.dart';
 import 'package:asterlink/playback/cast/cast_platform.dart';
+import 'cast_support.dart' show TestCastPlatform;
 
 class FakePlaybackBackend extends PlaybackBackend {
   FakePlaybackBackend(this.name, this.events);
@@ -45,6 +47,12 @@ class FakePlaybackBackend extends PlaybackBackend {
   );
   @override
   PlayerState get state => _state;
+  @override
+  PlaybackScreenInfo screenInfo = const PlaybackScreenInfo();
+  bool screenMonitoring = false;
+  @override
+  void setScreenDisplayMonitoringEnabled(bool enabled) =>
+      screenMonitoring = enabled;
   @override
   int errorRevision = 0;
   @override
@@ -295,9 +303,13 @@ class PlaybackFixture {
     controller = PlaybackController(
       castSessionFactory:
           castSessionFactory ??
-          ((device, source) =>
-              CastSession(device, source, managePlatform: false)),
-      castPlatform: castPlatform,
+          ((device, source) => CastSession(
+            device,
+            source,
+            managePlatform: false,
+            prepareSource: false,
+          )),
+      castPlatform: castPlatform ?? TestCastPlatform(),
       externalStreamFactory:
           externalStreamFactory ?? ExternalPlaybackStream.new,
       entries: entries,
@@ -346,6 +358,8 @@ class PlaybackFixture {
 
 class FakePlaybackDevice extends PlaybackDevice {
   @override
+  bool isTelevision = false;
+  @override
   bool supportsExternalPlayer = false;
   Future<bool> Function(String, String, Duration)? externalPlayer;
   @override
@@ -380,6 +394,7 @@ class FakePlaybackDevice extends PlaybackDevice {
   double brightness = .5;
   bool started = false, finished = false, full = false;
   int updates = 0;
+  double? frameRate;
   bool _video = false;
   final calls = <String>[];
   final events = StreamController<String>.broadcast();
@@ -396,12 +411,14 @@ class FakePlaybackDevice extends PlaybackDevice {
     required bool playing,
     int? width,
     int? height,
+    double? frameRate,
     bool autoRotate = true,
     PlaybackOrientation? orientation,
     bool locked = false,
     bool controlsVisible = true,
   }) async {
     updates++;
+    this.frameRate = frameRate;
     this.orientation = _video && orientation != null
         ? orientation
         : playbackOrientation(

@@ -145,6 +145,13 @@ class DownloadTask {
   final bool payloadReady;
   final bool directOutput;
   final Json hls;
+  bool get isStreamingPlaylist =>
+      hls.isNotEmpty ||
+      RegExp(
+        r'\.(m3u8|mpd)$',
+        caseSensitive: false,
+      ).hasMatch(Uri.tryParse(spec.url)?.path ?? '') ||
+      RegExp(r'\.(m3u8|mpd)$', caseSensitive: false).hasMatch(spec.fileName);
   final Map<String, int> connectionOptions;
   bool get active =>
       status == DownloadStatus.pending || status == DownloadStatus.running;

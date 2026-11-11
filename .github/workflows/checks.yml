@@ -32,11 +32,26 @@ jobs:
         run: ./tool/tests/build-config.test.ps1
       - name: Analyze Flutter
         run: flutter analyze --no-pub
+      - name: Test Windows GPU preference and restoration
+        shell: pwsh
+        run: |
+          cmake -S windows/runner/tests -B .local/gpu-preference-tests -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'GPU preference test configuration failed.' }
+          cmake --build .local/gpu-preference-tests --config Release --target gpu_preference_test
+          if ($LASTEXITCODE -ne 0) { throw 'GPU preference test build failed.' }
+          ctest --test-dir .local/gpu-preference-tests -C Release -R '^gpu_preference$' --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'GPU preference tests failed.' }
       - name: Build the native helper used by integration tests
         shell: pwsh
         run: ./tool/build-native-windows.ps1
       - name: Test Flutter
         run: flutter test --no-pub --concurrency=4 --reporter expanded
+      - name: Verify packaged Windows PGS and text subtitle decoding
+        shell: pwsh
+        run: |
+          ./tool/prepare-player-test.ps1
+          flutter test --no-pub test/native_subtitle_render_test.dart --reporter expanded
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native subtitle regression failed.' }
       - name: Test browser scripts and configuration editor
         run: |
           flutter test --no-pub tool/login_web_scripts_test.dart --reporter expanded

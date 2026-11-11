@@ -153,6 +153,16 @@ class DiagnosticRecorderTest {
         assertEquals(false, recorder.snapshot()["exitHistorySupported"])
     }
 
+    @Test fun memoryCountersAreNumericAndHonorOptOut() {
+        val data = recorder.memorySnapshot()
+        assertTrue(data.containsKey("pid"))
+        assertTrue(data.containsKey("pssKb"))
+        assertTrue(data.containsKey("nativeHeapAllocatedBytes"))
+        assertTrue(data.values.all { it is Number || it is Boolean })
+        recorder.setEnabled(false)
+        assertTrue(recorder.memorySnapshot().isEmpty())
+    }
+
     @Test @Config(sdk = [30]) fun systemExitHistoryHonorsRetentionClearAndOptOut() {
         val activity = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val shadow = Shadows.shadowOf(activity)

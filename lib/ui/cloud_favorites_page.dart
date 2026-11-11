@@ -28,6 +28,7 @@ Future<void> openCloudFavorite(
         value.session,
         initialItems: value.files,
         initialTrail: value.trail,
+        initialCursor: value.cursor,
         highlightedFileId: value.highlight,
       ),
     ),

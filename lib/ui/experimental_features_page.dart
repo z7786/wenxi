@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'app_switch.dart';
 import '../app_services.dart';
 import 'common.dart';
 
@@ -12,7 +13,7 @@ class ExperimentalFeaturesPage extends StatelessWidget {
     required String title,
     required String description,
     required bool value,
-  }) => SwitchListTile.adaptive(
+  }) => AppSwitchListTile(
     key: ValueKey(setting),
     contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
     title: Text(

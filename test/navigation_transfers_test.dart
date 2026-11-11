@@ -68,6 +68,29 @@ class QueueFixture {
 
 void main() {
   test(
+    'hash matching contributes active count without pretending to upload bytes',
+    () {
+      final change = ChangeNotifier();
+      var matching = 1;
+      final state = NavigationTransfers(
+        changes: change,
+        downloads: () => [],
+        uploads: () => [],
+        downloadById: (_) => null,
+        uploadById: (_) => null,
+        rapid: () => matching,
+      );
+      expect(state.value.active, 1);
+      expect(state.value.progress, -1);
+      expect(state.value.description, contains('跨盘任务'));
+      matching = 0;
+      change.notifyListeners();
+      expect(state.value.active, 0);
+      state.dispose();
+      change.dispose();
+    },
+  );
+  test(
     'old completed and failed history stays quiet; both queues share the ring',
     () {
       final q = QueueFixture();

@@ -351,6 +351,7 @@ class CloudFavorites {
       BrowseSession session,
       List<(String, String)> trail,
       List<CloudFile> files,
+      String? cursor,
       String? highlight,
     })
   >
@@ -376,10 +377,27 @@ class CloudFavorites {
           : favorite.directoryId;
       if (trail.last.$1 != id) trail.add((id, favorite.file.name));
     }
-    final files = await cloud.list(session, trail.last.$1);
+    final page = await cloud.listPage(session, trail.last.$1);
+    final files = {for (final file in page.files) file.id: file};
+    var cursor = page.nextCursor;
     if (!favorite.file.isDirectory) {
+      // Locate a saved file across batches, but leave the remaining pages for
+      // the browser to load as the user scrolls.
+      final seen = <String>{};
+      while (files[favorite.file.id]?.isDirectory != false && cursor != null) {
+        require(seen.add(cursor), '文件列表分页已失效，请刷新');
+        final next = await cloud.listPage(
+          session,
+          trail.last.$1,
+          cursor: cursor,
+        );
+        for (final file in next.files) {
+          files[file.id] = file;
+        }
+        cursor = next.nextCursor;
+      }
       require(
-        files.any((f) => f.id == favorite.file.id && !f.isDirectory),
+        files[favorite.file.id]?.isDirectory == false,
         '收藏的文件已移动、删除或分享已失效',
       );
     }
@@ -416,7 +434,8 @@ class CloudFavorites {
     return (
       session: session,
       trail: trail,
-      files: files,
+      files: files.values.toList(),
+      cursor: cursor,
       highlight: favorite.file.isDirectory ? null : favorite.file.id,
     );
   });

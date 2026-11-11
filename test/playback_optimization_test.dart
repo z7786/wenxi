@@ -434,7 +434,7 @@ void main() {
   });
 
   test(
-    'Adequate throughput keeps four connections while a seek fills its cache',
+    'Adequate throughput keeps eight connections while a seek fills its cache',
     () {
       final policy = PlaybackBufferPolicy(connectionLimit: 16);
       for (var second = 0; second <= 20; second += 2) {
@@ -449,7 +449,7 @@ void main() {
           playing: true,
           requiredBytesPerSecond: 1.3 * 1024 * 1024,
         );
-        expect(policy.connections, 4);
+        expect(policy.connections, 8);
       }
     },
   );
@@ -500,6 +500,147 @@ void main() {
     },
   );
 
+  test('Desktop Blu-ray cache grows without raising the mobile budget', () {
+    for (final desktop in [false, true]) {
+      final policy = PlaybackBufferPolicy(
+        connectionLimit: 128,
+        desktop: desktop,
+      );
+      final target = policy.forwardTarget(
+        size: 60 * 1024 * 1024 * 1024,
+        duration: const Duration(hours: 2),
+        rate: 1,
+      );
+      expect(target, (desktop ? 256 : 48) * PlaybackBufferPolicy.mib);
+      expect(
+        target + policy.proxyBytesFor(target) + PlaybackBufferPolicy.backBytes,
+        lessThanOrEqualTo(policy.byteBudget),
+      );
+      expect(
+        policy.proxyBytesFor(target),
+        greaterThanOrEqualTo(16 * PlaybackBufferPolicy.mib),
+      );
+      policy.forwardBytes = target;
+      expect(
+        policy.forwardTarget(
+          size: 1,
+          duration: const Duration(hours: 2),
+          rate: 1,
+        ),
+        target,
+      );
+    }
+  });
+
+  test('Large timestamp buffer does not hide a measured bitrate deficit', () {
+    final policy = PlaybackBufferPolicy(connectionLimit: 16);
+    for (final second in [0, 2]) {
+      policy.observe(
+        elapsed: Duration(seconds: second),
+        receivedBytes: second * 512 * 1024,
+        failures: 0,
+        status: 206,
+        activeRequests: policy.connections,
+        bufferedSeconds: 600,
+        buffering: false,
+        playing: true,
+        requiredBytesPerSecond: 8.0 * PlaybackBufferPolicy.mib,
+      );
+    }
+    expect(policy.connections, 10);
+  });
+
+  test('HTTP 206 throughput collapse rolls back a concurrency trial', () {
+    final policy = PlaybackBufferPolicy(connectionLimit: 128);
+    var received = 0;
+    for (var second = 0; second <= 20; second += 2) {
+      if (second > 0) {
+        received += (second <= 2 ? 2 : 1) * PlaybackBufferPolicy.mib;
+      }
+      policy.observe(
+        elapsed: Duration(seconds: second),
+        receivedBytes: received,
+        failures: 0,
+        status: 206,
+        activeRequests: policy.connections,
+        bufferedSeconds: 600,
+        buffering: false,
+        playing: true,
+        requiredBytesPerSecond: 8.0 * PlaybackBufferPolicy.mib,
+      );
+      if (second == 2) expect(policy.connections, 10);
+      if (second >= 8) expect(policy.connections, 8);
+    }
+  });
+
+  test(
+    'Growing throughput can reach a high ceiling without a cache underrun',
+    () {
+      final policy = PlaybackBufferPolicy(connectionLimit: 128);
+      var received = 0;
+      for (var second = 0; second <= 80; second += 2) {
+        received += policy.connections * 128 * 1024;
+        policy.observe(
+          elapsed: Duration(seconds: second),
+          receivedBytes: received,
+          failures: 0,
+          status: 206,
+          activeRequests: policy.connections,
+          bufferedSeconds: 600,
+          buffering: false,
+          playing: true,
+          requiredBytesPerSecond: 20.0 * PlaybackBufferPolicy.mib,
+        );
+      }
+      expect(policy.connections, 128);
+    },
+  );
+
+  test(
+    'Source ceilings, pauses and idle proxy windows do not add requests',
+    () {
+      final policy = PlaybackBufferPolicy(connectionLimit: 2);
+      expect(policy.connections, 2);
+      policy.setLimit(16);
+      expect(policy.connections, 8);
+      for (var second = 0; second <= 20; second += 2) {
+        policy.observe(
+          elapsed: Duration(seconds: second),
+          receivedBytes: second * 512 * 1024,
+          failures: 0,
+          status: 206,
+          activeRequests: second < 10 ? 8 : 0,
+          bufferedSeconds: 600,
+          buffering: false,
+          playing: second >= 10,
+          requiredBytesPerSecond: 8.0 * PlaybackBufferPolicy.mib,
+        );
+        expect(policy.connections, 8);
+      }
+      policy.setLimit(1);
+      expect(policy.connections, 1);
+    },
+  );
+
+  test('Range memory capacity bounds growth at large configured limits', () {
+    final policy = PlaybackBufferPolicy(connectionLimit: 128);
+    for (var second = 0; second <= 120; second += 2) {
+      policy.observe(
+        elapsed: Duration(seconds: second),
+        receivedBytes: second * 512 * 1024,
+        failures: 0,
+        status: 206,
+        activeRequests: policy.connections,
+        requestCapacity: 15,
+        bufferedSeconds: 1,
+        buffering: true,
+        playing: true,
+      );
+    }
+    expect(policy.limit, 128);
+    expect(policy.connections, 15);
+  });
+
   test('One throttled response cannot repeatedly halve concurrency', () {
     final policy = PlaybackBufferPolicy(connectionLimit: 8);
     for (var second = 0; second <= 10; second += 2) {
@@ -513,7 +654,7 @@ void main() {
         buffering: true,
         playing: true,
       );
-      expect(policy.connections, 2);
+      expect(policy.connections, 4);
     }
   });
 
@@ -521,7 +662,15 @@ void main() {
     'Repeated underruns build a bounded reserve measured at playback speed',
     () {
       final policy = PlaybackBufferPolicy(connectionLimit: 8);
-      expect(policy.resumeSeconds(rebufferCount: 0, rate: 1), 6);
+      expect(policy.resumeSeconds(rebufferCount: 0, rate: 1), 2);
+      expect(
+        policy.resumeSeconds(
+          rebufferCount: 20,
+          rate: 2,
+          awaitingProgress: true,
+        ),
+        4,
+      );
       expect(policy.resumeSeconds(rebufferCount: 1, rate: 1), 8);
       expect(policy.resumeSeconds(rebufferCount: 2, rate: 1), 10);
       expect(policy.resumeSeconds(rebufferCount: 20, rate: 1), 12);
@@ -587,7 +736,14 @@ void main() {
       sample(11, playing: false, position: 30);
       expect(metrics.bufferingCount, 1);
       expect(metrics.bufferingTime, const Duration(seconds: 3));
-      expect(metrics.lastSeekTime, const Duration(seconds: 1));
+      expect(metrics.lastSeekTime, isNull);
+      expect(metrics.awaitingProgress, isTrue);
+      sample(12, position: 30, buffering: true);
+      sample(13, position: 30);
+      sample(14, position: 31);
+      expect(metrics.lastSeekTime, const Duration(seconds: 4));
+      expect(metrics.awaitingProgress, isFalse);
+      expect(metrics.bufferingCount, 1);
     },
   );
 }

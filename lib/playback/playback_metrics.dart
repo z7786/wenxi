@@ -5,16 +5,30 @@ class PlaybackMetrics {
   Duration? lastSeekTime;
   int bufferingCount = 0, seekCount = 0, seekTimeoutCount = 0;
   bool _started = false;
-  Duration _lastPosition = Duration.zero;
+  bool _underrun = false;
+  bool _awaitingProgress = true, _seekLanded = false;
+  Duration? _lastPosition;
+
+  /// Keep the small reserve until playback actually advances after open/seek.
+  /// A rendered preview or a jump to the seek target is not resumed playback.
+  bool get awaitingProgress => _awaitingProgress;
 
   void seek(Duration target, Duration elapsed) {
     _seekAt = elapsed;
     _seekTarget = target;
+    _seekLanded = false;
+    _started = false;
+    _underrun = false;
+    _awaitingProgress = true;
+    _lastPosition = null;
     seekCount++;
     _finishBuffering(elapsed);
   }
 
-  void pause(Duration elapsed) => _finishBuffering(elapsed);
+  void pause(Duration elapsed) {
+    _finishBuffering(elapsed);
+    _underrun = false;
+  }
 
   void observe({
     required Duration elapsed,
@@ -24,14 +38,24 @@ class PlaybackMetrics {
   }) {
     final previousPosition = _lastPosition;
     _lastPosition = position;
+    final advancing =
+        playing &&
+        !buffering &&
+        previousPosition != null &&
+        position > previousPosition &&
+        position - previousPosition < const Duration(seconds: 2);
     if (_seekAt != null && _seekTarget != null) {
-      if (!buffering &&
-          (position - _seekTarget!).abs() < const Duration(milliseconds: 500)) {
+      if (_seekLanded && advancing) {
         lastSeekTime = elapsed - _seekAt!;
         _seekAt = _seekTarget = null;
+        _started = true;
+        _awaitingProgress = false;
       } else if (elapsed - _seekAt! > const Duration(seconds: 30)) {
         seekTimeoutCount++;
         _seekAt = _seekTarget = null;
+      } else if ((position - _seekTarget!).abs() <
+          const Duration(milliseconds: 500)) {
+        _seekLanded = true;
       }
       return;
     }
@@ -40,11 +64,19 @@ class PlaybackMetrics {
       return;
     }
     if (!buffering) {
-      if (firstFrame != null || position > previousPosition) _started = true;
+      if (advancing) {
+        _started = true;
+        _underrun = false;
+        _awaitingProgress = false;
+      }
       _finishBuffering(elapsed);
-    } else if (_started && _bufferingAt == null) {
+    } else if ((_started || _underrun) && _bufferingAt == null) {
       _bufferingAt = elapsed;
-      bufferingCount++;
+      if (!_underrun) bufferingCount++;
+      _underrun = true;
+      // Buffering can flicker before any new frame advances. Count that as
+      // one underrun rather than escalating the reserve on every toggle.
+      _started = false;
     }
   }
 
@@ -57,6 +89,7 @@ class PlaybackMetrics {
   Map<String, Object?> fields(Duration elapsed) => {
     'firstFrameMs': ?firstFrame?.inMilliseconds,
     'rebufferCount': bufferingCount,
+    'awaitingPlaybackProgress': _awaitingProgress,
     'rebufferMs':
         (bufferingTime +
                 (_bufferingAt == null

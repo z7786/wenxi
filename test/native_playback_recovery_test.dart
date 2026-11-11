@@ -179,8 +179,7 @@ void main() {
           try {
             await HttpOverrides.runWithHttpOverrides(() async {
               await backend.open(origin.source(), Duration.zero);
-              // This short fixture must begin before its held tail arrives;
-              // the production startup reserve exceeds the fixture duration.
+              // Force an early start to exercise a genuine mid-play underrun.
               final native = backend.player.platform as NativePlayer;
               await native.setProperty('cache-pause-initial', 'no');
               await native.setProperty('cache-pause-wait', '1');
@@ -197,6 +196,7 @@ void main() {
               );
               expect(backend.state.buffering, isTrue);
               expect(backend.failure, isNull);
+              final requestCount = origin.requests;
               await backend.setRate(2);
               await until(
                 () => backend.diagnosticFields['resumeBufferSeconds'] == 16,
@@ -213,7 +213,7 @@ void main() {
                 1,
                 reason: '$transitions',
               );
-              expect(origin.requests, 2);
+              expect(origin.requests, requestCount);
             }, _RealHttp());
           } finally {
             if (!origin.tail!.isCompleted) origin.tail!.complete();
@@ -314,13 +314,20 @@ void main() {
                   () => backend.state.buffer >= const Duration(seconds: 3),
                 );
                 if (paused) await backend.pause();
+                await until(
+                  () =>
+                      (backend.diagnosticFields['proxy']
+                          as Map)['activeRequests'] >
+                      0,
+                );
+                final requestsBeforeSeek = origin.requests;
                 await backend.seek(const Duration(seconds: 1));
                 await Future<void>.delayed(const Duration(milliseconds: 100));
                 expect(
                   (backend.diagnosticFields['proxy'] as Map)['activeRequests'],
-                  1,
+                  greaterThan(0),
                 );
-                expect(origin.requests, 2);
+                expect(origin.requests, requestsBeforeSeek);
                 if (paused) expect(backend.state.playing, isFalse);
                 origin.tail!.complete();
                 if (paused) await backend.play();
@@ -329,7 +336,7 @@ void main() {
                 );
                 expect(backend.failure, isNull);
                 expect(backend.state.completed, isFalse);
-                expect(origin.requests, 2);
+                expect(origin.requests, requestsBeforeSeek);
                 expect(
                   await (backend.player.platform as NativePlayer).getProperty(
                     'cache-on-disk',

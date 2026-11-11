@@ -231,20 +231,7 @@ PlaybackController downloadedPlayback(
     entries: entries,
     initialIndex: entries.indexWhere((entry) => entry.id == initial.id),
     history: PlaybackStore(services.store),
-    prepare: (entry, _) async {
-      final task = tasks[entry.id]!;
-      require(task.savedPath?.isNotEmpty == true, '文件位置已失效');
-      final availability = await services.downloads.files.inspect(
-        task.savedPath,
-      );
-      require(
-        availability == FileAvailability.present,
-        availability == FileAvailability.missing
-            ? '文件不存在或已被移动'
-            : '无法访问文件，请检查目录权限',
-      );
-      return DownloadSpec(url: task.savedPath!, fileName: task.spec.fileName);
-    },
+    prepare: (entry, _) => downloadedSource(services, tasks[entry.id]!),
     retain: (_) {},
     release: (_) async {},
     backendFactory:
@@ -254,4 +241,18 @@ PlaybackController downloadedPlayback(
           hardwareAcceleration: hardware,
         ),
   );
+}
+
+Future<DownloadSpec> downloadedSource(
+  AppServices services,
+  DownloadTask task,
+) async {
+  require(task.savedPath?.isNotEmpty == true, '文件位置已失效');
+  final availability = await services.downloads.files.inspect(task.savedPath);
+  RequestScope.checkpoint();
+  require(
+    availability == FileAvailability.present,
+    availability == FileAvailability.missing ? '文件不存在或已被移动' : '无法访问文件，请检查目录权限',
+  );
+  return DownloadSpec(url: task.savedPath!, fileName: task.spec.fileName);
 }

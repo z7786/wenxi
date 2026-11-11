@@ -29,6 +29,215 @@ class _SeekRetryClient extends DlnaClient {
 
 void main() {
   test(
+    'cast endpoints accept local IPv6 and CGNAT while rejecting public and credential URLs',
+    () {
+      for (final host in [
+        '::1',
+        'fd12::8',
+        'fe80::8',
+        '100.64.0.8',
+        '100.127.255.8',
+      ]) {
+        expect(
+          castEndpoint(Uri(scheme: 'http', host: host, path: '/device.xml')),
+          isTrue,
+        );
+      }
+      for (final host in ['2001:4860:4860::8888', '8.8.8.8', '100.128.0.8']) {
+        expect(
+          castEndpoint(Uri(scheme: 'http', host: host, path: '/device.xml')),
+          isFalse,
+        );
+      }
+      expect(castEndpoint(Uri.parse('http://secret@192.168.1.8/')), isFalse);
+    },
+  );
+  Future<CastSession> sessionFor(
+    TestTv tv, {
+    Duration position = Duration.zero,
+    bool playing = true,
+    Duration connectionGrace = const Duration(seconds: 45),
+  }) async {
+    final session = CastSession(
+      tv.device,
+      const DownloadSpec(
+        url: 'https://example.invalid/video.mp4',
+        fileName: 'movie.mp4',
+        expectedSize: 1024,
+      ),
+      platform: TestCastPlatform(),
+      prepareSource: false,
+      pollInterval: const Duration(days: 1),
+      connectionGrace: connectionGrace,
+      seekConfirmationTimeout: Duration.zero,
+    );
+    addTearDown(session.close);
+    await session.start(
+      title: 'movie',
+      position: position,
+      duration: tv.duration,
+      playWhenReady: playing,
+    );
+    await session.refresh();
+    return session;
+  }
+
+  test(
+    'mid-film stopped/empty media zero does not erase progress, deliberate seek zero does',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final session = await sessionFor(tv);
+      tv.position = const Duration(seconds: 173);
+      await session.refresh();
+      for (final status in ['STOPPED', 'NO_MEDIA_PRESENT', 'TRANSITIONING']) {
+        tv.transport = status;
+        tv.position = Duration.zero;
+        await session.refresh();
+        expect(session.bookmarkState.position, const Duration(seconds: 173));
+        expect(session.state.completed, isFalse);
+      }
+      await session.seek(Duration.zero);
+      tv.transport = 'PLAYING';
+      await session.refresh();
+      expect(session.bookmarkState.position, Duration.zero);
+    },
+  );
+
+  test(
+    'TV clock reset near completion supports NO_MEDIA_PRESENT and a missed poll',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final session = await sessionFor(tv);
+      tv.position = tv.duration - const Duration(seconds: 7);
+      await session.refresh();
+      tv.transport = 'NO_MEDIA_PRESENT';
+      tv.position = Duration.zero;
+      await session.refresh();
+      expect(session.state.completed, isTrue);
+      expect(session.playWhenReady, isTrue);
+      expect(session.bookmarkState.position, tv.duration);
+    },
+  );
+
+  test(
+    'paused handoff retries temporary 701 and does not lose paused intent',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      tv.faultSequences['Pause'] = [701, 0];
+      final session = await sessionFor(
+        tv,
+        position: const Duration(seconds: 42),
+        playing: false,
+      );
+      expect(session.connected, isTrue);
+      expect(tv.events.where((e) => e == 'Pause'), hasLength(2));
+      expect(session.state.playing, isFalse);
+      expect(session.bookmarkState.position, const Duration(seconds: 42));
+    },
+  );
+
+  test(
+    'ignored Seek retries once and preserves original bookmark while showing actual position',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      tv.ignoreSeek = true;
+      final session = await sessionFor(
+        tv,
+        position: const Duration(seconds: 173),
+      );
+      await session.refresh();
+      await session.refresh();
+      expect(tv.events.where((e) => e == 'Seek'), hasLength(2));
+      expect(session.warning, contains('原进度已保留'));
+      expect(session.state.position, Duration.zero);
+      expect(session.bookmarkState.position, const Duration(seconds: 173));
+      tv.position = const Duration(seconds: 180);
+      await session.refresh();
+      expect(session.bookmarkState.position, tv.position);
+    },
+  );
+
+  test(
+    'Seek fault other than 701 keeps a working TV session and original bookmark',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      tv.faults['Seek'] = 501;
+      final session = await sessionFor(
+        tv,
+        position: const Duration(seconds: 173),
+      );
+      expect(session.connected, isTrue);
+      expect(session.state.position, Duration.zero);
+      expect(session.bookmarkState.position, const Duration(seconds: 173));
+      expect(session.warning, contains('原进度已保留'));
+    },
+  );
+
+  test(
+    'TV query/fragment rewrite preserves transport ownership but different path does not',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final session = await sessionFor(tv);
+      tv.trackOverride = '${tv.media}?tv=probe#play';
+      await session.refresh();
+      expect(session.transportReplaced, isFalse);
+      tv.trackOverride = '${tv.media}/other';
+      await session.refresh();
+      expect(session.transportReplaced, isTrue);
+    },
+  );
+
+  test(
+    'repeated SOAP 501 degrades telemetry without disabling working TV controls',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final session = await sessionFor(tv);
+      tv.faults['GetTransportInfo'] = 501;
+      for (var i = 0; i < 4; i++) {
+        await session.refresh();
+      }
+      expect(session.connectionLost, isFalse);
+      expect(session.warning, contains('回传播放状态'));
+      await session.pause();
+      expect(tv.transport, 'PAUSED_PLAYBACK');
+      await session.play();
+      expect(tv.transport, 'PLAYING');
+    },
+  );
+
+  test(
+    'real poll failures eventually abandon the session and preserve its bookmark',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final session = await sessionFor(tv, connectionGrace: Duration.zero);
+      tv.position = const Duration(seconds: 173);
+      await session.refresh();
+      tv.malformed = true;
+      for (var i = 0; i < 3; i++) {
+        await session.refresh();
+      }
+      expect(session.connectionAbandoned, isTrue);
+      expect(session.bookmarkState.position, const Duration(seconds: 173));
+      expect(session.error, contains('投屏已结束'));
+    },
+  );
+  test(
     'manual television description works without multicast discovery',
     () async {
       final tv = TestTv();
@@ -196,6 +405,7 @@ void main() {
         '电影 <第一集> & "4K"',
         'video/mp4',
         const Duration(minutes: 90),
+        size: 123456,
       );
       expect(tv.media, url);
       final metadata = XmlDocument.parse(tv.metadata);
@@ -205,6 +415,13 @@ void main() {
           .innerText;
       expect(value('title'), '电影 <第一集> & "4K"');
       expect(value('res'), url);
+      final resource = metadata.descendants.whereType<XmlElement>().firstWhere(
+        (e) => e.name.local == 'res',
+      );
+      expect(resource.getAttribute('size'), '123456');
+      expect(resource.getAttribute('protocolInfo'), contains('DLNA.ORG_OP=01'));
+      expect(tv.requests.single.headers.value('transfer-encoding'), isNull);
+      expect(tv.requests.single.headers.contentLength, greaterThan(0));
       expect(tv.requests.single.args['InstanceID'], '0');
       expect(
         tv.requests.single.headers.value('SOAPAction'),
@@ -252,6 +469,7 @@ void main() {
           fileName: 'movie.mp4',
         ),
         platform: platform,
+        prepareSource: false,
         pollInterval: const Duration(days: 1),
       );
       addTearDown(session.close);
@@ -300,6 +518,7 @@ void main() {
         ),
         client: client,
         platform: TestCastPlatform(),
+        prepareSource: false,
         pollInterval: const Duration(days: 1),
       );
       addTearDown(session.close);
@@ -333,7 +552,9 @@ void main() {
           url: 'https://example.invalid/video.mp4',
           fileName: 'movie.mp4',
         ),
+        prepareSource: false,
         pollInterval: const Duration(days: 1),
+        platform: TestCastPlatform(),
       );
       addTearDown(session.close);
       await session.start(
@@ -342,14 +563,17 @@ void main() {
         duration: tv.duration,
       );
       await castEventually(() => session.volumeSupported);
-      tv.faults['GetTransportInfo'] = 501;
+      tv.malformed = true;
       for (var i = 0; i < 3; i++) {
         await session.refresh();
       }
       expect(session.error, contains('连接中断'));
-      tv.faults.clear();
+      expect(session.connectionLost, isTrue);
+      expect(session.playWhenReady, isTrue);
+      tv.malformed = false;
       await session.refresh();
       expect(session.error, isEmpty);
+      expect(session.connectionLost, isFalse);
       expect(session.state.playing, isTrue);
       tv.media = 'http://192.168.1.4/somebody-else.mp4';
       await session.refresh();
@@ -396,6 +620,8 @@ void main() {
           url: 'https://example.invalid/video.mp4',
           fileName: 'video.mp4',
         ),
+        prepareSource: false,
+        platform: TestCastPlatform(),
       );
       addTearDown(session.close);
       await session.start(

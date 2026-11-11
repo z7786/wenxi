@@ -22,6 +22,8 @@ import 'package:asterlink/playback/playback_sleep_timer.dart';
 import 'package:asterlink/ui/subtitle_appearance.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/playback/external_stream.dart';
+import 'package:asterlink/domain/playback_screen_display.dart';
+import 'package:asterlink/playback/playback_screen_info.dart';
 import 'player_support.dart';
 
 class _FixtureExternalStream extends ExternalPlaybackStream {
@@ -47,6 +49,25 @@ class _CappedSystemVolumeDevice extends FakePlaybackDevice {
   @override
   Future<double> setSystemVolume(double value) =>
       super.setSystemVolume(value.clamp(0, 70).toDouble());
+}
+
+class _BrightnessDevice extends FakePlaybackDevice {
+  double initialBrightness = .2;
+  Future<void>? brightnessBarrier;
+  final adjustments = <double>[];
+  @override
+  Future<void> start({required bool video}) async {
+    await super.start(video: video);
+    brightness = initialBrightness;
+  }
+
+  @override
+  Future<void> setBrightness(double value) async {
+    adjustments.add(value);
+    await brightnessBarrier;
+    if (finished) return;
+    await super.setBrightness(value);
+  }
 }
 
 class _SlowProgressStore extends PlaybackStore {
@@ -215,6 +236,370 @@ void main() {
     await tester.ensureVisible(action);
     await tap(tester, action);
   }
+
+  testWidgets('Screen settings toggle each item and persist globally', (
+    tester,
+  ) async {
+    final page = await render(tester);
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
+    await openMenuAction(
+      tester,
+      find.byKey(const Key('player-screen-settings')),
+    );
+    await tap(tester, find.byKey(const Key('player-screen-enabled')));
+    for (final item in PlaybackScreenItem.values) {
+      final before = page.fixture.controller.preferences.screenDisplay.items
+          .contains(item);
+      final toggle = find.byKey(Key('player-screen-${item.name}'));
+      await tester.ensureVisible(toggle);
+      await tap(tester, toggle);
+      expect(
+        page.fixture.history.preferences.screenDisplay.items.contains(item),
+        !before,
+      );
+    }
+    final saved = page.fixture.history.preferences.screenDisplay;
+    expect(saved.enabled, isTrue);
+    expect(saved.items, {
+      PlaybackScreenItem.parameters,
+      PlaybackScreenItem.media,
+    });
+    await tap(tester, find.byTooltip('关闭面板'));
+    expect(find.byKey(const Key('player-screen-line-title')), findsNothing);
+    expect(find.byKey(const Key('player-screen-line-progress')), findsNothing);
+    expect(
+      find.byKey(const Key('player-screen-line-parameters')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('player-screen-line-video')), findsOneWidget);
+  });
+
+  testWidgets(
+    'Screen display refreshes cached information without rebuilding video or controls',
+    (tester) async {
+      final fixture = PlaybackFixture(
+        data: {
+          'playbackPreferences': {
+            'screenDisplay': {
+              'enabled': true,
+              'items': [
+                'time',
+                'network',
+                'resolution',
+                'progress',
+                'title',
+                'parameters',
+                'media',
+              ],
+            },
+          },
+        },
+      );
+      fixture.configureBackend = (backend) {
+        backend.videoSurface = true;
+        backend.screenInfo = const PlaybackScreenInfo(
+          transport: 'direct',
+          bytesPerSecond: 2097152,
+          hardwareDecoder: 'mediacodec',
+          decoderDroppedFrames: 2,
+          outputDroppedFrames: 3,
+        );
+      };
+      final page = await render(tester, suppliedFixture: fixture);
+      final backend = fixture.current;
+      backend.emit(
+        backend.state.copyWith(
+          tracks: Tracks(
+            video: const [
+              VideoTrack(
+                '1',
+                null,
+                null,
+                codec: 'hevc',
+                fps: 60,
+                bitrate: 20000000,
+              ),
+            ],
+            audio: const [
+              AudioTrack(
+                '1',
+                '普通话',
+                'zho',
+                codec: 'aac',
+                samplerate: 48000,
+                channelscount: 2,
+              ),
+            ],
+            subtitle: backend.state.tracks.subtitle,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('网速 2.00 MB/s'), findsOneWidget);
+      expect(find.text('分辨率 1920 × 1080'), findsOneWidget);
+      expect(find.textContaining('HEVC · 60 fps · 20 Mbps'), findsOneWidget);
+      expect(find.text('音频 AAC · 48 kHz · 2 声道'), findsOneWidget);
+      expect(find.textContaining('硬解 mediacodec'), findsOneWidget);
+      expect(find.textContaining('解码丢帧 2 · 输出丢帧 3'), findsOneWidget);
+      expect(find.textContaining('fixture-secret'), findsNothing);
+      final top = tester.widget(find.byKey(const Key('player-top-controls')));
+      final video = tester.widget(
+        find.byKey(const Key('player-video-surface')),
+      );
+      final updates = page.device.updates;
+      for (var i = 0; i < 12; i++) {
+        backend.emit(
+          backend.state.copyWith(position: Duration(seconds: 130 + i)),
+        );
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('进度 02:21 / 10:00 · 23.5%'), findsOneWidget);
+      expect(
+        tester.widget(find.byKey(const Key('player-top-controls'))),
+        same(top),
+      );
+      expect(
+        tester.widget(find.byKey(const Key('player-video-surface'))),
+        same(video),
+      );
+      expect(page.device.updates, updates);
+      backend.screenInfo = const PlaybackScreenInfo(
+        transport: 'direct',
+        bytesPerSecond: 0,
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('网速 0 B/s'), findsOneWidget);
+      backend.screenInfo = const PlaybackScreenInfo(transport: 'local');
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('网速 本地播放'), findsOneWidget);
+      await tester.tapAt(const Offset(196, 500));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('player-top-controls')), findsNothing);
+      expect(find.byKey(const Key('player-screen-display')), findsOneWidget);
+      expect(backend.screenMonitoring, isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      expect(backend.screenMonitoring, isFalse);
+    },
+  );
+
+  for (final (size, scale, television) in [
+    (const Size(320, 700), 1.8, false),
+    (const Size(844, 390), 1.0, false),
+    (const Size(1920, 1080), 1.0, true),
+  ]) {
+    testWidgets('Screen display stays inside safe bounds at $size', (
+      tester,
+    ) async {
+      final fixture = PlaybackFixture(
+        data: {
+          'playbackPreferences': {
+            'screenDisplay': {
+              'enabled': true,
+              'items': [
+                for (final item in PlaybackScreenItem.values)
+                  if (item != PlaybackScreenItem.time) item.name,
+              ],
+            },
+          },
+        },
+      );
+      await render(
+        tester,
+        size: size,
+        scale: scale,
+        suppliedFixture: fixture,
+        suppliedDevice: FakePlaybackDevice()..isTelevision = television,
+      );
+      if (television) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+      } else {
+        await tap(tester, find.byKey(const Key('player-lock')));
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pumpAndSettle();
+      }
+      final display = find.byKey(const Key('player-screen-display'));
+      final bounds = tester.getRect(display);
+      expect(bounds.size, size);
+      final video = tester.getRect(
+        find.byKey(const Key('player-screen-video-bounds')),
+      );
+      final title = tester.getRect(
+        find.byKey(const Key('player-screen-line-title')),
+      );
+      final audio = tester.getRect(
+        find.byKey(const Key('player-screen-line-audio')),
+      );
+      expect(title.top, greaterThanOrEqualTo(bounds.top));
+      expect(audio.bottom, lessThanOrEqualTo(bounds.bottom + .1));
+      expect(title.left, greaterThanOrEqualTo(12));
+      expect(audio.right, lessThanOrEqualTo(video.center.dx));
+      final progress = tester.getRect(
+        find.byKey(const Key('player-screen-line-progress')),
+      );
+      final resolution = tester.getRect(
+        find.byKey(const Key('player-screen-line-resolution')),
+      );
+      final network = tester.getRect(
+        find.byKey(const Key('player-screen-line-network')),
+      );
+      expect(title.right, lessThanOrEqualTo(video.center.dx));
+      expect(network.left, greaterThan(video.center.dx));
+      expect(progress.bottom, greaterThan(title.bottom));
+      expect(resolution.left, greaterThan(progress.right));
+      expect(resolution.top, greaterThan(network.bottom));
+      expect(resolution.right, lessThanOrEqualTo(size.width - 12));
+      for (final id in [
+        'top-left',
+        'top-right',
+        'bottom-left',
+        'bottom-right',
+      ]) {
+        final region = tester.getRect(
+          find.byKey(Key('player-screen-region-$id')),
+        );
+        expect(region.left, greaterThanOrEqualTo(video.left));
+        expect(region.right, lessThanOrEqualTo(video.right));
+        expect(region.top, greaterThanOrEqualTo(video.top));
+        expect(region.bottom, lessThanOrEqualTo(video.bottom));
+      }
+      expect(tester.takeException(), isNull);
+      await expectLater(
+        find.byKey(const Key('player-capture')),
+        matchesGoldenFile('goldens/player-screen-${size.width.toInt()}.png'),
+      );
+    });
+  }
+
+  testWidgets('Screen anchors stay fixed when controls hide, lock and unlock', (
+    tester,
+  ) async {
+    final fixture = PlaybackFixture(
+      data: {
+        'playbackPreferences': {
+          'screenDisplay': {
+            'enabled': true,
+            'items': [for (final item in PlaybackScreenItem.values) item.name],
+          },
+        },
+      },
+    );
+    await render(tester, size: const Size(792, 360), suppliedFixture: fixture);
+    const ids = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
+    Map<String, Rect> regions() => {
+      for (final id in ids)
+        id: tester.getRect(find.byKey(Key('player-screen-region-$id'))),
+    };
+    final expected = regions();
+    await tester.tapAt(const Offset(396, 140));
+    await tester.pumpAndSettle();
+    expect(regions(), expected);
+    await tester.tapAt(const Offset(396, 140));
+    await tester.pumpAndSettle();
+    await tap(tester, find.byKey(const Key('player-lock')));
+    expect(regions(), expected);
+    await tap(tester, find.byKey(const Key('player-unlock')));
+    expect(regions(), expected);
+  });
+
+  testWidgets('Screen display respects PiP and all items disabled', (
+    tester,
+  ) async {
+    final fixture = PlaybackFixture(
+      data: {
+        'playbackPreferences': {
+          'screenDisplay': {'enabled': true},
+        },
+      },
+    );
+    final page = await render(tester, suppliedFixture: fixture);
+    expect(find.byKey(const Key('player-screen-display')), findsOneWidget);
+    page.device.inPip = true;
+    page.device.notifyListeners();
+    await tester.pump();
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
+    expect(fixture.current.screenMonitoring, isFalse);
+    page.device.inPip = false;
+    page.device.notifyListeners();
+    await tester.pump();
+    await fixture.controller.updatePreferences(
+      fixture.controller.preferences.copyWith(
+        screenDisplay: const PlaybackScreenDisplay(enabled: true, items: {}),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
+  });
+
+  testWidgets(
+    'Windows punctuation adjusts rate and middle mouse toggles fullscreen',
+    (tester) async {
+      final page = await render(tester, size: const Size(1280, 800));
+      final controller = page.fixture.controller;
+      await tester.sendKeyEvent(LogicalKeyboardKey.comma);
+      await tester.pumpAndSettle();
+      expect(controller.preferences.rate, 1.5);
+      await tester.sendKeyEvent(LogicalKeyboardKey.period);
+      await tester.pumpAndSettle();
+      expect(controller.preferences.rate, 1);
+      await controller.setRate(PlaybackPreferences.maxRate);
+      await tester.sendKeyEvent(LogicalKeyboardKey.comma);
+      await tester.pumpAndSettle();
+      expect(controller.preferences.rate, PlaybackPreferences.maxRate);
+      final pointer = await tester.createGesture(
+        kind: PointerDeviceKind.mouse,
+        buttons: kMiddleMouseButton,
+      );
+      await pointer.down(
+        tester.getCenter(find.byKey(const Key('player-gesture-surface'))),
+      );
+      await pointer.up();
+      await tester.pumpAndSettle();
+      expect(page.device.calls, contains('fullscreen:true'));
+      await pointer.down(
+        tester.getCenter(find.byKey(const Key('player-gesture-surface'))),
+      );
+      await pointer.up();
+      await tester.pumpAndSettle();
+      expect(page.device.calls, contains('fullscreen:false'));
+      await tap(tester, find.byKey(const Key('player-more')));
+      final rate = controller.preferences.rate;
+      await tester.sendKeyEvent(LogicalKeyboardKey.period);
+      await tester.pumpAndSettle();
+      expect(controller.preferences.rate, rate);
+    },
+    skip: !Platform.isWindows,
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
+
+  testWidgets(
+    'Windows playback settings read GPU preference without writing',
+    (tester) async {
+      const channel = MethodChannel('com.asterlink.app/gpu_preference');
+      final methods = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            methods.add(call.method);
+            return {'enabled': false, 'restartRequired': false};
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      await render(tester, size: const Size(1280, 800));
+      await tap(tester, find.byKey(const Key('player-more')));
+      expect(
+        find.byKey(const Key('player-high-performance-gpu')),
+        findsOneWidget,
+      );
+      expect(methods, ['get']);
+    },
+    skip: !Platform.isWindows,
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
 
   testWidgets(
     'player waits for download confirmation and cancellation creates no task',
@@ -1386,6 +1771,45 @@ void main() {
     },
   );
 
+  testWidgets('Player passes track cadence and speed changes to the display', (
+    tester,
+  ) async {
+    final page = await render(tester);
+    final backend = page.fixture.current;
+    backend.emit(
+      backend.state.copyWith(
+        tracks: Tracks(
+          audio: backend.state.tracks.audio,
+          subtitle: backend.state.tracks.subtitle,
+          video: const [VideoTrack('1', null, null, fps: 24)],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(page.device.frameRate, 24);
+    await page.fixture.controller.setRate(1.25);
+    await tester.pumpAndSettle();
+    expect(page.device.frameRate, 30);
+    await page.fixture.controller.updatePreferences(
+      page.fixture.controller.preferences.copyWith(autoNext: false),
+    );
+    backend.emit(backend.state.copyWith(completed: true));
+    await tester.pumpAndSettle();
+    expect(page.device.frameRate, isNull);
+    backend.emit(
+      backend.state.copyWith(
+        completed: false,
+        tracks: Tracks(
+          audio: backend.state.tracks.audio,
+          subtitle: backend.state.tracks.subtitle,
+          video: const [VideoTrack('2', null, null)],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(page.device.frameRate, isNull);
+  });
+
   testWidgets('Desktop seek hover shows the target playback time', (
     tester,
   ) async {
@@ -2268,6 +2692,279 @@ void main() {
       expect(page.fixture.history.preferences.volume, backend.state.volume);
     },
   );
+
+  testWidgets('Folder brightness restores before playback begins', (
+    tester,
+  ) async {
+    final fixture = PlaybackFixture(
+      suppliedEntries: [
+        const PlaybackEntry(
+          id: 'episode-1',
+          key: 'episode-1',
+          name: '第一集.mp4',
+          video: true,
+          settingsFolder: 'show',
+        ),
+      ],
+      data: {
+        'playbackFolders': {
+          'show': {'brightness': .85},
+        },
+      },
+    );
+    final barrier = Completer<void>();
+    final device = _BrightnessDevice()..brightnessBarrier = barrier.future;
+    final brightnessAtPlay = <double>[];
+    fixture.configureBackend = (backend) {
+      backend.addListener(() {
+        if (backend.state.playing) brightnessAtPlay.add(device.brightness);
+      });
+    };
+    await render(
+      tester,
+      suppliedFixture: fixture,
+      suppliedDevice: device,
+      settle: false,
+    );
+    await tester.pump();
+    expect(device.started, isTrue);
+    expect(device.brightness, .2);
+    expect(device.adjustments, [.85]);
+    expect(brightnessAtPlay, isEmpty);
+    expect(fixture.backends, isEmpty);
+    barrier.complete();
+    await tester.pumpAndSettle();
+    expect(fixture.controller.ready, isTrue);
+    expect(brightnessAtPlay, isNotEmpty);
+    expect(brightnessAtPlay, everyElement(.85));
+  });
+
+  testWidgets(
+    'Brightness gestures persist across episodes, folders and reopening',
+    (tester) async {
+      const entries = [
+        PlaybackEntry(
+          id: '1',
+          key: '1',
+          name: '第一集.mp4',
+          video: true,
+          settingsFolder: 'a',
+        ),
+        PlaybackEntry(
+          id: '2',
+          key: '2',
+          name: '第二集.mp4',
+          video: true,
+          settingsFolder: 'a',
+        ),
+        PlaybackEntry(
+          id: '3',
+          key: '3',
+          name: '另一部剧.mp4',
+          video: true,
+          settingsFolder: 'b',
+        ),
+      ];
+      final fixture = PlaybackFixture(suppliedEntries: entries);
+      final device = _BrightnessDevice();
+      await render(tester, suppliedFixture: fixture, suppliedDevice: device);
+      await tester.dragFrom(const Offset(90, 400), const Offset(0, -180));
+      await tester.pumpAndSettle();
+      final adjusted = device.brightness;
+      expect(adjusted, greaterThan(.2));
+      expect(fixture.history.brightnessFor('a'), adjusted);
+      await fixture.controller.next();
+      await tester.pumpAndSettle();
+      expect(device.brightness, adjusted);
+      await fixture.controller.next();
+      await tester.pumpAndSettle();
+      expect(device.brightness, .2);
+      expect(fixture.history.brightnessFor('b'), isNull);
+      await tester.dragFrom(const Offset(90, 400), const Offset(0, -60));
+      await tester.pumpAndSettle();
+      final other = device.brightness;
+      expect(fixture.history.brightnessFor('b'), other);
+      await fixture.controller.load(0);
+      await tester.pumpAndSettle();
+      expect(device.brightness, adjusted);
+      await fixture.controller.setRememberFolder(false);
+      await tester.pumpAndSettle();
+      expect(device.brightness, .2);
+      await fixture.controller.setRememberFolder(true);
+      await tester.pumpAndSettle();
+      expect(device.brightness, adjusted);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      await fixture.controller.close();
+      final reopened = PlaybackFixture(
+        sharedStore: fixture.store,
+        suppliedEntries: entries,
+      );
+      final nextDevice = _BrightnessDevice()..initialBrightness = .05;
+      await render(
+        tester,
+        suppliedFixture: reopened,
+        suppliedDevice: nextDevice,
+      );
+      expect(nextDevice.brightness, adjusted);
+      expect(reopened.history.brightnessFor('b'), other);
+    },
+  );
+
+  testWidgets('Leaving during a brightness gesture saves its latest target', (
+    tester,
+  ) async {
+    final fixture = PlaybackFixture(
+      suppliedEntries: const [
+        PlaybackEntry(
+          id: '1',
+          key: '1',
+          name: '第一集.mp4',
+          video: true,
+          settingsFolder: 'show',
+        ),
+      ],
+    );
+    final device = _BrightnessDevice();
+    await render(tester, suppliedFixture: fixture, suppliedDevice: device);
+    final gesture = await tester.startGesture(const Offset(90, 400));
+    await gesture.moveBy(const Offset(0, -20));
+    await gesture.moveBy(const Offset(0, -70));
+    await tester.pump();
+    final applied = device.brightness;
+    final barrier = Completer<void>();
+    device.brightnessBarrier = barrier.future;
+    await gesture.moveBy(const Offset(0, -100));
+    // Leave before the throttled or pending native call applies the last movement.
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    await fixture.controller.close();
+    await gesture.up();
+    barrier.complete();
+    await tester.pump();
+    final next = PlaybackFixture(
+      sharedStore: fixture.store,
+      suppliedEntries: fixture.entries,
+    );
+    final nextDevice = _BrightnessDevice();
+    await render(tester, suppliedFixture: next, suppliedDevice: nextDevice);
+    expect(nextDevice.brightness, greaterThan(applied));
+    expect(nextDevice.brightness, next.history.brightnessFor('show'));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'Switching folders during a brightness gesture saves the original folder',
+    (tester) async {
+      final fixture = PlaybackFixture(
+        suppliedEntries: const [
+          PlaybackEntry(
+            id: '1',
+            key: '1',
+            name: '第一集.mp4',
+            video: true,
+            settingsFolder: 'a',
+          ),
+          PlaybackEntry(
+            id: '2',
+            key: '2',
+            name: '另一部剧.mp4',
+            video: true,
+            settingsFolder: 'b',
+          ),
+        ],
+      );
+      final device = _BrightnessDevice();
+      await render(tester, suppliedFixture: fixture, suppliedDevice: device);
+      final gesture = await tester.startGesture(const Offset(90, 400));
+      await gesture.moveBy(const Offset(0, -20));
+      await gesture.moveBy(const Offset(0, -120));
+      await tester.pump();
+      await fixture.controller.next();
+      await tester.pumpAndSettle();
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(fixture.history.brightnessFor('a'), greaterThan(.2));
+      expect(fixture.history.brightnessFor('b'), isNull);
+      expect(device.brightness, .2);
+      await fixture.controller.previous();
+      await tester.pumpAndSettle();
+      expect(device.brightness, fixture.history.brightnessFor('a'));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('Brightness remains available when folder memory is disabled', (
+    tester,
+  ) async {
+    final fixture = PlaybackFixture(
+      suppliedEntries: const [
+        PlaybackEntry(
+          id: '1',
+          key: '1',
+          name: '第一集.mp4',
+          video: true,
+          settingsFolder: 'show',
+        ),
+        PlaybackEntry(
+          id: '2',
+          key: '2',
+          name: '第二集.mp4',
+          video: true,
+          settingsFolder: 'show',
+        ),
+      ],
+      data: {
+        'playbackFolders': {
+          'show': {'enabled': false, 'brightness': .9},
+        },
+      },
+    );
+    final device = _BrightnessDevice();
+    await render(tester, suppliedFixture: fixture, suppliedDevice: device);
+    expect(device.brightness, .2);
+    await tester.dragFrom(const Offset(90, 400), const Offset(0, -180));
+    await tester.pumpAndSettle();
+    final adjusted = device.brightness;
+    expect(adjusted, greaterThan(.2));
+    expect(fixture.history.brightnessFor('show'), isNull);
+    await fixture.controller.next();
+    await tester.pumpAndSettle();
+    expect(device.brightness, adjusted);
+    await fixture.controller.setRememberFolder(true);
+    await tester.pumpAndSettle();
+    expect(device.brightness, .9);
+  });
+
+  testWidgets('Unsupported devices do not restore or save screen brightness', (
+    tester,
+  ) async {
+    final fixture = PlaybackFixture(
+      suppliedEntries: const [
+        PlaybackEntry(
+          id: '1',
+          key: '1',
+          name: '第一集.mp4',
+          video: true,
+          settingsFolder: 'show',
+        ),
+      ],
+      data: {
+        'playbackFolders': {
+          'show': {'brightness': .9},
+        },
+      },
+    );
+    final device = _BrightnessDevice()..supportsBrightness = false;
+    await render(tester, suppliedFixture: fixture, suppliedDevice: device);
+    expect(device.adjustments, isEmpty);
+    await tester.dragFrom(const Offset(90, 400), const Offset(0, -180));
+    await tester.pumpAndSettle();
+    expect(device.brightness, .2);
+    expect(device.adjustments, isEmpty);
+    expect(fixture.history.brightnessFor('show'), .9);
+    expect(find.text('请在系统中调整屏幕亮度'), findsOneWidget);
+  });
 
   testWidgets(
     'Long press restores the chosen speed and locking prevents gesture actions',

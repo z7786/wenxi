@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'app_switch.dart';
 import '../platform/link_opening.dart';
 import 'common.dart';
 
@@ -178,7 +179,7 @@ class _LinkOpeningPageState extends State<LinkOpeningPage>
                 ),
                 _group([
                   for (final target in targets)
-                    SwitchListTile.adaptive(
+                    AppSwitchListTile(
                       key: ValueKey('link-opening-${target.id}'),
                       title: Text(
                         target.label,

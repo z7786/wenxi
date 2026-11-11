@@ -1,5 +1,50 @@
 # AsterLink Windows media runtime
 
+## Optional Windows x64 full component
+
+The application bundles the original compact 20241021 runtime again. The full
+PGS-capable 20261108 archive below remains pinned in source and is installed only
+after a user clicks Download in Player components. Its archive and extracted DLL
+must match SHA-256 before publication to the per-user application support folder.
+The separate preference file does not alter account data or imported backups.
+
+Switching requires a complete application restart. The video plugin delay-loads
+libmpv so Dart and the native renderer resolve the same selected module. Independent
+windows inherit the parent's active variant, including when a pending selection
+has not yet been applied. An unavailable/corrupt full component falls back to the
+bundled compact runtime. Active full DLLs cannot be overwritten or removed.
+
+Unmodified 7-Zip Extra 26.01 x64 7za.exe is packaged in tools/player-7za.exe from
+native/third_party/player-7za-x64-26.01.bin. Both build and runtime verify its
+SHA-256; component extraction does not require an external 7-Zip installation.
+Its source and license links are in Windows-x64-media-NOTICES.txt.
+
+## 2026-11-09: Windows x64 PGS subtitles (#69)
+
+The x64 runtime now uses `zhongfly/mpv-winbuild`, release
+`2026-11-08-8bc468896e`, baseline x86-64 development archive
+`mpv-dev-x86_64-20261108-git-8bc468896e.7z`.
+
+- SHA-256: `a36392a8fbd989ae274a37c63d01ef6c51b6070a5ebd2ee26d2715ae88f90ceb`.
+- MD5: `f6678a79e2526b16b45ff629574fd96f`.
+- Original PGS regression media verifies automatic and explicit subtitle
+  selection and disable/re-enable against the real DLL. Both the former
+  20241021 runtime and the proposed upstream 0.41.0 runtime fail this test:
+  the latter's FFmpeg decoder allowlist still omits `pgssub`.
+- The full archive is kept in `native/third_party` because upstream releases
+  are retained for 30 days. CMake, build preparation and native test preparation
+  verify and use it before network downloads. Headers, import library and
+  packaged DLL come from the same archive and a new extraction directory.
+- The full build imports `vulkan-1.dll`; the existing verified ANGLE distribution
+  supplies this DLL and it remains bundled alongside libmpv. Native test
+  preparation supplies it and adds the test runtime directory to the process PATH.
+- Source references and component notices are included in
+  `assets/licenses/Windows-x64-media-NOTICES.txt`. This is a GPL-enabled build.
+  The uncompressed DLL is larger (about 117 MiB); the development archive is
+  about 31 MiB. Android/ARM64 media versions and ANGLE are unchanged.
+
+## Earlier runtime changes
+
 The plugin retains its upstream MIT license and existing ANGLE build. The
 Windows x64 libmpv pin now matches the runtime used by upstream media_kit's
 Windows plugin at the time of the 2026-09-24 playback review:
@@ -43,4 +88,4 @@ Windows ARM64 uses a separate dependency directory and native runtime:
   the ARM64-filtered libmpv archive.
 - Installer preparation verifies the PE architecture of every DLL/EXE and the
   ELF/PE architecture of the Dart AOT snapshot before packaging. Native helper
-  output is separate from the x64 binary. The x64 configuration is unchanged.
+  output is separate from the x64 binary.

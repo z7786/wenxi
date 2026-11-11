@@ -1,11 +1,359 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/playback/external_stream.dart';
+import 'package:asterlink/playback/cast/cast_session.dart';
+import 'cast_support.dart';
 
 void main() {
+  test(
+    'range worker 403 stays an expired source failure instead of a generic relay 502',
+    () async {
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      origin.listen((request) async {
+        if (request.headers.value('Range') == 'bytes=0-1023') {
+          request.response.statusCode = 206;
+          request.response.headers.set('content-range', 'bytes 0-1023/8388608');
+          request.response.contentLength = 1024;
+          request.response.add(List.filled(1024, 7));
+        } else {
+          request.response.statusCode = 403;
+        }
+        await request.response.close();
+      });
+      final failures = <int?>[];
+      final stream = ExternalPlaybackStream.lan(
+        DownloadSpec(
+          url: 'http://127.0.0.1:${origin.port}/video.mp4',
+          fileName: 'movie.mp4',
+        ),
+        lanAddress: InternetAddress.loopbackIPv4,
+        onFailure: (value) => failures.add(value.status),
+      );
+      addTearDown(stream.close);
+      await stream.start();
+      await stream.prepareMedia();
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final response = await (await client.getUrl(
+        Uri.parse(stream.url),
+      )).close();
+      await response.drain<void>();
+      expect(stream.failure?.status, 403);
+      expect(failures, contains(403));
+      expect(failures, isNot(contains(502)));
+    },
+  );
+  test(
+    'relay diagnostics record source status and omit URLs, title and credentials',
+    () async {
+      final log = DiagnosticLog.open(null);
+      final previous = DiagnosticLog.active;
+      DiagnosticLog.active = log;
+      addTearDown(() async {
+        DiagnosticLog.active = previous;
+        log.close();
+      });
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      origin.listen((request) async {
+        request.response.statusCode = 403;
+        await request.response.close();
+      });
+      final stream = ExternalPlaybackStream.lan(
+        DownloadSpec(
+          url:
+              'http://127.0.0.1:${origin.port}/private-movie?signature=do-not-log',
+          fileName: 'private-title.mp4',
+          headers: const {'Cookie': 'private-cookie'},
+        ),
+        lanAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(stream.close);
+      await stream.start();
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final response = await (await client.getUrl(
+        Uri.parse(stream.url),
+      )).close();
+      await response.drain<void>();
+      await stream.close();
+      final records = log.entries();
+      expect(records.any((e) => e.event == 'cast.relay_request'), isTrue);
+      final detail = records.map((e) => e.detail).join();
+      expect(detail, contains('403'));
+      for (final value in [
+        'do-not-log',
+        'private-cookie',
+        'private-title',
+        'private-movie',
+      ]) {
+        expect(detail, isNot(contains(value)));
+      }
+    },
+  );
+  for (final limit in [1, 4]) {
+    test(
+      'prepared TV stream uses bounded parallel ranges, respects limit $limit and cancels abandoned reads',
+      () async {
+        final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => origin.close(force: true));
+        const total = 8 * 1024 * 1024;
+        var active = 0, peak = 0, upstreamBytes = 0;
+        origin.listen((request) async {
+          active++;
+          if (active > peak) peak = active;
+          try {
+            expect(request.headers.value('Cookie'), 'account=private');
+            final range = RegExp(
+              r'bytes=(\d+)-(\d+)',
+            ).firstMatch(request.headers.value('Range')!)!;
+            final start = int.parse(range[1]!),
+                end = int.parse(range[2]!).clamp(0, total - 1);
+            request.response.statusCode = 206;
+            request.response.headers.set(
+              'content-range',
+              'bytes $start-$end/$total',
+            );
+            request.response.headers.contentType = ContentType('video', 'mp4');
+            request.response.contentLength = end - start + 1;
+            for (var at = start; at <= end; at += 16 * 1024) {
+              final size = (end - at + 1).clamp(0, 16 * 1024);
+              request.response.add(List.filled(size, 7));
+              upstreamBytes += size;
+              await request.response.flush();
+              await Future<void>.delayed(const Duration(milliseconds: 3));
+            }
+          } catch (_) {
+          } finally {
+            active--;
+            try {
+              await request.response.close();
+            } catch (_) {}
+          }
+        });
+        final stream = ExternalPlaybackStream.lan(
+          DownloadSpec(
+            url: 'http://127.0.0.1:${origin.port}/movie.mp4',
+            fileName: 'movie.mp4',
+            headers: const {'Cookie': 'account=private'},
+            maxPlaybackConnections: limit,
+          ),
+          lanAddress: InternetAddress.loopbackIPv4,
+        );
+        addTearDown(stream.close);
+        await stream.start();
+        await stream.prepareMedia(connections: 4);
+        final uri = Uri.parse(stream.url);
+        final client = HttpClient();
+        addTearDown(() => client.close(force: true));
+        final tv = await Socket.connect(uri.host, uri.port);
+        final read = Completer<void>();
+        var received = 0;
+        tv.listen((bytes) {
+          received += bytes.length;
+          if (received > 512 * 1024 && !read.isCompleted) {
+            tv.destroy();
+            read.complete();
+          }
+        }, onError: (Object _) {});
+        tv.write('GET ${uri.path}?tv=1 HTTP/1.1\r\nHost: ${uri.host}\r\n\r\n');
+        await tv.flush();
+        await read.future.timeout(const Duration(seconds: 10));
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        final request = await client.getUrl(uri);
+        request.headers.set('Range', 'bytes=1048576-1049599');
+        final response = await request.close().timeout(
+          const Duration(seconds: 3),
+        );
+        expect(response.statusCode, 206);
+        expect(await response.expand((e) => e).toList(), List.filled(1024, 7));
+        expect(peak, lessThanOrEqualTo(limit));
+        if (limit > 1) expect(peak, greaterThan(1));
+        expect(upstreamBytes, lessThan(total));
+        expect(stream.mediaSize, total);
+      },
+    );
+  }
+
+  test(
+    'extensionless HLS is identified before DIDL is sent to the TV',
+    () async {
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      origin.listen((request) async {
+        request.response.headers.contentType = ContentType.binary;
+        request.response.write(
+          '#EXTM3U\n#EXTINF:1,\npart.ts\n#EXT-X-ENDLIST\n',
+        );
+        await request.response.close();
+      });
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final session = CastSession(
+        tv.device,
+        DownloadSpec(
+          url: 'http://127.0.0.1:${origin.port}/manifest',
+          fileName: 'movie.mp4',
+        ),
+        platform: TestCastPlatform(),
+        pollInterval: const Duration(days: 1),
+      );
+      addTearDown(session.close);
+      await session.start(
+        title: 'movie',
+        position: Duration.zero,
+        duration: tv.duration,
+      );
+      expect(tv.metadata, contains('application/vnd.apple.mpegurl'));
+      expect(tv.metadata, contains('DLNA.ORG_OP=00'));
+    },
+  );
+  test(
+    'abandoned TV stream cancels its upstream body and frees a single source slot',
+    () async {
+      final origin = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(origin.close);
+      final sockets = <Socket>[];
+      final tasks = <Future<void>>[];
+      var cancelled = false, sent = 0, requests = 0;
+      origin.listen((socket) {
+        sockets.add(socket);
+        final task = () async {
+          var started = false;
+          final headers = Completer<void>();
+          var input = '';
+          final subscription = socket.listen(
+            (bytes) {
+              input += latin1.decode(bytes);
+              if (!headers.isCompleted && input.contains('\r\n\r\n')) {
+                headers.complete();
+              }
+            },
+            onDone: () {
+              cancelled = true;
+            },
+            onError: (Object _) {
+              cancelled = true;
+            },
+          );
+          try {
+            await headers.future;
+            requests++;
+            if (requests > 1) {
+              socket.add(
+                ascii.encode(
+                  'HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n',
+                ),
+              );
+              socket.add([1, 2, 3, 4]);
+              await socket.flush();
+            } else {
+              started = true;
+              socket.add(
+                ascii.encode(
+                  'HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 100663296\r\nConnection: close\r\n\r\n',
+                ),
+              );
+              final block = List.filled(64 * 1024, 7);
+              while (!cancelled && sent < 96 * 1024 * 1024) {
+                socket.add(block);
+                await socket.flush();
+                sent += block.length;
+                await Future<void>.delayed(const Duration(milliseconds: 4));
+              }
+            }
+          } catch (_) {
+            if (started) cancelled = true;
+          } finally {
+            await subscription.cancel();
+            socket.destroy();
+          }
+        }();
+        tasks.add(task);
+      });
+      addTearDown(() async {
+        for (final socket in sockets) {
+          socket.destroy();
+        }
+        await Future.wait(tasks);
+      });
+      final stream = ExternalPlaybackStream.lan(
+        DownloadSpec(
+          url: 'http://127.0.0.1:${origin.port}/movie.mp4',
+          fileName: 'movie.mp4',
+          maxPlaybackConnections: 1,
+        ),
+        lanAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(stream.close);
+      await stream.start();
+      final uri = Uri.parse(stream.url);
+      final tv = await Socket.connect(uri.host, uri.port);
+      final read = Completer<void>();
+      var received = 0;
+      tv.listen((bytes) {
+        received += bytes.length;
+        if (received >= 1024 * 1024 && !read.isCompleted) {
+          tv.destroy();
+          read.complete();
+        }
+      }, onError: (Object _) {});
+      tv.write('GET ${uri.path} HTTP/1.1\r\nHost: ${uri.host}\r\n\r\n');
+      await tv.flush();
+      await read.future.timeout(const Duration(seconds: 5));
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final response = await (await client.getUrl(
+        uri,
+      )).close().timeout(const Duration(seconds: 2));
+      expect(await response.expand((e) => e).toList(), [1, 2, 3, 4]);
+      expect(cancelled, isTrue);
+      expect(sent, lessThan(4 * 1024 * 1024));
+    },
+  );
+
+  test(
+    'TV query suffix is ignored and HEAD uses signed GET without draining the movie',
+    () async {
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      final seen = <String>[];
+      origin.listen((request) async {
+        seen.add('${request.method} ${request.uri}');
+        request.response.statusCode = request.method == 'HEAD' ? 403 : 200;
+        request.response.contentLength = 4;
+        request.response.add([1, 2, 3, 4]);
+        await request.response.close();
+      });
+      final stream = ExternalPlaybackStream.lan(
+        DownloadSpec(
+          url: 'http://127.0.0.1:${origin.port}/movie.mp4?signature=private',
+          fileName: 'movie.mp4',
+        ),
+        lanAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(stream.close);
+      await stream.start();
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final uri = Uri.parse('${stream.url}?tv=1&url=http://untrusted.invalid/');
+      final head = await (await client.headUrl(uri)).close();
+      expect(head.statusCode, 200);
+      expect(head.contentLength, 4);
+      expect(await head.expand((e) => e).toList(), isEmpty);
+      final get = await (await client.getUrl(uri)).close();
+      expect(await get.expand((e) => e).toList(), [1, 2, 3, 4]);
+      expect(seen, List.filled(2, 'GET /movie.mp4?signature=private'));
+      expect(stream.lastError, isEmpty);
+    },
+  );
   test(
     'TV relay preserves the source Host for same-origin redirects and resets it for a CDN',
     () async {

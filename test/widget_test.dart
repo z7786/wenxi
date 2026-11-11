@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:asterlink/ui/app_switch.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/main.dart';
 import 'package:asterlink/data/state_store.dart';
@@ -272,11 +273,11 @@ void main() {
         expect(find.byType(WebLoginPage), findsNothing);
       } else if (platform == CloudPlatform.guangya) {
         expect(find.byType(GuangyaSmsLoginPage), findsOneWidget);
-        expect(find.text('手机号验证码登录'), findsOneWidget);
+        expect(find.text('光鸭登录'), findsOneWidget);
         expect(find.byType(WebLoginPage), findsNothing);
       } else if (platform == CloudPlatform.wopan) {
         expect(find.byType(WopanSmsLoginPage), findsOneWidget);
-        expect(find.text('手机号验证码登录'), findsOneWidget);
+        expect(find.text('联通登录'), findsOneWidget);
         expect(find.byType(WebLoginPage), findsNothing);
       } else {
         expect(find.byType(WebLoginPage), findsOneWidget);
@@ -540,7 +541,7 @@ void main() {
       await tester.tap(find.text('实验性功能'));
       await tester.pumpAndSettle();
       expect(find.byType(ExperimentalFeaturesPage), findsOneWidget);
-      expect(find.byType(SwitchListTile), findsNWidgets(3));
+      expect(find.byType(AppSwitchListTile), findsNWidgets(3));
       expect(find.text('突破文件大小限制'), findsOneWidget);
       expect(find.text('游客下载'), findsNWidgets(2));
       expect(find.textContaining('修改后自动保存'), findsNothing);
@@ -560,14 +561,14 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 20));
       });
       await tester.pumpAndSettle();
-      expect(tester.widget<SwitchListTile>(quarkSwitch).value, isTrue);
+      expect(tester.widget<AppSwitchListTile>(quarkSwitch).value, isTrue);
       expect(services.settings.ucGuestDirectDownload, isTrue);
       expect(services.settings.quarkGuestDirectDownload, isFalse);
       Navigator.of(tester.element(find.byType(ExperimentalFeaturesPage))).pop();
       await tester.pumpAndSettle();
       await tester.tap(find.text('实验性功能'));
       await tester.pumpAndSettle();
-      expect(tester.widget<SwitchListTile>(quarkSwitch).value, isTrue);
+      expect(tester.widget<AppSwitchListTile>(quarkSwitch).value, isTrue);
 
       tester.view.physicalSize = const Size(320, 700);
       await changeTextScale(tester, 1.8);
@@ -708,6 +709,13 @@ void main() {
         tester.view.physicalSize = const Size(740, 600);
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
+        await tester.scrollUntilVisible(
+          find.text('夸克 · 直链'),
+          100,
+          scrollable: find
+              .descendant(of: settingsList, matching: find.byType(Scrollable))
+              .first,
+        );
         expect(find.text('夸克 · 直链'), findsOneWidget);
 
         await tester.runAsync(() => services.updateSettings({'theme': 'Dark'}));
@@ -1241,7 +1249,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         tester
-            .widget<Switch>(find.byKey(const ValueKey('cloud-visible-quark')))
+            .widget<AppSwitch>(
+              find.byKey(const ValueKey('cloud-visible-quark')),
+            )
             .value,
         isFalse,
       );

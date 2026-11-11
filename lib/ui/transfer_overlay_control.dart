@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'app_switch.dart';
 import '../download/download_overlay.dart';
 import 'common.dart';
 
@@ -83,7 +84,7 @@ class TransferOverlayControl extends StatelessWidget {
                 ],
               ),
             ),
-            Switch.adaptive(
+            AppSwitch(
               value: on,
               onChanged: (_) => busy(context, overlay.toggle),
             ),
