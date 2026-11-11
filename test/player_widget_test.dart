@@ -602,6 +602,32 @@ void main() {
   );
 
   testWidgets(
+    'Windows playback settings read GPU preference without writing',
+    (tester) async {
+      const channel = MethodChannel('com.asterlink.app/gpu_preference');
+      final methods = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            methods.add(call.method);
+            return {'enabled': false, 'restartRequired': false};
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      await render(tester, size: const Size(1280, 800));
+      await tap(tester, find.byKey(const Key('player-more')));
+      expect(
+        find.byKey(const Key('player-high-performance-gpu')),
+        findsOneWidget,
+      );
+      expect(methods, ['get']);
+    },
+    skip: !Platform.isWindows,
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
+
+  testWidgets(
     'player waits for download confirmation and cancellation creates no task',
     (tester) async {
       var decision = Completer<bool>();
