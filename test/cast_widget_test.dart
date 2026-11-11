@@ -502,9 +502,15 @@ void main() {
       page.discovery.found.clear();
       page.discovery.notifyListeners();
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('cast-device-test-tv')), findsOneWidget);
+      final devices = find.byKey(const Key('cast-device-test-tv'));
+      final scrollable = find.descendant(
+        of: find.byKey(const Key('player-cast-panel')),
+        matching: find.byType(Scrollable),
+      ).first;
+      await tester.scrollUntilVisible(devices, 120, scrollable: scrollable);
+      expect(devices, findsOneWidget);
       final button = find.byKey(const Key('cast-reconnect'));
-      await tester.ensureVisible(button);
+      await tester.scrollUntilVisible(button, -120, scrollable: scrollable);
       await tester.tap(button);
       await tester.pumpAndSettle();
       expect(page.sessions.length, 2);
