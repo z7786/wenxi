@@ -26,6 +26,16 @@ class DelegatingPlaybackBackend extends PlaybackBackend {
   @override
   VideoController? get videoController => delegate.videoController;
   @override
+  Future<void> setDecoderCompatibility(bool enabled) =>
+      delegate.setDecoderCompatibility(enabled);
+  @override
+  void setRenderViewport(
+    Size viewport,
+    double pixelRatio,
+    BoxFit fit,
+    double scale,
+  ) => delegate.setRenderViewport(viewport, pixelRatio, fit, scale);
+  @override
   Widget? buildVideo({required BoxFit fit, double? aspectRatio}) =>
       delegate.buildVideo(fit: fit, aspectRatio: aspectRatio);
   @override

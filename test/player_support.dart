@@ -382,6 +382,7 @@ class FakePlaybackDevice extends PlaybackDevice {
   double brightness = .5;
   bool started = false, finished = false, full = false;
   int updates = 0;
+  double? frameRate;
   bool _video = false;
   final calls = <String>[];
   final events = StreamController<String>.broadcast();
@@ -398,12 +399,14 @@ class FakePlaybackDevice extends PlaybackDevice {
     required bool playing,
     int? width,
     int? height,
+    double? frameRate,
     bool autoRotate = true,
     PlaybackOrientation? orientation,
     bool locked = false,
     bool controlsVisible = true,
   }) async {
     updates++;
+    this.frameRate = frameRate;
     this.orientation = _video && orientation != null
         ? orientation
         : playbackOrientation(

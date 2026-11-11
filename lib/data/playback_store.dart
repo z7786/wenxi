@@ -9,6 +9,10 @@ class PlaybackStore {
   static final _pendingBookmarks = Expando<Map<String, PlaybackBookmark>>(
     'playback.pending',
   );
+  static final _pendingBrightness =
+      Expando<Map<String, ({double value, Object token})>>(
+        'playback.brightness',
+      );
   static const historyLimit = 200;
   static const torrentCacheBytes = 16 * 1024 * 1024;
   bool get historyHidden => store.data.boolean('playbackHistoryHidden');
@@ -44,6 +48,39 @@ class PlaybackStore {
   bool remembersFolder(String? key) =>
       key != null &&
       store.data.obj('playbackFolders').obj(key).boolean('enabled', true);
+
+  double? brightnessFor(String? key) {
+    if (!remembersFolder(key)) return null;
+    final pending = _pendingBrightness[store]?[key];
+    if (pending != null) return pending.value;
+    final value = store.data
+        .obj('playbackFolders')
+        .obj(key!)
+        .number('brightness', double.nan);
+    return value.isFinite ? value.clamp(0, 1).toDouble() : null;
+  }
+
+  Future<void> saveBrightness(String? key, double value) {
+    if (!remembersFolder(key) || !value.isFinite) return Future.value();
+    final folderKey = key!;
+    final pending = (value: value.clamp(0, 1).toDouble(), token: Object());
+    final values = _pendingBrightness[store] ??= {};
+    // A newly opened player can restore the last gesture before disk I/O ends.
+    values[folderKey] = pending;
+    return store
+        .change((draft) {
+          final folders = draft.obj('playbackFolders');
+          final folder = folders.obj(folderKey);
+          if (!folder.boolean('enabled', true)) return;
+          folder['brightness'] = pending.value;
+          _putFolder(draft, folders, folderKey, folder);
+        })
+        .whenComplete(() {
+          if (identical(values[folderKey]?.token, pending.token)) {
+            values.remove(folderKey);
+          }
+        });
+  }
 
   PlaybackPreferences preferencesFor(String? key) {
     if (!remembersFolder(key)) return preferences;

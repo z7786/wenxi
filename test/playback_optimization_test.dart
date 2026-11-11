@@ -662,7 +662,15 @@ void main() {
     'Repeated underruns build a bounded reserve measured at playback speed',
     () {
       final policy = PlaybackBufferPolicy(connectionLimit: 8);
-      expect(policy.resumeSeconds(rebufferCount: 0, rate: 1), 6);
+      expect(policy.resumeSeconds(rebufferCount: 0, rate: 1), 2);
+      expect(
+        policy.resumeSeconds(
+          rebufferCount: 20,
+          rate: 2,
+          awaitingProgress: true,
+        ),
+        4,
+      );
       expect(policy.resumeSeconds(rebufferCount: 1, rate: 1), 8);
       expect(policy.resumeSeconds(rebufferCount: 2, rate: 1), 10);
       expect(policy.resumeSeconds(rebufferCount: 20, rate: 1), 12);
@@ -728,7 +736,14 @@ void main() {
       sample(11, playing: false, position: 30);
       expect(metrics.bufferingCount, 1);
       expect(metrics.bufferingTime, const Duration(seconds: 3));
-      expect(metrics.lastSeekTime, const Duration(seconds: 1));
+      expect(metrics.lastSeekTime, isNull);
+      expect(metrics.awaitingProgress, isTrue);
+      sample(12, position: 30, buffering: true);
+      sample(13, position: 30);
+      sample(14, position: 31);
+      expect(metrics.lastSeekTime, const Duration(seconds: 4));
+      expect(metrics.awaitingProgress, isFalse);
+      expect(metrics.bufferingCount, 1);
     },
   );
 }

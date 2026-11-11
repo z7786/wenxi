@@ -1,5 +1,11 @@
 # AsterLink local patch
 
+## Optional property reads
+
+Free the allocated property name when `mpv_get_property_string` returns null.
+Playback monitoring probes optional properties on different libmpv builds;
+unavailable properties must not leak a native allocation on every sample.
+
 Based on the published `media_kit 1.2.6` package from pub.flutter-io.cn.
 Original package archive SHA-256:
 `ae9e79597500c7ad6083a3c7b7b7544ddabfceacce7ae5c9709b0ec16a5d6643`.

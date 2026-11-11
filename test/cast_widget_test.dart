@@ -389,6 +389,36 @@ void main() {
     },
   );
 
+  testWidgets(
+    'Hidden TV controls stop rebuilding and show fresh progress when opened',
+    (tester) async {
+      final page = await render(
+        tester,
+        size: const Size(960, 540),
+        television: true,
+      );
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      final controls = find.byKey(
+        const Key('player-tv-controls'),
+        skipOffstage: false,
+      );
+      final before = tester.widget(controls);
+      final backend = page.fixture.current;
+      backend.emit(
+        backend.state.copyWith(position: const Duration(seconds: 90)),
+      );
+      await tester.pump();
+      expect(tester.widget(controls), same(before));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pumpAndSettle();
+      expect(tester.widget(controls), isNot(same(before)));
+      expect(tester.widget<Slider>(find.byType(Slider)).value, 90000);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+    },
+  );
+
   testWidgets('Android TV timeline and settings remain reachable by remote', (
     tester,
   ) async {

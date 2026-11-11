@@ -7,6 +7,7 @@ import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.view.View
 import android.view.ViewGroup
+import io.flutter.embedding.android.FlutterSurfaceView
 import androidx.core.graphics.Insets as CompatInsets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -27,7 +28,7 @@ import org.robolectric.annotation.Config
 import java.nio.ByteBuffer
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [28], manifest = Config.NONE)
+@Config(sdk = [28], manifest = Config.NONE, shadows = [PlaybackTestSurfaceView::class])
 class PlaybackLifecycleTest {
     private class Messenger : BinaryMessenger {
         val sent = mutableListOf<MethodCall>()
@@ -59,19 +60,74 @@ class PlaybackLifecycleTest {
     private lateinit var bridge: PlaybackBridge
     private lateinit var messenger: Messenger
     private var windowInsets: WindowInsetsCompat? = null
+    private val frameRates = mutableListOf<Float>()
 
     @Before fun setup() {
         val context: Context = RuntimeEnvironment.getApplication()
-        activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        activity = Robolectric.buildActivity(Activity::class.java).setup().visible().get()
         messenger = Messenger()
         bridge = PlaybackBridge(context, MethodChannel(messenger, "com.asterlink.app/playback"),
-            rootInsets = { windowInsets ?: ViewCompat.getRootWindowInsets(it) })
+            rootInsets = { windowInsets ?: ViewCompat.getRootWindowInsets(it) },
+            displayCadence = PlaybackFrameRate { _, rate -> frameRates.add(rate) })
         bridge.attach(activity)
         messenger.call("begin", mapOf("session" to "test-player", "video" to true))
         messenger.sent.clear()
     }
 
     @After fun cleanup() { bridge.detach(activity) }
+
+    private fun installFlutterSurface() {
+        val surface = FlutterSurfaceView(activity)
+        activity.setContentView(surface)
+        activity.window.decorView.measure(
+            View.MeasureSpec.makeMeasureSpec(400, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY))
+        activity.window.decorView.layout(0, 0, 400, 800)
+        surface.layout(0, 0, 400, 800)
+    }
+
+    @Test @Config(sdk = [30]) fun displayCadenceClearsOnPauseBackgroundEndAndStaleSessionsAreIgnored() {
+        installFlutterSurface()
+        val state = mapOf("session" to "test-player", "playing" to true, "frameRate" to 24.0)
+        messenger.call("state", state)
+        assertEquals(24f, frameRates.last())
+        messenger.call("state", state + ("playing" to false))
+        assertEquals(0f, frameRates.last())
+        messenger.call("state", state)
+        bridge.paused(activity)
+        assertEquals(0f, frameRates.last())
+        messenger.call("state", state)
+        assertEquals(0f, frameRates.last())
+        bridge.resumed(activity)
+        assertEquals(24f, frameRates.last())
+        messenger.call("begin", mapOf("session" to "new-player", "video" to true))
+        assertEquals(0f, frameRates.last())
+        messenger.call("state", state)
+        assertEquals(0f, frameRates.last())
+        messenger.call("state", state + ("session" to "new-player"))
+        assertEquals(24f, frameRates.last())
+        messenger.call("end", mapOf("session" to "new-player"))
+        assertEquals(0f, frameRates.last())
+        messenger.call("state", state + ("session" to "new-player"))
+        assertEquals(0f, frameRates.last())
+    }
+
+    @Test @Config(sdk = [30]) fun visiblePipKeepsCadenceButStopAndAudioReleaseIt() {
+        installFlutterSurface()
+        val state = mapOf("session" to "test-player", "playing" to true, "frameRate" to 50.0)
+        messenger.call("state", state)
+        bridge.paused(activity)
+        assertEquals(0f, frameRates.last())
+        assertTrue(activity.enterPictureInPictureMode(PictureInPictureParams.Builder().build()))
+        bridge.pipChanged(activity, true)
+        bridge.paused(activity)
+        assertEquals(50f, frameRates.last())
+        bridge.stopped(activity)
+        assertEquals(0f, frameRates.last())
+        messenger.call("begin", mapOf("session" to "audio", "video" to false))
+        messenger.call("state", state + ("session" to "audio"))
+        assertEquals(0f, frameRates.last())
+    }
 
     @Test fun leanbackDevicesReportTelevisionAndIgnorePhoneRotation() {
         val context: Context = RuntimeEnvironment.getApplication()

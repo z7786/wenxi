@@ -20,6 +20,7 @@ import '../domain/playback_source.dart';
 import '../platform/playback_device.dart';
 import '../platform/player_screenshot.dart';
 import '../playback/playback_controller.dart';
+import '../playback/playback_ui_diagnostics.dart';
 import '../playback/floating_playback.dart';
 import '../playback/playback_sleep_timer.dart';
 import '../playback/subtitle_files.dart';
@@ -89,6 +90,7 @@ class _PlayerPageState extends State<PlayerPage>
       _nativeSubtitleSize = 22;
   bool _lockVisible = false;
   late final AnimationController _chrome;
+  late final PlaybackUiDiagnostics _uiDiagnostics;
   bool _disableAnimations = false;
   Object? _presentationState, _deviceState;
   final _safeInsets = <Orientation, EdgeInsets>{};
@@ -127,6 +129,12 @@ class _PlayerPageState extends State<PlayerPage>
   double _dragX = 0, _dragY = 0, _viewportWidth = 1, _viewportHeight = 1;
   double _verticalInitial = 0, _verticalTarget = 0;
   bool _brightnessDrag = false, _verticalActive = false;
+  double? _initialBrightness;
+  String? _brightnessFolder;
+  bool _brightnessChanged = false;
+  Object? _brightnessState;
+  final _brightnessGate = AsyncGate();
+  Future<void> _brightnessWork = Future.value();
   double _lastAudibleVolume = 100;
   int _volumeRevision = 0;
   RawDialogRoute<void>? _activePanel;
@@ -163,8 +171,15 @@ class _PlayerPageState extends State<PlayerPage>
   @override
   void initState() {
     super.initState();
+    _uiDiagnostics = PlaybackUiDiagnostics(
+      eligible: () =>
+          mounted &&
+          controller.state.playing &&
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
+      refreshRate: () => View.of(context).display.refreshRate,
+      context: () => controller.backend?.diagnosticFields ?? const {},
+    )..start();
     _chrome = AnimationController(vsync: this, value: 1);
-    _chrome.addListener(_syncNativeSubtitles);
     WidgetsBinding.instance.addObserver(this);
     controller.addListener(_onController);
     controller.beforePlay = _preparePresentation;
@@ -196,6 +211,9 @@ class _PlayerPageState extends State<PlayerPage>
   Future<void> _initialize() async {
     try {
       await device.start(video: controller.hasVideo);
+      if (!mounted) return;
+      _initialBrightness = device.brightness;
+      await _syncBrightness();
       if (mounted && device.supportsSystemVolume) {
         await controller.useSystemVolume(
           device.setSystemVolume,
@@ -242,6 +260,10 @@ class _PlayerPageState extends State<PlayerPage>
       }
     }
     if (_seenGeneration != controller.generation) {
+      _saveBrightnessGesture();
+      _volumeTimer?.cancel();
+      _volumeTimer = null;
+      _verticalActive = false;
       _seenGeneration = controller.generation;
       _seekPreview = null;
       _hoverSeekPreview = null;
@@ -338,7 +360,8 @@ class _PlayerPageState extends State<PlayerPage>
               backgroundColor: controller.preferences.subtitleBackgroundArgb,
               bottom:
                   ((_nativeSubtitleBottom +
-                              _nativeSubtitleLift * _chrome.value) /
+                              _nativeSubtitleLift *
+                                  (visible && !locked ? 1 : 0)) /
                           _nativeSubtitleHeight)
                       .clamp(0, .6),
             )
@@ -358,10 +381,19 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<void> _syncDevice() {
+    final brightness = _syncBrightness();
     final geometry = controller.videoGeometry;
+    final frameRate =
+        controller.hasVideo &&
+            !controller.loading &&
+            !controller.casting &&
+            !controller.state.completed
+        ? controller.backend?.displayFrameRate
+        : null;
     final deviceState = (
       controller.generation,
       geometry,
+      frameRate,
       controller.preferences.autoRotate,
       _orientationOverride,
       controller.state.playing && !controller.loading && !controller.casting,
@@ -371,7 +403,7 @@ class _PlayerPageState extends State<PlayerPage>
       device.inPip,
     );
     if (_deviceState == deviceState) {
-      return Future.wait([_deviceWork, _layoutWork]).then((_) {});
+      return Future.wait([brightness, _deviceWork, _layoutWork]).then((_) {});
     }
     _deviceState = deviceState;
     final target = controller.hasVideo && _orientationOverride != null
@@ -417,6 +449,7 @@ class _PlayerPageState extends State<PlayerPage>
               !controller.casting,
           width: geometry?.width,
           height: geometry?.height,
+          frameRate: frameRate,
           autoRotate: controller.preferences.autoRotate,
           orientation: _orientationOverride,
           locked: locked,
@@ -439,7 +472,42 @@ class _PlayerPageState extends State<PlayerPage>
         }),
       );
     }
-    return Future.wait([update, _layoutWork]).then((_) {});
+    return Future.wait([brightness, update, _layoutWork]).then((_) {});
+  }
+
+  Future<void> _syncBrightness() {
+    if (!mounted ||
+        _leaving ||
+        _initialBrightness == null ||
+        !controller.hasVideo ||
+        !device.supportsBrightness) {
+      return Future.value();
+    }
+    final folder = controller.folderKey;
+    final saved = controller.history.brightnessFor(folder);
+    final state = (folder, controller.remembersFolder, saved);
+    if (_brightnessState == state) return _brightnessWork;
+    _brightnessState = state;
+    final target = saved ?? _initialBrightness!;
+    _brightnessWork = _brightnessGate
+        .run(() async {
+          if (!mounted || _leaving || _brightnessState != state) return;
+          if ((device.brightness - target).abs() > .0001) {
+            await device.setBrightness(target);
+          }
+        })
+        .catchError((Object error, StackTrace stack) {
+          if (_brightnessState == state) _brightnessState = null;
+          DiagnosticLog.error('player.brightness', error, stack);
+        });
+    return _brightnessWork;
+  }
+
+  void _saveBrightnessGesture() {
+    if (!_brightnessChanged) return;
+    _brightnessChanged = false;
+    final folder = _brightnessFolder, value = _verticalTarget;
+    _run(() => controller.history.saveBrightness(folder, value));
   }
 
   bool _layoutMatches(PlaybackOrientation target) {
@@ -537,6 +605,8 @@ class _PlayerPageState extends State<PlayerPage>
 
   @override
   void dispose() {
+    _saveBrightnessGesture();
+    _uiDiagnostics.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _hudTimer?.cancel();
@@ -615,6 +685,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _animateChrome() {
     final target = visible && !locked ? 1.0 : 0.0;
+    _syncNativeSubtitles();
     if (_disableAnimations) {
       _chrome.value = target;
     } else {
@@ -1044,6 +1115,8 @@ class _PlayerPageState extends State<PlayerPage>
     if (locked || !controller.ready) return;
     _verticalActive = true;
     _brightnessDrag = details.localPosition.dx < _viewportWidth / 2;
+    _brightnessFolder = controller.folderKey;
+    _brightnessChanged = false;
     _verticalInitial = _brightnessDrag
         ? device.brightness
         : controller.state.volume / 100;
@@ -1062,7 +1135,10 @@ class _PlayerPageState extends State<PlayerPage>
         (_verticalInitial - _dragY / math.max(80, _viewportHeight * .7))
             .clamp(0, 1)
             .toDouble();
-    if (_brightnessDrag) _showHud('亮度  ${(_verticalTarget * 100).round()}%');
+    if (_brightnessDrag) {
+      _brightnessChanged = true;
+      _showHud('亮度  ${(_verticalTarget * 100).round()}%');
+    }
     if (_volumeTimer == null) {
       _applyVertical();
       _volumeTimer = Timer(const Duration(milliseconds: 60), () {
@@ -1078,7 +1154,12 @@ class _PlayerPageState extends State<PlayerPage>
     final revision = ++_volumeRevision;
     _run(() async {
       if (brightness) {
-        await device.setBrightness(value);
+        if (!device.supportsBrightness) return;
+        _brightnessWork = _brightnessGate.run(() async {
+          if (!mounted || _leaving) return;
+          await device.setBrightness(value);
+        });
+        await _brightnessWork;
       } else {
         await controller.setVolume(value * 100, save: save);
         if (mounted && !locked && !_leaving && revision == _volumeRevision) {
@@ -1091,6 +1172,7 @@ class _PlayerPageState extends State<PlayerPage>
   void _verticalEnd() {
     _volumeTimer?.cancel();
     _volumeTimer = null;
+    _saveBrightnessGesture();
     if (locked || !controller.ready || !_verticalActive) return;
     _verticalActive = false;
     _applyVertical(save: true);
@@ -2143,7 +2225,7 @@ class _PlayerPageState extends State<PlayerPage>
             subtitle: Text(
               controller.folderKey == null
                   ? '当前来源无法确定文件夹，使用通用设置'
-                  : '分别保存倍速、片头片尾、字幕样式、画面比例和缩放',
+                  : '分别保存亮度、倍速、片头片尾、字幕样式、比例和缩放',
             ),
             value: controller.remembersFolder,
             onChanged: controller.folderKey == null || controller.loading
@@ -2170,6 +2252,20 @@ class _PlayerPageState extends State<PlayerPage>
             ),
           if (controller.hasVideo && Platform.isWindows)
             const WindowsGpuPreferenceTile(),
+          if (controller.hasVideo && Platform.isAndroid)
+            AppSwitchListTile(
+              key: const Key('player-decoder-compatibility'),
+              title: const Text('兼容硬解模式'),
+              subtitle: const Text('出现绿屏、黑屏时开启，仍使用硬件解码'),
+              value: controller.preferences.decoderCompatibility,
+              onChanged:
+                  controller.loading ||
+                      controller.casting ||
+                      !controller.preferences.hardwareAcceleration
+                  ? null
+                  : (value) =>
+                        _run(() => controller.setDecoderCompatibility(value)),
+            ),
           if (Platform.isWindows) const PlayerComponentsTile(),
           if (controller.hasVideo && !device.isTelevision)
             AppSwitchListTile(
@@ -2937,6 +3033,15 @@ class _PlayerPageState extends State<PlayerPage>
                       ? 12
                       : controller.preferences.subtitleSize;
                   _syncNativeSubtitles();
+                  backend?.setRenderViewport(
+                    Size(box.maxWidth, box.maxHeight),
+                    MediaQuery.devicePixelRatioOf(context),
+                    desktopPip ||
+                            controller.preferences.fit == PlaybackFit.contain
+                        ? BoxFit.contain
+                        : BoxFit.cover,
+                    desktopPip ? 1 : controller.preferences.videoScale,
+                  );
                   final systemPipVideo = controller.systemPipPlayback
                       ?.buildVideo(fit: BoxFit.contain);
                   // Keep the ordinary texture mounted across AVKit handoffs.
@@ -3152,7 +3257,11 @@ class _PlayerPageState extends State<PlayerPage>
                                     child: RepaintBoundary(
                                       child: device.isTelevision
                                           ? ListenableBuilder(
-                                              listenable: controller,
+                                              listenable: visible && !locked
+                                                  ? controller
+                                                  : const AlwaysStoppedAnimation<
+                                                      double
+                                                    >(0),
                                               builder: (_, _) =>
                                                   PlayerTvControls(
                                                     title:

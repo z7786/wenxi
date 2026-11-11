@@ -9,6 +9,7 @@ import '../download/download_playback_cache.dart';
 import '../domain/playback.dart';
 import '../core/json.dart';
 import 'playback_failure.dart';
+import 'playback_range_plan.dart';
 
 class _ReadCancelled implements Exception {}
 
@@ -20,9 +21,11 @@ class _Reader {
     this.generation,
     this.byteStart,
     this.byteEnd,
+    this.plan,
   ) : cursor = first;
   final int first, last, generation;
   final int byteStart, byteEnd;
+  final PlaybackRangePlan plan;
   final bool metadata;
   int cursor;
   final cancelled = Completer<void>();
@@ -171,6 +174,7 @@ class PlaybackStreamProxy {
   final int chunkBytes, warmupBytes;
   int _maxCacheBytes;
   int get maxCacheBytes => _maxCacheBytes;
+  Future<bool> resizeCacheAsync(int bytes) async => resizeCache(bytes);
   bool resizeCache(int bytes) {
     if (_closed || bytes < chunkBytes || !_makeRoom(0, limit: bytes)) {
       return false;
@@ -229,6 +233,8 @@ class PlaybackStreamProxy {
   bool _seekPending = false;
   bool _seekReadInterrupted = false;
   bool _interleavedReads = false;
+  int _alternations = 0;
+  bool _interleavedDeficit = false;
   int? _lastMediaFirst, _previousMediaFirst;
   final _probeWatch = Stopwatch();
   String _probeResult = 'not_started';
@@ -288,6 +294,7 @@ class PlaybackStreamProxy {
     'connectionLimit': connections,
     'fileBytes': _length,
     'interleavedReads': _interleavedReads,
+    'interleavedThroughputDeficit': _interleavedDeficit,
   };
   Uri get uri => Uri.parse('http://127.0.0.1:${_server!.port}$_path');
   int get _budget => math.min(
@@ -799,9 +806,14 @@ class PlaybackStreamProxy {
   /// cutting it here can leave the player buffering after that cache runs out.
   void prepareSeek() {
     if (_closed) return;
+    _interleavedReads = _interleavedDeficit = false;
+    _alternations = 0;
+    _lastMediaFirst = _previousMediaFirst = null;
     _seekPending = true;
     _seekReadInterrupted = false;
   }
+
+  Future<void> prepareSeekAsync() async => prepareSeek();
 
   /// Wake a demuxer whose seek is waiting inside its current HTTP read. Keep
   /// upstream requests and partial cache bytes for the replacement read.
@@ -835,10 +847,29 @@ class PlaybackStreamProxy {
     // Non-interleaved MP4 stores audio far from video. A deep window for each
     // short-lived HTTP read repeatedly speculates into the wrong track.
     // Keep one nearby chunk ready per region within the same session budget.
-    if (_interleavedReads) return math.min(2, _budget);
+    if (_interleavedReads && !_interleavedDeficit) return math.min(2, _budget);
     // Download-backed playback leaves preloading to its download task.
     if (readCache != null || _deliveredBytes < warmupBytes) return _budget;
     return math.max(1, maxCacheBytes ~/ chunkBytes);
+  }
+
+  /// A short interleaved window is only useful while it meets media demand.
+  /// Latch expansion until the next seek to avoid oscillating every sample.
+  void observeThroughput({
+    required double receivedBytesPerSecond,
+    required double requiredBytesPerSecond,
+    required bool buffering,
+  }) {
+    if (_closed || !_interleavedReads || _interleavedDeficit) return;
+    if (buffering ||
+        requiredBytesPerSecond > 0 &&
+            receivedBytesPerSecond < requiredBytesPerSecond * 1.2) {
+      _interleavedDeficit = true;
+      for (final reader in _readers.toList()) {
+        _scheduleAhead(reader);
+      }
+      _pump();
+    }
   }
 
   void _scheduleAhead(_Reader reader) {
@@ -871,8 +902,13 @@ class PlaybackStreamProxy {
         segment.started &&
         (segment.demanders.contains(reader) && segment.received > 0 ||
             _interleavedReads && index == reader.cursor + 1);
+    if (!identical(reader.pending[reader.cursor], segment)) {
+      segment.demanders.remove(reader);
+    }
+    // A cached large range can cover several of this reader's small startup
+    // chunks. Keep ownership until its last pending reference is released.
+    if (reader.pending.values.any((value) => identical(value, segment))) return;
     segment.owners.remove(reader);
-    segment.demanders.remove(reader);
     if (segment.owners.isEmpty && segment.bytes == null && !useful) {
       segment.cancel();
       if (identical(_segments[segment.key], segment)) {
@@ -895,16 +931,9 @@ class PlaybackStreamProxy {
 
   _Segment _requestSegment(_Reader reader, int index, {required bool demand}) {
     final segment = reader.pending.putIfAbsent(index, () {
-      final aligned = index * chunkBytes;
       // A seek can start late within a large segment. Request its first byte
       // directly instead of downloading a discarded prefix on a slow source.
-      final start = math.max(reader.byteStart, aligned);
-      final end = reader.metadata
-          ? math.min(
-              reader.byteEnd,
-              math.min(_length, aligned + chunkBytes) - 1,
-            )
-          : math.min(_length, aligned + chunkBytes) - 1;
+      final (start, end) = reader.plan.range(index);
       final key = (start, end - start + 1);
       // Media can rejoin an in-flight covering range when switching tracks.
       // Footer probes only share available bytes so they never wait behind a
@@ -926,7 +955,7 @@ class PlaybackStreamProxy {
       }
       final shared = _segments.putIfAbsent(
         key,
-        () => _Segment(index, start, _generation, end - start + 1),
+        () => _Segment(start, start, _generation, end - start + 1),
       );
       shared.owners.add(reader);
       return shared;
@@ -955,7 +984,7 @@ class PlaybackStreamProxy {
       return false;
     }
     int edge(_Segment s) =>
-        s.index == 0 || s.index >= (_length - 1) ~/ chunkBytes - 1 ? 1 : 0;
+        s.start < chunkBytes || s.start >= _length - 2 * chunkBytes ? 1 : 0;
     candidates.sort((a, b) {
       final ownership = (a.owners.isEmpty ? 0 : 1).compareTo(
         b.owners.isEmpty ? 0 : 1,
@@ -971,7 +1000,7 @@ class PlaybackStreamProxy {
     });
     for (final victim in candidates) {
       for (final owner in victim.owners.toList()) {
-        owner.pending.remove(victim.index);
+        owner.pending.removeWhere((_, value) => identical(value, victim));
       }
       victim.owners.clear();
       _segments.remove(victim.key);
@@ -1017,9 +1046,7 @@ class PlaybackStreamProxy {
           if (victim != null) {
             _metadataPreemption = victim;
             for (final owner in victim.owners.toList()) {
-              if (identical(owner.pending[victim.index], victim)) {
-                owner.pending.remove(victim.index);
-              }
+              owner.pending.removeWhere((_, value) => identical(value, victim));
             }
             victim.owners.clear();
             _segments.remove(victim.key);
@@ -1235,10 +1262,26 @@ class PlaybackStreamProxy {
         );
       }
       if (request.method == 'HEAD') return;
-      final first = start ~/ chunkBytes, last = end ~/ chunkBytes;
+      final mediaFirst = start ~/ chunkBytes;
       final metadata =
           end - start + 1 <= math.min(64 * 1024, 2 * chunkBytes) &&
-          (first == 0 || start >= _length - 2 * chunkBytes);
+          (mediaFirst == 0 || start >= _length - 2 * chunkBytes);
+      // Ordinary small bounded reads retain a full cache chunk for reuse.
+      final plan = PlaybackRangePlan(
+        start,
+        metadata
+            ? end
+            : math.min(
+                _length - 1,
+                chunkBytes <= PlaybackRangePlan.initialBytes
+                    ? ((end ~/ chunkBytes + 1) * chunkBytes - 1)
+                    : end,
+              ),
+        chunkBytes,
+        metadata: metadata,
+      );
+      const first = 0;
+      final last = plan.last;
       final seeking = _seekPending;
       final interrupted = _seekReadInterrupted;
       _seekPending = false;
@@ -1248,15 +1291,18 @@ class PlaybackStreamProxy {
         if (!seeking &&
             previous != null &&
             beforePrevious != null &&
-            (first - previous).abs() > 4 &&
-            (first - beforePrevious).abs() <= 4) {
-          _interleavedReads = true;
+            (mediaFirst - previous).abs() > 4 &&
+            (mediaFirst - beforePrevious).abs() <= 4) {
+          _alternations++;
+          _interleavedReads = _alternations >= 3;
           for (final activeReader in _readers) {
             _trimWindow(activeReader);
           }
+        } else {
+          _alternations = 0;
         }
         _previousMediaFirst = seeking ? null : previous;
-        _lastMediaFirst = first;
+        _lastMediaFirst = mediaFirst;
       }
       // Containers may alternate distant audio/video ranges during ordinary
       // demuxing. Byte distance cannot distinguish that from a user seek:
@@ -1284,7 +1330,7 @@ class PlaybackStreamProxy {
       if (seeking && _paused) {
         _pausedAllowance = math.min(connections, maxCacheBytes ~/ chunkBytes);
       }
-      if (!metadata) _cursor = first;
+      if (!metadata) _cursor = start;
       final current = reader = _Reader(
         first,
         last,
@@ -1292,6 +1338,7 @@ class PlaybackStreamProxy {
         _generation,
         start,
         end,
+        plan,
       );
       _readers.add(current);
       // HttpResponse.done only finishes when the outgoing body is closed.
@@ -1313,14 +1360,15 @@ class PlaybackStreamProxy {
       for (var index = first; index <= last; index++) {
         current.check();
         current.cursor = index;
-        if (!metadata) _cursor = index;
+        if (!metadata) _cursor = plan.range(index).$1;
         _trimWindow(current);
         final demanded = _requestSegment(current, index, demand: true);
         _scheduleAhead(current);
         _pump();
         final offset = demanded.start;
-        final from = math.max(0, start - offset),
-            to = math.min(demanded.size, end - offset + 1);
+        final wanted = plan.range(index);
+        final from = math.max(0, wanted.$1 - offset),
+            to = math.min(wanted.$2, end) - offset + 1;
         var cursor = from;
         while (cursor < to) {
           final available = await current.wait(

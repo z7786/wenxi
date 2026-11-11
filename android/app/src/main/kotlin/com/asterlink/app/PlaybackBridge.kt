@@ -32,6 +32,7 @@ class PlaybackBridge internal constructor(
     private val context: Context,
     private val channel: MethodChannel,
     private val rootInsets: (View) -> WindowInsetsCompat? = ViewCompat::getRootWindowInsets,
+    private val displayCadence: PlaybackFrameRate = PlaybackFrameRate(),
 ) {
     constructor(context: Context, engine: FlutterEngine) : this(context,
         MethodChannel(engine.dartExecutor.binaryMessenger, "com.asterlink.app/playback"))
@@ -39,6 +40,8 @@ class PlaybackBridge internal constructor(
     private var session: String? = null
     private var video = false
     private var playing = false
+    private var frameRate = 0f
+    private var hidden = false
     private var width = 16
     private var height = 9
     private var originalBrightness = -1f
@@ -82,22 +85,37 @@ class PlaybackBridge internal constructor(
     }
     fun pipChanged(current: Activity, active: Boolean) {
         if (activity === current) {
+            // Some devices report onPause before the PiP flag becomes true.
+            if (active) hidden = false
+            updateFrameRate()
             if (!active) applyOrientation()
             emit("pip", mapOf("active" to active))
         }
     }
     fun stopped(current: Activity) {
-        if (activity === current) emit("action", mapOf("action" to "hidden"))
+        if (activity === current) {
+            hidden = true
+            displayCadence.clear()
+            emit("action", mapOf("action" to "hidden"))
+        }
     }
     fun paused(current: Activity) {
         if (activity !== current) return
         // PiP stays visible while Android reports the activity as paused.
         if (Build.VERSION.SDK_INT >= 26 && current.isInPictureInPictureMode) return
+        hidden = true
+        displayCadence.clear()
         emit("action", mapOf("action" to "hidden"))
+    }
+    fun resumed(current: Activity) {
+        if (activity !== current) return
+        hidden = false
+        updateFrameRate()
     }
     fun windowFocused(current: Activity) {
         if (activity === current && session != null) {
             volume.refresh(); applySystemBars()
+            updateFrameRate()
         }
     }
     fun volumeKey(current: Activity) {
@@ -129,6 +147,8 @@ class PlaybackBridge internal constructor(
                     session = token
                     video = call.argument<Boolean>("video") ?: false
                     playing = false
+                    frameRate = 0f
+                    hidden = false
                     fullscreen = false
                     controlsVisible = true
                     desiredOrientation = "system"
@@ -153,6 +173,7 @@ class PlaybackBridge internal constructor(
                 }
                 "state" -> {
                     playing = call.argument<Boolean>("playing") ?: false
+                    frameRate = call.argument<Number>("frameRate")?.toFloat() ?: 0f
                     width = (call.argument<Number>("width")?.toInt() ?: width).coerceAtLeast(1)
                     height = (call.argument<Number>("height")?.toInt() ?: height).coerceAtLeast(1)
                     call.argument<String>("orientation")?.takeIf { it in setOf("system", "portrait", "landscape") }
@@ -223,12 +244,22 @@ class PlaybackBridge internal constructor(
     }
     private fun updateWindow() {
         val current = activity ?: return
+        updateFrameRate()
         applySystemBars()
         if (playing && video) current.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else if (!originalKeepScreen) current.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (supportsPip() && Build.VERSION.SDK_INT >= 26) {
             try { current.setPictureInPictureParams(parameters()) } catch (_: Exception) { /* capability can change */ }
         }
+    }
+    private fun updateFrameRate() {
+        if (session == null) {
+            displayCadence.clear()
+            return
+        }
+        val current = activity ?: return
+        displayCadence.update(current.window.decorView,
+            if (video && playing && !hidden) frameRate else 0f)
     }
     private fun applySystemBars() {
         val current = activity ?: return
@@ -276,6 +307,7 @@ class PlaybackBridge internal constructor(
         return RemoteAction(Icon.createWithResource(context, resource), title, title, pending)
     }
     private fun restoreWindow() {
+        displayCadence.clear()
         volume.stop()
         val current = activity ?: return
         current.window.attributes = current.window.attributes.apply { screenBrightness = originalBrightness }

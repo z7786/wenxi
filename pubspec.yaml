@@ -67,6 +67,8 @@ dependency_overrides:
     path: vendor_plugins/file_selector_android
   media_kit:
     path: vendor_plugins/media_kit
+  media_kit_video:
+    path: vendor_plugins/media_kit_video
   media_kit_libs_android_video:
     path: vendor_plugins/media_kit_libs_android_video
   media_kit_libs_windows_video:

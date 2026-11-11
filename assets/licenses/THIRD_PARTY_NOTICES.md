@@ -2,6 +2,8 @@
 
 AsterLink Flutter 使用下列开放源代码组件；原作者的版权与许可声明保留。
 
+播放器纹理插件 `media_kit_video 2.0.1` 现保留于 `vendor_plugins/media_kit_video`，MIT 许可及原版权声明随源码保留。Android 尺寸、Surface 生命周期、硬解选择与桌面尺寸补丁见该目录 `ASTERLINK_PATCHES.md`；未更换 libmpv 二进制。
+
 项目原创代码及适用移植实现的 AGPL-3.0 许可见根目录 LICENSE 和 assets/licenses/AsterLink-LICENSE.txt。独立第三方组件仍保留下述各自许可；完整范围与内置 SDK 的组合分发说明见 docs/LICENSING.md。
 
 ## Gopeed

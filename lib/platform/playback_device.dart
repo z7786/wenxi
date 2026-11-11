@@ -35,6 +35,7 @@ abstract class PlaybackDevice extends ChangeNotifier {
     required bool playing,
     int? width,
     int? height,
+    double? frameRate,
     bool autoRotate = true,
     PlaybackOrientation? orientation,
     bool locked = false,
@@ -243,6 +244,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
     required bool playing,
     int? width,
     int? height,
+    double? frameRate,
     bool autoRotate = true,
     PlaybackOrientation? orientation,
     bool locked = false,
@@ -264,8 +266,18 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
             width: width,
             height: height,
           );
+    final cadence =
+        _android &&
+            _video &&
+            playing &&
+            frameRate != null &&
+            frameRate.isFinite &&
+            frameRate >= 1 &&
+            frameRate <= 240
+        ? (frameRate * 1000).round() / 1000.0
+        : 0.0;
     final signature =
-        '$playing/$width/$height/${targetOrientation?.name}/$locked/$controlsVisible';
+        '$playing/$width/$height/$cadence/${targetOrientation?.name}/$locked/$controlsVisible';
     if (_lastUpdate == signature) return;
     _lastUpdate = signature;
     try {
@@ -293,6 +305,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
         'playing': playing,
         'width': width,
         'height': height,
+        if (_android) 'frameRate': cadence,
         'orientation': targetOrientation?.name,
         'locked': locked,
         'controlsVisible': controlsVisible,

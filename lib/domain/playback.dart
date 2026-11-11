@@ -147,6 +147,7 @@ class PlaybackPreferences {
     this.driveConnections = const {},
     this.segmentSizeMiB = 4,
     this.hardwareAcceleration = true,
+    this.decoderCompatibility = false,
     this.skipIntroSeconds = 0,
     this.skipOutroSeconds = 0,
   });
@@ -162,6 +163,7 @@ class PlaybackPreferences {
                 ? 0
                 : subtitleBackgroundColor);
   final bool autoNext, autoRotate, resume, subtitles, hardwareAcceleration;
+  final bool decoderCompatibility;
   final PlaybackFit fit;
   final double aspectRatio;
   final double videoScale, videoOffsetX, videoOffsetY, controlsScale;
@@ -225,6 +227,7 @@ class PlaybackPreferences {
     }),
     segmentSizeMiB: value.integer('segmentSizeMiB', 4).clamp(1, 16),
     hardwareAcceleration: value.boolean('hardwareAcceleration', true),
+    decoderCompatibility: value.boolean('decoderCompatibility'),
     skipIntroSeconds: value.integer('skipIntroSeconds').clamp(0, 600),
     skipOutroSeconds: value.integer('skipOutroSeconds').clamp(0, 600),
     subtitleSize: finiteRange(
@@ -312,6 +315,7 @@ class PlaybackPreferences {
     'driveConnections': driveConnections,
     'segmentSizeMiB': segmentSizeMiB,
     'hardwareAcceleration': hardwareAcceleration,
+    'decoderCompatibility': decoderCompatibility,
     'skipIntroSeconds': skipIntroSeconds,
     'skipOutroSeconds': skipOutroSeconds,
   };
@@ -346,6 +350,7 @@ class PlaybackPreferences {
     Map<String, int>? driveConnections,
     int? segmentSizeMiB,
     bool? hardwareAcceleration,
+    bool? decoderCompatibility,
     int? skipIntroSeconds,
     int? skipOutroSeconds,
   }) => PlaybackPreferences.fromJson({
@@ -382,6 +387,7 @@ class PlaybackPreferences {
     'driveConnections': driveConnections ?? this.driveConnections,
     'segmentSizeMiB': segmentSizeMiB ?? this.segmentSizeMiB,
     'hardwareAcceleration': hardwareAcceleration ?? this.hardwareAcceleration,
+    'decoderCompatibility': decoderCompatibility ?? this.decoderCompatibility,
     'skipIntroSeconds': skipIntroSeconds ?? this.skipIntroSeconds,
     'skipOutroSeconds': skipOutroSeconds ?? this.skipOutroSeconds,
   });

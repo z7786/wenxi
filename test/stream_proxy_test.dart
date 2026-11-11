@@ -8,6 +8,7 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/download/download_playback_cache.dart';
 import 'package:asterlink/playback/stream_proxy.dart';
+import 'package:asterlink/playback/isolated_stream_proxy.dart';
 import 'package:asterlink/playback/playback_failure.dart';
 import 'support.dart';
 
@@ -207,6 +208,175 @@ void main() {
     }
     return builder.takeBytes();
   }
+
+  test(
+    'Worker streams exact bytes, controls seek/pause and acknowledges cache budgets',
+    () async {
+      await proxy.close();
+      proxy = IsolatedPlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        chunkBytes: 8192,
+        maxCacheBytes: 32768,
+        connections: 4,
+        onFailure: failures.add,
+      );
+      expect(await proxy.start(), isTrue);
+      expect(proxy.diagnosticFields['proxyIsolate'], isTrue);
+      expect(await read(1337, 19000), origin.bytes.sublist(1337, 19001));
+      proxy.setPaused(true);
+      await proxy.prepareSeekAsync();
+      expect(proxy.diagnosticFields['seekPending'], isTrue);
+      expect(await read(350000, 355000), origin.bytes.sublist(350000, 355001));
+      proxy.setPaused(false);
+      proxy.connections = 2;
+      expect(await proxy.resizeCacheAsync(65536), isTrue);
+      expect(proxy.maxCacheBytes, 65536);
+      expect(await read(400000, 450000), origin.bytes.sublist(400000, 450001));
+      expect(failures, isEmpty);
+      await proxy.close();
+      expect(proxy.supported, isFalse);
+    },
+  );
+
+  test(
+    'Worker calls download leases through RPC and transfers cached bytes',
+    () async {
+      await proxy.close();
+      const identity = RemoteIdentity(512 * 1024, '"stable"', null);
+      var reads = 0;
+      proxy = IsolatedPlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        chunkBytes: 8192,
+        maxCacheBytes: 32768,
+        cacheSnapshot: () async =>
+            DownloadReadableState(identity, [(0, origin.bytes.length)]),
+        readCache: (start, end, remote) async {
+          expect(identity.canResume(remote), isTrue);
+          reads++;
+          return Uint8List.sublistView(origin.bytes, start, end + 1);
+        },
+        onFailure: failures.add,
+      );
+      expect(await proxy.start(), isTrue);
+      expect(await read(3000, 30000), origin.bytes.sublist(3000, 30001));
+      expect(reads, greaterThan(1));
+      expect(origin.calls, isEmpty);
+      expect(failures, isEmpty);
+    },
+  );
+
+  test(
+    'Worker forwards demanded HTTP failures and can close during startup',
+    () async {
+      await proxy.close();
+      proxy = IsolatedPlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        chunkBytes: 8192,
+        maxCacheBytes: 32768,
+        onFailure: failures.add,
+      );
+      expect(await proxy.start(), isTrue);
+      origin.statusFor = (_, end, _) => end > 1023 ? 403 : 0;
+      await read(10000, 20000).then<void>((_) {}, onError: (Object _) {});
+      await until(() => failures.isNotEmpty);
+      expect(failures.first.kind, PlaybackFailureKind.expired);
+      await proxy.close();
+      proxy = IsolatedPlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+      );
+      final starting = proxy.start();
+      await proxy.close();
+      expect(await starting, isFalse);
+    },
+  );
+
+  test(
+    'Repeated alternating reads enable a bounded window and a seek resets it',
+    () async {
+      expect(await proxy.start(), isTrue);
+      for (final start in [65000, 350000, 66000]) {
+        expect(
+          await read(start, start + 300),
+          origin.bytes.sublist(start, start + 301),
+        );
+      }
+      expect(proxy.diagnosticFields['interleavedReads'], isFalse);
+      for (final start in [351000, 67000]) {
+        await read(start, start + 300);
+      }
+      expect(proxy.diagnosticFields['interleavedReads'], isTrue);
+      proxy.observeThroughput(
+        receivedBytesPerSecond: 500000,
+        requiredBytesPerSecond: 2200000,
+        buffering: false,
+      );
+      expect(proxy.diagnosticFields['interleavedThroughputDeficit'], isTrue);
+      proxy.prepareSeek();
+      expect(proxy.diagnosticFields['interleavedReads'], isFalse);
+      expect(proxy.diagnosticFields['interleavedThroughputDeficit'], isFalse);
+    },
+  );
+
+  test(
+    'Large configured ranges ramp from 512 KiB and restart after an unaligned seek',
+    () async {
+      await proxy.close();
+      await origin.close();
+      origin = _Origin(length: 36 * 1048576);
+      origin.delay = Duration.zero;
+      await origin.start();
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        chunkBytes: 4 * 1048576,
+        maxCacheBytes: 32 * 1048576,
+        connections: 8,
+      );
+      expect(await proxy.start(), isTrue);
+      expect(
+        await read(1337, 32 * 1048576),
+        origin.bytes.sublist(1337, 32 * 1048576 + 1),
+      );
+      expect(origin.calls, contains((1337, 1337 + 524288 - 1)));
+      expect(
+        origin.calls,
+        contains((1337 + 8 * 524288, 1337 + 8 * 524288 + 1048576 - 1)),
+      );
+      // A distant read beyond the completed cache starts small again.
+      proxy.prepareSeek();
+      const target = 34 * 1048576 + 97;
+      expect(
+        await read(target, origin.bytes.length - 1),
+        origin.bytes.sublist(target),
+      );
+      expect(origin.calls, contains((target, target + 524288 - 1)));
+      expect(proxy.bufferedBytes, lessThanOrEqualTo(proxy.maxCacheBytes));
+    },
+  );
+
+  test(
+    'Several small seek chunks can reuse a single larger cached range',
+    () async {
+      await proxy.close();
+      await origin.close();
+      origin = _Origin(length: 36 * 1048576);
+      origin.delay = Duration.zero;
+      await origin.start();
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        chunkBytes: 4 * 1048576,
+        maxCacheBytes: 48 * 1048576,
+        connections: 8,
+      );
+      expect(await proxy.start(), isTrue);
+      expect(await read(0, origin.bytes.length - 1), origin.bytes);
+      final count = origin.calls.length;
+      proxy.prepareSeek();
+      const start = 28 * 1048576 + 123, end = start + 3 * 1048576;
+      expect(await read(start, end), origin.bytes.sublist(start, end + 1));
+      expect(origin.calls.length, count);
+      expect(failures, isEmpty);
+    },
+  );
 
   test(
     'Playback reuses matching downloaded ranges and fetches only holes',
@@ -1052,7 +1222,8 @@ void main() {
           origin.bytes.sublist(400000, 400512),
         );
         final nearby = read(66560, 71536);
-        await until(() => proxy.diagnosticFields['interleavedReads'] == true);
+        await until(() => proxy.diagnosticFields['readers'] == 1);
+        expect(proxy.diagnosticFields['interleavedReads'], isFalse);
         expect(proxy.generation, 0);
         expect(proxy.bufferedBytes, lessThanOrEqualTo(proxy.maxCacheBytes));
         gate.complete();
