@@ -19,7 +19,7 @@
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
   },
   "test/tianyi_test.dart": {
-    "sha256": "57e7a6262af8fd2286ab3ab47dcaedc8ca85538ba98aad11c001984e1c988b98",
+    "sha256": "e3545a2ae6da69fd7099e05ea0e7582d2d2a1a96c4bbb18e267b244140507b10",
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
   },
   "test/uc_tv_test.dart": {
