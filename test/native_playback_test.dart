@@ -110,6 +110,8 @@ void main() {
               Duration.zero,
             );
             expect(backend.diagnosticFields, isNot(contains('videoCodec')));
+            expect(backend.screenInfo.videoCodec, isNull);
+            expect(backend.screenInfo.bytesPerSecond, isNull);
             expect(backend.hardwareDecodingActive, isNull);
             await backend.play();
             await until(
@@ -121,6 +123,11 @@ void main() {
             expect(backend.diagnosticFields['videoFps'], fps);
             expect(backend.diagnosticFields['videoPixelFormat'], isNotEmpty);
             expect(backend.diagnosticFields['decoderDroppedFrames'], 0);
+            expect(backend.screenInfo.videoCodec, codec);
+            expect(backend.screenInfo.videoFps, fps);
+            expect(backend.screenInfo.hardwareDecoder, 'no');
+            expect(backend.screenInfo.pixelFormat, isNotEmpty);
+            expect(backend.screenInfo.decoderDroppedFrames, 0);
             expect(player.state.width, width);
             expect(backend.failure, isNull);
           }
@@ -311,6 +318,7 @@ void main() {
             fileName: 'hls-video.mp4',
             profile: 'aliyun',
           );
+          backend.setScreenDisplayMonitoringEnabled(true);
           // A preceding resume must not leak its start option into a fresh open.
           for (final start in [
             Duration.zero,
@@ -337,6 +345,9 @@ void main() {
                   start + const Duration(milliseconds: 300),
             );
             await backend.pause();
+            await until(() => backend.screenInfo.bytesPerSecond != null);
+            expect(backend.screenInfo.transport, 'direct');
+            expect(backend.screenInfo.bytesPerSecond, greaterThanOrEqualTo(0));
             expect(
               player.state.position,
               lessThan(start + const Duration(seconds: 2)),

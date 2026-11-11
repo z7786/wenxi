@@ -1428,6 +1428,12 @@ class _BrowserPageState extends State<BrowserPage> {
                   title: const Text('下载'),
                   onTap: () => Navigator.pop(context, 'download'),
                 ),
+              if (file.isDirectory || _provider.canDownloadFile(session, file))
+                ListTile(
+                  leading: const Icon(Icons.bolt_rounded),
+                  title: const Text('跨盘传输'),
+                  onTap: () => Navigator.pop(context, 'rapid-transfer'),
+                ),
               if (canDownloadUcPlayable(session, file))
                 ListTile(
                   leading: const Icon(CupertinoIcons.film),

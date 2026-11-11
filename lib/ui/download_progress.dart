@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import '../domain/downloads.dart';
 import '../domain/uploads.dart';
 import '../upload/upload_task.dart';
+import '../transfer/rapid_transfer_task.dart';
 
 class DownloadProgress extends StatelessWidget {
   const DownloadProgress({
@@ -113,6 +114,46 @@ class TransferProgress extends StatefulWidget {
       _ => TransferProgressStatus.paused,
     },
   );
+
+  factory TransferProgress.cross(
+    RapidTransferTask task, {
+    bool enabled = true,
+    bool compact = false,
+  }) {
+    final movingData = task.entries.any(
+      (e) =>
+          e.status == RapidEntryStatus.downloading ||
+          e.status == RapidEntryStatus.uploading,
+    );
+    // Cross-drive progress includes matching and both relay phases. Use units
+    // of work rather than pretend these values are uploaded byte counts.
+    final fraction = task.progress;
+    final total = fraction == null ? 0 : task.entries.length * 1000000;
+    return TransferProgress._(
+      id: task.id,
+      total: total,
+      transferred: ((fraction ?? 0) * total).round(),
+      speed: movingData ? task.speed : 0,
+      enabled: enabled,
+      compact: compact,
+      direction: 'cross-transfer',
+      stage: task.stage,
+      processingLabel: task.scanned ? '匹配中' : '扫描中',
+      status: switch (task.status) {
+        RapidTaskStatus.pending => TransferProgressStatus.pending,
+        RapidTaskStatus.running =>
+          movingData
+              ? TransferProgressStatus.running
+              : TransferProgressStatus.processing,
+        RapidTaskStatus.completed =>
+          task.canRetry
+              ? TransferProgressStatus.failed
+              : TransferProgressStatus.completed,
+        RapidTaskStatus.failed => TransferProgressStatus.failed,
+        _ => TransferProgressStatus.paused,
+      },
+    );
+  }
   @override
   State<TransferProgress> createState() => _TransferProgressState();
 }
@@ -290,7 +331,7 @@ class _TransferProgressState extends State<TransferProgress>
         ? const Color(0xffed625a)
         : paused
         ? const Color(0xff98a2b3)
-        : task.direction == 'upload'
+        : task.direction != 'download'
         ? Theme.of(context).colorScheme.secondary
         : Theme.of(context).colorScheme.primary;
     final percent = task.total > 0
@@ -306,7 +347,11 @@ class _TransferProgressState extends State<TransferProgress>
         ? '排队中'
         : percent;
     return Semantics(
-      label: task.direction == 'upload' ? '上传进度' : '下载进度',
+      label: task.direction == 'cross-transfer'
+          ? '跨盘传输进度'
+          : task.direction == 'upload'
+          ? '上传进度'
+          : '下载进度',
       value:
           '${task.stage}，${_complete
               ? '100%'

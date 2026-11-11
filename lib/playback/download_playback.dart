@@ -14,6 +14,7 @@ import 'delegating_backend.dart';
 import 'playback_backend_factory.dart';
 import 'playback_controller.dart';
 import 'playback_sources.dart';
+import 'playback_screen_info.dart';
 
 PlaybackController downloadPlayback(
   AppServices services,
@@ -135,6 +136,11 @@ class DownloadMediaBackend extends DelegatingPlaybackBackend {
         : '';
     return '边下边播 · ${task.status.label}$progress';
   }
+
+  @override
+  PlaybackScreenInfo get screenInfo => delegate.screenInfo.withNetworkSpeed(
+    downloads.task(downloadId)?.speed.toDouble(),
+  );
 
   @override
   Future<void> close() {

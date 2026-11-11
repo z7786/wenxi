@@ -1,6 +1,82 @@
 import 'package:flutter/material.dart';
 import 'common.dart';
 
+/// Shared compact layout for local uploads and transfers between cloud drives.
+class TransferTaskRow extends StatelessWidget {
+  const TransferTaskRow({
+    super.key,
+    required this.rowKey,
+    required this.name,
+    required this.directory,
+    required this.onTap,
+    required this.subtitle,
+    required this.progress,
+    required this.trailing,
+    required this.platformMark,
+    this.badge,
+  });
+
+  final Key rowKey;
+  final String name;
+  final bool directory;
+  final VoidCallback? onTap;
+  final Widget subtitle, progress, trailing, platformMark;
+  final Widget? badge;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    color: Colors.transparent,
+    child: InkWell(
+      key: rowKey,
+      onTap: onTap,
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 66),
+        padding: const EdgeInsets.fromLTRB(16, 8, 10, 8),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: border(context), width: .5)),
+        ),
+        child: Row(
+          children: [
+            FileGlyph(name, directory: directory, size: 30),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            height: 1.3,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      if (badge != null) ...[const SizedBox(width: 6), badge!],
+                      const SizedBox(width: 6),
+                      platformMark,
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  subtitle,
+                  progress,
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            trailing,
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 class TransferFilterBar extends StatelessWidget {
   const TransferFilterBar({
     super.key,

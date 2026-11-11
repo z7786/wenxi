@@ -523,6 +523,8 @@ void main() {
       await search(tester, '报告');
       await tester.tap(find.byTooltip('季度报告.pdf操作'));
       await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('重命名'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('重命名'));
       await tester.pumpAndSettle();
       await tester.enterText(

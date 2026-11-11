@@ -22,6 +22,8 @@ import 'package:asterlink/playback/playback_sleep_timer.dart';
 import 'package:asterlink/ui/subtitle_appearance.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/playback/external_stream.dart';
+import 'package:asterlink/domain/playback_screen_display.dart';
+import 'package:asterlink/playback/playback_screen_info.dart';
 import 'player_support.dart';
 
 class _FixtureExternalStream extends ExternalPlaybackStream {
@@ -234,6 +236,247 @@ void main() {
     await tester.ensureVisible(action);
     await tap(tester, action);
   }
+
+  testWidgets('Screen settings toggle each item and persist globally', (
+    tester,
+  ) async {
+    final page = await render(tester);
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
+    await openMenuAction(
+      tester,
+      find.byKey(const Key('player-screen-settings')),
+    );
+    await tap(tester, find.byKey(const Key('player-screen-enabled')));
+    for (final item in PlaybackScreenItem.values) {
+      final before = page.fixture.controller.preferences.screenDisplay.items
+          .contains(item);
+      final toggle = find.byKey(Key('player-screen-${item.name}'));
+      await tester.ensureVisible(toggle);
+      await tap(tester, toggle);
+      expect(
+        page.fixture.history.preferences.screenDisplay.items.contains(item),
+        !before,
+      );
+    }
+    final saved = page.fixture.history.preferences.screenDisplay;
+    expect(saved.enabled, isTrue);
+    expect(saved.items, {
+      PlaybackScreenItem.parameters,
+      PlaybackScreenItem.media,
+    });
+    await tap(tester, find.byTooltip('关闭面板'));
+    expect(find.byKey(const Key('player-screen-line-title')), findsNothing);
+    expect(find.byKey(const Key('player-screen-line-progress')), findsNothing);
+    expect(
+      find.byKey(const Key('player-screen-line-parameters')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('player-screen-line-video')), findsOneWidget);
+  });
+
+  testWidgets(
+    'Screen display refreshes cached information without rebuilding video or controls',
+    (tester) async {
+      final fixture = PlaybackFixture(
+        data: {
+          'playbackPreferences': {
+            'screenDisplay': {
+              'enabled': true,
+              'items': [
+                'time',
+                'network',
+                'resolution',
+                'progress',
+                'title',
+                'parameters',
+                'media',
+              ],
+            },
+          },
+        },
+      );
+      fixture.configureBackend = (backend) {
+        backend.videoSurface = true;
+        backend.screenInfo = const PlaybackScreenInfo(
+          transport: 'direct',
+          bytesPerSecond: 2097152,
+          hardwareDecoder: 'mediacodec',
+          decoderDroppedFrames: 2,
+          outputDroppedFrames: 3,
+        );
+      };
+      final page = await render(tester, suppliedFixture: fixture);
+      final backend = fixture.current;
+      backend.emit(
+        backend.state.copyWith(
+          tracks: Tracks(
+            video: const [
+              VideoTrack(
+                '1',
+                null,
+                null,
+                codec: 'hevc',
+                fps: 60,
+                bitrate: 20000000,
+              ),
+            ],
+            audio: const [
+              AudioTrack(
+                '1',
+                '普通话',
+                'zho',
+                codec: 'aac',
+                samplerate: 48000,
+                channelscount: 2,
+              ),
+            ],
+            subtitle: backend.state.tracks.subtitle,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('网速 2.00 MB/s'), findsOneWidget);
+      expect(find.text('分辨率 1920 × 1080'), findsOneWidget);
+      expect(find.textContaining('HEVC · 60 fps · 20 Mbps'), findsOneWidget);
+      expect(find.text('音频 AAC · 48 kHz · 2 声道'), findsOneWidget);
+      expect(find.textContaining('硬解 mediacodec'), findsOneWidget);
+      expect(find.textContaining('解码丢帧 2 · 输出丢帧 3'), findsOneWidget);
+      expect(find.textContaining('fixture-secret'), findsNothing);
+      final top = tester.widget(find.byKey(const Key('player-top-controls')));
+      final video = tester.widget(
+        find.byKey(const Key('player-video-surface')),
+      );
+      final updates = page.device.updates;
+      for (var i = 0; i < 12; i++) {
+        backend.emit(
+          backend.state.copyWith(position: Duration(seconds: 130 + i)),
+        );
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('进度 02:21 / 10:00 · 23.5%'), findsOneWidget);
+      expect(
+        tester.widget(find.byKey(const Key('player-top-controls'))),
+        same(top),
+      );
+      expect(
+        tester.widget(find.byKey(const Key('player-video-surface'))),
+        same(video),
+      );
+      expect(page.device.updates, updates);
+      backend.screenInfo = const PlaybackScreenInfo(
+        transport: 'direct',
+        bytesPerSecond: 0,
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('网速 0 B/s'), findsOneWidget);
+      backend.screenInfo = const PlaybackScreenInfo(transport: 'local');
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('网速 本地播放'), findsOneWidget);
+      await tester.tapAt(const Offset(196, 500));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('player-top-controls')), findsNothing);
+      expect(find.byKey(const Key('player-screen-display')), findsOneWidget);
+      expect(backend.screenMonitoring, isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      expect(backend.screenMonitoring, isFalse);
+    },
+  );
+
+  for (final (size, scale, television) in [
+    (const Size(320, 700), 1.8, false),
+    (const Size(844, 390), 1.0, false),
+    (const Size(1920, 1080), 1.0, true),
+  ]) {
+    testWidgets('Screen display stays inside safe bounds at $size', (
+      tester,
+    ) async {
+      final fixture = PlaybackFixture(
+        data: {
+          'playbackPreferences': {
+            'screenDisplay': {
+              'enabled': true,
+              'items': [
+                for (final item in PlaybackScreenItem.values)
+                  if (item != PlaybackScreenItem.time) item.name,
+              ],
+            },
+          },
+        },
+      );
+      await render(
+        tester,
+        size: size,
+        scale: scale,
+        suppliedFixture: fixture,
+        suppliedDevice: FakePlaybackDevice()..isTelevision = television,
+      );
+      final display = find.byKey(const Key('player-screen-display'));
+      final bounds = tester.getRect(display);
+      expect(bounds.size, size);
+      final title = tester.getRect(
+        find.byKey(const Key('player-screen-line-title')),
+      );
+      final audio = tester.getRect(
+        find.byKey(const Key('player-screen-line-audio')),
+      );
+      expect(title.top, greaterThanOrEqualTo(bounds.top));
+      expect(audio.bottom, lessThanOrEqualTo(bounds.bottom + .1));
+      expect(title.left, greaterThanOrEqualTo(12));
+      expect(audio.right, lessThanOrEqualTo(size.width / 2));
+      final progress = tester.getRect(
+        find.byKey(const Key('player-screen-line-progress')),
+      );
+      final resolution = tester.getRect(
+        find.byKey(const Key('player-screen-line-resolution')),
+      );
+      final network = tester.getRect(
+        find.byKey(const Key('player-screen-line-network')),
+      );
+      expect(title.right, lessThanOrEqualTo(size.width / 2));
+      expect(network.left, greaterThan(size.width / 2));
+      expect(progress.bottom, greaterThan(title.bottom));
+      expect(resolution.left, greaterThan(progress.right));
+      expect(resolution.bottom, closeTo(progress.bottom, .1));
+      expect(resolution.right, lessThanOrEqualTo(size.width - 12));
+      expect(tester.takeException(), isNull);
+      await expectLater(
+        find.byKey(const Key('player-capture')),
+        matchesGoldenFile('goldens/player-screen-${size.width.toInt()}.png'),
+      );
+    });
+  }
+
+  testWidgets('Screen display respects PiP and all items disabled', (
+    tester,
+  ) async {
+    final fixture = PlaybackFixture(
+      data: {
+        'playbackPreferences': {
+          'screenDisplay': {'enabled': true},
+        },
+      },
+    );
+    final page = await render(tester, suppliedFixture: fixture);
+    expect(find.byKey(const Key('player-screen-display')), findsOneWidget);
+    page.device.inPip = true;
+    page.device.notifyListeners();
+    await tester.pump();
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
+    expect(fixture.current.screenMonitoring, isFalse);
+    page.device.inPip = false;
+    page.device.notifyListeners();
+    await tester.pump();
+    await fixture.controller.updatePreferences(
+      fixture.controller.preferences.copyWith(
+        screenDisplay: const PlaybackScreenDisplay(enabled: true, items: {}),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
+  });
 
   testWidgets(
     'Windows punctuation adjusts rate and middle mouse toggles fullscreen',

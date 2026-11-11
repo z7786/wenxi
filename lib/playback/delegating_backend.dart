@@ -6,6 +6,7 @@ import '../domain/models.dart';
 import '../domain/playback.dart';
 import 'media_backend.dart';
 import 'playback_failure.dart';
+import 'playback_screen_info.dart';
 
 /// Transport-specific status belongs outside the platform playback engine.
 class DelegatingPlaybackBackend extends PlaybackBackend {
@@ -54,6 +55,11 @@ class DelegatingPlaybackBackend extends PlaybackBackend {
   String get streamingDescription => delegate.streamingDescription;
   @override
   Map<String, Object?> get diagnosticFields => delegate.diagnosticFields;
+  @override
+  PlaybackScreenInfo get screenInfo => delegate.screenInfo;
+  @override
+  void setScreenDisplayMonitoringEnabled(bool enabled) =>
+      delegate.setScreenDisplayMonitoringEnabled(enabled);
   @override
   bool get rendersSubtitlesNatively => delegate.rendersSubtitlesNatively;
   @override

@@ -189,10 +189,11 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
                     findChildIndexCallback: (key) => indices[key],
                     itemBuilder: (context, index) => tasks[index].upload != null
                         ? _task(tasks[index].upload!)
-                        : CrossTransferCard(
+                        : CrossTransferRow(
                             widget.services,
                             tasks[index].cross!,
                             key: ValueKey(tasks[index].cross!.id),
+                            active: widget.active && foreground,
                           ),
                   ),
           ),
@@ -319,116 +320,70 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
     final manager = widget.services.uploads;
     final locked = busyIds.contains(t.id);
     final tint = _tint(t);
-    return Material(
+    return TransferTaskRow(
       key: ValueKey(t.id),
-      color: Colors.transparent,
-      child: InkWell(
-        key: ValueKey('upload-row-${t.id}'),
-        onTap: () => _details(t.id),
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 66),
-          padding: const EdgeInsets.fromLTRB(16, 8, 10, 8),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: border(context), width: .5),
+      rowKey: ValueKey('upload-row-${t.id}'),
+      name: t.name,
+      directory: t.isFolder,
+      onTap: () => _details(t.id),
+      platformMark: PlatformMark(platform: t.session.platform, size: 14),
+      subtitle: Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: t.stage,
+              style: TextStyle(color: tint),
             ),
-          ),
-          child: Row(
-            children: [
-              FileGlyph(t.name, directory: t.isFolder, size: 30),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            t.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              height: 1.3,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        PlatformMark(platform: t.session.platform, size: 14),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text.rich(
-                      TextSpan(
-                        children: [
-                          TextSpan(
-                            text: t.stage,
-                            style: TextStyle(color: tint),
-                          ),
-                          TextSpan(text: ' · ${_amount(t)}'),
-                          if (t.active &&
-                              t.phase == UploadPhase.uploading &&
-                              t.speed > 0)
-                            TextSpan(
-                              text: ' · ${formatBytes(t.speed)}/s',
-                              style: TextStyle(color: accent),
-                            ),
-                        ],
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: secondary(context),
-                        fontFeatures: const [ui.FontFeature.tabularFigures()],
-                      ),
-                    ),
-                    TransferProgress.upload(
-                      t,
-                      compact: true,
-                      enabled:
-                          widget.active &&
-                          foreground &&
-                          ModalRoute.of(context)?.isCurrent != false,
-                    ),
-                  ],
-                ),
+            TextSpan(text: ' · ${_amount(t)}'),
+            if (t.active && t.phase == UploadPhase.uploading && t.speed > 0)
+              TextSpan(
+                text: ' · ${formatBytes(t.speed)}/s',
+                style: TextStyle(color: accent),
               ),
-              const SizedBox(width: 6),
-              TransferActionButton(
-                key: ValueKey('upload-action-${t.id}'),
-                color: t.active || t.canRetry
-                    ? accent
-                    : const Color(0xff30b866),
-                icon: t.active
-                    ? CupertinoIcons.stop
-                    : t.canRetry
-                    ? CupertinoIcons.arrow_clockwise
-                    : CupertinoIcons.folder,
-                label: t.active
-                    ? '取消上传'
-                    : t.canRetry
-                    ? t.isFolder
-                          ? '继续上传'
-                          : '重新上传'
-                    : '打开目标目录：${t.folderName}',
-                onPressed: locked
-                    ? null
-                    : () {
-                        if (t.active) {
-                          cancel(t);
-                        } else if (t.canRetry) {
-                          action(t, () => manager.retry(t.id));
-                        } else {
-                          action(t, () => openFolder(t));
-                        }
-                      },
-              ),
-            ],
-          ),
+          ],
         ),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11,
+          color: secondary(context),
+          fontFeatures: const [ui.FontFeature.tabularFigures()],
+        ),
+      ),
+      progress: TransferProgress.upload(
+        t,
+        compact: true,
+        enabled:
+            widget.active &&
+            foreground &&
+            ModalRoute.of(context)?.isCurrent != false,
+      ),
+      trailing: TransferActionButton(
+        key: ValueKey('upload-action-${t.id}'),
+        color: t.active || t.canRetry ? accent : const Color(0xff30b866),
+        icon: t.active
+            ? CupertinoIcons.stop
+            : t.canRetry
+            ? CupertinoIcons.arrow_clockwise
+            : CupertinoIcons.folder,
+        label: t.active
+            ? '取消上传'
+            : t.canRetry
+            ? t.isFolder
+                  ? '继续上传'
+                  : '重新上传'
+            : '打开目标目录：${t.folderName}',
+        onPressed: locked
+            ? null
+            : () {
+                if (t.active) {
+                  cancel(t);
+                } else if (t.canRetry) {
+                  action(t, () => manager.retry(t.id));
+                } else {
+                  action(t, () => openFolder(t));
+                }
+              },
       ),
     );
   }

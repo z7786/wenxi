@@ -19,6 +19,7 @@ import 'playback_seek_queue.dart';
 import 'playback_buffer_policy.dart';
 import 'playback_metrics.dart';
 import 'playback_diagnostics.dart';
+import 'playback_screen_info.dart';
 import 'subtitle_fonts.dart';
 import 'video_output_policy.dart';
 import 'playback_render_policy.dart';
@@ -114,6 +115,8 @@ abstract class PlaybackBackend extends ChangeNotifier {
   bool get canRetryWithSoftware => true;
   String get streamingDescription => '';
   Map<String, Object?> get diagnosticFields => const {};
+  PlaybackScreenInfo get screenInfo => const PlaybackScreenInfo();
+  void setScreenDisplayMonitoringEnabled(bool enabled) {}
   bool get rendersSubtitlesNatively => false;
   bool get supportsScreenshot => false;
   Future<Uint8List?> screenshot({bool includeSubtitles = false}) async => null;
@@ -542,6 +545,34 @@ class MediaKitBackend extends PlaybackBackend {
   Map<String, Object?>? _probeDiagnostics;
   Stopwatch? _openWatch;
   String _transport = 'pending';
+  bool _screenDisplayMonitoring = false;
+  double? _directReceiveBytesPerSecond;
+
+  @override
+  void setScreenDisplayMonitoringEnabled(bool enabled) {
+    _screenDisplayMonitoring = enabled;
+    if (!enabled) _directReceiveBytesPerSecond = null;
+  }
+
+  @override
+  PlaybackScreenInfo get screenInfo => PlaybackScreenInfo(
+    transport: _transport,
+    receivedBytes: _proxy?.receivedBytes,
+    bytesPerSecond: _directReceiveBytesPerSecond,
+    videoCodec: _nativeMetrics['videoCodec']?.toString(),
+    videoFps: _screenMetric('videoFps'),
+    pixelFormat: _nativeMetrics['videoPixelFormat']?.toString(),
+    hardwareDecoder: _nativeMetrics['hwdecCurrent']?.toString(),
+    decoderDroppedFrames: _screenMetric('decoderDroppedFrames')?.toInt(),
+    outputDroppedFrames: _screenMetric('outputDroppedFrames')?.toInt(),
+    bufferSeconds: _screenMetric('demuxerCacheSeconds'),
+  );
+
+  double? _screenMetric(String key) {
+    final value = double.tryParse('${_nativeMetrics[key]}');
+    return value != null && value.isFinite ? value : null;
+  }
+
   int? _networkTimeoutSeconds;
   double _resumeBufferSeconds = 1;
   final _transportChecks = <Timer>[];
@@ -820,6 +851,7 @@ class MediaKitBackend extends PlaybackBackend {
       }.contains(defaultTargetPlatform),
     );
     _sourceBytes = source.expectedSize;
+    _directReceiveBytesPerSecond = null;
     _transport = 'pending';
     _networkTimeoutSeconds = null;
     _probeDiagnostics = null;
@@ -994,6 +1026,25 @@ class MediaKitBackend extends PlaybackBackend {
       final native = player.platform;
       if (native is! NativePlayer) return;
       final state = player.state, proxy = _proxy;
+      if (_screenDisplayMonitoring &&
+          proxy == null &&
+          {'direct', 'torrent'}.contains(_transport)) {
+        try {
+          final speed = double.tryParse(
+            await _readProperty(native, 'cache-speed'),
+          );
+          _directReceiveBytesPerSecond =
+              _screenDisplayMonitoring &&
+                  speed != null &&
+                  speed.isFinite &&
+                  speed >= 0
+              ? speed
+              : null;
+        } catch (_) {
+          _directReceiveBytesPerSecond = null;
+        }
+        if (_closing) return;
+      }
       await _updateResumeBuffer();
       if (_closing) return;
       if (downloadCache == null &&

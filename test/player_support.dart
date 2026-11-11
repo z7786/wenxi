@@ -12,6 +12,7 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback.dart';
 import 'package:asterlink/platform/playback_device.dart';
 import 'package:asterlink/playback/media_backend.dart';
+import 'package:asterlink/playback/playback_screen_info.dart';
 import 'package:asterlink/playback/playback_controller.dart';
 import 'package:asterlink/playback/playback_failure.dart';
 import 'package:asterlink/playback/subtitle_matching.dart';
@@ -45,6 +46,12 @@ class FakePlaybackBackend extends PlaybackBackend {
   );
   @override
   PlayerState get state => _state;
+  @override
+  PlaybackScreenInfo screenInfo = const PlaybackScreenInfo();
+  bool screenMonitoring = false;
+  @override
+  void setScreenDisplayMonitoringEnabled(bool enabled) =>
+      screenMonitoring = enabled;
   @override
   int errorRevision = 0;
   @override

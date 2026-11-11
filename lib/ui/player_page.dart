@@ -33,6 +33,7 @@ import 'player_connections_input.dart';
 import 'player_playlist_panel.dart';
 import 'player_aspect_panel.dart';
 import 'player_layout_panel.dart';
+import 'player_screen_display.dart';
 import 'player_skip_time_dialog.dart';
 import 'player_sleep_panel.dart';
 import 'player_screenshot_panel.dart';
@@ -1989,6 +1990,18 @@ class _PlayerPageState extends State<PlayerPage>
     ),
   );
 
+  Future<void> _screenDisplay() => _panel(
+    '屏显设置',
+    (_) => PlayerScreenDisplayPanel(
+      preferences: controller.preferences.screenDisplay,
+      onChanged: (value) => _run(
+        () => controller.updatePreferences(
+          controller.preferences.copyWith(screenDisplay: value),
+        ),
+      ),
+    ),
+  );
+
   Future<void> _settings() async {
     Future<void> Function()? next;
     await _panel(
@@ -2006,6 +2019,12 @@ class _PlayerPageState extends State<PlayerPage>
                     CupertinoIcons.speaker_2,
                     _audio,
                     enabled: !controller.casting,
+                  ),
+                  _PlayerMenuAction(
+                    '屏显设置',
+                    CupertinoIcons.info_circle,
+                    _screenDisplay,
+                    key: const Key('player-screen-settings'),
                   ),
                   if (!device.isTelevision)
                     _PlayerMenuAction(
@@ -3231,6 +3250,22 @@ class _PlayerPageState extends State<PlayerPage>
                           controller.error.isNotEmpty &&
                           !pip)
                         _errorPanel(),
+                      if (!pip &&
+                          !_editingLayout &&
+                          !_rotationPending &&
+                          controller.error.isEmpty &&
+                          controller.preferences.screenDisplay.visible)
+                        Positioned.fill(
+                          key: const Key('player-screen-layer'),
+                          child: PlayerScreenDisplay(
+                            controller: controller,
+                            television: device.isTelevision,
+                            insets: insets,
+                            controlsVisible: visible && !locked,
+                            controlsScale: _chromePreferences.controlsScale,
+                            controlsHeight: controlsHeight,
+                          ),
+                        ),
                       if (desktopPip) _desktopPipControls(),
                       if (!pip && !_boostGestureActive)
                         Positioned.fill(
