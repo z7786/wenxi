@@ -11,6 +11,12 @@ import 'package:asterlink/domain/resource_search.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final root = Directory(Platform.environment['ASTERLINK_BACKEND_ROOT'] ?? 'D:/.ls/pan-relay-main');
+  if (!Directory('${root.path}/src/configs/client_search').existsSync() ||
+      !File('${root.path}/reports/kitesearch-20261108/private/app-replay-private.json').existsSync()) {
+    test('Kite native replay requires private captured fixtures', () {},
+        skip: 'Private replay fixtures are unavailable');
+    return;
+  }
   final library = Platform.environment['ASTERLINK_JS_LIBRARY'];
   final client = ClientSearchEngine(store: StateStore.memory(), endpoint: 'https://backend.example.com', fetch: (_) async => {});
   final modules = <String, dynamic>{
