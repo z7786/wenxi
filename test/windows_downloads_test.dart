@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:asterlink/ui/app_switch.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
@@ -113,7 +114,7 @@ void main() {
         expect(services.downloadShutdown.enabled, isFalse);
         final powerSwitch = find.descendant(
           of: find.byKey(const Key('download-shutdown-option')),
-          matching: find.byType(Switch),
+          matching: find.byType(AppSwitch),
         );
         await tester.tap(powerSwitch);
         await tester.pumpAndSettle();
@@ -191,5 +192,73 @@ void main() {
       }
     },
     skip: !Platform.isWindows,
+  );
+
+  testWidgets(
+    'HLS download details and context menu explain independent online playback',
+    (tester) async {
+      final root = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('asterlink-hls-download-ui-'),
+      ))!;
+      final services = (await tester.runAsync(() async {
+        final services = AppServices(
+          controlEnabled: false,
+          store: StateStore.memory({
+            'tasks': [
+              const DownloadTask(
+                id: 'hls',
+                createdAt: 1,
+                status: DownloadStatus.paused,
+                spec: DownloadSpec(
+                  url: 'https://example.invalid/playlist.m3u8',
+                  fileName: '连续剧.ts',
+                ),
+                hls: {'fingerprint': 'fixture', 'index': 1, 'bytes': 1024},
+              ).toJson(),
+            ],
+          }),
+          dataDirectory: root,
+          cacheDirectory: Directory('${root.path}/cache'),
+          transport: FakeNative(),
+          files: FakeFiles(Directory('${root.path}/saved')),
+          http: FakeHttp(),
+          platformFeatures: false,
+        );
+        await services.downloads.initialize();
+        return services;
+      }))!;
+      try {
+        tester.view.physicalSize = const Size(1100, 780);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: appTheme(Brightness.light),
+            home: Scaffold(body: DownloadsPage(services)),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('连续剧.ts'));
+        await tester.pumpAndSettle();
+        expect(find.text('在线播放'), findsOneWidget);
+        expect(find.text('播放与下载独立取流，不复用已下载片段'), findsOneWidget);
+        expect(find.text('边下边播'), findsNothing);
+        Navigator.of(tester.element(find.text('在线播放'))).pop();
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('连续剧.ts'), buttons: 2);
+        await tester.pumpAndSettle();
+        expect(find.text('在线播放'), findsOneWidget);
+        expect(find.text('边下边播'), findsNothing);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        await tester.runAsync(() async {
+          await services.close();
+          await root.delete(recursive: true);
+        });
+      }
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
   );
 }

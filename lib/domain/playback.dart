@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import '../core/json.dart';
 import 'models.dart';
 import 'playback_source.dart';
+import 'playback_screen_display.dart';
 
 enum PlaybackFit { contain, cover, stretch }
 
@@ -143,10 +144,12 @@ class PlaybackPreferences {
     this.showLockButton = true,
     this.showScreenshotButton = true,
     this.panelLayout = 'auto',
+    this.screenDisplay = const PlaybackScreenDisplay(),
     this.connections = 8,
     this.driveConnections = const {},
     this.segmentSizeMiB = 4,
     this.hardwareAcceleration = true,
+    this.decoderCompatibility = false,
     this.skipIntroSeconds = 0,
     this.skipOutroSeconds = 0,
   });
@@ -162,6 +165,7 @@ class PlaybackPreferences {
                 ? 0
                 : subtitleBackgroundColor);
   final bool autoNext, autoRotate, resume, subtitles, hardwareAcceleration;
+  final bool decoderCompatibility;
   final PlaybackFit fit;
   final double aspectRatio;
   final double videoScale, videoOffsetX, videoOffsetY, controlsScale;
@@ -173,6 +177,7 @@ class PlaybackPreferences {
       showLockButton,
       showScreenshotButton;
   final String panelLayout;
+  final PlaybackScreenDisplay screenDisplay;
   final int connections;
   final Map<String, int> driveConnections;
   final int segmentSizeMiB, skipIntroSeconds, skipOutroSeconds;
@@ -225,6 +230,7 @@ class PlaybackPreferences {
     }),
     segmentSizeMiB: value.integer('segmentSizeMiB', 4).clamp(1, 16),
     hardwareAcceleration: value.boolean('hardwareAcceleration', true),
+    decoderCompatibility: value.boolean('decoderCompatibility'),
     skipIntroSeconds: value.integer('skipIntroSeconds').clamp(0, 600),
     skipOutroSeconds: value.integer('skipOutroSeconds').clamp(0, 600),
     subtitleSize: finiteRange(
@@ -271,6 +277,7 @@ class PlaybackPreferences {
     showNextButton: value.boolean('showNextButton', true),
     showLockButton: value.boolean('showLockButton', true),
     showScreenshotButton: value.boolean('showScreenshotButton', true),
+    screenDisplay: PlaybackScreenDisplay.fromJson(value.obj('screenDisplay')),
     panelLayout: {'auto', 'side', 'bottom'}.contains(value.str('panelLayout'))
         ? value.str('panelLayout')
         : 'auto',
@@ -308,10 +315,12 @@ class PlaybackPreferences {
     'showLockButton': showLockButton,
     'showScreenshotButton': showScreenshotButton,
     'panelLayout': panelLayout,
+    'screenDisplay': screenDisplay.toJson(),
     'connections': connections,
     'driveConnections': driveConnections,
     'segmentSizeMiB': segmentSizeMiB,
     'hardwareAcceleration': hardwareAcceleration,
+    'decoderCompatibility': decoderCompatibility,
     'skipIntroSeconds': skipIntroSeconds,
     'skipOutroSeconds': skipOutroSeconds,
   };
@@ -342,10 +351,12 @@ class PlaybackPreferences {
     bool? showLockButton,
     bool? showScreenshotButton,
     String? panelLayout,
+    PlaybackScreenDisplay? screenDisplay,
     int? connections,
     Map<String, int>? driveConnections,
     int? segmentSizeMiB,
     bool? hardwareAcceleration,
+    bool? decoderCompatibility,
     int? skipIntroSeconds,
     int? skipOutroSeconds,
   }) => PlaybackPreferences.fromJson({
@@ -378,10 +389,12 @@ class PlaybackPreferences {
     'showLockButton': showLockButton ?? this.showLockButton,
     'showScreenshotButton': showScreenshotButton ?? this.showScreenshotButton,
     'panelLayout': panelLayout ?? this.panelLayout,
+    'screenDisplay': (screenDisplay ?? this.screenDisplay).toJson(),
     'connections': connections ?? this.connections,
     'driveConnections': driveConnections ?? this.driveConnections,
     'segmentSizeMiB': segmentSizeMiB ?? this.segmentSizeMiB,
     'hardwareAcceleration': hardwareAcceleration ?? this.hardwareAcceleration,
+    'decoderCompatibility': decoderCompatibility ?? this.decoderCompatibility,
     'skipIntroSeconds': skipIntroSeconds ?? this.skipIntroSeconds,
     'skipOutroSeconds': skipOutroSeconds ?? this.skipOutroSeconds,
   });

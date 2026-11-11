@@ -10,6 +10,8 @@ import '../../domain/uploads.dart';
 import '../http.dart';
 import '../state_store.dart';
 import '../uploads/upload_io.dart';
+import '../transfer_md5.dart';
+import '../../domain/rapid_transfer.dart';
 import '../../core/operation_progress.dart';
 import '../../diagnostics/app_log.dart';
 import 'baidu_link_service.dart';
@@ -43,6 +45,62 @@ class BaiduConnector extends CloudConnector {
   final BaiduPlaybackClient _playbackClient;
   @override
   CloudPlatform get platform => CloudPlatform.baidu;
+  @override
+  bool get providesTransferMd5 => true;
+
+  @override
+  Future<String?> transferMd5(
+    BrowseSession session,
+    CloudFile file,
+    Credential? credential,
+  ) async {
+    final s = session, c = credential;
+    if (file.isDirectory) return null;
+    final known = file.hashType == 'md5' ? contentMd5(file.hashValue) : null;
+    if (known != null) return known;
+    // Web list MD5 may be transformed; never treat it as the content digest.
+    // Personal metadata supplies an original-file URL without saving a share
+    // or calling the application's download-link service.
+    if (c == null) return null;
+    if (s.mode == BrowseMode.share) {
+      if (fileKind(file.name) != FileKind.video) return null;
+      final original = await playback(s, file, c);
+      return probeTransferMd5(http, original.url, original.headers, file.size);
+    }
+    final ck = cookie(c);
+    final path = file.token.ifEmpty(file.id.startsWith('/') ? file.id : '');
+    if (!path.startsWith('/')) return null;
+    final data = check(
+      await http.get(
+        query('https://pan.baidu.com/api/filemetas', {
+          ...await _appParams(ck, appId(c)),
+          'target': encoded([path]),
+          'dlink': 1,
+          'web': 5,
+          'origin': 'dlna',
+        }),
+        diskHeaders(ck),
+      ),
+    );
+    final rows = data.list('info').isNotEmpty
+        ? data.list('info')
+        : data.list('list');
+    final found = rows.where(
+      (r) =>
+          r.str('fs_id') == file.id &&
+          r.integer('size', -1) == file.size &&
+          r.integer('isdir') == 0,
+    );
+    if (found.isEmpty) return null;
+    final metadata = found.first;
+    final direct = contentMd5(metadata.str('content_md5'));
+    if (direct != null) return direct;
+    final url = metadata.str('dlink');
+    return url.isEmpty
+        ? null
+        : probeTransferMd5(http, url, diskHeaders(ck), file.size);
+  }
+
   static const defaultAppId = '250528';
   static const webUa =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';

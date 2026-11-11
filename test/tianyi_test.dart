@@ -2116,6 +2116,8 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('${_file.name}操作'));
       await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('创建分享'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('创建分享'));
       await tester.pumpAndSettle();
       expect(find.text('访问码由天翼云盘自动生成'), findsOneWidget);

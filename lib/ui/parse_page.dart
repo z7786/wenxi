@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:file_selector/file_selector.dart';
+import 'app_switch.dart';
 import '../domain/torrent.dart';
 import 'torrent_page.dart';
 import 'package:flutter/cupertino.dart';
@@ -504,6 +505,8 @@ class ParsePageState extends State<ParsePage> {
       return;
     }
     if (link.kind == LinkKind.magnet || link.kind == LinkKind.torrent) {
+      focus.unfocus();
+      codeFocus.unfocus();
       final added = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
@@ -2048,7 +2051,7 @@ class _DirectDialogState extends State<_DirectDialog> {
                 ],
               ),
               const SizedBox(height: 8),
-              SwitchListTile(
+              AppSwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('自定义请求头', style: TextStyle(fontSize: 13)),
                 value: advanced,

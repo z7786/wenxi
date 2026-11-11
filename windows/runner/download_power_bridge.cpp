@@ -6,6 +6,39 @@
 #include <variant>
 
 DownloadPowerBridge::DownloadPowerBridge(flutter::BinaryMessenger* messenger) {
+  cast_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      messenger, "com.asterlink.app/cast",
+      &flutter::StandardMethodCodec::GetInstance());
+  cast_channel_->SetMethodCallHandler([this](const auto& call, auto result) {
+    using flutter::EncodableMap;
+    using flutter::EncodableValue;
+    if (call.method_name() != "active") {
+      result->NotImplemented();
+      return;
+    }
+    const auto* args = call.arguments() ? std::get_if<EncodableMap>(call.arguments()) : nullptr;
+    const std::string* token = nullptr;
+    const bool* enabled = nullptr;
+    if (args) {
+      const auto owner = args->find(EncodableValue("token"));
+      const auto active = args->find(EncodableValue("enabled"));
+      if (owner != args->end()) token = std::get_if<std::string>(&owner->second);
+      if (active != args->end()) enabled = std::get_if<bool>(&active->second);
+    }
+    if (!token || token->empty() || token->size() > 128 || !enabled) {
+      result->Error("arguments", "投屏保活参数无效");
+      return;
+    }
+    auto owners = cast_owners_;
+    if (*enabled) owners.insert(*token);
+    else owners.erase(*token);
+    if (!cast_request_.SetActive(!owners.empty())) {
+      result->Error("active", "无法更新投屏保活状态");
+      return;
+    }
+    cast_owners_ = std::move(owners);
+    result->Success();
+  });
   channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       messenger, "com.asterlink.app/native",
       &flutter::StandardMethodCodec::GetInstance());
@@ -55,5 +88,6 @@ DownloadPowerBridge::DownloadPowerBridge(flutter::BinaryMessenger* messenger) {
 }
 
 DownloadPowerBridge::~DownloadPowerBridge() {
+  cast_channel_->SetMethodCallHandler(nullptr);
   channel_->SetMethodCallHandler(nullptr);
 }

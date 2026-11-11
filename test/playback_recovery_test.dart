@@ -250,14 +250,19 @@ void main() {
           ..fail();
         await Future<void>.delayed(const Duration(milliseconds: 40));
         expect(fixture.preparations, 1);
-        expect(fixture.controller.error, failure.message);
-        expect(fixture.current.state.playing, isFalse);
+        if (failure.kind == PlaybackFailureKind.decoder) {
+          expect(fixture.backends, hasLength(2));
+          expect(fixture.controller.error, isEmpty);
+        } else {
+          expect(fixture.controller.error, failure.message);
+          expect(fixture.current.state.playing, isFalse);
+        }
       },
     );
   }
 
   test(
-    'A released decoder saves its last progress and waits for an explicit decoder choice',
+    'A released decoder reconstructs once, then permits an explicit decoder choice',
     () async {
       await fixture.controller.start();
       final backend = fixture.current;
@@ -269,10 +274,14 @@ void main() {
         )
         ..fail();
       await until(
-        () =>
-            fixture.history.bookmark(fixture.entries.first.key)?.position ==
-            position,
+        () => fixture.backends.length == 2 && fixture.controller.ready,
       );
+      expect(fixture.current.openedStart, position);
+      expect(fixture.current.openedSource, same(backend.openedSource));
+      fixture.current
+        ..failure = backend.failure
+        ..fail();
+      await Future<void>.delayed(Duration.zero);
       expect(fixture.preparations, 1);
       expect(backend.state.playing, isFalse);
       expect(fixture.controller.error, contains('硬件解码器'));

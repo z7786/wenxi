@@ -76,8 +76,15 @@ class PlaybackBufferPolicy {
   /// A short initial reserve, then a larger reserve after real underruns.
   /// The caller excludes seeks and user pauses from the rebuffer count. The decoder's
   /// threshold is in media seconds, so preserve the reserve at faster speeds.
-  double resumeSeconds({required int rebufferCount, required double rate}) =>
-      (6 + 2 * rebufferCount.clamp(0, 3)) * rate.clamp(.25, 4);
+  double resumeSeconds({
+    required int rebufferCount,
+    required double rate,
+    bool awaitingProgress = false,
+  }) =>
+      (awaitingProgress || rebufferCount == 0
+          ? 2
+          : 6 + 2 * rebufferCount.clamp(0, 3)) *
+      rate.clamp(.25, 4);
 
   int observe({
     required Duration elapsed,

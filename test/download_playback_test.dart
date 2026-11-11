@@ -1,15 +1,19 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/data/playback_store.dart';
+import 'package:asterlink/data/parser_rules/hub.dart';
+import 'package:asterlink/data/sources/service.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback_source.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/playback/download_playback.dart';
 import 'package:asterlink/playback/recent_playback.dart';
+import 'package:asterlink/platform/file_access.dart';
 import 'support.dart';
 import 'player_support.dart';
 
@@ -43,6 +47,44 @@ class _Native extends FakeNative {
   }
 }
 
+class _Files extends FakeFiles {
+  _Files(super.directory);
+  bool contentUri = false;
+  @override
+  Future<String> save({
+    required String id,
+    required File source,
+    required String name,
+    required String relativePath,
+    String? destination,
+    required void Function() checkpoint,
+    void Function(int copied, int total)? onProgress,
+  }) async {
+    final path = await super.save(
+      id: id,
+      source: source,
+      name: name,
+      relativePath: relativePath,
+      destination: destination,
+      checkpoint: checkpoint,
+      onProgress: onProgress,
+    );
+    return contentUri ? 'content://fixture/document/video' : path;
+  }
+}
+
+class _RefreshSources extends RemoteSources {
+  _RefreshSources({required super.hub, required super.directory})
+    : super(enabled: false);
+  final entered = Completer<void>();
+  final result = Completer<DownloadSpec>();
+  @override
+  Future<DownloadSpec> refreshDownload(DownloadSpec previous) {
+    if (!entered.isCompleted) entered.complete();
+    return result.future;
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late Directory root;
@@ -70,7 +112,7 @@ void main() {
       dataDirectory: root,
       cacheDirectory: Directory('${root.path}/cache'),
       transport: native,
-      files: FakeFiles(Directory('${root.path}/saved')),
+      files: _Files(Directory('${root.path}/saved')),
       http: FakeHttp(),
       transferHttp: _Probe(),
       platformFeatures: false,
@@ -89,6 +131,17 @@ void main() {
       try {
         await until(() => services.downloads.task('movie')!.downloaded == 2);
         expect(await cache.read(0, 1, identity), [1, 2]);
+        expect((await cache.snapshot())!.identity.canResume(identity), isTrue);
+        expect(await cache.readAvailable(0, 3, identity), [1, 2]);
+        expect(await cache.readAvailable(2, 3, identity), isNull);
+        expect(
+          await cache.readAvailable(
+            0,
+            3,
+            const RemoteIdentity(4, '"changed"', null),
+          ),
+          isNull,
+        );
         expect(await cache.read(2, 3, identity), isNull);
         expect(
           await cache.read(0, 1, const RemoteIdentity(4, '"changed"', null)),
@@ -138,6 +191,224 @@ void main() {
     final saved = File(services.downloads.task('movie')!.savedPath!);
     expect(await saved.readAsBytes(), [1, 2, 3, 4]);
   });
+
+  for (final completeBeforeStart in [false, true]) {
+    for (final savedUri in [false, true]) {
+      test(
+        'Completion opens the saved file on ${completeBeforeStart ? 'first start' : 'retry'} (content URI: $savedUri)',
+        () async {
+          final backends = <FakePlaybackBackend>[];
+          final controller = downloadPlayback(
+            services,
+            services.downloads.task('movie')!,
+            backendFactory: (entry, _) {
+              final backend = FakePlaybackBackend(entry.id, []);
+              backends.add(backend);
+              return backend;
+            },
+          );
+          final hold = completeBeforeStart
+              ? await services.downloads.acquirePlayback('movie')
+              : null;
+          try {
+            if (!completeBeforeStart) {
+              await controller.start();
+              await controller.seek(const Duration(seconds: 35));
+            }
+            await until(
+              () => services.downloads.task('movie')!.downloaded == 2,
+            );
+            (services.downloads.files as _Files).contentUri = savedUri;
+            native.finish = true;
+            await until(
+              () =>
+                  services.downloads.task('movie')!.status ==
+                      DownloadStatus.completed &&
+                  services.downloads.activeCount == 0,
+            );
+            final saved = services.downloads.task('movie')!.savedPath!;
+            expect(saved.startsWith('content:'), savedUri);
+            await hold?.release();
+            if (completeBeforeStart) {
+              await controller.start();
+            } else {
+              await controller.retry();
+            }
+            expect(controller.error, isEmpty);
+            expect(backends.last.openedSource!.url, saved);
+            if (!completeBeforeStart) {
+              expect(backends.last.openedStart, const Duration(seconds: 35));
+            }
+            expect(
+              await File(
+                '${services.engine.taskDirectory('movie').path}/payload.gopeed',
+              ).exists(),
+              isFalse,
+            );
+          } finally {
+            await hold?.release();
+            await controller.close();
+          }
+        },
+      );
+    }
+  }
+
+  for (final availability in [
+    FileAvailability.missing,
+    FileAvailability.inaccessible,
+  ]) {
+    test('Completed retry reports unavailable file ($availability)', () async {
+      final backends = <FakePlaybackBackend>[];
+      final controller = downloadPlayback(
+        services,
+        services.downloads.task('movie')!,
+        backendFactory: (entry, _) {
+          final backend = FakePlaybackBackend(entry.id, []);
+          backends.add(backend);
+          return backend;
+        },
+      );
+      try {
+        await controller.start();
+        await until(() => services.downloads.task('movie')!.downloaded == 2);
+        native.finish = true;
+        await until(
+          () =>
+              services.downloads.task('movie')!.status ==
+                  DownloadStatus.completed &&
+              services.downloads.activeCount == 0,
+        );
+        final saved = services.downloads.task('movie')!.savedPath!;
+        (services.downloads.files as FakeFiles).availability[saved] =
+            availability;
+        await controller.retry();
+        expect(
+          controller.error,
+          availability == FileAvailability.missing
+              ? '文件不存在或已被移动'
+              : '无法访问文件，请检查目录权限',
+        );
+        expect(backends.last.openedSource, isNull);
+      } finally {
+        await controller.close();
+      }
+    });
+  }
+
+  test('HLS has an online entry but is not advertised as cached streaming', () {
+    final task = services.downloads.task('movie')!;
+    for (final changes in [
+      {
+        'hls': {'fingerprint': 'fixture', 'index': 1, 'bytes': 1024},
+      },
+      {
+        'spec': {
+          ...task.spec.toJson(),
+          'url': 'https://example.invalid/video.m3u8?token=a',
+        },
+      },
+      {
+        'spec': {...task.spec.toJson(), 'fileName': 'video.m3u8'},
+      },
+    ]) {
+      final playlist = task.update(changes);
+      expect(services.downloads.canPlayOnline(playlist), isTrue);
+      expect(services.downloads.canStream(playlist), isFalse);
+    }
+    expect(services.downloads.canStream(task), isTrue);
+  });
+
+  for (final refreshFails in [false, true]) {
+    test(
+      'Completion during a pending source refresh uses the saved file (refresh fails: $refreshFails)',
+      () async {
+        await services.close();
+        final store = StateStore.memory({
+          'tasks': [
+            DownloadTask(
+              id: 'movie',
+              createdAt: 1,
+              status: DownloadStatus.paused,
+              spec: const DownloadSpec(
+                url: 'https://example.invalid/video.mp4',
+                fileName: 'video.mp4',
+                source: {'kind': 'remoteSource'},
+              ),
+            ).toJson(),
+          ],
+        });
+        final hub = ParserRuleHub(
+          store: Vault(store),
+          directory: root,
+          url: '',
+        );
+        final sources = _RefreshSources(hub: hub, directory: root);
+        native = _Native();
+        services = AppServices(
+          controlEnabled: false,
+          store: store,
+          dataDirectory: root,
+          cacheDirectory: Directory('${root.path}/cache'),
+          transport: native,
+          files: _Files(Directory('${root.path}/saved')),
+          http: FakeHttp(),
+          transferHttp: _Probe(),
+          platformFeatures: false,
+          remoteSources: sources,
+          parserRuleHub: hub,
+        );
+        await services.downloads.initialize();
+        final backends = <FakePlaybackBackend>[];
+        final controller = downloadPlayback(
+          services,
+          services.downloads.task('movie')!,
+          backendFactory: (entry, _) {
+            final backend = FakePlaybackBackend(entry.id, []);
+            backends.add(backend);
+            return backend;
+          },
+        );
+        // Seed written data without resolving a real signed-source package.
+        final directory = services.engine.taskDirectory('movie');
+        await directory.create(recursive: true);
+        await File(
+          '${directory.path}/payload.gopeed',
+        ).writeAsBytes([1, 2, 3, 4]);
+        try {
+          final retrying = controller.retry();
+          await sources.entered.future;
+          final saved = '${root.path}/completed.mp4';
+          await File(saved).writeAsBytes([1, 2, 3, 4]);
+          await services.downloads.importPausedQueue(
+            () => store.put('tasks', [
+              services.downloads.task('movie')!.update({
+                'status': 'completed',
+                'savedPath': saved,
+                'downloaded': 4,
+                'total': 4,
+              }).toJson(),
+            ]),
+          );
+          if (refreshFails) {
+            sources.result.completeError(const AppException('播放地址已失效'));
+          } else {
+            sources.result.complete(
+              services.downloads.task('movie')!.spec.copyWith(),
+            );
+          }
+          await retrying;
+          expect(controller.error, isEmpty);
+          expect(backends.last.openedSource!.url, saved);
+        } finally {
+          if (!sources.result.isCompleted) {
+            sources.result.completeError(const AppException('已取消'));
+          }
+          await controller.close();
+        }
+      },
+    );
+  }
 
   test(
     'Explicit download pause keeps readable bytes but prevents new network reads',

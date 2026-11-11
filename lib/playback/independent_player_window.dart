@@ -5,6 +5,7 @@ import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/playback.dart';
 import 'playback_controller.dart';
+import 'windows_player_components.dart';
 
 const independentPlayerArgument = '--asterlink-player-window';
 
@@ -44,6 +45,12 @@ class IndependentPlayerWindow {
       final process = _process = await Process.start(
         Platform.resolvedExecutable,
         [independentPlayerArgument, address],
+        environment: {
+          // A pending selection must not change the runtime of a new small
+          // window before the main application has restarted.
+          'ASTERLINK_PLAYER_VARIANT':
+              WindowsPlayerComponents.shared.active.name,
+        },
         runInShell: false,
       );
       unawaited(process.stdout.drain<void>());

@@ -17,7 +17,7 @@ class CastPlatform {
   }
 
   Future<void> active(bool enabled) async {
-    if (Platform.isAndroid) {
+    if (Platform.isAndroid || Platform.isWindows) {
       await _channel.invokeMethod<void>('active', {
         'token': _token,
         'enabled': enabled,

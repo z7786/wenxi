@@ -6,6 +6,8 @@
 #include <flutter/method_channel.h>
 
 #include <memory>
+#include <set>
+#include <string>
 
 #include "download_power_request.h"
 
@@ -16,7 +18,10 @@ class DownloadPowerBridge {
 
  private:
   DownloadPowerRequest request_;
+  DownloadPowerRequest cast_request_;
+  std::set<std::string> cast_owners_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> cast_channel_;
 };
 
 #endif  // RUNNER_DOWNLOAD_POWER_BRIDGE_H_

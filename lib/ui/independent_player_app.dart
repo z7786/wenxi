@@ -10,6 +10,7 @@ import '../domain/playback.dart';
 import '../platform/windows_pip.dart';
 import 'desktop_pip_surface.dart';
 import '../playback/video_output_policy.dart';
+import '../playback/windows_player_components.dart';
 
 class IndependentPlayerApp extends StatelessWidget {
   const IndependentPlayerApp({super.key, required this.endpoint});
@@ -80,7 +81,7 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
 
   Future<void> initialize() async {
     try {
-      MediaKit.ensureInitialized();
+      await initializeMediaRuntime(independentWindow: true);
       await windowManager.ensureInitialized();
       if (!mounted || closing) return;
       windowManager.addListener(this);

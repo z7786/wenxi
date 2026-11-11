@@ -5,7 +5,7 @@ $runtimePath = Join-Path $projectPath '.local\player-test'
 $libraryPath = Join-Path $runtimePath 'libmpv'
 $archiveName = 'mpv-dev-x86_64-20261108-git-8bc468896e.7z'
 $archivePath = Join-Path $runtimePath $archiveName
-# Same pinned release as vendor_plugins/media_kit_libs_windows_video.
+# Optional full component pin; the application bundles the compact runtime.
 $archiveHash = 'a36392a8fbd989ae274a37c63d01ef6c51b6070a5ebd2ee26d2715ae88f90ceb'
 $upstreamMd5 = 'f6678a79e2526b16b45ff629574fd96f'
 $downloadUrl = 'https://gh-proxy.org/https://github.com/zhongfly/mpv-winbuild/releases/download/2026-11-08-8bc468896e/' + $archiveName

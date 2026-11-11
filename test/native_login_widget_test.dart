@@ -453,7 +453,7 @@ void main() {
     (tester) async {
       final http = LoginHttp(smsResponse);
       await render(tester, CloudPlatform.guangya, http);
-      expect(find.text('手机号验证码登录'), findsOneWidget);
+      expect(find.text('手机号登录'), findsOneWidget);
       expect(find.byKey(const ValueKey('native-login-password')), findsNothing);
       await tester.tap(find.byKey(const ValueKey('guangya-sms-send')));
       await tester.pump();
@@ -644,7 +644,7 @@ void main() {
     (tester) async {
       final http = LoginHttp(wopanLoginResponse);
       await render(tester, CloudPlatform.wopan, http);
-      expect(find.text('手机号验证码登录'), findsOneWidget);
+      expect(find.text('手机号登录'), findsOneWidget);
       expect(find.byType(WebLoginPage), findsNothing);
       expect(find.byKey(const ValueKey('native-login-password')), findsNothing);
       await tester.tap(find.byKey(const ValueKey('wopan-sms-send')));
@@ -841,7 +841,7 @@ void main() {
             .obscureText,
         isTrue,
       );
-      expect(find.text('账号密码保存在本机应用私有目录，登录失效时自动重登'), findsOneWidget);
+      expect(find.text('账号密码保存在本机应用私有目录，登录失效时自动重登'), findsNothing);
       expect(find.byKey(const ValueKey('native-login-web')), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
@@ -962,7 +962,7 @@ void main() {
               );
         final services = await render(tester, platform, http);
         if (platform == CloudPlatform.guangya) {
-          expect(find.text('手机号验证码登录'), findsOneWidget);
+          expect(find.text('手机号登录'), findsOneWidget);
           await tester.ensureVisible(
             find.byKey(const ValueKey('guangya-sms-password')),
           );

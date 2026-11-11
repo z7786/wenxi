@@ -108,7 +108,7 @@ class _RecentPlaybackPageState extends State<RecentPlaybackPage>
   }
 
   Future<void> _open(PlaybackRecord record) async {
-    if (_opening) return;
+    if (_opening || PlaybackStore(widget.services.store).historyHidden) return;
     setState(() => _opening = true);
     try {
       if (widget.onOpen != null) {
@@ -130,10 +130,14 @@ class _RecentPlaybackPageState extends State<RecentPlaybackPage>
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.services.store,
     builder: (context, _) {
-      final entries = recentPlayback(widget.services);
+      final hidden = PlaybackStore(widget.services.store).historyHidden;
+      final entries = hidden
+          ? const <PlaybackRecord>[]
+          : recentPlayback(widget.services);
       return PageFrame(
         title: '最近播放',
         actions: [
+          _RecentPlaybackVisibilityButton(widget.services, enabled: !_opening),
           if (entries.isNotEmpty)
             TextButton(
               onPressed: _opening
@@ -153,7 +157,13 @@ class _RecentPlaybackPageState extends State<RecentPlaybackPage>
               child: const Text('清空'),
             ),
         ],
-        child: entries.isEmpty
+        child: hidden
+            ? const EmptyPanel(
+                '播放记录已隐藏',
+                '点击右上角眼睛图标可恢复显示',
+                icon: CupertinoIcons.eye_slash,
+              )
+            : entries.isEmpty
             ? const EmptyPanel(
                 '暂无播放记录',
                 '播放过的音视频会显示在这里',
@@ -347,7 +357,11 @@ class RecentPlaybackSummary extends StatefulWidget {
 class _RecentPlaybackSummaryState extends State<RecentPlaybackSummary> {
   bool _opening = false;
   Future<void> _open(PlaybackRecord record) async {
-    if (_opening || !widget.enabled) return;
+    if (_opening ||
+        !widget.enabled ||
+        PlaybackStore(widget.services.store).historyHidden) {
+      return;
+    }
     setState(() => _opening = true);
     try {
       await openRecentPlayback(context, widget.services, record);
@@ -360,7 +374,10 @@ class _RecentPlaybackSummaryState extends State<RecentPlaybackSummary> {
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.services.store,
     builder: (context, _) {
-      final record = recentPlayback(widget.services).firstOrNull;
+      final hidden = PlaybackStore(widget.services.store).historyHidden;
+      final record = hidden
+          ? null
+          : recentPlayback(widget.services).firstOrNull;
       final enabled = widget.enabled && !_opening;
       void history() => Navigator.push<void>(
         context,
@@ -371,41 +388,60 @@ class _RecentPlaybackSummaryState extends State<RecentPlaybackSummary> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            InkWell(
-              key: const Key('parse-recent'),
-              onTap: enabled ? history : null,
-              borderRadius: BorderRadius.circular(8),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 3),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '最近播放',
-                        style: TextStyle(
-                          fontSize: widget.desktop ? 14 : 18,
-                          fontWeight: widget.desktop
-                              ? FontWeight.w600
-                              : FontWeight.w800,
-                        ),
+            Row(
+              children: [
+                Expanded(
+                  child: InkWell(
+                    key: const Key('parse-recent'),
+                    onTap: enabled ? history : null,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '最近播放',
+                              style: TextStyle(
+                                fontSize: widget.desktop ? 14 : 18,
+                                fontWeight: widget.desktop
+                                    ? FontWeight.w600
+                                    : FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            '全部',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: secondary(context),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Icon(
+                            CupertinoIcons.chevron_right,
+                            size: 14,
+                            color: themeAccent(context),
+                          ),
+                        ],
                       ),
                     ),
-                    Text(
-                      '全部',
-                      style: TextStyle(fontSize: 12, color: secondary(context)),
-                    ),
-                    const SizedBox(width: 4),
-                    Icon(
-                      CupertinoIcons.chevron_right,
-                      size: 14,
-                      color: themeAccent(context),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
+                const SizedBox(width: 4),
+                _RecentPlaybackVisibilityButton(
+                  widget.services,
+                  enabled: enabled,
+                ),
+              ],
             ),
             const SizedBox(height: 10),
-            if (record == null)
+            if (hidden)
+              Text(
+                '播放记录已隐藏',
+                style: TextStyle(fontSize: 13, color: secondary(context)),
+              )
+            else if (record == null)
               Text(
                 '暂无播放记录',
                 style: TextStyle(fontSize: 13, color: secondary(context)),
@@ -461,4 +497,47 @@ class _RecentPlaybackSummaryState extends State<RecentPlaybackSummary> {
       );
     },
   );
+}
+
+class _RecentPlaybackVisibilityButton extends StatefulWidget {
+  const _RecentPlaybackVisibilityButton(this.services, {required this.enabled});
+  final AppServices services;
+  final bool enabled;
+
+  @override
+  State<_RecentPlaybackVisibilityButton> createState() =>
+      _RecentPlaybackVisibilityButtonState();
+}
+
+class _RecentPlaybackVisibilityButtonState
+    extends State<_RecentPlaybackVisibilityButton> {
+  bool _saving = false;
+
+  Future<void> _toggle() async {
+    if (_saving || !widget.enabled) return;
+    setState(() => _saving = true);
+    try {
+      final history = PlaybackStore(widget.services.store);
+      await history.setHistoryHidden(!history.historyHidden);
+    } catch (e) {
+      if (mounted) message(context, errorText(e));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hidden = PlaybackStore(widget.services.store).historyHidden;
+    return IconButton(
+      key: const Key('recent-playback-visibility'),
+      tooltip: hidden ? '显示最近播放' : '隐藏最近播放',
+      onPressed: widget.enabled && !_saving ? _toggle : null,
+      icon: Icon(
+        hidden ? CupertinoIcons.eye_slash : CupertinoIcons.eye,
+        size: 19,
+        color: secondary(context),
+      ),
+    );
+  }
 }

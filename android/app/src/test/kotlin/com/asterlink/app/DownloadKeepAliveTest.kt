@@ -116,6 +116,20 @@ class DownloadKeepAliveTest {
         assertTrue(shadowOf(service).isStoppedBySelf)
     }
 
+    @Test fun hashMatchingNoticeOpensItsQueueAndCanStop() {
+        val notice = DownloadNotice.from(mapOf("active" to 1, "rapid" to 1,
+            "progress" to -1, "text" to "秒传匹配 1 个任务"))
+        assertEquals(1, notice.rapid)
+        keeper.update(notice, Reply())
+        val service = createService()
+        service.onStartCommand(Intent(), 0, 1)
+        val notification = shadowOf(service).lastForegroundNotification
+        assertEquals("停止传输", notification.actions.single().title)
+        val intent = shadowOf(notification.contentIntent).savedIntent
+        assertEquals("rapid", intent.getStringExtra("transferTab"))
+        assertTrue(notification.extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE))
+    }
+
     @Test fun uploadNoticeShowsTransferActionAndTargetsUploadPage() {
         keeper.update(DownloadNotice.from(mapOf("active" to 1, "uploads" to 1, "text" to "上传 1 · 2 MB/s", "progress" to 40)), Reply())
         val service = createService()

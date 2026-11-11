@@ -71,7 +71,7 @@ class FlutterDownloadService : Service() {
         if (foreground && lastNotice == value && allowPause && lastNotificationPermission == canNotify) return
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java).setAction("com.asterlink.app.OPEN_TRANSFERS")
-                .putExtra("transferTab", if (value.active == value.lan && value.lan > 0) "lan" else if (value.uploads > 0) "uploads" else "downloads"),
+                .putExtra("transferTab", if (value.active == value.lan && value.lan > 0) "lan" else if (value.uploads > 0) "uploads" else if (value.rapid > 0) "rapid" else "downloads"),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val public = NotificationCompat.Builder(this, CHANNEL)
@@ -93,7 +93,7 @@ class FlutterDownloadService : Service() {
                 this, 1, Intent(this, FlutterDownloadService::class.java).setAction("pauseAll"),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            builder.addAction(android.R.drawable.ic_media_pause, if (value.uploads > 0 || value.lan > 0) "停止传输" else "全部暂停", pause)
+            builder.addAction(android.R.drawable.ic_media_pause, if (value.uploads > 0 || value.lan > 0 || value.rapid > 0) "停止传输" else "全部暂停", pause)
         }
         val notification = builder.build()
         if (!foreground) {

@@ -14,7 +14,9 @@ import 'package:asterlink/ui/transfers_page.dart';
 import 'package:asterlink/domain/uploads.dart';
 import 'package:asterlink/upload/upload_task.dart';
 import 'package:asterlink/upload/upload_folder.dart';
+import 'package:asterlink/transfer/rapid_transfer_task.dart';
 import 'upload_manager_test.dart' show QueueConnector, uploadSession;
+import 'rapid_transfer_manager_test.dart' show Drive, file, personal;
 import 'support.dart';
 
 void main() {
@@ -207,12 +209,12 @@ void main() {
     }
   }
 
-  Future<String> enqueue() async =>
+  Future<String> enqueue([String name = 'new.txt']) async =>
       (await services.uploads.enqueue(uploadSession, '0', '全部文件', [
         XFile.fromData(
           Uint8List.fromList([1, 2, 3]),
-          path: 'new.txt',
-          name: 'new.txt',
+          path: name,
+          name: name,
           lastModified: DateTime.utc(2026, 10, 8),
         ),
       ])).single;
@@ -229,6 +231,173 @@ void main() {
     }
     expect(done, isTrue, reason: 'Upload page cleanup did not finish');
   }
+
+  testWidgets(
+    'continue all queues only retryable uploads once across filters',
+    (tester) async {
+      await setup(tester, size: const Size(320, 700), scale: 1.8);
+      try {
+        expect(find.byKey(const ValueKey('upload-continue-all')), findsNothing);
+        provider.fail = true;
+        final failed = await enqueue('failed.txt');
+        final cancelled = await enqueue('cancelled.txt');
+        final interrupted = await enqueue('interrupted.txt');
+        await tester.pumpAndSettle();
+        services.uploads.task(cancelled)!.status = UploadStatus.cancelled;
+        services.uploads.task(interrupted)!.status = UploadStatus.interrupted;
+        provider.fail = false;
+        final completed = await enqueue('completed.txt');
+        await tester.pumpAndSettle();
+        provider.hold = Completer<void>();
+        final active = await enqueue('active.txt');
+        final pending = await enqueue('pending.txt');
+        await tester.pumpAndSettle();
+        expect(services.uploads.task(active)!.status, UploadStatus.running);
+        expect(services.uploads.task(pending)!.status, UploadStatus.pending);
+        await tester.tap(find.byKey(const ValueKey('upload-filter-2')));
+        await tester.pumpAndSettle();
+        final button = find.byKey(const ValueKey('upload-continue-all'));
+        final press = tester.widget<TextButton>(button).onPressed!;
+        press();
+        press();
+        await tester.pumpAndSettle();
+        for (final id in [failed, cancelled, interrupted]) {
+          expect(services.uploads.task(id)!.status, UploadStatus.pending);
+        }
+        expect(
+          services.uploads.task(completed)!.status,
+          UploadStatus.completed,
+        );
+        expect(services.uploads.task(active)!.status, UploadStatus.running);
+        expect(find.text('已加入队列 3 个任务'), findsOneWidget);
+        expect(button, findsNothing);
+        expect(tester.takeException(), isNull);
+        provider.hold!.complete();
+        await tester.pumpAndSettle();
+        expect(
+          services.uploads.tasks.every((t) => !t.canRetry && !t.active),
+          true,
+        );
+        expect(provider.started, hasLength(9));
+        expect(
+          provider.started.where((name) => name == 'completed.txt'),
+          hasLength(1),
+        );
+        expect(provider.maxInFlight, 1);
+      } finally {
+        await finish(tester);
+      }
+    },
+  );
+
+  testWidgets(
+    'continue all reports unavailable accounts without blocking other uploads',
+    (tester) async {
+      await setup(tester);
+      try {
+        provider.fail = true;
+        final missing = await enqueue('missing-account.txt');
+        await tester.pumpAndSettle();
+        await services.vault.removeCredential(CloudPlatform.quark);
+        await services.vault.putCredential(
+          CloudPlatform.quark,
+          Credential('新账号', {'primary': 'new'}, updatedAt: 2),
+        );
+        final available = await enqueue('available-account.txt');
+        await tester.pumpAndSettle();
+        provider.fail = false;
+        await tester.tap(find.byKey(const ValueKey('upload-continue-all')));
+        await tester.pumpAndSettle();
+        expect(services.uploads.task(missing)!.status, UploadStatus.failed);
+        expect(
+          services.uploads.task(available)!.status,
+          UploadStatus.completed,
+        );
+        expect(provider.started, [
+          'missing-account.txt',
+          'available-account.txt',
+          'available-account.txt',
+        ]);
+        expect(find.text('已加入队列 1 个任务；1 个未能继续：请重新登录原上传账号后重试'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await finish(tester);
+      }
+    },
+  );
+
+  testWidgets(
+    'continue all also resumes cross transfers and preserves completed files',
+    (tester) async {
+      await setup(tester);
+      try {
+        provider.fail = true;
+        final local = await enqueue();
+        await tester.pumpAndSettle();
+        provider.fail = false;
+        for (final p in [CloudPlatform.baidu, CloudPlatform.pan123]) {
+          await services.vault.putCredential(
+            p,
+            Credential(p.key, {'primary': 'fixture'}, updatedAt: 1),
+          );
+        }
+        final source = Drive(CloudPlatform.baidu);
+        final target = Drive(CloudPlatform.pan123);
+        services.cloud.connectors[CloudPlatform.baidu] = source;
+        services.cloud.connectors[CloudPlatform.pan123] = target;
+        final good = file('good', 'good.txt', '0');
+        final retry = file('retry', 'retry.txt', '0');
+        source.directories['0'] = [good, retry];
+        target.directories['0'] = [good];
+        final cross = RapidTransferTask(
+          id: 'partial',
+          source: services.cloud.bindSession(personal(CloudPlatform.baidu)),
+          target: services.cloud.bindSession(personal(CloudPlatform.pan123)),
+          parent: '0',
+          folderName: '全部文件',
+          selections: [good, retry],
+          createdAt: 1,
+          status: RapidTaskStatus.completed,
+          scanned: true,
+          entries: [
+            RapidTransferEntry(
+              good,
+              [],
+              status: RapidEntryStatus.reused,
+              fileId: good.id,
+            ),
+            RapidTransferEntry(retry, [], status: RapidEntryStatus.failed),
+          ],
+        );
+        await services.store.put('rapidTransferTasks', [cross.toJson()]);
+        await services.rapidTransfers.initialize();
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('upload-continue-all')));
+        await tester.pumpAndSettle();
+        expect(services.uploads.task(local)!.status, UploadStatus.completed);
+        for (
+          var i = 0;
+          services.rapidTransfers.task(cross.id)!.active && i < 100;
+          i++
+        ) {
+          await tester.pump(const Duration(milliseconds: 100));
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
+          );
+        }
+        await tester.pumpAndSettle();
+        final resumed = services.rapidTransfers.task(cross.id)!;
+        expect(resumed.status, RapidTaskStatus.completed);
+        expect(resumed.canRetry, false);
+        expect(resumed.entries.first.fileId, good.id);
+        expect(target.calls.map((call) => call.$1), ['retry.txt']);
+        expect(find.text('已加入队列 2 个任务'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await finish(tester);
+      }
+    },
+  );
 
   testWidgets(
     'folder uploads show counts, current file and a continuation action',

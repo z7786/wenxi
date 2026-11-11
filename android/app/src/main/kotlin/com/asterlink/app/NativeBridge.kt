@@ -33,6 +33,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
     private val lanQrScanner = LanQrScanner { activity }
     private val nativeWorker = Executors.newSingleThreadExecutor()
     private val externalWorker = Executors.newSingleThreadExecutor()
+    private val themeFrameCapture = ThemeFrameCapture(Executors.newSingleThreadExecutor())
     private val externalParser = ExternalOpenRequest(context)
     private val externalOpens = ExternalOpenQueue()
     val fileOpening = FileOpening(context, { activity })
@@ -87,6 +88,12 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         }
     }
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method == "captureThemeFrame") {
+            themeFrameCapture.capture(activity, call.arguments as? Map<*, *> ?: emptyMap<Any, Any>()) {
+                result.success(it)
+            }
+            return
+        }
         if (call.method == "takeTransferNavigation") {
             result.success(pendingTransferTab)
             pendingTransferTab = null
@@ -245,7 +252,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             return
         }
         if (call.method == "openFile" || call.method == "shareFile") {
-            fileOpening.open(call.argument<String>("path").orEmpty(), call.argument<String>("name").orEmpty(), call.method == "shareFile") { error ->
+            fileOpening.open(call.argument<String>("path").orEmpty(), call.argument<String>("name").orEmpty(), call.method == "shareFile", call.argument<Boolean>("chooseApp") == true) { error ->
                 if (error == null) result.success(null)
                 else result.error(error.code, error.message, null)
             }
@@ -321,6 +328,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
                     "subtitleFontFiles" -> SubtitleFontFiles.available()
                     "diagnosticPaths" -> mapOf("logs" to File(context.noBackupFilesDir, "diagnostics_flutter").absolutePath, "enabled" to diagnostics.enabled)
                     "diagnosticSnapshot" -> diagnostics.snapshot() + mapOf("downloadProtection" to downloadProtection.status())
+                    "diagnosticMemory" -> diagnostics.memorySnapshot()
                     "diagnosticEnabled" -> { diagnostics.setEnabled(call.argument<Boolean>("enabled") == true); null }
                     "diagnosticClear" -> { diagnostics.clear(); null }
                     "paths" -> {

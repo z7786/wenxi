@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:media_kit/media_kit.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import 'app_services.dart';
@@ -22,8 +21,10 @@ import 'ui/cloud_page.dart';
 import 'ui/cloud_accounts_page.dart';
 import 'ui/clipboard_link_banner.dart';
 import 'ui/common.dart';
+import 'ui/desktop_mouse_back.dart';
 import 'ui/app_theme.dart';
 import 'ui/app_text_scale.dart';
+import 'ui/theme_reveal.dart';
 import 'ui/app_background.dart';
 export 'ui/app_theme.dart' show appTheme;
 import 'ui/startup_loading_page.dart';
@@ -43,6 +44,7 @@ import 'ui/mobile_data_download_prompt.dart';
 import 'ui/player_page.dart';
 import 'ui/floating_playback_host.dart';
 import 'playback/floating_playback.dart';
+import 'playback/windows_player_components.dart';
 import 'ui/independent_player_app.dart';
 import 'playback/independent_player_window.dart';
 import 'platform/external_open.dart';
@@ -70,6 +72,8 @@ void main(List<String> arguments) {
       'LanzouAPI': 'LanzouAPI-LICENSE.txt',
       '115driver m115 protocol': '115driver.txt',
       'AndroidLiquidGlass / Backdrop': 'AndroidLiquidGlass-LICENSE.txt',
+      '7-Zip Extra': '7-Zip-Extra-NOTICES.txt',
+      '7-Zip Extra (LGPL)': '7-Zip-LGPL-2.1.txt',
     }.entries) {
       yield LicenseEntryWithLineBreaks([
         entry.key,
@@ -81,7 +85,7 @@ void main(List<String> arguments) {
 
 Future<void> _initializeRuntime() async {
   await DiagnosticRuntime.start();
-  MediaKit.ensureInitialized();
+  await initializeMediaRuntime();
   if (isDesktopPlatform) {
     await windowManager.ensureInitialized();
     unawaited(
@@ -181,7 +185,7 @@ class _BootstrapState extends State<AppBootstrap> {
   );
 }
 
-class AsterLinkApp extends StatelessWidget {
+class AsterLinkApp extends StatefulWidget {
   const AsterLinkApp(
     this.services, {
     super.key,
@@ -191,10 +195,19 @@ class AsterLinkApp extends StatelessWidget {
   final AppServices services;
   final int initialTab;
   final String? fontFamily;
+
+  @override
+  State<AsterLinkApp> createState() => _AsterLinkAppState();
+}
+
+class _AsterLinkAppState extends State<AsterLinkApp> {
+  final _themeReveal = GlobalKey<ThemeRevealHostState>();
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: services.store,
+    animation: widget.services.store,
     builder: (context, _) {
+      final services = widget.services;
       final settings = services.settings;
       return MaterialApp(
         navigatorKey: FloatingPlaybackManager.of(services.store).navigatorKey,
@@ -205,7 +218,7 @@ class AsterLinkApp extends StatelessWidget {
         localizationsDelegates: GlobalMaterialLocalizations.delegates,
         theme: appTheme(
           Brightness.light,
-          fontFamily: fontFamily,
+          fontFamily: widget.fontFamily,
           palette: settings.themePalette,
           glassStyle: settings.glassStyle,
           glassControls: settings.glassControls,
@@ -213,19 +226,20 @@ class AsterLinkApp extends StatelessWidget {
         ),
         darkTheme: appTheme(
           Brightness.dark,
-          fontFamily: fontFamily,
+          fontFamily: widget.fontFamily,
           palette: settings.themePalette,
           glassStyle: settings.glassStyle,
           glassControls: settings.glassControls,
           glassLowPower: settings.glassLowPower,
         ),
         themeAnimationDuration:
-            (MediaQuery.maybeDisableAnimationsOf(context) ??
-                WidgetsBinding
-                    .instance
-                    .platformDispatcher
-                    .accessibilityFeatures
-                    .disableAnimations)
+            (_themeReveal.currentState?.isPrepared == true ||
+                (MediaQuery.maybeDisableAnimationsOf(context) ??
+                    WidgetsBinding
+                        .instance
+                        .platformDispatcher
+                        .accessibilityFeatures
+                        .disableAnimations))
             ? Duration.zero
             : const Duration(milliseconds: 240),
         themeAnimationCurve: Curves.easeOutCubic,
@@ -234,16 +248,19 @@ class AsterLinkApp extends StatelessWidget {
           'Dark' => ThemeMode.dark,
           _ => ThemeMode.system,
         },
-        builder: (context, child) => AppTextScale(
-          percent: settings.fontScalePercent,
-          child: WindowsWindowTheme(
-            enabled: services.platformFeatures,
-            child: FloatingPlaybackHost(store: services.store, child: child!),
+        builder: (context, child) => ThemeRevealHost(
+          key: _themeReveal,
+          child: AppTextScale(
+            percent: settings.fontScalePercent,
+            child: WindowsWindowTheme(
+              enabled: services.platformFeatures,
+              child: FloatingPlaybackHost(store: services.store, child: child!),
+            ),
           ),
         ),
         home: SearchSecurityHost(
           services,
-          child: MainShell(services, initialTab: initialTab),
+          child: MainShell(services, initialTab: widget.initialTab),
         ),
       );
     },
@@ -905,10 +922,25 @@ class _MainShellState extends State<MainShell>
         );
       case 'stop-uploads':
         if (await confirm(context, '停止全部上传', '未完成任务将停止，重试时会从头上传。') && mounted) {
-          await busy(context, widget.services.uploads.stopAll);
+          await busy(context, () async {
+            await widget.services.rapidTransfers.stopAll();
+            await widget.services.uploads.stopAll();
+          });
         }
       case 'clear-uploads':
-        await busy(context, widget.services.uploads.clearCompleted);
+        await busy(context, () async {
+          await widget.services.uploads.clearCompleted();
+          await widget.services.rapidTransfers.clearCompleted();
+        });
+      case 'clear-failed-uploads':
+        if (await confirm(
+              context,
+              '清理失败传输',
+              '删除未完成且已停止的跨盘传输记录，并清理对应的已下载中转文件？目标网盘中已完成的文件会保留。',
+            ) &&
+            mounted) {
+          await busy(context, widget.services.rapidTransfers.clearFailed);
+        }
     }
   }
 
@@ -930,7 +962,7 @@ class _MainShellState extends State<MainShell>
         icon: CupertinoIcons.arrow_clockwise,
       ),
     ],
-    3 when widget.services.transferTab.value == 1 => const [
+    3 when widget.services.transferTab.value != 0 => const [
       AppMenuAction(
         value: 'stop-uploads',
         label: '停止全部上传',
@@ -940,6 +972,11 @@ class _MainShellState extends State<MainShell>
         value: 'clear-uploads',
         label: '清理完成记录',
         icon: CupertinoIcons.trash,
+      ),
+      AppMenuAction(
+        value: 'clear-failed-uploads',
+        label: '清理失败跨盘传输',
+        icon: CupertinoIcons.exclamationmark_circle,
       ),
     ],
     3 => const [
@@ -1183,19 +1220,21 @@ class _MainShellState extends State<MainShell>
                       ? null
                       : _navigation(context, rail: false),
                 );
-                return PopScope(
-                  canPop: !_hiddenResourcePage,
-                  onPopInvokedWithResult: (didPop, _) {
-                    if (!didPop && _hiddenResourcePage) _selectTab(0);
-                  },
-                  child: rail
-                      ? Row(
-                          children: [
-                            _navigation(context, rail: true),
-                            Expanded(child: content),
-                          ],
-                        )
-                      : content,
+                return DesktopMouseBack(
+                  child: PopScope(
+                    canPop: !_hiddenResourcePage,
+                    onPopInvokedWithResult: (didPop, _) {
+                      if (!didPop && _hiddenResourcePage) _selectTab(0);
+                    },
+                    child: rail
+                        ? Row(
+                            children: [
+                              _navigation(context, rail: true),
+                              Expanded(child: content),
+                            ],
+                          )
+                        : content,
+                  ),
                 );
               },
             ),

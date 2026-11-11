@@ -61,6 +61,40 @@ void main() {
       }
 
       test(
+        'Output frame availability and exact seeking use supported native properties',
+        () async {
+          final native = player.platform as NativePlayer;
+          await native.setProperty('vo', 'null');
+          await native.setProperty('vid', 'auto');
+          await native.setProperty('hwdec', 'no');
+          await open();
+          final properties = await native.getProperty('property-list');
+          expect(properties, contains('video-frame-info'));
+          expect(properties, contains('vo-configured'));
+          expect(await native.getProperty('hr-seek-framedrop'), 'yes');
+          await backend.play();
+          await until(() => player.state.position.inMilliseconds > 500);
+          final before = double.parse(await native.getProperty('time-pos'));
+          expect(
+            await native.getProperty('video-frame-info/interlaced'),
+            anyOf('yes', 'no'),
+          );
+          expect(await native.getProperty('vo-configured'), 'yes');
+          await until(() => player.state.position.inMilliseconds > 900);
+          expect(
+            double.parse(await native.getProperty('time-pos')),
+            greaterThan(before),
+          );
+          await backend.pause();
+          await backend.seek(const Duration(milliseconds: 4350));
+          await until(
+            () => (player.state.position.inMilliseconds - 4350).abs() < 150,
+          );
+          expect(player.state.playing, isFalse);
+        },
+      );
+
+      test(
         'Actual decoding reports codec, frame rate and software mode without leaking the previous file metrics',
         () async {
           final native = player.platform as NativePlayer;
@@ -76,6 +110,8 @@ void main() {
               Duration.zero,
             );
             expect(backend.diagnosticFields, isNot(contains('videoCodec')));
+            expect(backend.screenInfo.videoCodec, isNull);
+            expect(backend.screenInfo.bytesPerSecond, isNull);
             expect(backend.hardwareDecodingActive, isNull);
             await backend.play();
             await until(
@@ -87,6 +123,11 @@ void main() {
             expect(backend.diagnosticFields['videoFps'], fps);
             expect(backend.diagnosticFields['videoPixelFormat'], isNotEmpty);
             expect(backend.diagnosticFields['decoderDroppedFrames'], 0);
+            expect(backend.screenInfo.videoCodec, codec);
+            expect(backend.screenInfo.videoFps, fps);
+            expect(backend.screenInfo.hardwareDecoder, 'no');
+            expect(backend.screenInfo.pixelFormat, isNotEmpty);
+            expect(backend.screenInfo.decoderDroppedFrames, 0);
             expect(player.state.width, width);
             expect(backend.failure, isNull);
           }
@@ -277,6 +318,7 @@ void main() {
             fileName: 'hls-video.mp4',
             profile: 'aliyun',
           );
+          backend.setScreenDisplayMonitoringEnabled(true);
           // A preceding resume must not leak its start option into a fresh open.
           for (final start in [
             Duration.zero,
@@ -303,6 +345,9 @@ void main() {
                   start + const Duration(milliseconds: 300),
             );
             await backend.pause();
+            await until(() => backend.screenInfo.bytesPerSecond != null);
+            expect(backend.screenInfo.transport, 'direct');
+            expect(backend.screenInfo.bytesPerSecond, greaterThanOrEqualTo(0));
             expect(
               player.state.position,
               lessThan(start + const Duration(seconds: 2)),
@@ -374,7 +419,7 @@ void main() {
           final native = player.platform as NativePlayer;
           expect(double.parse(await native.getProperty('cache-secs')), 90);
           expect(await native.getProperty('cache-pause-initial'), 'yes');
-          expect(double.parse(await native.getProperty('cache-pause-wait')), 6);
+          expect(double.parse(await native.getProperty('cache-pause-wait')), 2);
           expect(
             int.parse(await native.getProperty('demuxer-max-bytes')),
             16 * 1024 * 1024,
@@ -557,9 +602,9 @@ void main() {
               response.headers.set('Content-Type', 'video/x-matroska');
               response.headers.set('ETag', '"streamed-fixture"');
               response.contentLength = end - start + 1;
-              // The startup reserve is now six seconds; keep enough real
-              // packets for it while holding the remainder of the range.
-              const prefix = 512 * 1024;
+              // Enough packets for the two-second reserve, but less than the
+              // 512 KiB first range: this must exercise incremental delivery.
+              const prefix = 256 * 1024;
               if (end - start + 1 > prefix) {
                 response.add(bytes.sublist(start, start + prefix));
                 await response.flush();
@@ -606,6 +651,9 @@ void main() {
           expect(held, greaterThan(0));
           expect(tail.isCompleted, isFalse);
           expect(backend.failure, isNull);
+          await until(
+            () => (backend.diagnosticFields['proxy'] as Map)['servedBytes'] > 0,
+          );
           final stats = backend.diagnosticFields['proxy'] as Map;
           expect(stats['receivedBytes'], greaterThan(0));
           expect(stats['servedBytes'], greaterThan(0));

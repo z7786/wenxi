@@ -19,6 +19,7 @@ import '../diagnostics/app_log.dart';
 import '../domain/ctfile_captcha.dart';
 import '../domain/models.dart';
 import 'common.dart';
+import 'cloud_login_layout.dart';
 import 'ctfile_verification_page.dart';
 import 'guangya_verification_page.dart';
 
@@ -255,186 +256,134 @@ class _NativePasswordLoginPageState extends State<NativePasswordLoginPage> {
       },
       child: PageFrame(
         title: '${platform.shortName}登录',
-        child: Align(
-          alignment: Alignment.topCenter,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 560),
-            child: AutofillGroup(
-              onDisposeAction: AutofillContextAction.cancel,
-              child: Form(
-                key: _form,
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(24, 28, 24, 28),
-                  children: [
-                    Row(
-                      children: [
-                        PlatformMark(platform: platform, size: 52),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                '账号密码登录',
-                                style: TextStyle(
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              const SizedBox(height: 5),
-                              Text(
-                                platform.label,
-                                style: TextStyle(
-                                  color: secondary(context),
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 32),
-                    TextFormField(
-                      key: const ValueKey('native-login-username'),
-                      controller: _username,
-                      enabled: !_working,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      keyboardType: TextInputType.emailAddress,
-                      textInputAction: TextInputAction.next,
-                      autofillHints: const [AutofillHints.username],
-                      decoration: InputDecoration(
-                        labelText: '账号',
-                        hintText: platform == CloudPlatform.pikpak
-                            ? '邮箱 / 手机号（含国家区号）'
-                            : platform == CloudPlatform.ctfile
-                            ? '注册邮箱'
-                            : platform == CloudPlatform.lanzou
-                            ? '蓝奏云用户名 / 账号'
-                            : platform == CloudPlatform.tianyi
-                            ? '手机号 / 邮箱 / 别名'
-                            : platform == CloudPlatform.guangya
-                            ? '手机号 / 邮箱 / 用户名'
-                            : '手机号',
-                        prefixIcon: const Icon(CupertinoIcons.person, size: 20),
-                      ),
-                      validator: (value) =>
-                          value?.trim().isNotEmpty == true ? null : '请输入账号',
-                    ),
-                    const SizedBox(height: 18),
-                    TextFormField(
-                      key: const ValueKey('native-login-password'),
-                      controller: _password,
-                      enabled: !_working,
-                      obscureText: !_visible,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      keyboardType: TextInputType.visiblePassword,
-                      textInputAction: TextInputAction.done,
-                      autofillHints: const [AutofillHints.password],
-                      decoration: InputDecoration(
-                        labelText: '密码',
-                        prefixIcon: const Icon(CupertinoIcons.lock, size: 20),
-                        suffixIcon: IconButton(
-                          tooltip: _visible ? '隐藏密码' : '显示密码',
-                          onPressed: _working
-                              ? null
-                              : () => setState(() => _visible = !_visible),
-                          icon: Icon(
-                            _visible
-                                ? CupertinoIcons.eye_slash
-                                : CupertinoIcons.eye,
-                            size: 20,
-                          ),
-                        ),
-                      ),
-                      validator: (value) =>
-                          value?.isNotEmpty == true ? null : '请输入密码',
-                      onFieldSubmitted: (_) => _login(),
-                    ),
-                    const SizedBox(height: 24),
-                    if (_error.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 18),
-                        child: Semantics(
-                          liveRegion: true,
-                          child: Text(
-                            _error,
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.error,
-                            ),
-                          ),
-                        ),
-                      ),
-                    FilledButton(
-                      key: const ValueKey('native-login-submit'),
-                      onPressed: _working ? null : _login,
-                      style: FilledButton.styleFrom(
-                        minimumSize: const Size.fromHeight(50),
-                      ),
-                      child: _working
-                          ? SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: themeOnAccent(context),
-                              ),
-                            )
-                          : const Text('登录'),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      _working
-                          ? _status
-                          : switch (platform) {
-                              CloudPlatform.pikpak =>
-                                '登录令牌保存在本机应用私有目录并自动续期；遇到安全验证可切换网页登录',
-                              CloudPlatform.ctfile =>
-                                '支持注册邮箱登录；登录凭据保存在本机应用私有目录，过期后请重新登录',
-                              CloudPlatform.lanzou =>
-                                '账号密码保存在本机应用私有目录，登录失效时可重新登录；遇到安全验证可切换网页登录',
-                              CloudPlatform.aliyun =>
-                                '账号密码由官方页面验证并加密记住，登录后自动续期',
-                              CloudPlatform.guangya =>
-                                '账号密码保存在本机应用私有目录，未设置密码可切换短信登录',
-                              _ => '账号密码保存在本机应用私有目录，登录失效时自动重登',
-                            },
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: secondary(context), fontSize: 13),
-                    ),
-                    if (widget.onUseSms != null)
-                      TextButton.icon(
-                        key: const ValueKey('native-login-sms'),
-                        onPressed: () => _switchMethod(widget.onUseSms),
-                        icon: const Icon(CupertinoIcons.chat_bubble, size: 18),
-                        label: const Text('切换短信验证码登录'),
-                      ),
-                    if (widget.onUseWeb != null) ...[
-                      const SizedBox(height: 14),
-                      TextButton.icon(
-                        key: const ValueKey('native-login-web'),
-                        onPressed: () => _switchMethod(widget.onUseWeb),
-                        icon: const Icon(CupertinoIcons.globe, size: 18),
-                        label: const Text('切换网页登录'),
-                      ),
-                    ],
-                    if (widget.onUseManual != null)
-                      TextButton.icon(
-                        key: const ValueKey('native-login-manual'),
-                        onPressed: () => _switchMethod(widget.onUseManual),
-                        icon: const Icon(
-                          CupertinoIcons.doc_on_clipboard,
-                          size: 18,
-                        ),
-                        label: const Text('手动提交登录信息'),
-                      ),
-                  ],
+        child: CloudLoginLayout(
+          platform: platform,
+          method: '账号密码登录',
+          formKey: _form,
+          children: [
+            TextFormField(
+              key: const ValueKey('native-login-username'),
+              controller: _username,
+              enabled: !_working,
+              autocorrect: false,
+              enableSuggestions: false,
+              keyboardType: TextInputType.emailAddress,
+              textInputAction: TextInputAction.next,
+              autofillHints: const [AutofillHints.username],
+              decoration: InputDecoration(
+                labelText: '账号',
+                hintText: platform == CloudPlatform.pikpak
+                    ? '邮箱 / 手机号（含国家区号）'
+                    : platform == CloudPlatform.ctfile
+                    ? '注册邮箱'
+                    : platform == CloudPlatform.lanzou
+                    ? '蓝奏云用户名 / 账号'
+                    : platform == CloudPlatform.tianyi
+                    ? '手机号 / 邮箱 / 别名'
+                    : platform == CloudPlatform.guangya
+                    ? '手机号 / 邮箱 / 用户名'
+                    : '手机号',
+                prefixIcon: const CloudLoginFieldIcon(CupertinoIcons.person),
+              ),
+              validator: (value) =>
+                  value?.trim().isNotEmpty == true ? null : '请输入账号',
+            ),
+            const SizedBox(height: 18),
+            TextFormField(
+              key: const ValueKey('native-login-password'),
+              controller: _password,
+              enabled: !_working,
+              obscureText: !_visible,
+              autocorrect: false,
+              enableSuggestions: false,
+              keyboardType: TextInputType.visiblePassword,
+              textInputAction: TextInputAction.done,
+              autofillHints: const [AutofillHints.password],
+              decoration: InputDecoration(
+                labelText: '密码',
+                prefixIcon: const CloudLoginFieldIcon(CupertinoIcons.shield),
+                suffixIcon: IconButton(
+                  tooltip: _visible ? '隐藏密码' : '显示密码',
+                  onPressed: _working
+                      ? null
+                      : () => setState(() => _visible = !_visible),
+                  icon: Icon(
+                    _visible ? CupertinoIcons.eye_slash : CupertinoIcons.eye,
+                    size: 20,
+                  ),
                 ),
               ),
+              validator: (value) => value?.isNotEmpty == true ? null : '请输入密码',
+              onFieldSubmitted: (_) => _login(),
             ),
-          ),
+            const SizedBox(height: 24),
+            if (_error.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 18),
+                child: Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    _error,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ),
+              ),
+            FilledButton(
+              key: const ValueKey('native-login-submit'),
+              onPressed: _working ? null : _login,
+              child: _working
+                  ? SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: themeOnAccent(context),
+                      ),
+                    )
+                  : const Text('登录'),
+            ),
+
+            if (_working && _status.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 16),
+                child: Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    _status,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: secondary(context), fontSize: 13),
+                  ),
+                ),
+              ),
+            CloudLoginAlternatives(
+              children: [
+                if (widget.onUseSms != null)
+                  TextButton.icon(
+                    key: const ValueKey('native-login-sms'),
+                    onPressed: () => _switchMethod(widget.onUseSms),
+                    icon: const Icon(CupertinoIcons.chat_bubble, size: 18),
+                    label: const Text('短信登录'),
+                  ),
+                if (widget.onUseWeb != null) ...[
+                  TextButton.icon(
+                    key: const ValueKey('native-login-web'),
+                    onPressed: () => _switchMethod(widget.onUseWeb),
+                    icon: const Icon(CupertinoIcons.globe, size: 18),
+                    label: const Text('网页登录'),
+                  ),
+                ],
+                if (widget.onUseManual != null)
+                  TextButton.icon(
+                    key: const ValueKey('native-login-manual'),
+                    onPressed: () => _switchMethod(widget.onUseManual),
+                    icon: const Icon(CupertinoIcons.doc_on_clipboard, size: 18),
+                    label: const Text('手动提交'),
+                  ),
+              ],
+            ),
+          ],
         ),
       ),
     );

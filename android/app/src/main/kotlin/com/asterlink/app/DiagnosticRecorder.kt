@@ -4,7 +4,9 @@ import android.app.ActivityManager
 import android.app.ApplicationExitInfo
 import android.content.Context
 import android.os.Build
+import android.os.Debug
 import android.os.Process
+import android.os.SystemClock
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -147,6 +149,45 @@ class DiagnosticRecorder(private val context: Context, private val now: () -> Lo
         "${info.versionName}+${if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()}"
     }.getOrDefault("unknown")
 
+    /** Numeric process counters only, called on the bridge's worker thread. */
+    fun memorySnapshot(): Map<String, Any> {
+        if (!recording.get()) return emptyMap()
+        val started = SystemClock.elapsedRealtime()
+        val data = mutableMapOf<String, Any>(
+            "sampleElapsedMs" to SystemClock.elapsedRealtime(), "pid" to Process.myPid(),
+        )
+        runCatching {
+            val memory = Debug.MemoryInfo()
+            Debug.getMemoryInfo(memory)
+            data["pssKb"] = memory.totalPss
+            data["privateDirtyKb"] = memory.totalPrivateDirty
+            data["nativeHeapAllocatedBytes"] = Debug.getNativeHeapAllocatedSize()
+            val runtime = Runtime.getRuntime()
+            data["javaHeapUsedBytes"] = runtime.totalMemory() - runtime.freeMemory()
+            if (Build.VERSION.SDK_INT >= 23) {
+                for ((key, name) in mapOf(
+                    "summary.java-heap" to "javaHeapPrivateKb",
+                    "summary.native-heap" to "nativeHeapPrivateKb",
+                    "summary.graphics" to "graphicsPrivateKb",
+                    "summary.stack" to "stackPrivateKb",
+                    "summary.total-swap" to "swapKb",
+                )) memory.getMemoryStat(key)?.toLongOrNull()?.let { data[name] = it }
+            }
+        }.onFailure { data["memoryInfoUnavailable"] = true }
+        runCatching {
+            // A fixed kernel status file; its contents are never exported.
+            val status = File("/proc/self/status").inputStream().use {
+                it.readNBytesCompat(16 * 1024).toString(Charsets.US_ASCII)
+            }
+            for ((key, name) in mapOf("VmRSS" to "rssKb", "Threads" to "threadCount")) {
+                Regex("(?m)^$key:\\s+(\\d+)").find(status)?.groupValues?.get(1)?.toLongOrNull()
+                    ?.let { data[name] = it }
+            }
+        }
+        data["sampleCostMs"] = SystemClock.elapsedRealtime() - started
+        return if (recording.get()) data else emptyMap()
+    }
+
     fun snapshot(): Map<String, Any> {
         val result = mutableMapOf<String, Any>(
             "enabled" to recording.get(), "api" to Build.VERSION.SDK_INT,
@@ -168,6 +209,7 @@ class DiagnosticRecorder(private val context: Context, private val now: () -> Lo
         }
         if (Build.VERSION.SDK_INT >= 30 && recording.get()) {
             try {
+                var nativeTraces = 0
                 val cutoff = maxOf(preferences.getLong("clearedAt", 0), now() - RETENTION_MS)
                 val activity = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                 result["exits"] = activity.getHistoricalProcessExitReasons(context.packageName, 0, 12)
@@ -185,9 +227,18 @@ class DiagnosticRecorder(private val context: Context, private val now: () -> Lo
                                 }
                             }.onFailure { data["traceUnavailable"] = true }
                         } else if (exit.reason == ApplicationExitInfo.REASON_CRASH_NATIVE) {
-                            // Native tombstones may be protobufs with memory snapshots.
-                            // Preserve reason/status, never export raw process memory.
-                            data["traceNote"] = "系统原生崩溃；未导出可能含内存数据的二进制 tombstone"
+                            if (Build.VERSION.SDK_INT >= 31 && nativeTraces++ < 2) {
+                                runCatching {
+                                    data.putAll(NativeCrashTrace.extract { exit.traceInputStream })
+                                }.onFailure {
+                                    data["traceUnavailable"] = true
+                                    data["traceNote"] = "原生堆栈无法安全解析或超出读取上限；保留退出原因"
+                                }
+                            } else {
+                                data["traceUnavailable"] = true
+                                data["traceNote"] = if (Build.VERSION.SDK_INT < 31)
+                                    "Android 12 以下无法读取原生崩溃堆栈" else "仅提取最近两次原生崩溃的堆栈"
+                            }
                         }
                         data
                     }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:asterlink/ui/app_switch.dart';
 import 'package:asterlink/main.dart';
 import 'package:asterlink/platform/link_opening.dart';
 import 'package:asterlink/ui/link_opening_page.dart';
@@ -52,11 +53,11 @@ void main() {
       );
       await tester.pumpAndSettle();
       final toggle = find.byKey(const ValueKey('link-opening-quark'));
-      expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
+      expect(tester.widget<AppSwitchListTile>(toggle).value, isTrue);
       await tester.tap(toggle);
       await tester.pumpAndSettle();
       expect(enabled, isFalse);
-      expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
+      expect(tester.widget<AppSwitchListTile>(toggle).value, isFalse);
       await tester.tap(find.text('系统默认打开设置'));
       await tester.pumpAndSettle();
       expect(opened, 1);
@@ -65,7 +66,7 @@ void main() {
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
       expect(reads, 2);
-      expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
+      expect(tester.widget<AppSwitchListTile>(toggle).value, isTrue);
       expect(tester.takeException(), isNull);
     },
   );
@@ -97,7 +98,7 @@ void main() {
     final toggle = find.byKey(const ValueKey('link-opening-quark'));
     await tester.tap(toggle);
     await tester.pumpAndSettle();
-    expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
+    expect(tester.widget<AppSwitchListTile>(toggle).value, isTrue);
     expect(find.textContaining('无法更改链接入口'), findsOneWidget);
   });
 
@@ -160,7 +161,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('网页一键打开'), findsOneWidget);
       expect(find.textContaining('Windows 安装版'), findsOneWidget);
-      expect(find.byType(SwitchListTile), findsNothing);
+      expect(find.byType(AppSwitchListTile), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
@@ -186,7 +187,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.text('网页一键打开'), findsOneWidget);
         expect(find.textContaining('Windows 安装版'), findsNothing);
-        expect(find.byType(SwitchListTile), findsNothing);
+        expect(find.byType(AppSwitchListTile), findsNothing);
         expect(tester.takeException(), isNull);
       },
     );

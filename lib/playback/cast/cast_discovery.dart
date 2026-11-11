@@ -3,13 +3,13 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../../core/json.dart';
-import '../../lan/lan_models.dart' show isLanAddress;
+import '../../diagnostics/app_log.dart';
 import 'cast_platform.dart';
 import 'dlna.dart';
 
 /// SSDP responses are untrusted datagrams, not URLs to blindly fetch.
 Uri? castLocation(List<int> bytes, InternetAddress sender) {
-  if (bytes.length > 16384 || !isLanAddress(sender.address)) return null;
+  if (bytes.length > 16384 || !isCastAddress(sender.address)) return null;
   final lines = latin1.decode(bytes).split(RegExp(r'\r?\n'));
   if (lines.isEmpty ||
       !RegExp(r'^HTTP/1\.[01] 200(?:\s|$)').hasMatch(lines.first)) {
@@ -50,7 +50,7 @@ class CastDiscovery extends ChangeNotifier {
       type: InternetAddressType.IPv4,
     ))
       for (final address in nic.addresses)
-        if (!address.isLoopback && isLanAddress(address.address)) address,
+        if (!address.isLoopback && isCastAddress(address.address)) address,
   ];
   final _devices = <String, CastDevice>{};
   final _sockets = <RawDatagramSocket>[];
@@ -84,7 +84,12 @@ class CastDiscovery extends ChangeNotifier {
       if (exact) {
         locations.add(uri);
       } else {
-        socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+        socket = await RawDatagramSocket.bind(
+          InternetAddress(uri.host).type == InternetAddressType.IPv6
+              ? InternetAddress.anyIPv6
+              : InternetAddress.anyIPv4,
+          0,
+        );
         require(!_disposed, '投屏窗口已关闭');
         _manualSockets.add(socket);
         socket.writeEventsEnabled = false;
@@ -223,7 +228,14 @@ class CastDiscovery extends ChangeNotifier {
           socket?.close();
         }
       }
-      require(_sockets.isNotEmpty, '未连接局域网，请先连接与电视相同的 Wi-Fi 或有线网络');
+      require(
+        _sockets.isNotEmpty,
+        '未找到可搜索电视的 IPv4 网络接口，请连接同一 Wi-Fi，或输入电视的完整设备描述地址',
+      );
+      DiagnosticLog.event(
+        'cast.discovery_started',
+        fields: {'interfaces': _sockets.length},
+      );
       void search() {
         for (final socket in _sockets) {
           for (final target in [
@@ -274,6 +286,10 @@ class CastDiscovery extends ChangeNotifier {
       if (identical(_done, done)) _done = null;
       if (current()) {
         scanning = false;
+        DiagnosticLog.event(
+          'cast.discovery_finished',
+          fields: {'devices': _devices.length, 'failed': error.isNotEmpty},
+        );
         if (Platform.isIOS && _devices.isEmpty && error.isEmpty) {
           error = '未发现电视，可点击“输入电视地址”添加设备。';
         }

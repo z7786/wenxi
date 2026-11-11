@@ -22,7 +22,7 @@ bool DownloadPowerRequest::SetActive(bool active) {
 
   if (handle_ != INVALID_HANDLE_VALUE && !SetActive(false)) return false;
 
-  wchar_t reason[] = L"文析助手正在下载文件";
+  wchar_t reason[] = L"文析助手正在传输文件";
   REASON_CONTEXT context{};
   context.Version = POWER_REQUEST_CONTEXT_VERSION;
   context.Flags = POWER_REQUEST_CONTEXT_SIMPLE_STRING;

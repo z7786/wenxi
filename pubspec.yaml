@@ -1,7 +1,7 @@
 name: asterlink
 description: 文析助手，支持网盘解析、下载和 BT 在线播放。
 publish_to: none
-version: 2.2.5+225
+version: 2.3.0+230
 
 environment:
   sdk: '>=3.11.0 <4.0.0'
@@ -67,6 +67,8 @@ dependency_overrides:
     path: vendor_plugins/file_selector_android
   media_kit:
     path: vendor_plugins/media_kit
+  media_kit_video:
+    path: vendor_plugins/media_kit_video
   media_kit_libs_android_video:
     path: vendor_plugins/media_kit_libs_android_video
   media_kit_libs_windows_video:

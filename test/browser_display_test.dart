@@ -225,6 +225,8 @@ void main() {
     await value.render(tester, size: const Size(800, 900));
     await tester.tap(find.byTooltip('使用说明.txt操作'));
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('创建分享'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('创建分享'));
     await tester.pumpAndSettle();
     final dropdown = tester.widget<DropdownButtonFormField<int>>(
@@ -749,7 +751,9 @@ void main() {
         }
       }
       expect(
-        value.services.settings.browserDisplayFor(CloudPlatform.tianyi).ascending,
+        value.services.settings
+            .browserDisplayFor(CloudPlatform.tianyi)
+            .ascending,
         isFalse,
       );
       expect(

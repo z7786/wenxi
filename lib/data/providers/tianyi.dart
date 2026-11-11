@@ -14,6 +14,8 @@ import '../../domain/models.dart';
 import '../../domain/tianyi_web_login.dart';
 import '../../domain/tianyi_share.dart';
 import '../../domain/uploads.dart';
+import '../../domain/rapid_transfer.dart';
+import 'dart:io' show HttpDate;
 import '../http.dart';
 import '../http_retry.dart';
 import '../uploads/upload_io.dart';
@@ -21,9 +23,21 @@ import '../../core/operation_progress.dart';
 import '../state_store.dart';
 
 part 'uploads/tianyi_upload.dart';
+part 'uploads/tianyi_rapid_transfer.dart';
 
 /// Tianyi's official cloud protocol, shared by native and imported logins.
 class TianyiConnector extends CloudConnector {
+  @override
+  bool get providesTransferMd5 => true;
+  @override
+  bool canRapidTransferTo(BrowseSession session) => session.canManageFiles;
+  @override
+  Future<RapidTransferResult> rapidTransfer(
+    BrowseSession session,
+    String parent,
+    RapidTransferFile file,
+    Credential credential,
+  ) => _run(credential, () => _rapidTransfer(session, parent, file, credential));
   TianyiConnector(
     this.http, {
     this.store,

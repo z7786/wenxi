@@ -188,6 +188,14 @@ String _stepLabel(OperationStep step) {
     OperationStepStatus.failed => '${step.stage.label} · 未完成',
     OperationStepStatus.cancelled => '${step.stage.label} · 已取消',
   };
+  if (step.totalBytes != null &&
+      step.totalBytes! > 0 &&
+      step.copiedBytes != null) {
+    final percent = (step.copiedBytes! * 100 / step.totalBytes!)
+        .clamp(0, 100)
+        .toStringAsFixed(1);
+    return '$label · $percent%';
+  }
   if (step.stage == OperationStage.parserQueue &&
       step.queuePosition != null &&
       step.status == OperationStepStatus.running) {
@@ -287,7 +295,11 @@ class _ItemProgress extends StatelessWidget {
     final settled = items.succeeded + items.failed + items.skipped;
     final ratio = items.total == 0 ? 1.0 : settled / items.total;
     final details = [
-      '已删除 ${items.succeeded} 项',
+      '${switch (step.stage) {
+        OperationStage.copyFiles => '已复制',
+        OperationStage.moveFiles => '已移动',
+        _ => '已删除',
+      }} ${items.succeeded} 项',
       if (items.failed > 0) '失败 ${items.failed} 项',
       if (items.skipped > 0) '跳过 ${items.skipped} 项',
       if (items.processed > settled) '等待保存 ${items.processed - settled} 项',
@@ -309,7 +321,8 @@ class _ItemProgress extends StatelessWidget {
             color: accent,
             backgroundColor: accent.withValues(alpha: .12),
             borderRadius: BorderRadius.circular(4),
-            semanticsLabel: '删除进度，已处理 ${items.processed} / ${items.total} 项',
+            semanticsLabel:
+                '${step.stage.label}进度，已处理 ${items.processed} / ${items.total} 项',
             semanticsValue: '${(ratio * 100).floor()}',
           ),
           const SizedBox(height: 6),

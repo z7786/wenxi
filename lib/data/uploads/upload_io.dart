@@ -29,6 +29,21 @@ class UploadIO {
 
   Future<String> digest(Hash algorithm, {int start = 0, int? end}) async {
     final stop = end ?? file.size;
+    if (start == 0 && stop == file.size) {
+      final name = algorithm == md5
+          ? 'md5'
+          : algorithm == sha1
+          ? 'sha1'
+          : algorithm == sha256
+          ? 'sha256'
+          : null;
+      final known = file.verifiedHashes[name];
+      if (known != null) {
+        await file.validate?.call();
+        RequestScope.checkpoint();
+        return known;
+      }
+    }
     final key = (algorithm, start, stop);
     if (_hashes.containsKey(key)) return _hashes[key]!;
     var count = 0;

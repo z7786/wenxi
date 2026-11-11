@@ -4,6 +4,7 @@ import '../../core/operation_progress.dart';
 import '../../domain/auth.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
+import '../../domain/rapid_transfer.dart';
 import '../http.dart';
 import '../uploads/upload_io.dart';
 import '../state_store.dart';
@@ -19,6 +20,17 @@ class GuangyaApiException extends AppException {
 }
 
 class GuangyaConnector extends CloudConnector {
+  @override
+  bool get providesTransferMd5 => true;
+  @override
+  bool canRapidTransferTo(BrowseSession session) => session.canManageFiles;
+  @override
+  Future<RapidTransferResult> rapidTransfer(
+    BrowseSession session,
+    String parent,
+    RapidTransferFile file,
+    Credential credential,
+  ) => _rapidTransfer(session, parent, file, credential);
   GuangyaConnector(
     this.http,
     CredentialStore store, {

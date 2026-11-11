@@ -29,6 +29,7 @@ class _Discovery extends CastDiscovery {
   int scans = 0;
   bool cleaned = false;
   final manualAddresses = <String>[];
+  final found = <CastDevice>[_tv];
   @override
   Future<CastDevice> addAddress(String value) async {
     manualAddresses.add(value);
@@ -36,7 +37,7 @@ class _Discovery extends CastDiscovery {
   }
 
   @override
-  List<CastDevice> get devices => [_tv];
+  List<CastDevice> get devices => found;
   @override
   Future<void> scan() async {
     scans++;
@@ -63,11 +64,20 @@ class _Session extends CastSession {
   @override
   PlayerState get state => value;
   @override
+  PlayerState get bookmarkState => value;
+  @override
+  bool get playWhenReady => value.playing;
+  @override
+  Future<void> refresh() async {}
+  @override
   Future<void> start({
     required String title,
     required Duration position,
     required Duration duration,
+    bool playWhenReady = true,
+    Future<void> Function()? beforeSetMedia,
   }) async {
+    await beforeSetMedia?.call();
     value = PlayerState(
       position: position,
       duration: duration,
@@ -78,7 +88,11 @@ class _Session extends CastSession {
     require(!cleaned, '投屏已取消');
     commands.add('Play');
     connected = volumeSupported = true;
-    value = value.copyWith(playing: true, buffering: false, volume: 35);
+    value = value.copyWith(
+      playing: playWhenReady,
+      buffering: false,
+      volume: 35,
+    );
     notifyListeners();
   }
 
@@ -138,6 +152,7 @@ void main() {
     Size size = const Size(393, 864),
     double scale = 1,
     Future<void>? barrier,
+    bool television = false,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -172,7 +187,7 @@ void main() {
             '/player': (_) => PlayerPage(
               fixture.controller,
               subtitleDirectory: Directory.systemTemp,
-              device: FakePlaybackDevice(),
+              device: FakePlaybackDevice()..isTelevision = television,
               castDiscoveryFactory: () => discovery,
             ),
           },
@@ -324,6 +339,187 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await tester.pumpAndSettle();
   });
+
+  testWidgets(
+    'Android TV remote navigates visible controls and seeks only when hidden',
+    (tester) async {
+      final page = await render(
+        tester,
+        size: const Size(960, 540),
+        television: true,
+      );
+      await capture(tester, 'television-controls');
+      expect(find.byKey(const Key('player-tv-controls')), findsOneWidget);
+      final play = tester.widget<IconButton>(
+        find.byKey(const Key('player-tv-play')),
+      );
+      expect(play.focusNode!.hasFocus, isTrue);
+      final initial = page.fixture.controller.state.position;
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(play.focusNode!.hasFocus, isFalse);
+      expect(page.fixture.controller.state.position, initial);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      expect(play.focusNode!.hasFocus, isFalse);
+      expect(
+        FocusManager.instance.primaryFocus!.debugLabel,
+        'AsterLink player',
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pumpAndSettle();
+      expect(
+        page.fixture.controller.state.position,
+        initial + const Duration(seconds: 15),
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pumpAndSettle();
+      expect(play.focusNode!.hasFocus, isTrue);
+      await tester.sendKeyEvent(LogicalKeyboardKey.select);
+      await tester.pumpAndSettle();
+      expect(page.fixture.controller.state.playing, isFalse);
+      final plays = page.fixture.current.plays;
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.mediaPlayPause);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.mediaPlayPause);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.mediaPlayPause);
+      await tester.pumpAndSettle();
+      expect(page.fixture.current.plays, plays + 1);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(find.byType(PlayerPage), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(find.text('已关闭播放器'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'Hidden TV controls stop rebuilding and show fresh progress when opened',
+    (tester) async {
+      final page = await render(
+        tester,
+        size: const Size(960, 540),
+        television: true,
+      );
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      final controls = find.byKey(
+        const Key('player-tv-controls'),
+        skipOffstage: false,
+      );
+      final before = tester.widget(controls);
+      final backend = page.fixture.current;
+      backend.emit(
+        backend.state.copyWith(position: const Duration(seconds: 90)),
+      );
+      await tester.pump();
+      expect(tester.widget(controls), same(before));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pumpAndSettle();
+      expect(tester.widget(controls), isNot(same(before)));
+      expect(tester.widget<Slider>(find.byType(Slider)).value, 90000);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets('Android TV timeline and settings remain reachable by remote', (
+    tester,
+  ) async {
+    final page = await render(
+      tester,
+      size: const Size(960, 540),
+      television: true,
+    );
+    final slider = tester.widget<Slider>(
+      find.byKey(const Key('player-tv-timeline')),
+    );
+    slider.focusNode!.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    expect(page.fixture.controller.state.position, greaterThan(Duration.zero));
+    await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('player-panel')), findsOneWidget);
+    expect(find.byKey(const Key('player-layout')), findsNothing);
+    expect(find.text('自动适配视频方向'), findsNothing);
+    final close = tester.widget<IconButton>(
+      find.byWidgetPredicate(
+        (widget) => widget is IconButton && widget.tooltip == '关闭面板',
+      ),
+    );
+    expect(FocusManager.instance.primaryFocus, isNotNull);
+    expect(close.autofocus, isTrue);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    final beforeMenuNavigation = page.fixture.controller.state.position;
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(page.fixture.controller.state.position, beforeMenuNavigation);
+    await capture(tester, 'television-settings');
+    await tester.sendKeyEvent(LogicalKeyboardKey.mediaPause);
+    await tester.pumpAndSettle();
+    expect(page.fixture.controller.state.playing, isFalse);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
+
+  for (final sample in [
+    (const Size(960, 540), 1.0),
+    (const Size(640, 360), 1.5),
+  ]) {
+    testWidgets(
+      'television controls fit ${sample.$1} with scale ${sample.$2}',
+      (tester) async {
+        await render(
+          tester,
+          size: sample.$1,
+          scale: sample.$2,
+          television: true,
+        );
+        expect(find.byKey(const Key('player-tv-controls')), findsOneWidget);
+        expect(
+          find.byKey(const Key('player-tv-play')).hitTestable(),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpAndSettle();
+      },
+    );
+  }
+
+  testWidgets(
+    'connected TV stays listed after a search and reconnect preserves pause',
+    (tester) async {
+      final page = await render(tester);
+      await open(tester);
+      await connect(tester);
+      final first = page.sessions.single;
+      await page.fixture.controller.pause();
+      first.value = first.value.copyWith(position: const Duration(minutes: 3));
+      page.discovery.found.clear();
+      page.discovery.notifyListeners();
+      await tester.pumpAndSettle();
+      final devices = find.byKey(const Key('cast-device-test-tv'));
+      final scrollable = find.descendant(
+        of: find.byKey(const Key('player-cast-panel')),
+        matching: find.byType(Scrollable),
+      ).first;
+      await tester.scrollUntilVisible(devices, 120, scrollable: scrollable);
+      expect(devices, findsOneWidget);
+      final button = find.byKey(const Key('cast-reconnect'));
+      await tester.scrollUntilVisible(button, -120, scrollable: scrollable);
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(page.sessions.length, 2);
+      expect(page.sessions.last.state.playing, isFalse);
+      expect(page.sessions.last.state.position, const Duration(minutes: 3));
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+    },
+  );
 
   testWidgets('cancel button works while the connect request is pending', (
     tester,

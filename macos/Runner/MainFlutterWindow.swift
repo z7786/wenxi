@@ -10,6 +10,7 @@ class MainFlutterWindow: NSWindow {
   private var pendingOpens = [[String: Any]]()
   private var sleepAssertion: IOPMAssertionID = 0
   private var externalPanel: NSOpenPanel?
+  private var fileApplicationPanel: NSOpenPanel?
   private let fileQueue = DispatchQueue(label: "com.asterlink.app.files")
 
   override func awakeFromNib() {
@@ -44,6 +45,40 @@ class MainFlutterWindow: NSWindow {
       guard let self = self else { return result(FlutterError(code: "closed", message: "窗口已关闭", details: nil)) }
       let args = call.arguments as? [String: Any] ?? [:]
       switch call.method {
+      case "openWith":
+        guard self.fileApplicationPanel == nil, self.externalPanel == nil else {
+          return result(FlutterError(code: "busy", message: "请先关闭当前应用选择窗口", details: nil))
+        }
+        guard let path = args["path"] as? String, path.hasPrefix("/") else {
+          return result(FlutterError(code: "location", message: "文件位置无效", details: nil))
+        }
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &directory), !directory.boolValue else {
+          return result(FlutterError(code: "missing", message: "文件不存在或无法访问", details: nil))
+        }
+        let file = URL(fileURLWithPath: path)
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.message = "选择用于打开“\(file.lastPathComponent)”的应用"
+        panel.prompt = "打开"
+        self.fileApplicationPanel = panel
+        panel.beginSheetModal(for: self) { [weak self] response in
+          self?.fileApplicationPanel = nil
+          guard response == .OK, let application = panel.url else { result(nil); return }
+          let config = NSWorkspace.OpenConfiguration()
+          config.activates = true
+          NSWorkspace.shared.open([file], withApplicationAt: application, configuration: config) { app, error in
+            DispatchQueue.main.async {
+              if error == nil && app != nil { result(nil) }
+              else { result(FlutterError(code: "open_with", message: "所选应用无法打开此文件", details: nil)) }
+            }
+          }
+        }
       case "storageVolume":
         guard let path = args["path"] as? String, path.hasPrefix("/") else {
           return result(FlutterError(code: "storage", message: "存储路径无效", details: nil))
@@ -76,7 +111,7 @@ class MainFlutterWindow: NSWindow {
       case "downloadProtectionStatus":
         result(["desktop": true, "wakeLockHeld": self.sleepAssertion != 0])
       case "selectExternalPlayer":
-        guard self.externalPanel == nil else { return result(nil) }
+        guard self.externalPanel == nil, self.fileApplicationPanel == nil else { return result(nil) }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.applicationBundle]
         panel.canChooseDirectories = false

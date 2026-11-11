@@ -1,6 +1,63 @@
 part of '../guangya.dart';
 
 extension _GuangyaUpload on GuangyaConnector {
+  Future<RapidTransferResult> _rapidTransfer(
+    BrowseSession s,
+    String parent,
+    RapidTransferFile file,
+    Credential c,
+  ) async {
+    _personal(s);
+    cloudFileName(file.name);
+    final session = await _session(c);
+    final pre = await _post(
+      '/nd.bizuserres.s/v1/get_res_center_token',
+      {
+        'capacity': 2,
+        'name': file.name,
+        'parentId': _parent(parent),
+        'res': {'fileSize': file.size, 'md5': file.md5},
+      },
+      session: session,
+      acceptedCodes: const {'156'},
+    );
+    if (pre.str('_uploadCode') != '156') {
+      return const RapidTransferResult.missed();
+    }
+    final taskId = pre.str('taskId');
+    require(taskId.isNotEmpty, '光鸭秒传回执缺少任务信息');
+    for (var attempt = 0; attempt < 30; attempt++) {
+      RequestScope.checkpoint();
+      final result = await _post(
+        '/nd.bizuserres.s/v1/file/get_info_by_task_id',
+        {'taskId': taskId},
+        session: session,
+        read: true,
+        acceptedCodes: const {'145', '146', '147', '155', '163'},
+      );
+      final id = result.str('fileId');
+      if (id.isNotEmpty) {
+        final matched = (await list(s, parent, c))
+            .where(
+              (f) =>
+                  f.id == id &&
+                  !f.isDirectory &&
+                  f.name == file.name &&
+                  f.size == file.size,
+            )
+            .toList();
+        require(
+          matched.length == 1 &&
+              contentMd5(matched.single.hashValue) == file.md5,
+          '光鸭秒传结果未能确认，请刷新目标目录',
+        );
+        return RapidTransferResult.reused(id);
+      }
+      await RequestScope.wait(const Duration(seconds: 1));
+    }
+    throw const RapidTransferUnavailable('光鸭仍在确认秒传结果，请稍后继续任务');
+  }
+
   Future<CloudFile> _upload(
     BrowseSession s,
     String parent,

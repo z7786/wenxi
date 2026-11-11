@@ -104,6 +104,9 @@ String diagnosticSummary(DiagnosticLog log, Json native, {String note = ''}) {
         ' [${clean(exit.str('reason'), 80)}]',
       );
       _windowsFault(text, exit, clean);
+      if (exit.str('signalName').isNotEmpty) {
+        text.writeln('  信号=${clean(exit['signalName'], 40)}');
+      }
     }
   }
   if (native.boolean('collectionFailed') ||

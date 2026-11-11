@@ -15,6 +15,7 @@ class _SystemPipSession {
 }
 
 String _iosExternalUrl(DownloadSpec source) {
+  require(source.networkPolicy == null, '此来源需要 App 校验网络权限，请使用内置播放器或下载完成后播放');
   final uri = Uri.tryParse(source.url);
   require(
     uri != null &&

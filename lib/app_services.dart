@@ -47,6 +47,8 @@ import 'download/transfer_activity.dart';
 import 'download/navigation_transfers.dart';
 import 'upload/upload_manager.dart';
 import 'upload/upload_sources.dart';
+import 'transfer/rapid_transfer_manager.dart';
+import 'transfer/cross_transfer_relay.dart';
 import 'lan/lan_service.dart';
 import 'lan/lan_download_route.dart';
 import 'lan/lan_files.dart';
@@ -56,6 +58,7 @@ import 'download/transfer_http.dart';
 import 'platform/file_access.dart';
 import 'platform/apple_storage.dart';
 import 'playback/floating_playback.dart';
+import 'playback/windows_player_components.dart';
 import 'platform/download_network.dart';
 import 'platform/app_update_installer.dart';
 import 'platform/clipboard_links.dart';
@@ -104,6 +107,10 @@ class AppServices extends ChangeNotifier {
   }) : _instanceLock = instanceLock,
        _preloadResources = platformFeatures || resourceSearch != null {
     vault = Vault(store);
+    if (platformFeatures && WindowsPlayerComponents.isSupported) {
+      WindowsPlayerComponents.shared.acceleration = () =>
+          settings.githubAcceleration;
+    }
     announcements = AnnouncementService(
       store,
       url: announcementsUrl,
@@ -292,6 +299,7 @@ class AppServices extends ChangeNotifier {
       downloads: () => downloads.activity,
       uploads: () => uploads.activity,
       lan: () => lan.activity,
+      rapid: () => rapidTransfers.activity,
       publish: (activity) async {
         if (!backgroundTransfers) return;
         try {
@@ -308,6 +316,18 @@ class AppServices extends ChangeNotifier {
         android: platformFeatures && Platform.isAndroid,
         ios: platformFeatures && Platform.isIOS,
       ),
+      foreground: backgroundTransfers ? transferActivity.sync : null,
+    );
+    rapidTransfers = RapidTransferManager(
+      store: store,
+      cloud: cloud,
+      relay: CrossTransferRelay(
+        cloud: cloud,
+        http: transfer,
+        cache: Directory('${cacheDirectory.path}/cross-transfers'),
+        availableSpace: files.freeBytes,
+      ),
+      confirmDownload: () => mobileDataDownloads.confirm(),
       foreground: backgroundTransfers ? transferActivity.sync : null,
     );
     mobileDataDownloads = MobileDataDownloadGuard(
@@ -338,11 +358,12 @@ class AppServices extends ChangeNotifier {
       foreground: backgroundTransfers ? (_) => transferActivity.sync() : null,
     );
     navigationTransfers = NavigationTransfers(
-      changes: Listenable.merge([downloads, uploads]),
+      changes: Listenable.merge([downloads, uploads, rapidTransfers]),
       downloads: () => downloads.activeTasks,
       uploads: () => uploads.activeTasks,
       downloadById: downloads.task,
       uploadById: uploads.task,
+      rapid: () => rapidTransfers.activeCount,
     );
     windows =
         windowsActions ??
@@ -362,11 +383,12 @@ class AppServices extends ChangeNotifier {
     );
     downloadShutdown = DownloadShutdown(
       supported: windows.supported,
-      changes: Listenable.merge([downloads, uploads, lan]),
+      changes: Listenable.merge([downloads, uploads, lan, rapidTransfers]),
       tasks: () => downloads.tasks,
       busy: () =>
           downloads.activeCount > 0 ||
           uploads.activeCount > 0 ||
+          rapidTransfers.activeCount > 0 ||
           lan.activeConnections > 0,
       shutdown: windows.shutdown,
       hibernate: windows.hibernate,
@@ -416,6 +438,7 @@ class AppServices extends ChangeNotifier {
   late final DownloadManager downloads;
   late final MobileDataDownloadGuard mobileDataDownloads;
   late final UploadManager uploads;
+  late final RapidTransferManager rapidTransfers;
   late final LanService lan;
   late final TransferActivity transferActivity;
   late final NavigationTransfers navigationTransfers;
@@ -477,6 +500,13 @@ class AppServices extends ChangeNotifier {
     }
   }
 
+  void requestRapidTransferManager() {
+    if (!_closed) {
+      transferTab.value = 1;
+      downloadNavigation.value++;
+    }
+  }
+
   void requestBrowserReturn() {
     if (!_closed && browserReturn.value != null) {
       browserReturnNavigation.value++;
@@ -505,6 +535,7 @@ class AppServices extends ChangeNotifier {
   Future<void> stopTransfers() async {
     await lan.stop();
     await uploads.stopAll();
+    await rapidTransfers.stopAll();
     await downloads.pauseAll();
   }
 
@@ -671,6 +702,8 @@ class AppServices extends ChangeNotifier {
             requestLanPage();
           } else if (target == 'uploads') {
             requestUploadManager();
+          } else if (target == 'rapid') {
+            requestRapidTransferManager();
           } else if (target != null) {
             requestDownloadManager();
           }
@@ -695,6 +728,7 @@ class AppServices extends ChangeNotifier {
             call.method == 'downloadServiceStalled') {
           await lan.stop();
           await uploads.stopAll(reason: '后台传输已停止，返回应用后可重新上传');
+          await rapidTransfers.stopAll();
           await downloads.pauseAll(
             reason: switch (call.method) {
               'serviceTimeout' => '系统已暂停长时间后台下载，返回应用后可继续',
@@ -718,6 +752,7 @@ class AppServices extends ChangeNotifier {
       fields: {'elapsedMs': startup.elapsedMilliseconds},
     );
     await uploads.initialize();
+    await rapidTransfers.initialize();
     DiagnosticLog.event(
       'app.uploads_ready',
       fields: {'elapsedMs': startup.elapsedMilliseconds},
@@ -1101,8 +1136,10 @@ class AppServices extends ChangeNotifier {
   Future<void> close() async {
     if (_closed) return;
     await FloatingPlaybackManager.maybeOf(store)?.close();
+    if (platformFeatures) await WindowsPlayerComponents.shared.close();
     resourceSearch.dispose();
     mobileDataDownloads.close();
+    await rapidTransfers.close();
     await _settlePlaybackCleanups();
     await cloud.publicPasswords.close();
     await sources.close();

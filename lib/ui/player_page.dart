@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'app_switch.dart';
 import '../download/mobile_data_download_guard.dart';
 import 'subtitle_appearance.dart';
 import 'dart:io';
@@ -7,6 +8,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import 'package:asterlink/playback/playback_state.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
@@ -18,21 +20,25 @@ import '../domain/playback_source.dart';
 import '../platform/playback_device.dart';
 import '../platform/player_screenshot.dart';
 import '../playback/playback_controller.dart';
+import '../playback/playback_ui_diagnostics.dart';
 import '../playback/floating_playback.dart';
 import '../playback/playback_sleep_timer.dart';
 import '../playback/subtitle_files.dart';
 import '../diagnostics/app_log.dart';
 import 'player_theme.dart';
 import 'windows_gpu_preference_tile.dart';
+import 'player_components_page.dart';
 import 'player_rate_input.dart';
 import 'player_connections_input.dart';
 import 'player_playlist_panel.dart';
 import 'player_aspect_panel.dart';
 import 'player_layout_panel.dart';
+import 'player_screen_display.dart';
 import 'player_skip_time_dialog.dart';
 import 'player_sleep_panel.dart';
 import 'player_screenshot_panel.dart';
 import 'player_cast_panel.dart';
+import 'player_tv_controls.dart';
 import '../playback/cast/cast_discovery.dart';
 import 'desktop_pip_surface.dart';
 import 'loading_indicator.dart';
@@ -72,6 +78,7 @@ class _PlayerPageState extends State<PlayerPage>
   PlaybackController get controller => widget.controller;
   late final device = widget.device ?? NativePlaybackDevice();
   final focus = FocusNode(debugLabel: 'AsterLink player');
+  final _tvPlayFocus = FocusNode(debugLabel: 'TV play/pause');
   Timer? _hideTimer, _hudTimer, _volumeTimer, _layoutDeadline, _layoutQuiet;
   Timer? _lockTimer;
   Timer? _boostIndicatorTimer;
@@ -84,6 +91,7 @@ class _PlayerPageState extends State<PlayerPage>
       _nativeSubtitleSize = 22;
   bool _lockVisible = false;
   late final AnimationController _chrome;
+  late final PlaybackUiDiagnostics _uiDiagnostics;
   bool _disableAnimations = false;
   Object? _presentationState, _deviceState;
   final _safeInsets = <Orientation, EdgeInsets>{};
@@ -122,6 +130,12 @@ class _PlayerPageState extends State<PlayerPage>
   double _dragX = 0, _dragY = 0, _viewportWidth = 1, _viewportHeight = 1;
   double _verticalInitial = 0, _verticalTarget = 0;
   bool _brightnessDrag = false, _verticalActive = false;
+  double? _initialBrightness;
+  String? _brightnessFolder;
+  bool _brightnessChanged = false;
+  Object? _brightnessState;
+  final _brightnessGate = AsyncGate();
+  Future<void> _brightnessWork = Future.value();
   double _lastAudibleVolume = 100;
   int _volumeRevision = 0;
   RawDialogRoute<void>? _activePanel;
@@ -158,8 +172,15 @@ class _PlayerPageState extends State<PlayerPage>
   @override
   void initState() {
     super.initState();
+    _uiDiagnostics = PlaybackUiDiagnostics(
+      eligible: () =>
+          mounted &&
+          controller.state.playing &&
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
+      refreshRate: () => View.of(context).display.refreshRate,
+      context: () => controller.backend?.diagnosticFields ?? const {},
+    )..start();
     _chrome = AnimationController(vsync: this, value: 1);
-    _chrome.addListener(_syncNativeSubtitles);
     WidgetsBinding.instance.addObserver(this);
     controller.addListener(_onController);
     controller.beforePlay = _preparePresentation;
@@ -191,6 +212,9 @@ class _PlayerPageState extends State<PlayerPage>
   Future<void> _initialize() async {
     try {
       await device.start(video: controller.hasVideo);
+      if (!mounted) return;
+      _initialBrightness = device.brightness;
+      await _syncBrightness();
       if (mounted && device.supportsSystemVolume) {
         await controller.useSystemVolume(
           device.setSystemVolume,
@@ -210,6 +234,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (mounted) {
       _onController();
       _touch();
+      if (device.isTelevision) _focusTvControls();
     }
   }
 
@@ -236,6 +261,10 @@ class _PlayerPageState extends State<PlayerPage>
       }
     }
     if (_seenGeneration != controller.generation) {
+      _saveBrightnessGesture();
+      _volumeTimer?.cancel();
+      _volumeTimer = null;
+      _verticalActive = false;
       _seenGeneration = controller.generation;
       _seekPreview = null;
       _hoverSeekPreview = null;
@@ -257,7 +286,10 @@ class _PlayerPageState extends State<PlayerPage>
       _boostIndicatorVisible = false;
       _boostGestureActive = false;
     }
-    if (wasVisible != visible) _animateChrome();
+    if (wasVisible != visible) {
+      _animateChrome();
+      if (device.isTelevision && visible) _focusTvControls();
+    }
     final state = controller.state;
     // Position and buffer updates only rebuild the bottom progress controls.
     // They must not rebuild the video surface, captions and page overlays.
@@ -329,7 +361,8 @@ class _PlayerPageState extends State<PlayerPage>
               backgroundColor: controller.preferences.subtitleBackgroundArgb,
               bottom:
                   ((_nativeSubtitleBottom +
-                              _nativeSubtitleLift * _chrome.value) /
+                              _nativeSubtitleLift *
+                                  (visible && !locked ? 1 : 0)) /
                           _nativeSubtitleHeight)
                       .clamp(0, .6),
             )
@@ -349,10 +382,19 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<void> _syncDevice() {
+    final brightness = _syncBrightness();
     final geometry = controller.videoGeometry;
+    final frameRate =
+        controller.hasVideo &&
+            !controller.loading &&
+            !controller.casting &&
+            !controller.state.completed
+        ? controller.backend?.displayFrameRate
+        : null;
     final deviceState = (
       controller.generation,
       geometry,
+      frameRate,
       controller.preferences.autoRotate,
       _orientationOverride,
       controller.state.playing && !controller.loading && !controller.casting,
@@ -362,7 +404,7 @@ class _PlayerPageState extends State<PlayerPage>
       device.inPip,
     );
     if (_deviceState == deviceState) {
-      return Future.wait([_deviceWork, _layoutWork]).then((_) {});
+      return Future.wait([brightness, _deviceWork, _layoutWork]).then((_) {});
     }
     _deviceState = deviceState;
     final target = controller.hasVideo && _orientationOverride != null
@@ -408,6 +450,7 @@ class _PlayerPageState extends State<PlayerPage>
               !controller.casting,
           width: geometry?.width,
           height: geometry?.height,
+          frameRate: frameRate,
           autoRotate: controller.preferences.autoRotate,
           orientation: _orientationOverride,
           locked: locked,
@@ -430,7 +473,42 @@ class _PlayerPageState extends State<PlayerPage>
         }),
       );
     }
-    return Future.wait([update, _layoutWork]).then((_) {});
+    return Future.wait([brightness, update, _layoutWork]).then((_) {});
+  }
+
+  Future<void> _syncBrightness() {
+    if (!mounted ||
+        _leaving ||
+        _initialBrightness == null ||
+        !controller.hasVideo ||
+        !device.supportsBrightness) {
+      return Future.value();
+    }
+    final folder = controller.folderKey;
+    final saved = controller.history.brightnessFor(folder);
+    final state = (folder, controller.remembersFolder, saved);
+    if (_brightnessState == state) return _brightnessWork;
+    _brightnessState = state;
+    final target = saved ?? _initialBrightness!;
+    _brightnessWork = _brightnessGate
+        .run(() async {
+          if (!mounted || _leaving || _brightnessState != state) return;
+          if ((device.brightness - target).abs() > .0001) {
+            await device.setBrightness(target);
+          }
+        })
+        .catchError((Object error, StackTrace stack) {
+          if (_brightnessState == state) _brightnessState = null;
+          DiagnosticLog.error('player.brightness', error, stack);
+        });
+    return _brightnessWork;
+  }
+
+  void _saveBrightnessGesture() {
+    if (!_brightnessChanged) return;
+    _brightnessChanged = false;
+    final folder = _brightnessFolder, value = _verticalTarget;
+    _run(() => controller.history.saveBrightness(folder, value));
   }
 
   bool _layoutMatches(PlaybackOrientation target) {
@@ -528,6 +606,8 @@ class _PlayerPageState extends State<PlayerPage>
 
   @override
   void dispose() {
+    _saveBrightnessGesture();
+    _uiDiagnostics.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _hudTimer?.cancel();
@@ -547,6 +627,7 @@ class _PlayerPageState extends State<PlayerPage>
     controller.removeListener(_onController);
     device.removeListener(_onDevice);
     focus.dispose();
+    _tvPlayFocus.dispose();
     if (controller.systemVolumeControl == device.setSystemVolume) {
       controller.systemVolumeControl = null;
     }
@@ -605,6 +686,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _animateChrome() {
     final target = visible && !locked ? 1.0 : 0.0;
+    _syncNativeSubtitles();
     if (_disableAnimations) {
       _chrome.value = target;
     } else {
@@ -624,8 +706,27 @@ class _PlayerPageState extends State<PlayerPage>
         if (!value) _hoverSeekPreview = null;
       });
       _animateChrome();
+      if (device.isTelevision) {
+        if (value) {
+          _focusTvControls();
+        } else if (_modalDepth == 0) {
+          focus.requestFocus();
+        }
+      }
     }
     unawaited(_syncDevice());
+  }
+
+  void _focusTvControls() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && visible && !locked && _modalDepth == 0) {
+        if (controller.ready) {
+          _tvPlayFocus.requestFocus();
+        } else if (focus.hasPrimaryFocus) {
+          focus.nextFocus();
+        }
+      }
+    });
   }
 
   void _clearTapSequence() {}
@@ -776,6 +877,10 @@ class _PlayerPageState extends State<PlayerPage>
   Future<void> _back() async {
     if (_editingLayout) {
       _cancelLayout();
+      return;
+    }
+    if (device.isTelevision && visible && !locked && _modalDepth == 0) {
+      _setControlsVisible(false);
       return;
     }
     if (device.supportsDesktopPip && device.inPip) {
@@ -1011,6 +1116,8 @@ class _PlayerPageState extends State<PlayerPage>
     if (locked || !controller.ready) return;
     _verticalActive = true;
     _brightnessDrag = details.localPosition.dx < _viewportWidth / 2;
+    _brightnessFolder = controller.folderKey;
+    _brightnessChanged = false;
     _verticalInitial = _brightnessDrag
         ? device.brightness
         : controller.state.volume / 100;
@@ -1029,7 +1136,10 @@ class _PlayerPageState extends State<PlayerPage>
         (_verticalInitial - _dragY / math.max(80, _viewportHeight * .7))
             .clamp(0, 1)
             .toDouble();
-    if (_brightnessDrag) _showHud('亮度  ${(_verticalTarget * 100).round()}%');
+    if (_brightnessDrag) {
+      _brightnessChanged = true;
+      _showHud('亮度  ${(_verticalTarget * 100).round()}%');
+    }
     if (_volumeTimer == null) {
       _applyVertical();
       _volumeTimer = Timer(const Duration(milliseconds: 60), () {
@@ -1045,7 +1155,12 @@ class _PlayerPageState extends State<PlayerPage>
     final revision = ++_volumeRevision;
     _run(() async {
       if (brightness) {
-        await device.setBrightness(value);
+        if (!device.supportsBrightness) return;
+        _brightnessWork = _brightnessGate.run(() async {
+          if (!mounted || _leaving) return;
+          await device.setBrightness(value);
+        });
+        await _brightnessWork;
       } else {
         await controller.setVolume(value * 100, save: save);
         if (mounted && !locked && !_leaving && revision == _volumeRevision) {
@@ -1058,9 +1173,43 @@ class _PlayerPageState extends State<PlayerPage>
   void _verticalEnd() {
     _volumeTimer?.cancel();
     _volumeTimer = null;
+    _saveBrightnessGesture();
     if (locked || !controller.ready || !_verticalActive) return;
     _verticalActive = false;
     _applyVertical(save: true);
+  }
+
+  KeyEventResult _mediaKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent ||
+        locked ||
+        controller.connectingCast ||
+        controller.disconnectingCast) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.mediaRewind ||
+        key == LogicalKeyboardKey.mediaFastForward) {
+      _run(
+        () => controller.skip(key == LogicalKeyboardKey.mediaRewind ? -15 : 15),
+      );
+    } else if (event is KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    } else if (key == LogicalKeyboardKey.mediaPlayPause) {
+      _run(controller.toggle);
+    } else if (key == LogicalKeyboardKey.mediaPlay) {
+      _run(controller.play);
+    } else if (key == LogicalKeyboardKey.mediaPause) {
+      _run(controller.pause);
+    } else if (key == LogicalKeyboardKey.mediaTrackNext && controller.canNext) {
+      _run(controller.next);
+    } else if (key == LogicalKeyboardKey.mediaTrackPrevious &&
+        controller.canPrevious) {
+      _run(controller.previous);
+    } else {
+      return KeyEventResult.ignored;
+    }
+    _touch(show: false);
+    return KeyEventResult.handled;
   }
 
   KeyEventResult _key(FocusNode node, KeyEvent event) {
@@ -1075,6 +1224,58 @@ class _PlayerPageState extends State<PlayerPage>
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
+    final focusedContext = FocusManager.instance.primaryFocus?.context;
+    if (_modalDepth > 0 ||
+        _leaving ||
+        ModalRoute.of(context)?.isCurrent == false ||
+        focusedContext?.widget is EditableText ||
+        focusedContext?.findAncestorWidgetOfExactType<EditableText>() != null) {
+      return KeyEventResult.ignored;
+    }
+    if (_mediaKey(node, event) == KeyEventResult.handled) {
+      return KeyEventResult.handled;
+    }
+    if (device.isTelevision && !locked) {
+      final horizontal =
+          key == LogicalKeyboardKey.arrowLeft ||
+          key == LogicalKeyboardKey.arrowRight;
+      final vertical =
+          key == LogicalKeyboardKey.arrowUp ||
+          key == LogicalKeyboardKey.arrowDown;
+      final confirm =
+          key == LogicalKeyboardKey.select ||
+          key == LogicalKeyboardKey.enter ||
+          key == LogicalKeyboardKey.numpadEnter ||
+          key == LogicalKeyboardKey.gameButtonA;
+      if (confirm && event is KeyRepeatEvent) return KeyEventResult.handled;
+      if (horizontal || vertical || confirm) {
+        if (visible) {
+          _touch(show: false);
+          if (focus.hasPrimaryFocus) {
+            _focusTvControls();
+            return KeyEventResult.handled;
+          }
+          // Let focused controls and Flutter's directional traversal own keys.
+          return KeyEventResult.ignored;
+        }
+        if (horizontal) {
+          _run(
+            () =>
+                controller.skip(key == LogicalKeyboardKey.arrowLeft ? -15 : 15),
+          );
+          _showHud(key == LogicalKeyboardKey.arrowLeft ? '后退 15 秒' : '前进 15 秒');
+        } else if (confirm) {
+          if (event is KeyDownEvent) _run(controller.toggle);
+        } else {
+          _touch();
+        }
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.contextMenu) {
+        if (event is KeyDownEvent) _run(_settings);
+        return KeyEventResult.handled;
+      }
+    }
     if (locked) {
       if (key == LogicalKeyboardKey.escape) {
         _showLock();
@@ -1103,10 +1304,20 @@ class _PlayerPageState extends State<PlayerPage>
           _showHud('音量 ${controller.state.volume.round()}%');
         }
       });
+    } else if (Platform.isWindows &&
+        (key == LogicalKeyboardKey.comma || key == LogicalKeyboardKey.period)) {
+      final rate =
+          (controller.preferences.rate +
+                  (key == LogicalKeyboardKey.comma ? .5 : -.5))
+              .clamp(PlaybackPreferences.minRate, PlaybackPreferences.maxRate)
+              .toDouble();
+      _run(() => controller.setRate(rate));
+      _showHud('播放速度 $rate×');
     } else if (key == LogicalKeyboardKey.keyF) {
       _run(_toggleFullscreen);
     } else if (key == LogicalKeyboardKey.escape) {
       _run(_back);
+      if (device.isTelevision) return KeyEventResult.handled;
     } else if (key == LogicalKeyboardKey.keyM) {
       if (controller.state.volume > 0) {
         _lastAudibleVolume = controller.state.volume;
@@ -1158,92 +1369,124 @@ class _PlayerPageState extends State<PlayerPage>
           child: child,
         );
       },
-      pageBuilder: (context, animation, secondaryAnimation) => Theme(
-        data: theme,
-        child: Builder(
-          builder: (panelContext) {
-            final size = MediaQuery.sizeOf(panelContext);
-            final side = _sidePanel(size);
-            final keyboard = MediaQuery.viewInsetsOf(panelContext).bottom;
-            return Padding(
-              padding: EdgeInsets.only(bottom: keyboard),
-              child: Align(
-                alignment: side
-                    ? Alignment.centerRight
-                    : Alignment.bottomCenter,
-                child: SizedBox(
-                  width: side ? math.min(360, size.width * .46) : size.width,
-                  height: side ? size.height - keyboard : null,
-                  child: Material(
-                    key: const Key('player-panel'),
-                    color: playerPanelColor,
-                    clipBehavior: Clip.antiAlias,
-                    borderRadius: side
-                        ? BorderRadius.zero
-                        : const BorderRadius.vertical(top: Radius.circular(18)),
-                    child: SafeArea(
-                      top: side,
-                      left: !side,
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(
-                          maxHeight:
-                              (size.height - keyboard) * (side ? 1 : .82),
-                        ),
-                        child: Column(
-                          mainAxisSize: side
-                              ? MainAxisSize.max
-                              : MainAxisSize.min,
-                          children: [
-                            if (!side)
-                              Container(
-                                width: 28,
-                                height: 3,
-                                margin: const EdgeInsets.only(top: 10),
-                                decoration: BoxDecoration(
-                                  color: Colors.white24,
-                                  borderRadius: BorderRadius.circular(2),
-                                ),
+      pageBuilder: (context, animation, secondaryAnimation) => Focus(
+        autofocus: true,
+        skipTraversal: true,
+        onKeyEvent: _mediaKey,
+        child: MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            navigationMode: device.isTelevision
+                ? NavigationMode.directional
+                : MediaQuery.of(context).navigationMode,
+          ),
+          child: Theme(
+            data: device.isTelevision
+                ? theme.copyWith(focusColor: Colors.white24)
+                : theme,
+            child: Builder(
+              builder: (panelContext) {
+                final size = MediaQuery.sizeOf(panelContext);
+                final side = _sidePanel(size);
+                final keyboard = MediaQuery.viewInsetsOf(panelContext).bottom;
+                return Padding(
+                  padding: device.isTelevision
+                      ? EdgeInsets.fromLTRB(
+                          size.width * .05,
+                          size.height * .05,
+                          size.width * .05,
+                          size.height * .05 + keyboard,
+                        )
+                      : EdgeInsets.only(bottom: keyboard),
+                  child: Align(
+                    alignment: side
+                        ? Alignment.centerRight
+                        : Alignment.bottomCenter,
+                    child: SizedBox(
+                      width: side
+                          ? math.min(360, size.width * .46)
+                          : size.width,
+                      height: side ? size.height - keyboard : null,
+                      child: Material(
+                        key: const Key('player-panel'),
+                        color: playerPanelColor,
+                        clipBehavior: Clip.antiAlias,
+                        borderRadius: side
+                            ? BorderRadius.zero
+                            : const BorderRadius.vertical(
+                                top: Radius.circular(18),
                               ),
-                            Padding(
-                              padding: const EdgeInsets.fromLTRB(20, 8, 8, 4),
-                              child: Row(
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      title,
-                                      style: const TextStyle(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w600,
+                        child: SafeArea(
+                          top: side,
+                          left: !side,
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxHeight:
+                                  (size.height - keyboard) * (side ? 1 : .82),
+                            ),
+                            child: Column(
+                              mainAxisSize: side
+                                  ? MainAxisSize.max
+                                  : MainAxisSize.min,
+                              children: [
+                                if (!side)
+                                  Container(
+                                    width: 28,
+                                    height: 3,
+                                    margin: const EdgeInsets.only(top: 10),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white24,
+                                      borderRadius: BorderRadius.circular(2),
+                                    ),
+                                  ),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    20,
+                                    8,
+                                    8,
+                                    4,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          title,
+                                          style: const TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
                                       ),
-                                    ),
+                                      IconButton(
+                                        tooltip: '关闭面板',
+                                        autofocus: device.isTelevision,
+                                        focusColor: Colors.white24,
+                                        onPressed: () =>
+                                            Navigator.pop(panelContext),
+                                        icon: const Icon(
+                                          CupertinoIcons.xmark,
+                                          size: 20,
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                  IconButton(
-                                    tooltip: '关闭面板',
-                                    onPressed: () =>
-                                        Navigator.pop(panelContext),
-                                    icon: const Icon(
-                                      CupertinoIcons.xmark,
-                                      size: 20,
-                                    ),
+                                ),
+                                Flexible(
+                                  child: AnimatedBuilder(
+                                    animation: controller,
+                                    builder: (_, _) => content(panelContext),
                                   ),
-                                ],
-                              ),
+                                ),
+                              ],
                             ),
-                            Flexible(
-                              child: AnimatedBuilder(
-                                animation: controller,
-                                builder: (_, _) => content(panelContext),
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
-              ),
-            );
-          },
+                );
+              },
+            ),
+          ),
         ),
       ),
     );
@@ -1253,7 +1496,10 @@ class _PlayerPageState extends State<PlayerPage>
     } finally {
       if (identical(_activePanel, route)) _activePanel = null;
       _modalDepth--;
-      if (mounted) _touch();
+      if (mounted) {
+        _touch();
+        if (device.isTelevision) _focusTvControls();
+      }
     }
   }
 
@@ -1744,6 +1990,18 @@ class _PlayerPageState extends State<PlayerPage>
     ),
   );
 
+  Future<void> _screenDisplay() => _panel(
+    '屏显设置',
+    (_) => PlayerScreenDisplayPanel(
+      preferences: controller.preferences.screenDisplay,
+      onChanged: (value) => _run(
+        () => controller.updatePreferences(
+          controller.preferences.copyWith(screenDisplay: value),
+        ),
+      ),
+    ),
+  );
+
   Future<void> _settings() async {
     Future<void> Function()? next;
     await _panel(
@@ -1763,18 +2021,26 @@ class _PlayerPageState extends State<PlayerPage>
                     enabled: !controller.casting,
                   ),
                   _PlayerMenuAction(
-                    '布局',
-                    CupertinoIcons.slider_horizontal_3,
-                    _layout,
-                    key: const Key('player-layout'),
+                    '屏显设置',
+                    CupertinoIcons.info_circle,
+                    _screenDisplay,
+                    key: const Key('player-screen-settings'),
                   ),
+                  if (!device.isTelevision)
+                    _PlayerMenuAction(
+                      '布局',
+                      CupertinoIcons.slider_horizontal_3,
+                      _layout,
+                      key: const Key('player-layout'),
+                    ),
                   if (!controller.preferences.showPlaylistButton)
                     _PlayerMenuAction(
                       '选集',
                       CupertinoIcons.list_bullet,
                       _playlist,
                     ),
-                  if (!controller.preferences.showSpeedButton)
+                  if (device.isTelevision ||
+                      !controller.preferences.showSpeedButton)
                     _PlayerMenuAction(
                       '倍速',
                       CupertinoIcons.speedometer,
@@ -1795,7 +2061,8 @@ class _PlayerPageState extends State<PlayerPage>
                       CupertinoIcons.forward_end_fill,
                       controller.next,
                     ),
-                  if (!controller.preferences.showLockButton)
+                  if (!device.isTelevision &&
+                      !controller.preferences.showLockButton)
                     _PlayerMenuAction(
                       '锁定画面',
                       CupertinoIcons.lock,
@@ -1971,13 +2238,13 @@ class _PlayerPageState extends State<PlayerPage>
               },
             ),
           ),
-          SwitchListTile(
+          AppSwitchListTile(
             key: const Key('player-folder-memory'),
             title: const Text('记住此文件夹的设置'),
             subtitle: Text(
               controller.folderKey == null
                   ? '当前来源无法确定文件夹，使用通用设置'
-                  : '分别保存倍速、片头片尾、字幕样式、画面比例和缩放',
+                  : '分别保存亮度、倍速、片头片尾、字幕样式、比例和缩放',
             ),
             value: controller.remembersFolder,
             onChanged: controller.folderKey == null || controller.loading
@@ -1985,7 +2252,7 @@ class _PlayerPageState extends State<PlayerPage>
                 : (value) => _run(() => controller.setRememberFolder(value)),
           ),
           if (controller.hasVideo)
-            SwitchListTile(
+            AppSwitchListTile(
               key: const Key('player-hardware-decoding'),
               title: const Text('硬件解码'),
               subtitle: Text(
@@ -2004,8 +2271,23 @@ class _PlayerPageState extends State<PlayerPage>
             ),
           if (controller.hasVideo && Platform.isWindows)
             const WindowsGpuPreferenceTile(),
-          if (controller.hasVideo)
-            SwitchListTile(
+          if (controller.hasVideo && Platform.isAndroid)
+            AppSwitchListTile(
+              key: const Key('player-decoder-compatibility'),
+              title: const Text('兼容硬解模式'),
+              subtitle: const Text('出现绿屏、黑屏时开启，仍使用硬件解码'),
+              value: controller.preferences.decoderCompatibility,
+              onChanged:
+                  controller.loading ||
+                      controller.casting ||
+                      !controller.preferences.hardwareAcceleration
+                  ? null
+                  : (value) =>
+                        _run(() => controller.setDecoderCompatibility(value)),
+            ),
+          if (Platform.isWindows) const PlayerComponentsTile(),
+          if (controller.hasVideo && !device.isTelevision)
+            AppSwitchListTile(
               title: const Text('自动适配视频方向'),
               subtitle: const Text('横向视频横屏，竖向视频竖屏'),
               value: controller.preferences.autoRotate,
@@ -2016,7 +2298,7 @@ class _PlayerPageState extends State<PlayerPage>
                 );
               }),
             ),
-          SwitchListTile(
+          AppSwitchListTile(
             title: const Text('记住播放进度'),
             subtitle: const Text('再次打开时从上次位置继续'),
             value: controller.preferences.resume,
@@ -2026,7 +2308,7 @@ class _PlayerPageState extends State<PlayerPage>
               ),
             ),
           ),
-          SwitchListTile(
+          AppSwitchListTile(
             title: const Text('自动播放下一集'),
             subtitle: const Text('按选集面板中的顺序播放'),
             value: controller.preferences.autoNext,
@@ -2215,6 +2497,7 @@ class _PlayerPageState extends State<PlayerPage>
                 '横向滑动调整进度，左侧上下滑动调亮度，右侧调音量；长按加速，按住上滑锁定、下滑取消。',
                 if (Platform.isWindows || Platform.isMacOS)
                   '键盘：空格播放/暂停，←/→跳转，↑/↓音量，F 全屏，Esc 返回，M 静音。',
+                if (Platform.isWindows) '鼠标中键切换全屏；逗号增加 0.5 倍速，句号降低 0.5 倍速。',
               ].join('\n\n'),
               style: const TextStyle(
                 color: Colors.white54,
@@ -2684,13 +2967,24 @@ class _PlayerPageState extends State<PlayerPage>
           ),
         );
     _safeInsets[orientation] = insets;
-    final chromeMedia = media.copyWith(padding: insets, viewPadding: insets);
+    final chromeMedia = media.copyWith(
+      padding: insets,
+      viewPadding: insets,
+      navigationMode: device.isTelevision
+          ? NavigationMode.directional
+          : media.navigationMode,
+    );
     return Theme(
       data: playerTheme(Theme.of(context)),
       child: AnnotatedRegion<SystemUiOverlayStyle>(
         value: SystemUiOverlayStyle.light,
         child: PopScope(
-          canPop: !_editingLayout && !fullscreen && !locked && !desktopPip,
+          canPop:
+              !_editingLayout &&
+              !fullscreen &&
+              !locked &&
+              !desktopPip &&
+              !(device.isTelevision && visible),
           onPopInvokedWithResult: (didPop, _) {
             if (didPop) {
               // System back and gestures also silence audio before the route
@@ -2717,17 +3011,19 @@ class _PlayerPageState extends State<PlayerPage>
                   final captions = state.subtitle
                       .where((line) => line.trim().isNotEmpty)
                       .join('\n');
-                  final controlsHeight =
-                      100.0 * _chromePreferences.controlsScale +
-                      insets.bottom +
-                      (_separateTimeline(
-                            (box.maxWidth - insets.horizontal) /
-                                    _chromePreferences.controlsScale -
-                                32,
-                            media.textScaler,
-                          )
-                          ? media.textScaler.scale(12) * 1.4 + 4
-                          : 0);
+                  final controlsHeight = device.isTelevision
+                      ? 190.0 * _chromePreferences.controlsScale +
+                            (box.maxHeight * .05).clamp(12.0, 27.0)
+                      : 100.0 * _chromePreferences.controlsScale +
+                            insets.bottom +
+                            (_separateTimeline(
+                                  (box.maxWidth - insets.horizontal) /
+                                          _chromePreferences.controlsScale -
+                                      32,
+                                  media.textScaler,
+                                )
+                                ? media.textScaler.scale(12) * 1.4 + 4
+                                : 0);
                   final captionBottom = pip
                       ? desktopPip
                             ? 54.0
@@ -2756,6 +3052,15 @@ class _PlayerPageState extends State<PlayerPage>
                       ? 12
                       : controller.preferences.subtitleSize;
                   _syncNativeSubtitles();
+                  backend?.setRenderViewport(
+                    Size(box.maxWidth, box.maxHeight),
+                    MediaQuery.devicePixelRatioOf(context),
+                    desktopPip ||
+                            controller.preferences.fit == PlaybackFit.contain
+                        ? BoxFit.contain
+                        : BoxFit.cover,
+                    desktopPip ? 1 : controller.preferences.videoScale,
+                  );
                   final systemPipVideo = controller.systemPipPlayback
                       ?.buildVideo(fit: BoxFit.contain);
                   // Keep the ordinary texture mounted across AVKit handoffs.
@@ -2891,26 +3196,40 @@ class _PlayerPageState extends State<PlayerPage>
                         ),
                       if (!pip && !_editingLayout)
                         Positioned.fill(
-                          child: GestureDetector(
-                            key: const Key('player-gesture-surface'),
-                            behavior: HitTestBehavior.opaque,
-                            onTapUp: _surfaceTap,
-                            onDoubleTap: locked ? null : _surfaceDoubleTap,
-                            onHorizontalDragStart: _horizontalStart,
-                            onHorizontalDragUpdate: _horizontalUpdate,
-                            onHorizontalDragEnd: (_) => _horizontalEnd(),
-                            onHorizontalDragCancel: () {
-                              if (mounted) setState(() => _seekPreview = null);
+                          child: Listener(
+                            onPointerDown: (event) {
+                              if (Platform.isWindows &&
+                                  !locked &&
+                                  !_leaving &&
+                                  _modalDepth == 0 &&
+                                  event.kind == PointerDeviceKind.mouse &&
+                                  event.buttons == kMiddleMouseButton) {
+                                _run(_toggleFullscreen);
+                              }
                             },
-                            onVerticalDragStart: _verticalStart,
-                            onVerticalDragUpdate: _verticalUpdate,
-                            onVerticalDragEnd: (_) => _verticalEnd(),
-                            onVerticalDragCancel: _verticalEnd,
-                            onLongPressStart: _startBoostGesture,
-                            onLongPressMoveUpdate: _moveBoostGesture,
-                            onLongPressEnd: (_) => _endBoostGesture(),
-                            onLongPressCancel: () =>
-                                _endBoostGesture(cancelled: true),
+                            child: GestureDetector(
+                              key: const Key('player-gesture-surface'),
+                              behavior: HitTestBehavior.opaque,
+                              onTapUp: _surfaceTap,
+                              onDoubleTap: locked ? null : _surfaceDoubleTap,
+                              onHorizontalDragStart: _horizontalStart,
+                              onHorizontalDragUpdate: _horizontalUpdate,
+                              onHorizontalDragEnd: (_) => _horizontalEnd(),
+                              onHorizontalDragCancel: () {
+                                if (mounted) {
+                                  setState(() => _seekPreview = null);
+                                }
+                              },
+                              onVerticalDragStart: _verticalStart,
+                              onVerticalDragUpdate: _verticalUpdate,
+                              onVerticalDragEnd: (_) => _verticalEnd(),
+                              onVerticalDragCancel: _verticalEnd,
+                              onLongPressStart: _startBoostGesture,
+                              onLongPressMoveUpdate: _moveBoostGesture,
+                              onLongPressEnd: (_) => _endBoostGesture(),
+                              onLongPressCancel: () =>
+                                  _endBoostGesture(cancelled: true),
+                            ),
                           ),
                         ),
                       if (controller.casting) _castCover(),
@@ -2931,6 +3250,19 @@ class _PlayerPageState extends State<PlayerPage>
                           controller.error.isNotEmpty &&
                           !pip)
                         _errorPanel(),
+                      if (!pip &&
+                          !_editingLayout &&
+                          !_rotationPending &&
+                          controller.error.isEmpty &&
+                          controller.preferences.screenDisplay.visible)
+                        Positioned.fill(
+                          key: const Key('player-screen-layer'),
+                          child: PlayerScreenDisplay(
+                            controller: controller,
+                            television: device.isTelevision,
+                            insets: insets,
+                          ),
+                        ),
                       if (desktopPip) _desktopPipControls(),
                       if (!pip && !_boostGestureActive)
                         Positioned.fill(
@@ -2938,45 +3270,108 @@ class _PlayerPageState extends State<PlayerPage>
                             chromeMedia,
                             ExcludeSemantics(
                               excluding: !visible || locked,
-                              child: IgnorePointer(
-                                ignoring: !visible || locked,
-                                child: AnimatedBuilder(
-                                  animation: _chrome,
-                                  builder: (_, child) => Offstage(
-                                    offstage:
-                                        _chrome.value == 0 &&
-                                        (!visible || locked),
-                                    child: FadeTransition(
-                                      key: const Key('player-controls-fade'),
-                                      opacity: _chrome,
-                                      child: child,
+                              child: ExcludeFocus(
+                                excluding: !visible || locked,
+                                child: IgnorePointer(
+                                  ignoring: !visible || locked,
+                                  child: AnimatedBuilder(
+                                    animation: _chrome,
+                                    builder: (_, child) => Offstage(
+                                      offstage:
+                                          _chrome.value == 0 &&
+                                          (!visible || locked),
+                                      child: FadeTransition(
+                                        key: const Key('player-controls-fade'),
+                                        opacity: _chrome,
+                                        child: child,
+                                      ),
                                     ),
-                                  ),
-                                  child: RepaintBoundary(
-                                    child: Stack(
-                                      key: const Key('player-visible-controls'),
-                                      children: [
-                                        _topControls(),
-                                        if (controller.error.isEmpty) ...[
-                                          ListenableBuilder(
-                                            listenable: visible && !locked
-                                                ? controller
-                                                : const AlwaysStoppedAnimation<
-                                                    double
-                                                  >(0),
-                                            builder: (_, _) =>
-                                                _bottomControls(),
-                                          ),
-                                          if (_editingLayout ||
-                                              _chromePreferences.showLockButton)
-                                            _lockControl(false),
-                                          if (controller.hasVideo &&
-                                              (_editingLayout ||
-                                                  _chromePreferences
-                                                      .showScreenshotButton))
-                                            _screenshotControl(),
-                                        ],
-                                      ],
+                                    child: RepaintBoundary(
+                                      child: device.isTelevision
+                                          ? ListenableBuilder(
+                                              listenable: visible && !locked
+                                                  ? controller
+                                                  : const AlwaysStoppedAnimation<
+                                                      double
+                                                    >(0),
+                                              builder: (_, _) =>
+                                                  PlayerTvControls(
+                                                    title:
+                                                        controller.current.name,
+                                                    state: controller.state,
+                                                    playFocus: _tvPlayFocus,
+                                                    ready: controller.ready,
+                                                    canSeek:
+                                                        !controller.casting ||
+                                                        controller
+                                                            .castSession!
+                                                            .seekSupported,
+                                                    onToggle: () =>
+                                                        _run(controller.toggle),
+                                                    onSeek: (value) => _run(
+                                                      () => controller.seek(
+                                                        value,
+                                                      ),
+                                                    ),
+                                                    onBack: () => _run(_back),
+                                                    onSettings: () =>
+                                                        _run(_settings),
+                                                    onPlaylist: () =>
+                                                        _run(_playlist),
+                                                    onSubtitles:
+                                                        controller.casting
+                                                        ? null
+                                                        : () =>
+                                                              _run(_subtitles),
+                                                    onCast: controller.hasVideo
+                                                        ? () => _run(_castPanel)
+                                                        : null,
+                                                    onPrevious:
+                                                        controller.canPrevious
+                                                        ? () => _run(
+                                                            controller.previous,
+                                                          )
+                                                        : null,
+                                                    onNext: controller.canNext
+                                                        ? () => _run(
+                                                            controller.next,
+                                                          )
+                                                        : null,
+                                                    onActivity: () =>
+                                                        _touch(show: false),
+                                                  ),
+                                            )
+                                          : Stack(
+                                              key: const Key(
+                                                'player-visible-controls',
+                                              ),
+                                              children: [
+                                                _topControls(),
+                                                if (controller
+                                                    .error
+                                                    .isEmpty) ...[
+                                                  ListenableBuilder(
+                                                    listenable:
+                                                        visible && !locked
+                                                        ? controller
+                                                        : const AlwaysStoppedAnimation<
+                                                            double
+                                                          >(0),
+                                                    builder: (_, _) =>
+                                                        _bottomControls(),
+                                                  ),
+                                                  if (_editingLayout ||
+                                                      _chromePreferences
+                                                          .showLockButton)
+                                                    _lockControl(false),
+                                                  if (controller.hasVideo &&
+                                                      (_editingLayout ||
+                                                          _chromePreferences
+                                                              .showScreenshotButton))
+                                                    _screenshotControl(),
+                                                ],
+                                              ],
+                                            ),
                                     ),
                                   ),
                                 ),

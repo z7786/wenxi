@@ -8,14 +8,23 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/downloads.dart';
+import '../domain/download_network_policy.dart';
+import '../download/download_playback_cache.dart';
 import '../domain/playback.dart';
 import 'stream_proxy.dart';
+import 'isolated_stream_proxy.dart';
+import 'external_stream.dart';
 import 'playback_failure.dart';
 import 'playback_stall_monitor.dart';
+import 'playback_video_monitor.dart';
+import 'playback_seek_queue.dart';
 import 'playback_buffer_policy.dart';
 import 'playback_metrics.dart';
+import 'playback_diagnostics.dart';
+import 'playback_screen_info.dart';
 import 'subtitle_fonts.dart';
 import 'video_output_policy.dart';
+import 'playback_render_policy.dart';
 
 /// The controller also runs against a deterministic backend in lifecycle tests.
 abstract class PlaybackBackend extends ChangeNotifier {
@@ -67,6 +76,38 @@ abstract class PlaybackBackend extends ChangeNotifier {
   }
 
   VideoController? get videoController => null;
+
+  /// Intended presentation cadence, including playback speed. The display
+  /// hint must not depend on the number of frames a struggling decoder emits.
+  double? get displayFrameRate {
+    if (state.track.video.id == 'no') return null;
+    final tracks = state.tracks.video.where(
+      (t) =>
+          !{'auto', 'no'}.contains(t.id) &&
+          t.albumart != true &&
+          t.image != true,
+    );
+    final track =
+        tracks.where((t) => t.id == state.track.video.id).firstOrNull ??
+        (state.track.video.id == 'auto'
+            ? tracks.where((t) => t.isDefault == true).firstOrNull ??
+                  tracks.firstOrNull
+            : null);
+    if (track == null) return null;
+    // estimated-vf-fps fluctuates after dropped frames and seeks. Never use
+    // that counter to drive display changes; unknown content keeps the default.
+    final fps = track.fps;
+    if (fps == null ||
+        !fps.isFinite ||
+        fps < 1 ||
+        !state.rate.isFinite ||
+        state.rate <= 0) {
+      return null;
+    }
+    final effective = fps * state.rate;
+    return effective >= 1 && effective <= 240 ? effective : null;
+  }
+
   Widget? buildVideo({required BoxFit fit, double? aspectRatio}) => null;
   Widget? buildSubtitleOverlay() => null;
   bool get usesSubtitleOverlay => false;
@@ -76,6 +117,8 @@ abstract class PlaybackBackend extends ChangeNotifier {
   bool get canRetryWithSoftware => true;
   String get streamingDescription => '';
   Map<String, Object?> get diagnosticFields => const {};
+  PlaybackScreenInfo get screenInfo => const PlaybackScreenInfo();
+  void setScreenDisplayMonitoringEnabled(bool enabled) {}
   bool get rendersSubtitlesNatively => false;
   bool get supportsScreenshot => false;
   Future<Uint8List?> screenshot({bool includeSubtitles = false}) async => null;
@@ -83,6 +126,14 @@ abstract class PlaybackBackend extends ChangeNotifier {
   bool get subtitleFontLoading => false;
   Future<void> retrySubtitleFont() async {}
   bool? get hardwareDecodingActive => null;
+  void setVideoMonitoringEnabled(bool enabled) {}
+  Future<void> setDecoderCompatibility(bool enabled) async {}
+  void setRenderViewport(
+    Size viewport,
+    double pixelRatio,
+    BoxFit fit,
+    double scale,
+  ) {}
   Future<void> initialize() async {}
   Future<void> setSubtitlePresentation({
     required double size,
@@ -113,7 +164,9 @@ class MediaKitBackend extends PlaybackBackend {
     Player? player,
     SubtitleFontStore? subtitleFonts,
     this.downloadCache,
-  }) : subtitleFonts = subtitleFonts ?? SubtitleFontStore.shared,
+    this.downloadSnapshot,
+  }) : _hardwareAcceleration = hardwareAcceleration,
+       subtitleFonts = subtitleFonts ?? SubtitleFontStore.shared,
        player =
            player ??
            Player(
@@ -153,9 +206,7 @@ class MediaKitBackend extends PlaybackBackend {
     for (final stream in <Stream<Object?>>[
       this.player.stream.playing,
       this.player.stream.completed,
-      this.player.stream.position,
       this.player.stream.duration,
-      this.player.stream.buffer,
       this.player.stream.buffering,
       this.player.stream.volume,
       this.player.stream.rate,
@@ -167,6 +218,12 @@ class MediaKitBackend extends PlaybackBackend {
       this.player.stream.subtitle,
     ]) {
       _subscriptions.add(stream.listen((_) => _onPlayerState()));
+    }
+    for (final stream in [
+      this.player.stream.position,
+      this.player.stream.buffer,
+    ]) {
+      _subscriptions.add(stream.listen((_) => _onPlayerState(progress: true)));
     }
     final native = this.player.platform;
     _subscriptions.add(
@@ -239,6 +296,7 @@ class MediaKitBackend extends PlaybackBackend {
     }
   }
   final Player player;
+  final bool _hardwareAcceleration;
   final SubtitleFontStore subtitleFonts;
   SubtitleFont? _subtitleFont;
   Future<void>? _subtitleFontTask;
@@ -253,6 +311,16 @@ class MediaKitBackend extends PlaybackBackend {
   PlaybackMetrics _metrics = PlaybackMetrics();
   PlaybackBufferPolicy _bufferPolicy = PlaybackBufferPolicy(connectionLimit: 8);
   final Map<String, Object?> _nativeMetrics = {};
+  Duration? _lastDiagnosticSample, _lastProgressNotification;
+  Object? _sampledVideoFormat;
+  final Map<String, String> _subtitleProperties = {};
+  PlaybackDropPolicy _dropPolicy = PlaybackDropPolicy();
+  Size? _renderViewport, _renderSize;
+  double _renderPixelRatio = 1, _renderScale = 1;
+  BoxFit _renderFit = BoxFit.contain;
+  Timer? _renderTimer;
+  bool _copyDecoder = false;
+  final _diagnostics = PlaybackDiagnostics();
   (double, double, double, int?)? _subtitlePresentation;
   Future<void>? _initializing;
   int? _initializedMs;
@@ -262,14 +330,22 @@ class MediaKitBackend extends PlaybackBackend {
   bool _networkFile = false, _wantsPlay = false;
   Duration? _seekTarget;
   final _stallMonitor = PlaybackStallMonitor();
+  final _videoMonitor = PlaybackVideoMonitor();
+  bool _videoMonitoringEnabled = true;
+  bool? _videoFrameInfoSupported;
+  Duration? _videoCheckAfter;
+  int _seekRevision = 0;
+  bool _seeking = false;
+  late final _seekQueue = PlaybackSeekQueue(_performSeek);
   PlaybackFailure? _failure, _failureHint;
   DateTime? _hintAt;
   @override
   PlaybackFailure? get failure => _failure;
 
-  void _onPlayerState() {
+  void _onPlayerState({bool progress = false}) {
     if (_closing) return;
     final state = player.state;
+    if (!progress) _scheduleRenderSize();
     // mpv briefly reports buffering while draining the final decoded packets,
     // before its completed event arrives. This is not a network underrun.
     const eofMargin = Duration(milliseconds: 250);
@@ -279,6 +355,7 @@ class MediaKitBackend extends PlaybackBackend {
             state.position + eofMargin >= state.duration &&
             state.buffer + eofMargin >= state.duration;
     final elapsed = _openWatch?.elapsed;
+    if (state.buffering || atEnd) _dropPolicy.resetWindow();
     if (elapsed != null) {
       _metrics.observe(
         elapsed: elapsed,
@@ -292,16 +369,10 @@ class MediaKitBackend extends PlaybackBackend {
           _bufferPolicy.resumeSeconds(
                 rebufferCount: _metrics.bufferingCount,
                 rate: state.rate,
+                awaitingProgress: _metrics.awaitingProgress,
               ) !=
               _resumeBufferSeconds) {
-        unawaited(_samplePerformance());
-      }
-      if (_metrics.firstFrame == null &&
-          _surfaceReady &&
-          (state.width ?? 0) > 1 &&
-          (state.height ?? 0) > 1) {
-        _metrics.firstFrame = elapsed;
-        DiagnosticLog.event('player.first_frame', fields: diagnosticFields);
+        unawaited(_updateResumeBuffer());
       }
     }
     final target = _seekTarget;
@@ -326,6 +397,14 @@ class MediaKitBackend extends PlaybackBackend {
       );
       return;
     }
+    if (progress &&
+        elapsed != null &&
+        _lastProgressNotification != null &&
+        elapsed - _lastProgressNotification! <
+            const Duration(milliseconds: 250)) {
+      return;
+    }
+    _lastProgressNotification = elapsed;
     notifyListeners();
   }
 
@@ -356,6 +435,14 @@ class MediaKitBackend extends PlaybackBackend {
   @override
   bool get canRetryWithSoftware =>
       !_sourceFailure && _failure?.decoderUnavailable != true;
+  @override
+  void setVideoMonitoringEnabled(bool enabled) {
+    if (_videoMonitoringEnabled == enabled) return;
+    _videoMonitoringEnabled = enabled;
+    _videoMonitor.reset();
+    _dropPolicy.resetWindow();
+  }
+
   @override
   bool get rendersSubtitlesNatively =>
       player.platform?.configuration.libass == true;
@@ -454,10 +541,41 @@ class MediaKitBackend extends PlaybackBackend {
     RemoteIdentity identity,
   )?
   downloadCache;
+  final Future<DownloadReadableState?> Function(DownloadSpec source)?
+  downloadSnapshot;
   PlaybackStreamProxy? _proxy;
+  ExternalPlaybackStream? _restrictedStream;
   Map<String, Object?>? _probeDiagnostics;
   Stopwatch? _openWatch;
   String _transport = 'pending';
+  bool _screenDisplayMonitoring = false;
+  double? _directReceiveBytesPerSecond;
+
+  @override
+  void setScreenDisplayMonitoringEnabled(bool enabled) {
+    _screenDisplayMonitoring = enabled;
+    if (!enabled) _directReceiveBytesPerSecond = null;
+  }
+
+  @override
+  PlaybackScreenInfo get screenInfo => PlaybackScreenInfo(
+    transport: _transport,
+    receivedBytes: _proxy?.receivedBytes,
+    bytesPerSecond: _directReceiveBytesPerSecond,
+    videoCodec: _nativeMetrics['videoCodec']?.toString(),
+    videoFps: _screenMetric('videoFps'),
+    pixelFormat: _nativeMetrics['videoPixelFormat']?.toString(),
+    hardwareDecoder: _nativeMetrics['hwdecCurrent']?.toString(),
+    decoderDroppedFrames: _screenMetric('decoderDroppedFrames')?.toInt(),
+    outputDroppedFrames: _screenMetric('outputDroppedFrames')?.toInt(),
+    bufferSeconds: _screenMetric('demuxerCacheSeconds'),
+  );
+
+  double? _screenMetric(String key) {
+    final value = double.tryParse('${_nativeMetrics[key]}');
+    return value != null && value.isFinite ? value : null;
+  }
+
   int? _networkTimeoutSeconds;
   double _resumeBufferSeconds = 1;
   final _transportChecks = <Timer>[];
@@ -473,6 +591,7 @@ class MediaKitBackend extends PlaybackBackend {
   @override
   Map<String, Object?> get diagnosticFields => {
     'engine': engineName,
+    ..._diagnostics.context,
     'transport': _transport,
     'networkTimeoutSeconds': ?_networkTimeoutSeconds,
     'openElapsedMs': ?_openWatch?.elapsedMilliseconds,
@@ -604,6 +723,87 @@ class MediaKitBackend extends PlaybackBackend {
 
   @override
   VideoController? get videoController => _video;
+
+  @override
+  Future<void> setDecoderCompatibility(bool enabled) async {
+    if (_closing ||
+        defaultTargetPlatform != TargetPlatform.android ||
+        !_hardwareAcceleration ||
+        _video == null) {
+      return;
+    }
+    final videoPlatform = await _video!.platform.future;
+    if (!videoPlatform.configuration.enableHardwareAcceleration ||
+        videoPlatform.configuration.hwdec == 'no') {
+      return;
+    }
+    final native = player.platform;
+    if (native is! NativePlayer) return;
+    _copyDecoder = enabled;
+    await native.setProperty(
+      'hwdec',
+      enabled ? 'mediacodec-copy' : 'mediacodec,mediacodec-copy',
+    );
+  }
+
+  @override
+  void setRenderViewport(
+    Size viewport,
+    double pixelRatio,
+    BoxFit fit,
+    double scale,
+  ) {
+    _renderViewport = viewport;
+    _renderPixelRatio = pixelRatio;
+    _renderFit = fit;
+    _renderScale = scale;
+    _scheduleRenderSize();
+  }
+
+  void _scheduleRenderSize() {
+    if (_closing ||
+        _video == null ||
+        _renderViewport == null ||
+        !{
+          TargetPlatform.android,
+          TargetPlatform.windows,
+          TargetPlatform.linux,
+          TargetPlatform.macOS,
+        }.contains(defaultTargetPlatform)) {
+      return;
+    }
+    final geometry = videoGeometry;
+    if (geometry == null) return;
+    final target = playbackRenderSize(
+      source: Size(geometry.width.toDouble(), geometry.height.toDouble()),
+      viewport: _renderViewport!,
+      pixelRatio: _renderPixelRatio,
+      fit: _renderFit,
+      scale: _renderScale,
+      quality: _dropPolicy.downgraded ? .75 : 1,
+    );
+    if (target == null || target == _renderSize) return;
+    _renderTimer?.cancel();
+    _renderTimer = Timer(const Duration(milliseconds: 200), () {
+      unawaited(
+        _propertyGate.run(() async {
+          if (_closing) return;
+          try {
+            await _video!.setSize(
+              width: target.width.toInt(),
+              height: target.height.toInt(),
+            );
+            _renderSize = target;
+            _nativeMetrics['renderWidth'] = target.width.toInt();
+            _nativeMetrics['renderHeight'] = target.height.toInt();
+          } catch (e, stack) {
+            if (!_closing) DiagnosticLog.error('player.render_size', e, stack);
+          }
+        }),
+      );
+    });
+  }
+
   @override
   Widget? buildVideo({required BoxFit fit, double? aspectRatio}) {
     final video = _video;
@@ -628,7 +828,18 @@ class MediaKitBackend extends PlaybackBackend {
     _cancelTransportChecks();
     _performanceTimer?.cancel();
     _openWatch = Stopwatch()..start();
+    _diagnostics.begin({
+      'playbackSource': DiagnosticLog.reference(
+        '${source.fileName}|${source.url}',
+      ),
+    });
     _nativeMetrics.clear();
+    _lastDiagnosticSample = _lastProgressNotification = null;
+    _sampledVideoFormat = null;
+    _dropPolicy = PlaybackDropPolicy();
+    _videoMonitor.reset();
+    _videoFrameInfoSupported = null;
+    _videoCheckAfter = null;
     _metrics = PlaybackMetrics();
     final sourceLimit = source.maxPlaybackConnections;
     _sourceConnectionLimit = sourceLimit != null && sourceLimit > 0
@@ -643,6 +854,7 @@ class MediaKitBackend extends PlaybackBackend {
       }.contains(defaultTargetPlatform),
     );
     _sourceBytes = source.expectedSize;
+    _directReceiveBytesPerSecond = null;
     _transport = 'pending';
     _networkTimeoutSeconds = null;
     _probeDiagnostics = null;
@@ -655,6 +867,8 @@ class MediaKitBackend extends PlaybackBackend {
     _hintAt = null;
     await _proxy?.close();
     _proxy = null;
+    await _restrictedStream?.close();
+    _restrictedStream = null;
     await initialize();
     if (_closing) return;
     final native = player.platform;
@@ -663,6 +877,9 @@ class MediaKitBackend extends PlaybackBackend {
         'cache': 'yes',
         'cache-on-disk': 'no',
         'sub-ass-override': 'no',
+        // Keep exact landing while allowing the decoder to discard pre-target
+        // frames. No timestamp-changing video filters are installed by the app.
+        'hr-seek-framedrop': 'yes',
       };
       for (final entry in properties.entries) {
         if (_closing) return;
@@ -675,7 +892,7 @@ class MediaKitBackend extends PlaybackBackend {
     if (!source.isTorrent &&
         {'http', 'https'}.contains(Uri.tryParse(url)?.scheme)) {
       _transport = 'probing';
-      final proxy = _proxy = PlaybackStreamProxy(
+      final proxy = _proxy = IsolatedPlaybackStreamProxy(
         source,
         connections: downloadCache == null ? _bufferPolicy.connections : 2,
         chunkBytes: downloadCache == null
@@ -688,6 +905,9 @@ class MediaKitBackend extends PlaybackBackend {
             ? null
             : (start, end, identity) =>
                   downloadCache!(source, start, end, identity),
+        cacheSnapshot: downloadSnapshot == null
+            ? null
+            : () => downloadSnapshot!(source),
         onFailure: (failure) => _reportFailure(failure, origin: 'proxy'),
       );
       bool available;
@@ -713,6 +933,34 @@ class MediaKitBackend extends PlaybackBackend {
         _proxy = null;
         _transport = 'direct';
         _streamingDescription = '当前地址不支持并行分段，使用原始播放连接';
+        // Native players cannot enforce signed source permissions themselves.
+        // Keep all fallback and playlist requests behind the checked relay.
+        if (source.networkPolicy != null) {
+          final stream = _restrictedStream = ExternalPlaybackStream(
+            source,
+            onFailure: (failure) =>
+                _reportFailure(failure, origin: 'restricted_relay'),
+          );
+          try {
+            await stream.start();
+          } on DownloadNetworkPolicyException catch (error) {
+            final failure = PlaybackFailure(
+              error.message,
+              PlaybackFailureKind.restricted,
+            );
+            _reportFailure(failure, origin: 'restricted_relay');
+            throw failure;
+          } on PlaybackFailure catch (failure) {
+            _reportFailure(failure, origin: 'restricted_relay');
+            rethrow;
+          }
+          if (_closing) {
+            await stream.close();
+            return;
+          }
+          url = stream.url;
+          headers = {};
+        }
       }
     } else {
       _transport = source.isTorrent ? 'torrent' : 'local';
@@ -782,6 +1030,28 @@ class MediaKitBackend extends PlaybackBackend {
     }
   }
 
+  Future<void> _updateResumeBuffer() => _propertyGate.run(() async {
+    if (_closing || !_enhancedPrefetch) return;
+    final native = player.platform;
+    if (native is! NativePlayer) return;
+    final resume = _bufferPolicy.resumeSeconds(
+      rebufferCount: _metrics.bufferingCount,
+      rate: state.rate,
+      awaitingProgress: _metrics.awaitingProgress,
+    );
+    if (resume == _resumeBufferSeconds) return;
+    await native.setProperty('cache-pause-wait', '$resume');
+    _resumeBufferSeconds = resume;
+  });
+
+  // Native getProperty is synchronous FFI even though it returns a Future.
+  // Yield an event turn between reads so frame notifications can be serviced.
+  Future<String> _readProperty(NativePlayer native, String name) async {
+    await Future<void>.delayed(Duration.zero);
+    if (_closing) return '';
+    return native.getProperty(name);
+  }
+
   Future<void> _samplePerformance() async {
     if (_closing || _sampling || _openWatch == null || _failure != null) return;
     _sampling = true;
@@ -789,16 +1059,26 @@ class MediaKitBackend extends PlaybackBackend {
       final native = player.platform;
       if (native is! NativePlayer) return;
       final state = player.state, proxy = _proxy;
-      if (_enhancedPrefetch) {
-        final resume = _bufferPolicy.resumeSeconds(
-          rebufferCount: _metrics.bufferingCount,
-          rate: state.rate,
-        );
-        if (resume != _resumeBufferSeconds) {
-          await native.setProperty('cache-pause-wait', '$resume');
-          _resumeBufferSeconds = resume;
+      if (_screenDisplayMonitoring &&
+          proxy == null &&
+          {'direct', 'torrent'}.contains(_transport)) {
+        try {
+          final speed = double.tryParse(
+            await _readProperty(native, 'cache-speed'),
+          );
+          _directReceiveBytesPerSecond =
+              _screenDisplayMonitoring &&
+                  speed != null &&
+                  speed.isFinite &&
+                  speed >= 0
+              ? speed
+              : null;
+        } catch (_) {
+          _directReceiveBytesPerSecond = null;
         }
+        if (_closing) return;
       }
+      await _updateResumeBuffer();
       if (_closing) return;
       if (downloadCache == null &&
           {'segmented', 'direct', 'torrent'}.contains(_transport)) {
@@ -810,7 +1090,10 @@ class MediaKitBackend extends PlaybackBackend {
         );
         if (target > _bufferPolicy.forwardBytes &&
             (proxy == null ||
-                proxy.resizeCache(_bufferPolicy.proxyBytesFor(target)))) {
+                await proxy.resizeCacheAsync(
+                  _bufferPolicy.proxyBytesFor(target),
+                ))) {
+          if (_closing) return;
           await native.setProperty('demuxer-max-bytes', target.toString());
           _bufferPolicy.forwardBytes = target;
         }
@@ -819,7 +1102,7 @@ class MediaKitBackend extends PlaybackBackend {
           double? nativeBufferedSeconds;
           try {
             nativeBufferedSeconds = double.tryParse(
-              await native.getProperty('demuxer-cache-duration'),
+              await _readProperty(native, 'demuxer-cache-duration'),
             );
             if (nativeBufferedSeconds != null &&
                 nativeBufferedSeconds.isFinite &&
@@ -855,33 +1138,192 @@ class MediaKitBackend extends PlaybackBackend {
                       state.rate
                 : 0,
           );
+          proxy.observeThroughput(
+            receivedBytesPerSecond: _bufferPolicy.bytesPerSecond,
+            requiredBytesPerSecond:
+                _sourceBytes > 0 && state.duration > Duration.zero
+                ? _sourceBytes /
+                      (state.duration.inMicroseconds / 1000000) *
+                      state.rate
+                : 0,
+            buffering: state.buffering,
+          );
           _streamingDescription = _proxyDescription;
         }
       }
-      for (final entry in const {
-        'hwdec-current': 'hwdecCurrent',
-        'video-format': 'videoCodec',
-        'estimated-vf-fps': 'videoFps',
-        'video-params/pixelformat': 'videoPixelFormat',
-        'decoder-frame-drop-count': 'decoderDroppedFrames',
-        'frame-drop-count': 'outputDroppedFrames',
-        'avsync': 'avSyncSeconds',
-      }.entries) {
-        if (_closing) return;
-        try {
-          final value = await native.getProperty(entry.key);
-          if (value.isNotEmpty) {
-            _nativeMetrics[entry.value] = num.tryParse(value) ?? value;
+      final elapsed = _openWatch!.elapsed;
+      final sampleSeekRevision = _seekRevision;
+      final format = (
+        state.track.video.id,
+        state.videoParams.pixelformat,
+        state.videoParams.hwPixelformat,
+        state.videoParams.w,
+        state.videoParams.h,
+      );
+      if (_sampledVideoFormat != format) {
+        _sampledVideoFormat = format;
+        _nativeMetrics.remove('videoCodec');
+        _nativeMetrics.remove('videoPixelFormat');
+        _lastDiagnosticSample = null;
+      }
+      if (_lastDiagnosticSample == null ||
+          elapsed - _lastDiagnosticSample! >= const Duration(seconds: 10)) {
+        _lastDiagnosticSample = elapsed;
+        for (final entry in {
+          'hwdec-current': 'hwdecCurrent',
+          if (!_nativeMetrics.containsKey('videoCodec'))
+            'video-format': 'videoCodec',
+          'estimated-vf-fps': 'videoFps',
+          if (!_nativeMetrics.containsKey('videoPixelFormat'))
+            'video-params/pixelformat': 'videoPixelFormat',
+          'decoder-frame-drop-count': 'decoderDroppedFrames',
+          'frame-drop-count': 'outputDroppedFrames',
+          'avsync': 'avSyncSeconds',
+        }.entries) {
+          if (_closing) return;
+          try {
+            final value = await _readProperty(native, entry.key);
+            if (value.isNotEmpty) {
+              _nativeMetrics[entry.value] = num.tryParse(value) ?? value;
+            }
+          } catch (_) {
+            // Properties unavailable for this track or older cores are optional.
           }
-        } catch (_) {
-          // Properties unavailable for this track or older cores are optional.
+        }
+        final drops = _nativeMetrics['outputDroppedFrames'];
+        if (drops is num &&
+            _dropPolicy.observe(
+              elapsed: elapsed,
+              drops: drops.toInt(),
+              fps: displayFrameRate,
+              eligible:
+                  _videoMonitoringEnabled &&
+                  _wantsPlay &&
+                  state.playing &&
+                  !state.buffering &&
+                  !state.completed &&
+                  !_seeking &&
+                  sampleSeekRevision == _seekRevision &&
+                  !_metrics.awaitingProgress &&
+                  (_videoCheckAfter == null || elapsed >= _videoCheckAfter!),
+            )) {
+          _scheduleRenderSize();
+          // Reduce GPU scaling cost, keep hardware decoding and play intent.
+          for (final entry in const {
+            'scale': 'bilinear',
+            'dscale': 'bilinear',
+            'cscale': 'bilinear',
+            'deband': 'no',
+          }.entries) {
+            await Future<void>.delayed(Duration.zero);
+            if (_closing) return;
+            await native.setProperty(entry.key, entry.value);
+          }
+          _nativeMetrics['renderPerformanceFallback'] = true;
+          DiagnosticLog.event(
+            'player.render_fallback',
+            fields: diagnosticFields,
+          );
         }
       }
-      if (!_closing) notifyListeners();
+      if (!_closing) await _sampleVideoOutput(native);
+      if (!_closing) {
+        unawaited(
+          _diagnostics.sample(_openWatch!.elapsed, () => diagnosticFields),
+        );
+        notifyListeners();
+      }
     } catch (e, stack) {
       if (!_closing) DiagnosticLog.error('player.performance_sample', e, stack);
     } finally {
       _sampling = false;
+    }
+  }
+
+  Future<void> _sampleVideoOutput(NativePlayer native) async {
+    if (_video == null || _closing) return;
+    // An unavailable value is also normal before the first output frame. Check
+    // support separately so older cores never trigger a false recovery.
+    if (_videoFrameInfoSupported == null) {
+      final properties = await _readProperty(native, 'property-list');
+      _videoFrameInfoSupported = properties
+          .split(',')
+          .contains('video-frame-info');
+    }
+    if (_closing || _videoFrameInfoSupported != true) return;
+    // This subproperty is available only when VO owns an actual current frame
+    // (vo_get_current_frame), even for progressive video where its value is no.
+    final frame = await _readProperty(native, 'video-frame-info/interlaced');
+    if (_closing) return;
+    final hasFrame = frame == 'yes' || frame == 'no';
+    final vo = await _readProperty(native, 'vo-configured');
+    if (_closing) return;
+    final seeking = await _readProperty(native, 'seeking');
+    if (_closing) return;
+    final state = player.state, elapsed = _openWatch!.elapsed;
+    final outputReady = _surfaceReady && vo == 'yes';
+    _nativeMetrics['videoOutputReady'] = outputReady;
+    _nativeMetrics['videoFrameAvailable'] = hasFrame;
+    if (_metrics.firstFrame == null && outputReady && hasFrame) {
+      _metrics.firstFrame = elapsed;
+      // Core output is measurable here; Flutter compositor presentation is not.
+      _nativeMetrics['firstFrameSignal'] = 'mpv-current-frame';
+      DiagnosticLog.event('player.first_frame', fields: diagnosticFields);
+    }
+    final tracks = state.tracks.video.where(
+      (t) =>
+          !{'auto', 'no'}.contains(t.id) &&
+          t.albumart != true &&
+          t.image != true,
+    );
+    final track =
+        tracks.where((t) => t.id == state.track.video.id).firstOrNull ??
+        (state.track.video.id == 'auto' ? tracks.firstOrNull : null);
+    final measuredFps = _nativeMetrics['videoFps'];
+    final fps =
+        track?.fps ?? (measuredFps is num ? measuredFps.toDouble() : null);
+    final stalled = _videoMonitor.observe(
+      elapsed: elapsed,
+      position: state.position,
+      outputReady: outputReady && hasFrame,
+      rate: state.rate,
+      eligible:
+          _videoMonitoringEnabled &&
+          _wantsPlay &&
+          state.playing &&
+          !state.buffering &&
+          !state.completed &&
+          !_seeking &&
+          seeking == 'no' &&
+          (_videoCheckAfter == null || elapsed >= _videoCheckAfter!) &&
+          track != null &&
+          fps != null &&
+          fps.isFinite &&
+          fps >= 1 &&
+          (state.duration == Duration.zero ||
+              state.position + const Duration(seconds: 2) < state.duration),
+    );
+    if (stalled) {
+      if (defaultTargetPlatform == TargetPlatform.android &&
+          !_copyDecoder &&
+          _nativeMetrics['hwdecCurrent'] == 'mediacodec') {
+        await setDecoderCompatibility(true);
+        _videoMonitor.reset();
+        _videoCheckAfter = elapsed + const Duration(seconds: 5);
+        _nativeMetrics['decoderCompatibilityFallback'] = true;
+        DiagnosticLog.event(
+          'player.decoder_copy_fallback',
+          fields: diagnosticFields,
+        );
+        return;
+      }
+      _reportFailure(
+        const PlaybackFailure(
+          '视频画面长时间没有输出，播放进度已保留；可重试或切换解码方式',
+          PlaybackFailureKind.decoder,
+        ),
+        origin: 'video_output_stall',
+      );
     }
   }
 
@@ -925,7 +1367,11 @@ class MediaKitBackend extends PlaybackBackend {
           : (3 * 720 / height).clamp(.1, 24).toStringAsFixed(2),
     }.entries) {
       if (_closing) return;
+      if (_subtitleProperties[entry.key] == entry.value) continue;
+      await Future<void>.delayed(Duration.zero);
+      if (_closing) return;
       await native.setProperty(entry.key, entry.value);
+      _subtitleProperties[entry.key] = entry.value;
     }
     _subtitlePresentation = next;
   });
@@ -934,15 +1380,18 @@ class MediaKitBackend extends PlaybackBackend {
   Future<void> play() {
     _wantsPlay = true;
     _stallMonitor.reset();
+    _videoMonitor.reset();
     _proxy?.setPaused(false);
     return player.play();
   }
 
   @override
   Future<void> pause() {
+    _dropPolicy.resetWindow();
     _wantsPlay = false;
     _metrics.pause(_openWatch?.elapsed ?? Duration.zero);
     _stallMonitor.reset();
+    _videoMonitor.reset();
     _proxy?.setPaused(true);
     if (_closing) return Future.value();
     final native = player.platform;
@@ -954,12 +1403,29 @@ class MediaKitBackend extends PlaybackBackend {
   }
 
   @override
-  Future<void> seek(Duration position) {
+  Future<void> seek(Duration position) => _seekQueue.seek(position);
+
+  Future<void> _performSeek(Duration position) async {
+    if (_closing) return;
+    final revision = ++_seekRevision;
+    _seeking = true;
+    _dropPolicy.resetWindow();
+    _videoMonitor.reset();
     _seekTarget = position;
     _metrics.seek(position, _openWatch?.elapsed ?? Duration.zero);
     _stallMonitor.reset();
-    _proxy?.prepareSeek();
-    return player.seek(position);
+    try {
+      await _proxy?.prepareSeekAsync();
+      await _updateResumeBuffer();
+      if (_closing) return;
+      await player.seek(position);
+    } finally {
+      if (revision == _seekRevision) {
+        _seeking = false;
+        _videoCheckAfter =
+            (_openWatch?.elapsed ?? Duration.zero) + const Duration(seconds: 3);
+      }
+    }
   }
 
   @override
@@ -993,10 +1459,14 @@ class MediaKitBackend extends PlaybackBackend {
   @override
   Future<void> close() => _closeFuture ??= _close();
   Future<void> _close() async {
+    final closeFields = diagnosticFields;
     if (_openWatch != null) {
       DiagnosticLog.event('player.transport_closed', fields: diagnosticFields);
     }
     _closing = true;
+    _renderTimer?.cancel();
+    _seekQueue.close();
+    _diagnostics.stop();
     _performanceTimer?.cancel();
     _cancelTransportChecks();
     _openWatch?.stop();
@@ -1007,8 +1477,19 @@ class MediaKitBackend extends PlaybackBackend {
     try {
       try {
         await _proxy?.close();
+        await _restrictedStream?.close();
       } finally {
         await player.dispose();
+        final diagnostics = _diagnostics;
+        if (diagnostics.supported && DiagnosticLog.active?.enabled == true) {
+          unawaited(diagnostics.afterClose(closeFields));
+          // libmpv termination is deferred for five seconds by media_kit. A
+          // second process sample distinguishes that grace period from growth
+          // that remains after teardown; neither sample delays route dismissal.
+          Timer(const Duration(seconds: 8), () {
+            unawaited(diagnostics.afterClose(closeFields, phase: 'settled'));
+          });
+        }
       }
     } finally {
       super.dispose();

@@ -15,6 +15,8 @@ enum OperationStage {
   waitDownloadOperation('等待任务操作完成'),
   stopDownloads('停止下载'),
   deleteFiles('删除本地文件'),
+  copyFiles('复制已下载文件'),
+  moveFiles('移动已下载文件'),
   removeDownloadRecords('移除下载记录'),
   cleanup('删除临时转存');
 
@@ -45,6 +47,8 @@ class OperationStep {
     this.items,
     this.queuePosition,
     this.waitingForRetry = false,
+    this.copiedBytes,
+    this.totalBytes,
   });
   final int id;
   final OperationStage stage;
@@ -53,6 +57,7 @@ class OperationStep {
   final OperationItems? items;
   final int? queuePosition;
   final bool waitingForRetry;
+  final int? copiedBytes, totalBytes;
 }
 
 class _ProgressBinding {
@@ -163,6 +168,31 @@ class OperationProgress extends ValueNotifier<List<OperationStep>> {
     }
   }
 
+  static void reportBytes(int copied, int total) {
+    final active =
+        Zone.current[_activeStepsKey] as List<(_ProgressBinding, int)>? ??
+        const [];
+    for (final (binding, id) in active) {
+      final progress = binding.progress;
+      if (!progress._current(binding.generation)) continue;
+      final index = progress.value.indexWhere(
+        (step) => step.id == id && step.status == OperationStepStatus.running,
+      );
+      if (index < 0) continue;
+      final step = progress.value[index];
+      final entries = progress.value.toList();
+      entries[index] = OperationStep(
+        id,
+        step.stage,
+        step.status,
+        items: step.items,
+        copiedBytes: copied,
+        totalBytes: total,
+      );
+      progress._publish(entries);
+    }
+  }
+
   static void reportServerStage(OperationStage stage, {int? queuePosition}) {
     final active =
         Zone.current[_activeStepsKey] as List<(_ProgressBinding, int)>? ??
@@ -243,6 +273,8 @@ class OperationProgress extends ValueNotifier<List<OperationStep>> {
       itemsRead: step.itemsRead,
       items: items,
       queuePosition: step.queuePosition,
+      copiedBytes: step.copiedBytes,
+      totalBytes: step.totalBytes,
       waitingForRetry: step.waitingForRetry,
     );
     _publish(entries);
@@ -281,6 +313,8 @@ class OperationProgress extends ValueNotifier<List<OperationStep>> {
                 itemsRead: step.itemsRead,
                 items: step.items,
                 queuePosition: step.queuePosition,
+                copiedBytes: step.copiedBytes,
+                totalBytes: step.totalBytes,
               )
             : step,
     ]);

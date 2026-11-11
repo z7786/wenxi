@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 import 'dart:io';
+import 'app_switch.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
 import '../diagnostics/diagnostic_share.dart';
@@ -203,7 +204,7 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
             ],
           ),
         ),
-        SwitchListTile.adaptive(
+        AppSwitchListTile(
           key: const Key('diagnostics-enabled'),
           contentPadding: EdgeInsets.zero,
           title: const Text('自动记录日志'),

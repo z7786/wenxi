@@ -11,6 +11,16 @@ option(MEDIA_KIT_LIBS_AVAILABLE "package:media_kit libraries are available." ON)
 
 set(PROJECT_NAME "media_kit_libs_windows_video")
 project(${PROJECT_NAME} LANGUAGES CXX)
+set(PLAYER_PROJECT_ROOT "${CMAKE_SOURCE_DIR}")
+# Flutter uses Windows directory junctions for plugins; REALPATH does not
+# reliably resolve those on every CMake/Windows version. Find the owning repo.
+while(NOT EXISTS "${PLAYER_PROJECT_ROOT}/pubspec.yaml")
+  get_filename_component(PLAYER_PARENT "${PLAYER_PROJECT_ROOT}" DIRECTORY)
+  if(PLAYER_PARENT STREQUAL PLAYER_PROJECT_ROOT)
+    message(FATAL_ERROR "Cannot locate the application player dependencies.")
+  endif()
+  set(PLAYER_PROJECT_ROOT "${PLAYER_PARENT}")
+endwhile()
 
 # Deal with MSVC incompatiblity
 add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
@@ -99,21 +109,21 @@ if(FLUTTER_TARGET_PLATFORM STREQUAL "windows-arm64")
     endif()
   endforeach()
 else()
-# Full x86-64 baseline build includes FFmpeg's PGS subtitle decoder.
-set(LIBMPV "mpv-dev-x86_64-20261108-git-8bc468896e.7z")
+# Compact default. Full PGS runtime is installed by the user into app support.
+set(LIBMPV "mpv-dev-x86_64-20241021-git-0f78584.7z")
 
 # Download URL & MD5 hash of the libmpv archive.
-set(LIBMPV_URL "https://gh-proxy.org/https://github.com/zhongfly/mpv-winbuild/releases/download/2026-11-08-8bc468896e/${LIBMPV}")
-set(LIBMPV_MD5 "f6678a79e2526b16b45ff629574fd96f")
-set(LIBMPV_SHA256 "a36392a8fbd989ae274a37c63d01ef6c51b6070a5ebd2ee26d2715ae88f90ceb")
+set(LIBMPV_URL "https://gh-proxy.com/https://github.com/media-kit/libmpv-win32-video-cmake/releases/download/20241021/${LIBMPV}")
+set(LIBMPV_MD5 "6ecf18e85b093c3f7edb16f3ee6603f3")
+set(LIBMPV_SHA256 "e23701df0adc1fe57c8ede3ff313513b0b80519870058c2d35ff02754284a007")
 
 # Download location of the libmpv archive.
 set(LIBMPV_ARCHIVE "${CMAKE_BINARY_DIR}/${LIBMPV}")
-set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv-20261108")
+set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv-20241021")
 
 # Upstream retains only recent releases. Keep the verified archive in source so
 # clean builds do not depend on a rolling release remaining available online.
-set(LIBMPV_VENDORED "${CMAKE_SOURCE_DIR}/../native/third_party/${LIBMPV}")
+set(LIBMPV_VENDORED "${PLAYER_PROJECT_ROOT}/native/third_party/${LIBMPV}")
 if(EXISTS "${LIBMPV_VENDORED}")
   file(SHA256 "${LIBMPV_VENDORED}" VENDORED_SHA256)
   if(NOT VENDORED_SHA256 STREQUAL LIBMPV_SHA256)
@@ -137,8 +147,8 @@ extract_archive_if_incomplete("${LIBMPV_ARCHIVE}" "${LIBMPV_SRC}"
   libmpv-2.dll libmpv.dll.a
   include/mpv/client.h include/mpv/render.h include/mpv/render_gl.h include/mpv/stream_cb.h)
 file(SHA256 "${LIBMPV_SRC}/libmpv-2.dll" LIBMPV_DLL_SHA256)
-if(NOT LIBMPV_DLL_SHA256 STREQUAL "7eb6d202bb3aa5d311aef32d6f56543fc160d1d3e976667ab99e2503e3ca5b57")
-  message(FATAL_ERROR "Extracted libmpv DLL does not match the pinned PGS runtime. Re-extract ${LIBMPV_ARCHIVE} into ${LIBMPV_SRC}.")
+if(NOT LIBMPV_DLL_SHA256 STREQUAL "56f9a69200863c2dcd2fb6367427ffedc35550d26f947d6c36eab37bd2a65fd5")
+  message(FATAL_ERROR "Extracted libmpv DLL does not match the pinned compact runtime. Re-extract ${LIBMPV_ARCHIVE} into ${LIBMPV_SRC}.")
 endif()
 
 # The Dart video package consumes this stable include/import-library layout.
@@ -174,10 +184,23 @@ extract_archive_if_incomplete("${ANGLE_ARCHIVE}" "${ANGLE_SRC}"
 # This full build imports Vulkan's loader even when rendering through ANGLE.
 # Keep it bundled alongside libmpv and carry the component notices.
 install(FILES
-  "${CMAKE_SOURCE_DIR}/../assets/licenses/Windows-x64-media-NOTICES.txt"
-  "${CMAKE_SOURCE_DIR}/../assets/licenses/Windows-x64-mpv-Copyright.txt"
-  "${CMAKE_SOURCE_DIR}/../assets/licenses/mpv-GPL-2.0.txt"
-  "${CMAKE_SOURCE_DIR}/../assets/licenses/FFmpeg-GPL-3.0.txt"
+  "${PLAYER_PROJECT_ROOT}/assets/licenses/Windows-x64-media-NOTICES.txt"
+  "${PLAYER_PROJECT_ROOT}/assets/licenses/Windows-x64-mpv-Copyright.txt"
+  "${PLAYER_PROJECT_ROOT}/assets/licenses/mpv-GPL-2.0.txt"
+  "${PLAYER_PROJECT_ROOT}/assets/licenses/FFmpeg-GPL-3.0.txt"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}/licenses" COMPONENT Runtime)
+
+# The fixed standalone unpacker avoids requiring a user's 7-Zip installation.
+set(PLAYER_UNPACKER "${PLAYER_PROJECT_ROOT}/native/third_party/player-7za-x64-26.01.bin")
+file(SHA256 "${PLAYER_UNPACKER}" PLAYER_UNPACKER_SHA256)
+if(NOT PLAYER_UNPACKER_SHA256 STREQUAL "5bea5af5215089d97749d438351d7288310d0b8a472616edbe1b34168ad1001c")
+  message(FATAL_ERROR "Player component unpacker verification failed.")
+endif()
+install(FILES "${PLAYER_UNPACKER}"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}/tools" RENAME "player-7za.exe" COMPONENT Runtime)
+install(FILES
+  "${PLAYER_PROJECT_ROOT}/assets/licenses/7-Zip-Extra-NOTICES.txt"
+  "${PLAYER_PROJECT_ROOT}/assets/licenses/7-Zip-LGPL-2.1.txt"
   DESTINATION "${CMAKE_INSTALL_PREFIX}/licenses" COMPONENT Runtime)
 endif()
 

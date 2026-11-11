@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'app_switch.dart';
 import '../core/json.dart';
 import '../platform/player_screenshot.dart';
 import 'player_theme.dart';
@@ -127,7 +128,7 @@ class _PlayerScreenshotPanelState extends State<PlayerScreenshotPanel> {
           '保存原始视频画面，不含播放控制按钮',
           style: TextStyle(color: Colors.white54, fontSize: 12, height: 1.5),
         ),
-        SwitchListTile(
+        AppSwitchListTile(
           contentPadding: EdgeInsets.zero,
           key: const Key('player-screenshot-subtitles'),
           title: const Text('包含字幕'),

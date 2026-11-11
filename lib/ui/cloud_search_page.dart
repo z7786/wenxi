@@ -512,7 +512,11 @@ class CloudSearchFileName extends StatelessWidget {
         name,
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 14),
+        style: const TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w500,
+          height: 1.4,
+        ),
       );
     }
     final spans = <InlineSpan>[];
@@ -540,7 +544,11 @@ class CloudSearchFileName extends StatelessWidget {
       TextSpan(children: spans),
       maxLines: 2,
       overflow: TextOverflow.ellipsis,
-      style: const TextStyle(fontSize: 14),
+      style: const TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w500,
+        height: 1.4,
+      ),
     );
   }
 }

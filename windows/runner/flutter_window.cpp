@@ -44,6 +44,8 @@ bool FlutterWindow::OnCreate() {
       flutter_controller_->engine()->messenger(), GetHandle());
   download_power_ = std::make_unique<DownloadPowerBridge>(
       flutter_controller_->engine()->messenger());
+  file_actions_ = std::make_unique<FileActionsBridge>(
+      flutter_controller_->engine()->messenger(), GetHandle());
   theme_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
           flutter_controller_->engine()->messenger(),
@@ -89,6 +91,7 @@ void FlutterWindow::OnDestroy() {
     theme_channel_.reset();
   }
   download_power_.reset();
+  file_actions_.reset();
   external_downloads_.reset();
   player_images_.reset();
   diagnostics_.reset();

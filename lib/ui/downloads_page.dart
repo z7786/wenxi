@@ -4,13 +4,13 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
-import 'package:share_plus/share_plus.dart';
 import '../app_services.dart';
 import '../core/json.dart';
 import '../domain/downloads.dart';
 import '../domain/models.dart' show CloudPlatform;
 import '../download/completed_files.dart';
 import '../platform/file_access.dart';
+import '../platform/completed_file_actions.dart';
 import '../platform/desktop_actions.dart';
 import '../platform/desktop_platform.dart';
 import '../playback/playback_sources.dart';
@@ -38,10 +38,12 @@ class DownloadsPage extends StatefulWidget {
     super.key,
     this.active = true,
     this.onPlay,
+    this.fileActions,
   });
   final AppServices services;
   final bool active;
   final Future<void> Function(DownloadTask)? onPlay;
+  final CompletedFileActions? fileActions;
   @override
   State<DownloadsPage> createState() => _DownloadsPageState();
 }
@@ -53,6 +55,8 @@ class _DownloadsPageState extends State<DownloadsPage>
   bool _foreground = true;
   bool _selecting = false, _batching = false;
   bool _detailsOpen = false;
+  bool _externalFileActionPending = false;
+  late final _fileActions = widget.fileActions ?? CompletedFileActions();
   String? _authorizingDownload;
   String? _selectionNotice;
   final _selected = <String>{};
@@ -532,9 +536,83 @@ class _DownloadsPageState extends State<DownloadsPage>
                 ),
             ],
           ),
+          if (_supportsFileTransfer)
+            Wrap(
+              spacing: 16,
+              children: [
+                for (final move in [false, true])
+                  TextButton.icon(
+                    key: Key(
+                      move ? 'downloads-batch-move' : 'downloads-batch-copy',
+                    ),
+                    onPressed: _batching || !selected.any(_transferable)
+                        ? null
+                        : () => _transferSelected(move: move),
+                    icon: Icon(
+                      move ? CupertinoIcons.folder : CupertinoIcons.doc_on_doc,
+                      size: 19,
+                    ),
+                    label: Text(move ? '移动文件' : '复制文件'),
+                  ),
+              ],
+            ),
         ],
       ),
     );
+  }
+
+  bool get _supportsFileTransfer =>
+      Platform.isWindows &&
+      Theme.of(context).platform == TargetPlatform.windows;
+  bool _transferable(DownloadTask task) =>
+      task.status == DownloadStatus.completed &&
+      task.savedPath?.isNotEmpty == true;
+
+  Future<void> _transferSelected({
+    required bool move,
+    List<String>? ids,
+  }) async {
+    if (_batching || !_supportsFileTransfer) return;
+    final targets =
+        ids ??
+        _selectedTasks.where(_transferable).map((task) => task.id).toList();
+    if (targets.isEmpty) return;
+    setState(() {
+      _batching = true;
+      _selectionNotice = null;
+    });
+    DownloadBatchResult? result;
+    try {
+      final destination = await widget.services.downloads.files
+          .chooseDirectory();
+      if (!mounted || destination == null) return;
+      result = await busy(
+        context,
+        () => widget.services.downloads.transferCompletedFiles(
+          targets,
+          destination,
+          move: move,
+        ),
+        label: '正在${move ? '移动' : '复制'} ${targets.length} 个文件…',
+      );
+    } catch (error) {
+      if (mounted) message(context, errorText(error));
+    } finally {
+      if (mounted) setState(() => _batching = false);
+    }
+    if (!mounted || result == null) return;
+    setState(() {
+      _selected.removeAll([...result!.succeeded, ...result.skipped]);
+      if (_selected.isEmpty) _selecting = false;
+    });
+    final notice =
+        '已${move ? '移动' : '复制'} ${result.succeeded.length} 个文件'
+        '${result.failed.isEmpty ? '' : '，${result.failed.length} 项失败：${errorText(result.failed.values.first)}'}';
+    if (_selecting && result.failed.isNotEmpty) {
+      setState(() => _selectionNotice = notice);
+    } else {
+      message(context, notice);
+    }
   }
 
   Future<void> _runSelectedAction(
@@ -688,6 +766,15 @@ class _DownloadsPageState extends State<DownloadsPage>
     if (task == null || _batching) return [];
     if (_selected.contains(id) && _selectedTasks.length > 1) {
       return [
+        if (_supportsFileTransfer)
+          for (final move in [false, true])
+            AppMenuAction(
+              value: move ? 'batch-move' : 'batch-copy',
+              label:
+                  '${move ? '移动文件' : '复制文件'}（${_selectedTasks.where(_transferable).length} 项）',
+              icon: move ? CupertinoIcons.folder : CupertinoIcons.doc_on_doc,
+              enabled: _selectedTasks.any(_transferable),
+            ),
         for (final action in DownloadBatchAction.values)
           AppMenuAction(
             value: 'batch-${action.name}',
@@ -721,6 +808,13 @@ class _DownloadsPageState extends State<DownloadsPage>
         icon: CupertinoIcons.info_circle,
       ),
       if (completed && files.state(task) == FileAvailability.present) ...[
+        if (_supportsFileTransfer)
+          for (final move in [false, true])
+            AppMenuAction(
+              value: move ? 'move-file' : 'copy-file',
+              label: move ? '移动文件' : '复制文件',
+              icon: move ? CupertinoIcons.folder : CupertinoIcons.doc_on_doc,
+            ),
         if (kind == FileKind.video || kind == FileKind.text)
           AppMenuAction(
             value: 'open',
@@ -733,6 +827,11 @@ class _DownloadsPageState extends State<DownloadsPage>
             label: '播放音频',
             icon: CupertinoIcons.play_rectangle,
           ),
+        const AppMenuAction(
+          value: 'open-with',
+          label: '用其他应用打开',
+          icon: CupertinoIcons.arrow_up_right_square,
+        ),
         const AppMenuAction(
           value: 'folder',
           label: '打开所在文件夹',
@@ -773,10 +872,10 @@ class _DownloadsPageState extends State<DownloadsPage>
           label: '在线播放',
           icon: CupertinoIcons.play_rectangle,
         ),
-      if (!completed && widget.services.downloads.canStream(task))
-        const AppMenuAction(
+      if (!completed && widget.services.downloads.canPlayOnline(task))
+        AppMenuAction(
           value: 'download-play',
-          label: '边下边播',
+          label: task.isStreamingPlaylist ? '在线播放' : '边下边播',
           icon: CupertinoIcons.play_rectangle,
         ),
       AppMenuAction(
@@ -996,6 +1095,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                   )
                 else
                   TransferActionButton(
+                    key: ValueKey('download-primary-action-${task.id}'),
                     label: done
                         ? unavailable
                               ? '查看文件异常'
@@ -1033,6 +1133,31 @@ class _DownloadsPageState extends State<DownloadsPage>
                                 ? widget.services.downloads.pause(task.id)
                                 : widget.services.downloads.resume(task.id),
                           ),
+                  ),
+                if (done && !unavailable)
+                  AppPopupMenuButton<String>(
+                    key: ValueKey('download-file-actions-${task.id}'),
+                    tooltip: '更多文件操作',
+                    icon: CupertinoIcons.ellipsis,
+                    actions: [
+                      const AppMenuAction(
+                        value: 'open-with',
+                        label: '用其他应用打开',
+                        icon: CupertinoIcons.arrow_up_right_square,
+                      ),
+                      const AppMenuAction(
+                        value: 'share',
+                        label: '分享文件',
+                        icon: CupertinoIcons.share,
+                      ),
+                      if (isDesktopPlatform)
+                        const AppMenuAction(
+                          value: 'folder',
+                          label: '打开所在文件夹',
+                          icon: CupertinoIcons.folder_open,
+                        ),
+                    ],
+                    onSelected: (action) => _taskAction(task.id, action),
                   ),
               ],
             ],
@@ -1140,28 +1265,39 @@ class _DownloadsPageState extends State<DownloadsPage>
   }
 
   Future<void> _share(DownloadTask task) async {
-    if (!await _checkOpen(task) || !mounted) return;
-    if (task.savedPath == null) return;
-    final box = context.findRenderObject() as RenderBox?;
-    final origin = box == null
-        ? null
-        : box.localToGlobal(Offset.zero) & box.size;
-    await busy(context, () async {
-      if (Platform.isAndroid) {
-        await nativeChannelOpen(
+    await _externalFileAction(task, share: true);
+  }
+
+  Future<void> _externalFileAction(
+    DownloadTask task, {
+    bool share = false,
+  }) async {
+    if (_externalFileActionPending) return;
+    _externalFileActionPending = true;
+    try {
+      if (!await _checkOpen(task) || !mounted || task.savedPath == null) return;
+      final box = context.findRenderObject() as RenderBox?;
+      final origin = box != null && box.hasSize && !box.size.isEmpty
+          ? box.localToGlobal(Offset.zero) & box.size
+          : null;
+      if (share) {
+        await _fileActions.share(
           task.savedPath!,
-          name: task.spec.fileName,
-          share: true,
+          task.spec.fileName,
+          origin: origin,
         );
       } else {
-        await SharePlus.instance.share(
-          ShareParams(
-            files: [XFile(task.savedPath!)],
-            sharePositionOrigin: origin,
-          ),
+        await _fileActions.openWith(
+          task.savedPath!,
+          task.spec.fileName,
+          origin: origin,
         );
       }
-    });
+    } catch (error) {
+      if (mounted) message(context, errorText(error));
+    } finally {
+      _externalFileActionPending = false;
+    }
   }
 
   String _connectionLabel(DownloadTask task) {
@@ -1335,6 +1471,13 @@ class _DownloadsPageState extends State<DownloadsPage>
                           title: const Text('分享文件'),
                           onTap: () => Navigator.pop(context, 'share'),
                         ),
+                        ListTile(
+                          leading: const Icon(
+                            CupertinoIcons.arrow_up_right_square,
+                          ),
+                          title: const Text('用其他应用打开'),
+                          onTap: () => Navigator.pop(context, 'open-with'),
+                        ),
                       ] else if (task.status != DownloadStatus.completed)
                         ListTile(
                           leading: Icon(
@@ -1379,12 +1522,18 @@ class _DownloadsPageState extends State<DownloadsPage>
                           onTap: () => Navigator.pop(context, 'torrent-play'),
                         ),
                       if (task.status != DownloadStatus.completed &&
-                          widget.services.downloads.canStream(task))
+                          widget.services.downloads.canPlayOnline(task))
                         ListTile(
                           key: const Key('download-stream-play'),
                           leading: const Icon(CupertinoIcons.play_rectangle),
-                          title: const Text('边下边播'),
-                          subtitle: const Text('开始播放，退出播放器后继续下载'),
+                          title: Text(
+                            task.isStreamingPlaylist ? '在线播放' : '边下边播',
+                          ),
+                          subtitle: Text(
+                            task.isStreamingPlaylist
+                                ? '播放与下载独立取流，不复用已下载片段'
+                                : '开始播放，退出播放器后继续下载',
+                          ),
                           onTap: () => Navigator.pop(context, 'download-play'),
                         ),
                       ListTile(
@@ -1435,6 +1584,12 @@ class _DownloadsPageState extends State<DownloadsPage>
     final task = widget.services.downloads.task(id);
     if (task == null) return;
     switch (action) {
+      case 'batch-copy':
+      case 'batch-move':
+        await _transferSelected(move: action == 'batch-move');
+      case 'copy-file':
+      case 'move-file':
+        await _transferSelected(move: action == 'move-file', ids: [id]);
       case 'details':
         await _details(context, id);
       case 'select':
@@ -1506,6 +1661,8 @@ class _DownloadsPageState extends State<DownloadsPage>
         await _open(task, reveal: true);
       case 'share':
         await _share(task);
+      case 'open-with':
+        await _externalFileAction(task);
       case 'copy':
         if (task.spec.needsPreparation) {
           message(context, '下载链接尚未准备好，请稍后重试');

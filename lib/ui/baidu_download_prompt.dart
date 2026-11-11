@@ -27,8 +27,7 @@ Future<bool> confirmBaiduDownload(
       scrollable: true,
       title: const Text('百度网盘下载提示'),
       content: const Text(
-        '百度网盘风控严重，下载存在一定风险可能导致账号被限制，请自行权衡，另外尽量不要一次性下载太多文件易导致下载失败。\n\n'
-        '下载单个文件大于 1 GB 时会限速。',
+        '百度网盘风控严重，下载存在一定风险可能导致账号被限制，请自行权衡，另外尽量不要一次性下载太多文件易导致下载失败。',
         style: TextStyle(fontSize: 14, height: 1.6),
       ),
       actions: [

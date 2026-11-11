@@ -8,6 +8,27 @@ import 'package:asterlink/domain/models.dart';
 import 'support.dart';
 
 void main() {
+  test('File byte progress survives item updates and completion', () async {
+    final progress = OperationProgress();
+    addTearDown(progress.dispose);
+    await progress.run(
+      () => OperationProgress.step(OperationStage.copyFiles, () async {
+        OperationProgress.reportBytes(512, 1024);
+        OperationProgress.reportItems((
+          processed: 1,
+          total: 2,
+          succeeded: 1,
+          failed: 0,
+          skipped: 0,
+          activity: null,
+        ));
+        expect(progress.value.single.copiedBytes, 512);
+      }),
+    );
+    expect(progress.value.single.totalBytes, 1024);
+    expect(progress.value.single.copiedBytes, 512);
+    expect(progress.value.single.items!.succeeded, 1);
+  });
   test(
     'Item progress deduplicates updates and retains returned failures',
     () async {

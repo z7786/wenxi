@@ -102,7 +102,9 @@ void main() {
     connector = _ClipboardShare();
     services.cloud.connectors[CloudPlatform.uc] = connector;
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-    await tester.pumpWidget(AsterLinkApp(services, initialTab: tab == 0 ? 0 : tab + 1));
+    await tester.pumpWidget(
+      AsterLinkApp(services, initialTab: tab == 0 ? 0 : tab + 1),
+    );
     await tester.pump(const Duration(milliseconds: 400));
     await tester.pumpAndSettle();
   }
@@ -227,6 +229,11 @@ void main() {
   ) async {
     await render(tester, tab: 3);
     await tester.scrollUntilVisible(find.text('自动识别剪贴板链接'), 150);
+    await Scrollable.ensureVisible(
+      tester.element(find.text('自动识别剪贴板链接')),
+      alignment: .3,
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.text('自动识别剪贴板链接'));
     await tester.pumpAndSettle();
     expect(services.settings.clipboardRecognition, isFalse);

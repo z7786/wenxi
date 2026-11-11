@@ -132,6 +132,44 @@ class FileOpeningTest {
         assertEquals(listOf<FileOpenFailure?>(null), results)
     }
 
+    @Test fun choosingAnApplicationForApkDoesNotStartInstallationAuthorization() {
+        allowed = false
+        opener.open(uri.toString(), "app.apk", false, true, results::add)
+        val chooser = shadowOf(activity).nextStartedActivity
+        assertEquals(Intent.ACTION_CHOOSER, chooser.action)
+        @Suppress("DEPRECATION")
+        val opened = chooser.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)!!
+        assertEquals(Intent.ACTION_VIEW, opened.action)
+        assertEquals(FileOpening.APK_MIME, opened.type)
+        assertEquals(uri, opened.data)
+        assertEquals(uri, opened.clipData!!.getItemAt(0).uri)
+        assertNotEquals(0, opened.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        assertEquals(0, opened.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        assertEquals(0, permissionChecks)
+        assertEquals(listOf<FileOpenFailure?>(null), results)
+    }
+
+    @Test fun choosingVideoApplicationUsesVideoMimeInsteadOfWrongProviderMime() {
+        opener.open(uri.toString(), "video.MP4", false, true, results::add)
+        val chooser = shadowOf(activity).nextStartedActivity
+        @Suppress("DEPRECATION")
+        val opened = chooser.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)!!
+        assertEquals(Intent.ACTION_VIEW, opened.action)
+        assertEquals("video/mp4", opened.type)
+        assertEquals(uri, opened.data)
+        assertEquals(0, permissionChecks)
+    }
+
+    @Test fun sharingVideoUsesVideoMimeInsteadOfWrongProviderMime() {
+        opener.open(uri.toString(), "video.mp4", true, results::add)
+        val chooser = shadowOf(activity).nextStartedActivity
+        @Suppress("DEPRECATION")
+        val shared = chooser.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)!!
+        assertEquals(Intent.ACTION_SEND, shared.action)
+        assertEquals("video/mp4", shared.type)
+        assertEquals(uri, shared.clipData!!.getItemAt(0).uri)
+    }
+
     @Test fun ordinaryFileUsesChooserWithoutInstallPermission() {
         allowed = false
         opener.open(uri.toString(), "archive.zip", false, results::add)

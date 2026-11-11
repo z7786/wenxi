@@ -23,6 +23,7 @@ import '../domain/github_acceleration.dart';
 import '../domain/settings.dart';
 import '../domain/torrent.dart';
 import '../platform/file_access.dart';
+import '../platform/completed_file_transfer.dart';
 import '../platform/android_download_file.dart';
 import '../platform/native_engine.dart';
 import '../lan/lan_download_route.dart';
@@ -241,6 +242,7 @@ class DownloadManager extends ChangeNotifier {
   final _running = <String, _Run>{};
   final _unsettledRuns = <_Run>{};
   final _controls = <String, AsyncGate>{};
+  final _fileTransfers = <Future<DownloadBatchResult>>{};
   final _guestDownloadBatches = <String, _GuestDownloadBatch>{};
   final _pumpGate = AsyncGate();
   final _removalGate = AsyncGate();
@@ -294,6 +296,9 @@ class DownloadManager extends ChangeNotifier {
   DownloadTask? task(String id) => _tasks[id];
 
   bool canStream(DownloadTask task) =>
+      canPlayOnline(task) && !task.isStreamingPlaylist;
+
+  bool canPlayOnline(DownloadTask task) =>
       !task.spec.isTorrent &&
       task.status != DownloadStatus.cancelled &&
       {FileKind.video, FileKind.audio}.contains(fileKind(task.spec.fileName)) &&
@@ -305,7 +310,7 @@ class DownloadManager extends ChangeNotifier {
   }) async {
     require(!_closing, '应用正在退出');
     final current = _tasks[id];
-    require(current != null && canStream(current), '此下载任务无法边下边播');
+    require(current != null && canPlayOnline(current), '此下载任务无法在线播放');
     await (_cacheAccess[id] ??= AsyncGate()).run(() async {
       require(!_closing && _tasks.containsKey(id), '下载任务已关闭');
       _playbackHolds[id] = (_playbackHolds[id] ?? 0) + 1;
@@ -339,11 +344,15 @@ class DownloadManager extends ChangeNotifier {
     }
 
     try {
-      if (refresh && current!.spec.source != null) {
+      final latest = _tasks[id];
+      require(latest != null, '下载任务已关闭');
+      if (refresh &&
+          latest!.status != DownloadStatus.completed &&
+          latest.spec.source != null) {
         // CloudRepository.refresh returns a retained source of the same file.
-        source = await refreshSource(current.spec);
+        source = await refreshSource(latest.spec);
       } else {
-        source = current!.spec.copyWith();
+        source = latest!.spec.copyWith();
         cleanups.retain(source.cleanup);
       }
       require(!_closing && _tasks[id] != null, '下载任务已关闭');
@@ -351,6 +360,51 @@ class DownloadManager extends ChangeNotifier {
       _schedule();
       return DownloadPlaybackCache(
         source: source,
+        snapshot: () async {
+          require(!released && !_closing, '播放已结束');
+          final state = _readable[id];
+          if (state == null || !state.identity.canResume(state.identity)) {
+            return null;
+          }
+          for (final range in state.ranges) {
+            if (range.$2 <= range.$1) continue;
+            // Confirm the cache still exists; sparse file length is not proof
+            // that any particular byte was written by the downloader.
+            final byte = await _readPlaybackCache(
+              id,
+              range.$1,
+              range.$1,
+              state.identity,
+            );
+            if (byte != null) return state;
+          }
+          return null;
+        },
+        readAvailable: (start, end, identity) async {
+          require(!released && !_closing, '播放已结束');
+          final state = _readable[id];
+          final range = state?.ranges
+              .where((range) => range.$1 <= start && range.$2 > start)
+              .firstOrNull;
+          if (range != null) {
+            final bytes = await _readPlaybackCache(
+              id,
+              start,
+              end < range.$2 ? end : range.$2 - 1,
+              identity,
+            );
+            if (bytes != null) return bytes;
+          }
+          final task = _tasks[id];
+          require(task != null, '下载任务已删除');
+          require(
+            task!.active || task.status == DownloadStatus.completed,
+            task.status == DownloadStatus.failed
+                ? '下载失败，请继续下载后重试播放'
+                : '下载已暂停，请继续下载后重试播放',
+          );
+          return null;
+        },
         read: (start, end, identity) async {
           require(!released && !_closing, '播放已结束');
           final bytes = await _readPlaybackCache(id, start, end, identity);
@@ -1755,6 +1809,141 @@ class DownloadManager extends ChangeNotifier {
     }
     await files.delete(savedPath);
   }
+
+  Future<DownloadBatchResult> transferCompletedFiles(
+    List<String> ids,
+    String destination, {
+    required bool move,
+  }) {
+    final operation = _transferCompletedFiles(ids, destination, move: move);
+    _fileTransfers.add(operation);
+    unawaited(
+      operation.then<void>(
+        (_) => _fileTransfers.remove(operation),
+        onError: (Object _) {
+          _fileTransfers.remove(operation);
+        },
+      ),
+    );
+    return operation;
+  }
+
+  Future<DownloadBatchResult> _transferCompletedFiles(
+    List<String> ids,
+    String destination, {
+    required bool move,
+  }) => OperationProgress.step(
+    move ? OperationStage.moveFiles : OperationStage.copyFiles,
+    () async {
+      require(Platform.isWindows, '当前系统不支持批量复制或移动已下载文件');
+      final targets = ids.toSet().toList(growable: false);
+      final succeeded = <String>[], skipped = <String>[];
+      final failed = <String, Object>{};
+      var cancelled = false;
+      void report() => OperationProgress.reportItems((
+        processed: succeeded.length + skipped.length + failed.length,
+        total: targets.length,
+        succeeded: succeeded.length,
+        failed: failed.length,
+        skipped: skipped.length,
+        activity: null,
+      ));
+      report();
+      for (final id in targets) {
+        if (_closing || RequestScope.current?.isCancelled == true) {
+          cancelled = true;
+          break;
+        }
+        try {
+          final changed = await _control(id, () async {
+            void checkpoint() {
+              RequestScope.checkpoint();
+              require(!_closing, '下载管理已关闭');
+            }
+
+            checkpoint();
+            final task = _tasks[id];
+            if (task == null || task.status != DownloadStatus.completed) {
+              return false;
+            }
+            require(!move || !_playbackHolds.containsKey(id), '请先关闭此任务的播放器再移动');
+            require(task.savedPath?.isNotEmpty == true, '文件保存位置无法读取');
+            final uri = Uri.tryParse(task.savedPath!);
+            require(
+              uri == null ||
+                  uri.scheme.isEmpty ||
+                  uri.scheme == 'file' ||
+                  p.windows.isAbsolute(task.savedPath!),
+              '此文件位置不支持复制或移动',
+            );
+            final source = uri?.scheme == 'file'
+                ? File.fromUri(uri!)
+                : File(task.savedPath!);
+            var lastProgressMs = -100;
+            final watch = Stopwatch()..start();
+            OperationProgress.reportBytes(0, task.total);
+            final output = await CompletedFileTransfer.publish(
+              source,
+              destination,
+              move: move,
+              checkpoint: checkpoint,
+              onProgress: (copied, total) {
+                if (copied == total ||
+                    watch.elapsedMilliseconds - lastProgressMs >= 100) {
+                  lastProgressMs = watch.elapsedMilliseconds;
+                  OperationProgress.reportBytes(copied, total);
+                }
+              },
+            );
+            if (move) {
+              try {
+                checkpoint();
+                // Persist the new name before unlinking the old one. A process
+                // interruption leaves a readable record and at worst two names.
+                await _update(id, {'savedPath': output.path, 'error': null});
+              } catch (_) {
+                _tasks[id] = task;
+                notifyListeners();
+                // A concurrent snapshot may have observed the new path. Keep
+                // both files if rollback persistence fails, so either record
+                // remains readable after a restart.
+                await _persist();
+                await output.delete();
+                rethrow;
+              }
+              try {
+                await source.delete();
+              } catch (_) {
+                await _update(id, {'savedPath': task.savedPath});
+                await output.delete();
+                throw const AppException('原文件正在使用或无法删除，已保留原位置，请关闭播放器后重试');
+              }
+            }
+            return true;
+          });
+          (changed ? succeeded : skipped).add(id);
+        } catch (error) {
+          if (_closing || RequestScope.current?.isCancelled == true) {
+            cancelled = true;
+            break;
+          }
+          failed[id] = error;
+        }
+        report();
+      }
+      return DownloadBatchResult(
+        succeeded: succeeded,
+        skipped: skipped,
+        failed: failed,
+        cancelled: cancelled,
+      );
+    },
+    statusForResult: (result) => result.cancelled
+        ? OperationStepStatus.cancelled
+        : result.failed.isNotEmpty
+        ? OperationStepStatus.failed
+        : OperationStepStatus.completed,
+  );
 
   Future<DownloadBatchResult?> _deleteIdleRecords(
     List<String> ids, {
@@ -3423,6 +3612,7 @@ class DownloadManager extends ChangeNotifier {
     _foregroundTimer?.cancel();
     _foregroundTimer = null;
     await pauseAll();
+    await Future.wait(_fileTransfers.toList());
     // Completed tasks can still be cleaning files or publishing their last
     // notification, after they no longer count as active downloads.
     await Future.wait(_unsettledRuns.map((run) => run.done).toList());
