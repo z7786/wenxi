@@ -81,6 +81,7 @@ endif()
 
 set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
+include(player_extractor.cmake)
 
 # Bundle the compiler's redistributable runtime so a clean Windows machine can
 # launch the complete release folder without a separate Visual C++ installer.

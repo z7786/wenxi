@@ -33,6 +33,14 @@ def stage(root, platform, installer=None, architecture='x64'):
         for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so'):
             if not (runtime / name).is_file():
                 raise ValueError('Windows runtime is incomplete')
+        if architecture == 'x64':
+            extractor = runtime / 'tools/player-7za.exe'
+            if not extractor.is_file():
+                raise ValueError('Windows runtime is missing the player component extractor')
+            if (extractor.stat().st_size != 1335296 or
+                    hashlib.sha256(extractor.read_bytes()).hexdigest() !=
+                    '5bea5af5215089d97749d438351d7288310d0b8a472616edbe1b34168ad1001c'):
+                raise ValueError('Windows player component extractor did not verify')
         files = sorted(p for p in runtime.rglob('*') if p.is_file())
         for path in files:
             relative = path.relative_to(runtime)
