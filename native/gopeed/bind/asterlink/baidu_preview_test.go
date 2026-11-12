@@ -26,6 +26,7 @@ func TestBaiduPreviewBoundedRequestsAndRestart(t *testing.T) {
 				var afterRestart atomic.Bool
 				var resumedMu sync.Mutex
 				var resumedOffsets []int64
+				firstBatchReady := make(chan struct{})
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					var first, last int
 					if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &first, &last); err != nil || first < 0 || last < first || last >= len(data) {
@@ -41,14 +42,26 @@ func TestBaiduPreviewBoundedRequestsAndRestart(t *testing.T) {
 						return
 					}
 					if first != 0 || last != 0 {
-						requests.Add(1)
+						requestNumber := requests.Add(1)
 						n := active.Add(1)
 						defer active.Add(-1)
 						for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
 						}
-						// Keep each request open long enough to observe the parallel
-						// request budget even on a fast local loopback connection.
-						time.Sleep(15 * time.Millisecond)
+						// Hold the first batch until every configured connection has
+						// arrived. A short sleep can miss one on a busy CI host.
+						if requestNumber <= int32(connections) {
+							if requestNumber == int32(connections) {
+								close(firstBatchReady)
+							}
+							select {
+							case <-firstBatchReady:
+							case <-time.After(5 * time.Second):
+								t.Errorf("first batch did not reach %d connections", connections)
+								return
+							case <-r.Context().Done():
+								return
+							}
+						}
 						if afterRestart.Load() {
 							resumedMu.Lock()
 							resumedOffsets = append(resumedOffsets, int64(first))
