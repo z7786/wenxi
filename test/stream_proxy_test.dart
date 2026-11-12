@@ -1236,12 +1236,13 @@ void main() {
       expect(proxy.cachedBytes, lessThanOrEqualTo(32768));
       expect(origin.cookies, everyElement('fixture=private'));
       // Let speculative reads settle before checking cache reuse: on a busy
-      // host their reserved bytes may evict the just-consumed range. A paused
-      // preview warms one bounded range without continuing read-ahead.
+      // host their reserved bytes may evict the just-consumed range. Warm the
+      // complete paused chunk: a shorter read can cancel its unfinished suffix
+      // before it becomes a reusable completed cache entry.
       proxy.setPaused(true);
       await until(() => proxy.activeRequests == 0);
       proxy.prepareSeek();
-      expect(await read(172100, 175000), origin.bytes.sublist(172100, 175001));
+      expect(await read(172100, 180223), origin.bytes.sublist(172100, 180224));
       await until(() => proxy.activeRequests == 0);
       bool overlapsSeek((int, int) range) =>
           range.$1 <= 175000 && range.$2 >= 172100;

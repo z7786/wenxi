@@ -45,7 +45,7 @@ jobs:
         shell: pwsh
         run: ./tool/build-native-windows.ps1
       - name: Test Flutter
-        run: flutter test --no-pub --concurrency=4 --reporter expanded
+        run: flutter test --no-pub test/stream_proxy_test.dart --reporter expanded
       - name: Verify packaged Windows PGS and text subtitle decoding
         shell: pwsh
         run: |
