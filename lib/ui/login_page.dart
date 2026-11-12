@@ -8,6 +8,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../app_services.dart';
 import '../core/json.dart';
 import '../data/http.dart';
+import '../data/cloud_browser_ua.dart';
 import '../data/providers/baidu.dart';
 import '../data/providers/pan123.dart';
 import '../data/providers/uc_tv.dart';
@@ -543,7 +544,7 @@ class _WebLoginPageState extends State<WebLoginPage>
   bool _baiduAutoReturn = false;
   String _baiduError = '';
   bool get _baiduNative =>
-      widget.baiduNativeLogin && widget.target.platform == CloudPlatform.baidu;
+      widget.baiduNativeLogin && _target.platform == CloudPlatform.baidu;
   bool get _baiduBusy =>
       _baiduExecuting ||
       const {
@@ -554,7 +555,7 @@ class _WebLoginPageState extends State<WebLoginPage>
   final _windows = <_WebLoginWindow>[];
   int _pollSequence = 0;
   bool get _flushLogin =>
-      Platform.isWindows && widget.target.platform == CloudPlatform.baidu;
+      Platform.isWindows && _target.platform == CloudPlatform.baidu;
   String _weiyunCaptureState = '';
   String _tianyiBrowserId = '', _tianyiCaptureState = '';
   bool ready = false,
@@ -567,14 +568,37 @@ class _WebLoginPageState extends State<WebLoginPage>
       passwordSent = false,
       passwordFallback = false;
   double progress = 0;
-  String get _initialStatus => widget.target.platform == CloudPlatform.xunlei
+  String get _initialStatus => _target.platform == CloudPlatform.xunlei
       ? '小米账号可在网页底部「更多方式」中登录，完成后自动保存'
       : '完成网页登录后将自动保存登录信息';
   late String status = _initialStatus;
   String error = '';
   bool get active => mounted && !leaving && !completed;
   bool get checking => checkingWeb != null;
-  late final diagnostics = WebLoginDiagnostics(widget.target.platform);
+  late final diagnostics = WebLoginDiagnostics(_target.platform);
+  late final _target = () {
+    final target = widget.target;
+    if (!CloudBrowserUa.supports(target.platform) ||
+        !CloudBrowserUa.ordinary(target.userAgent)) {
+      return target;
+    }
+    final identities = widget.services.cloud.browserUa;
+    return WebLoginTarget(
+      target.platform,
+      target.url,
+      target.cookieDomains,
+      userAgent: widget.services.vault.withAccount(
+        target.platform,
+        widget.accountId ??
+            widget.services.vault.activeAccountId(target.platform),
+        () => identities.selected(target.platform),
+      ),
+      desktopMode: target.desktopMode,
+      localStorageKey: target.localStorageKey,
+      clearCookieDomains: target.clearCookieDomains,
+      storageOrigins: target.storageOrigins,
+    );
+  }();
   // Creation and event callbacks can wrap the same native controller twice.
   bool _sameWeb(InAppWebViewController? left, InAppWebViewController? right) =>
       left != null && right != null && identical(left.platform, right.platform);
@@ -596,7 +620,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         stage: 'cleanup',
         flush: _flushLogin,
       );
-      await forgetWebLoginCookies(manager, widget.target);
+      await forgetWebLoginCookies(manager, _target);
       diagnostics.record(
         'cookie_cleanup_completed',
         stage: 'cleanup',
@@ -622,7 +646,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     if (_baiduNative) unawaited(_baiduLifecycle('close'));
     widget.passwordLogin?.clear();
     timer?.cancel();
-    widget.services.login.invalidate(widget.target.platform);
+    widget.services.login.invalidate(_target.platform);
     unawaited(_forgetBrowserCookies(logFailure: false));
   }
 
@@ -835,7 +859,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     if (manualOpen || !active) return;
     manualOpen = true;
     widget.passwordLogin?.clear();
-    widget.services.login.invalidate(widget.target.platform);
+    widget.services.login.invalidate(_target.platform);
     if (_baiduNative) await _baiduLifecycle('pause');
     if (!mounted || !active) return;
     try {
@@ -844,7 +868,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         MaterialPageRoute(
           builder: (_) => ManualLoginPage(
             widget.services,
-            widget.target.platform,
+            _target.platform,
             accountId: widget.accountId,
           ),
         ),
@@ -866,7 +890,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     timer?.cancel();
     diagnostics.record('initialize_started', stage: 'initialize');
     try {
-      widget.services.control.checkCloud(widget.target.platform);
+      widget.services.control.checkCloud(_target.platform);
       environment = await widget.services.webEnvironment();
       if (!active) return;
       diagnostics.record(
@@ -874,7 +898,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         stage: 'initialize',
         flush: _flushLogin,
       );
-      widget.services.control.checkCloud(widget.target.platform);
+      widget.services.control.checkCloud(_target.platform);
       cookies = CookieManager.instance(webViewEnvironment: environment);
       // Clear this login and its authentication hosts before rendering. Apple
       // search shares the default store and keeps unrelated challenge cookies.
@@ -908,7 +932,7 @@ class _WebLoginPageState extends State<WebLoginPage>
   }
 
   Future<String> _readCredentials(InAppWebViewController web, int poll) async {
-    final target = widget.target;
+    final target = _target;
     final readCookies =
         target.localStorageKey == null ||
         target.platform == CloudPlatform.feijipan ||
@@ -1165,7 +1189,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         if (!active || manualOpen || !_baiduOwnerCurrent()) return;
       }
       if (userInitiated) setState(() => status = '正在检测登录信息…');
-      final target = widget.target;
+      final target = _target;
       final browsers = [
         for (final window in _windows.reversed)
           if (window.controller != null) window.controller!,
@@ -1227,6 +1251,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         target.platform,
         candidate,
         accountId: widget.accountId,
+        browserUserAgent: target.userAgent,
         rememberedLogin: passwordSent
             ? widget.passwordLogin?.rememberedLogin ?? const {}
             : const {},
@@ -1319,9 +1344,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       return;
     }
     try {
-      if (!widget.target.canReadLocalStorage(
-        (await web.getUrl())?.toString(),
-      )) {
+      if (!_target.canReadLocalStorage((await web.getUrl())?.toString())) {
         return;
       }
       final state = await web.evaluateJavascript(source: attempt.statusScript);
@@ -1353,7 +1376,7 @@ class _WebLoginPageState extends State<WebLoginPage>
   void _continueWebLogin() {
     if (!active) return;
     widget.passwordLogin?.clear();
-    widget.services.login.invalidate(widget.target.platform);
+    widget.services.login.invalidate(_target.platform);
     setState(() {
       passwordFallback = true;
       status = _initialStatus;
@@ -1364,10 +1387,10 @@ class _WebLoginPageState extends State<WebLoginPage>
     if (!_current(web)) return;
     diagnostics.pageLoaded();
     try {
-      if (widget.target.desktopMode && !_baiduNative) {
+      if (_target.desktopMode && !_baiduNative) {
         await web.evaluateJavascript(source: desktopLoginViewportScript);
       }
-      if (widget.target.platform == CloudPlatform.tianyi && _current(web)) {
+      if (_target.platform == CloudPlatform.tianyi && _current(web)) {
         await web.evaluateJavascript(source: TianyiWebLogin.mobileFormScript);
       }
       final attempt = widget.passwordLogin;
@@ -1401,7 +1424,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       return;
     }
     timer?.cancel();
-    widget.services.login.invalidate(widget.target.platform);
+    widget.services.login.invalidate(_target.platform);
     // A dead renderer cannot be reused. Removing the platform view
     // lets the explicit retry create a fresh one instead of reloading it.
     controller = null;
@@ -1439,19 +1462,19 @@ class _WebLoginPageState extends State<WebLoginPage>
     webViewEnvironment: environment,
     windowId: popup?.id,
     initialUrlRequest: popup == null
-        ? URLRequest(url: WebUri(widget.target.url))
+        ? URLRequest(url: WebUri(_target.url))
         : null,
     initialSettings:
         webSettings(
-            userAgent: widget.target.userAgent,
-            desktopMode: widget.target.desktopMode,
+            userAgent: _target.userAgent,
+            desktopMode: _target.desktopMode,
             isPopup: popup != null,
           )
           ..useOnRenderProcessGone = true
           ..supportMultipleWindows = true
           ..javaScriptCanOpenWindowsAutomatically = true,
     initialUserScripts: UnmodifiableListView([
-      if (widget.target.desktopMode && !_baiduNative) desktopLoginUserScript(),
+      if (_target.desktopMode && !_baiduNative) desktopLoginUserScript(),
       if (_baiduNative && popup == null)
         UserScript(
           source: BaiduWebLogin.bootstrap(_baiduSession),
@@ -1459,33 +1482,33 @@ class _WebLoginPageState extends State<WebLoginPage>
           forMainFrameOnly: true,
           allowedOriginRules: const {BaiduWebLogin.origin},
         ),
-      if (widget.target.platform == CloudPlatform.tianyi)
+      if (_target.platform == CloudPlatform.tianyi)
         UserScript(
           source: TianyiWebLogin.mobileFormScript,
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
           forMainFrameOnly: true,
           allowedOriginRules: const {'https://open.e.189.cn'},
         ),
-      if (widget.target.platform == CloudPlatform.tianyi)
+      if (_target.platform == CloudPlatform.tianyi)
         UserScript(
           source: TianyiWebLogin.bootstrapScript,
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
           forMainFrameOnly: true,
           allowedOriginRules: TianyiWebLogin.origins,
         ),
-      if (widget.target.platform == CloudPlatform.weiyun)
+      if (_target.platform == CloudPlatform.weiyun)
         UserScript(
           source: WeiyunWebLogin.bootstrapScript,
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
           forMainFrameOnly: true,
           allowedOriginRules: WeiyunWebLogin.origins,
         ),
-      if (widget.target.localStorageKey != null)
+      if (_target.localStorageKey != null)
         UserScript(
-          source: widget.target.prepareStorageScript(_storageSession),
+          source: _target.prepareStorageScript(_storageSession),
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
           forMainFrameOnly: true,
-          allowedOriginRules: widget.target.storageOriginRules,
+          allowedOriginRules: _target.storageOriginRules,
         ),
       if (widget.passwordLogin != null && popup == null)
         UserScript(
@@ -1561,7 +1584,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     shouldOverrideUrlLoading: (web, action) async {
       final url = action.request.url;
       if (_current(web) &&
-          widget.target.platform == CloudPlatform.tianyi &&
+          _target.platform == CloudPlatform.tianyi &&
           action.isForMainFrame &&
           TianyiWebLogin.isCompletionLanding(url?.toString())) {
         // The official mobile SSO callback has already stored its HttpOnly
@@ -1617,10 +1640,8 @@ class _WebLoginPageState extends State<WebLoginPage>
     }
     try {
       final web = _windows.isEmpty ? controller : _windows.last.controller;
-      if (widget.target.platform == CloudPlatform.tianyi) {
-        await web?.loadUrl(
-          urlRequest: URLRequest(url: WebUri(widget.target.url)),
-        );
+      if (_target.platform == CloudPlatform.tianyi) {
+        await web?.loadUrl(urlRequest: URLRequest(url: WebUri(_target.url)));
       } else {
         await web?.reload();
       }
@@ -1662,7 +1683,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     child: PageFrame(
       title: _baiduNative
           ? '百度${_baiduWebVisible ? '登录验证' : '登录'}'
-          : '${widget.target.platform.shortName}${widget.passwordLogin == null || passwordFallback ? '网页登录' : '登录验证'}',
+          : '${_target.platform.shortName}${widget.passwordLogin == null || passwordFallback ? '网页登录' : '登录验证'}',
       actions: [
         IconButton(
           tooltip: '刷新网页',

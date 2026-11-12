@@ -456,6 +456,73 @@ void main() {
     },
   );
 
+  test(
+    'incognito keeps existing history and survives restored local state',
+    () async {
+      final api = SearchApiFixture(
+        (_, _) => Stream.value(
+          ResourceSearchBatch([searchHit('cached')], complete: true),
+        ),
+      );
+      final store = StateStore.memory();
+      addTearDown(store.dispose);
+      final search = ResourceSearch(store: store, api: api);
+      addTearDown(search.dispose);
+      expect(search.incognito, isFalse);
+      await search.search('Python');
+      await store.flush();
+      await search.setCloudPriority([CloudPlatform.uc]);
+      await search.setIncognito(true);
+      await search.search('私密搜索');
+      await search.search('python');
+      expect(search.fromCache, isTrue);
+      await search.search('Python', refresh: true);
+      await store.flush();
+      expect(search.history, ['Python']);
+      expect(search.items, isNotEmpty);
+
+      final restoredStore = StateStore.memory(
+        decodePlainState(encodePlainState(store.data)),
+      );
+      addTearDown(restoredStore.dispose);
+      final restored = ResourceSearch(store: restoredStore, api: api);
+      addTearDown(restored.dispose);
+      expect(restored.incognito, isTrue);
+      expect(restored.cloudPriority.first, CloudPlatform.uc);
+      await restored.search('不留记录');
+      await restoredStore.flush();
+      expect(restored.history, ['Python']);
+      await restored.setIncognito(false);
+      await restored.search('正常搜索');
+      await restoredStore.flush();
+      expect(restored.history, ['正常搜索', 'Python']);
+    },
+  );
+
+  test('queued incognito changes cannot save a private search', () async {
+    final store = StateStore.memory({
+      'resourceSearchHistory': ['原记录'],
+    });
+    addTearDown(store.dispose);
+    final search = ResourceSearch(
+      store: store,
+      api: SearchApiFixture(
+        (_, _) => Stream.value(const ResourceSearchBatch([], complete: true)),
+      ),
+    );
+    addTearDown(search.dispose);
+    final enabling = search.setIncognito(true);
+    await search.search('正在开启');
+    await enabling;
+    await store.flush();
+    expect(search.history, ['原记录']);
+    final disabling = search.setIncognito(false);
+    await search.search('正在关闭');
+    await disabling;
+    await store.flush();
+    expect(search.history, ['原记录']);
+  });
+
   test('total budget stops silent streams and preserves partial results', () {
     fakeAsync((time) {
       final stream = StreamController<ResourceSearchBatch>();

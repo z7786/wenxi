@@ -296,6 +296,16 @@ class ResourceSearch extends ChangeNotifier {
 
   bool get preferSupported =>
       store.data.obj('resourceSearch').boolean('preferSupported', true);
+  bool get incognito => store.data.obj('resourceSearch').boolean('incognito');
+
+  Future<void> setIncognito(bool value) async {
+    await store.change((draft) {
+      draft['resourceSearch'] = draft.obj('resourceSearch')
+        ..['incognito'] = value;
+    });
+    if (!_closed) notifyListeners();
+  }
+
   List<String> get history =>
       (store.data['resourceSearchHistory'] as List? ?? [])
           .whereType<String>()
@@ -482,18 +492,22 @@ class ResourceSearch extends ChangeNotifier {
     _checkBatch = linkChecks?.beginBatch();
     notifyListeners();
     // Search history stays in the app's private local state.
-    unawaited(
-      store
-          .change((draft) {
-            final recent = (draft['resourceSearchHistory'] as List? ?? [])
-                .whereType<String>();
-            draft['resourceSearchHistory'] = [
-              term,
-              ...recent.where((e) => e.toLowerCase() != term.toLowerCase()),
-            ].take(12).toList();
-          })
-          .catchError((Object _) {}),
-    );
+    if (!incognito) {
+      unawaited(
+        store
+            .change((draft) {
+              // Recheck after queued state changes, including enabling incognito.
+              if (draft.obj('resourceSearch').boolean('incognito')) return;
+              final recent = (draft['resourceSearchHistory'] as List? ?? [])
+                  .whereType<String>();
+              draft['resourceSearchHistory'] = [
+                term,
+                ...recent.where((e) => e.toLowerCase() != term.toLowerCase()),
+              ].take(12).toList();
+            })
+            .catchError((Object _) {}),
+      );
+    }
     final cached = _cache[term.toLowerCase()];
     if (!refresh &&
         !(api is HttpResourceSearchApi &&

@@ -2271,11 +2271,11 @@ class _PlayerPageState extends State<PlayerPage>
             ),
           if (controller.hasVideo && Platform.isWindows)
             const WindowsGpuPreferenceTile(),
-          if (controller.hasVideo && Platform.isAndroid)
+          if (controller.hasVideo && (Platform.isAndroid || Platform.isWindows))
             AppSwitchListTile(
               key: const Key('player-decoder-compatibility'),
               title: const Text('兼容硬解模式'),
-              subtitle: const Text('出现绿屏、黑屏时开启，仍使用硬件解码'),
+              subtitle: const Text('出现底部绿线、绿屏或黑屏时开启，优先使用拷贝硬解'),
               value: controller.preferences.decoderCompatibility,
               onChanged:
                   controller.loading ||
@@ -3251,6 +3251,7 @@ class _PlayerPageState extends State<PlayerPage>
                           !pip)
                         _errorPanel(),
                       if (!pip &&
+                          (!visible || locked) &&
                           !_editingLayout &&
                           !_rotationPending &&
                           controller.error.isEmpty &&

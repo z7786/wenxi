@@ -96,7 +96,6 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   bool get isTelevision => _isTelevision;
   bool _fullscreen = false, _previousWindowsFullscreen = false;
   bool _video = false;
-  bool _controlsVisible = true, _locked = false;
   bool? _iosUiHidden;
   PlaybackOrientation? _iosOrientation;
   double _brightness = .5;
@@ -283,8 +282,6 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
     try {
       if (_ios) {
         if (!identical(_handlerOwner, this)) return;
-        _controlsVisible = controlsVisible;
-        _locked = locked;
         if (targetOrientation != null && targetOrientation != _iosOrientation) {
           _iosOrientation = targetOrientation;
           await SystemChrome.setPreferredOrientations(
@@ -318,15 +315,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
 
   Future<void> _syncIosSystemUi({bool force = false}) async {
     if (!_ios || _closed || !identical(_handlerOwner, this)) return;
-    final views = WidgetsBinding.instance.platformDispatcher.views;
-    final size = views.isEmpty ? Size.zero : views.first.physicalSize;
-    final landscape =
-        _iosOrientation == PlaybackOrientation.landscape ||
-        (_iosOrientation == null ||
-                _iosOrientation == PlaybackOrientation.system) &&
-            size.width > size.height;
-    final hidden =
-        _video && (_fullscreen || landscape || _locked || !_controlsVisible);
+    final hidden = _video;
     if (!force && _iosUiHidden == hidden) return;
     _iosUiHidden = hidden;
     try {

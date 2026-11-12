@@ -1,15 +1,18 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:math' as math;
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:pointycastle/export.dart';
 import '../../core/json.dart';
+import '../../diagnostics/app_log.dart';
 import '../../domain/auth.dart';
 import '../../domain/models.dart';
 import '../../domain/links.dart';
 import '../../domain/uploads.dart';
 import '../../domain/web_tokens.dart';
 import '../http.dart';
+import '../desktop_browser_ua.dart';
 import '../login_cookies.dart';
 import '../state_store.dart';
 import '../uploads/upload_io.dart';
@@ -19,10 +22,34 @@ import 'token_session.dart';
 part 'uploads/feijipan_upload.dart';
 
 class FeijipanConnector extends PersonalCloudConnector {
-  FeijipanConnector(this.http, CredentialStore store, {int Function()? now})
-    : sessions = TokenSessions(CloudPlatform.feijipan, store, now: now);
+  FeijipanConnector(
+    this.http,
+    CredentialStore store, {
+    int Function()? now,
+    math.Random? random,
+  }) : sessions = TokenSessions(CloudPlatform.feijipan, store, now: now),
+       _userAgents = DesktopBrowserUaPool(random: random);
   final JsonHttp http;
   final TokenSessions sessions;
+  final DesktopBrowserUaPool _userAgents;
+  final _identityKey = Object();
+  final _browseIdentities = Expando<DesktopBrowserUaSession>();
+  late final _defaultIdentity = _userAgents.start();
+  DesktopBrowserUaSession get _identity =>
+      Zone.current[_identityKey] as DesktopBrowserUaSession? ??
+      _defaultIdentity;
+
+  Future<T> _withIdentity<T>(
+    Future<T> Function() action, {
+    BrowseSession? browse,
+  }) {
+    if (Zone.current[_identityKey] != null) return action();
+    final identity = browse == null
+        ? _userAgents.start()
+        : _browseIdentities[browse] ??= _userAgents.start();
+    return runZoned(action, zoneValues: {_identityKey: identity});
+  }
+
   final _mutations = AsyncGate();
   static const api = 'https://api.feijipan.com';
   static const web = 'https://www.feijipan.com';
@@ -88,8 +115,8 @@ class FeijipanConnector extends PersonalCloudConnector {
       'uuid': uuid,
       'devType': 6,
       'devCode': uuid,
-      'devModel': 'chrome',
-      'devVersion': '131',
+      'devModel': _identity.current.model,
+      'devVersion': _identity.current.version,
       'appVersion': '',
       'timestamp': encrypt('${timestamp ?? sessions.now()}'),
       if (token.isNotEmpty) 'appToken': token,
@@ -99,41 +126,98 @@ class FeijipanConnector extends PersonalCloudConnector {
     return '$api$path?${values.entries.map((e) => '${Uri.encodeQueryComponent(e.key)}=${e.key == 'appToken' ? tokenQueryValue('${e.value}') : Uri.encodeQueryComponent('${e.value}')}').join('&')}';
   }
 
-  Map<String, String> get _headers => {
-    'User-Agent': WebLoginTarget.desktopUserAgent,
+  Map<String, String> _headersFor(DesktopBrowserUa identity) => {
+    'User-Agent': identity.value,
     'Origin': web,
     'Referer': '$web/',
     'Accept-Language': 'zh-CN',
   };
 
-  Future<HttpResult> _request(String method, String url, {Json? body}) async {
-    final uri = Uri.parse(url);
-    final jar = LoginCookieJar({
+  Future<HttpResult> _request(String method, String url, {Json? body}) async =>
+      (await _requestWithIdentity(method, url, body: body)).response;
+
+  Future<({HttpResult response, DesktopBrowserUa identity})>
+  _requestWithIdentity(String method, String url, {Json? body}) async {
+    var uri = Uri.parse(url);
+    LoginCookieJar freshCookies() => LoginCookieJar({
       'feijipan.com',
       'www.feijipan.com',
       'api.feijipan.com',
     });
-    for (var attempt = 0; attempt < 2; attempt++) {
+    var jar = freshCookies(), verificationRetries = 0;
+    while (true) {
       RequestScope.checkpoint();
       final cookies = jar.header(uri);
+      final identity = _identity.current;
       final response = await http.request(
         method,
         url,
-        headers: {..._headers, if (cookies.isNotEmpty) 'Cookie': cookies},
+        headers: {
+          ..._headersFor(identity),
+          if (cookies.isNotEmpty) 'Cookie': cookies,
+        },
         body: body == null ? null : jsonEncode(body),
         contentType: body == null ? null : 'application/json; charset=utf-8',
         followRedirects: false,
       );
       RequestScope.checkpoint();
       jar.absorb(uri, response);
+      if (response.status == 403 &&
+          _uaRetryPaths.contains(uri.path) &&
+          _browserBlocked(response) &&
+          _identity.rotate()) {
+        DiagnosticLog.event(
+          'feijipan.user_agent_retry',
+          fields: {
+            'status': response.status,
+            'apiPath': uri.path,
+            'userAgent': _identity.current.value,
+          },
+        );
+        // Keep encrypted tokens and signatures byte-for-byte unchanged.
+        url = url
+            .replaceFirstMapped(
+              RegExp(r'([?&]devModel=)[^&]*'),
+              (match) => '${match[1]}${_identity.current.model}',
+            )
+            .replaceFirstMapped(
+              RegExp(r'([?&]devVersion=)[^&]*'),
+              (match) => '${match[1]}${_identity.current.version}',
+            );
+        uri = Uri.parse(url);
+        jar = freshCookies();
+        verificationRetries = 0;
+        continue;
+      }
       if (response.status == 409 &&
           response.header('content-type').contains('text/html')) {
-        if (attempt == 0) continue;
+        if (verificationRetries++ == 0) continue;
         throw const AppException('小飞机的访问验证未通过，请稍后重试或使用网页登录');
       }
-      return response;
+      return (response: response, identity: identity);
     }
-    throw const AppException('小飞机请求失败，请稍后重试');
+  }
+
+  // Only reads may be replayed after a UA rejection, including POST share lists.
+  static const _uaRetryPaths = {
+    '/ws/getUuid',
+    '/ws/recommend/list',
+    '/ws/share/list',
+    '/ws/file/download',
+    '/ws/file/redirect',
+    '/app/user/account/map',
+    '/app/user/info/map',
+    '/app/record/file/list',
+    '/ws/vod/results',
+  };
+
+  static bool _browserBlocked(HttpResult response) {
+    try {
+      response.json;
+      return false; // A JSON rejection belongs to auth/permissions handling.
+    } on AppException {
+      return true;
+    }
   }
 
   Json _checked(HttpResult response) {
@@ -171,7 +255,10 @@ class FeijipanConnector extends PersonalCloudConnector {
     return token;
   }
 
-  Future<LoginResult> password(String username, String password) async {
+  Future<LoginResult> password(String username, String password) =>
+      _withIdentity(() => _password(username, password));
+
+  Future<LoginResult> _password(String username, String password) async {
     username = username.trim();
     require(username.isNotEmpty && password.isNotEmpty, '请输入小飞机账号和密码');
     require(username.length <= 254 && password.length <= 256, '账号或密码过长');
@@ -282,7 +369,10 @@ class FeijipanConnector extends PersonalCloudConnector {
     );
   }
 
-  Future<LoginResult> authenticate(Credential c) async {
+  Future<LoginResult> authenticate(Credential c) =>
+      _withIdentity(() => _authenticate(c));
+
+  Future<LoginResult> _authenticate(Credential c) async {
     final session = await _session(c, candidate: true);
     final account = await _account(session);
     return LoginResult(session.credential, account);
@@ -290,16 +380,21 @@ class FeijipanConnector extends PersonalCloudConnector {
 
   @override
   Future<CloudAccount> account(Credential c) async =>
-      _account(await _session(c));
+      _withIdentity(() async => _account(await _session(c)));
   @override
-  Future<BrowseSession> openPersonal(Credential c) async {
+  Future<BrowseSession> openPersonal(Credential c) =>
+      _withIdentity(() => _openPersonal(c));
+
+  Future<BrowseSession> _openPersonal(Credential c) async {
     await _session(c);
-    return BrowseSession(
+    final browse = BrowseSession(
       platform: platform,
       mode: BrowseMode.personal,
       title: '我的小飞机网盘',
       rootId: '0',
     );
+    _browseIdentities[browse] = _identity;
+    return browse;
   }
 
   static String id(String value) {
@@ -336,7 +431,10 @@ class FeijipanConnector extends PersonalCloudConnector {
   }
 
   @override
-  Future<BrowseSession> openShare(
+  Future<BrowseSession> openShare(ParsedLink link, Credential? credential) =>
+      _withIdentity(() => _openShare(link, credential));
+
+  Future<BrowseSession> _openShare(
     ParsedLink link,
     Credential? credential,
   ) async {
@@ -354,6 +452,7 @@ class FeijipanConnector extends PersonalCloudConnector {
         'code': link.passcode ?? '',
       },
     );
+    _browseIdentities[s] = _identity;
     await _sharePage(s, s.rootId, 1);
     return s;
   }
@@ -407,6 +506,12 @@ class FeijipanConnector extends PersonalCloudConnector {
     BrowseSession s,
     String parentId,
     Credential? c,
+  ) => _withIdentity(() => _list(s, parentId, c), browse: s);
+
+  Future<List<CloudFile>> _list(
+    BrowseSession s,
+    String parentId,
+    Credential? c,
   ) async {
     if (s.mode == BrowseMode.share) return _shareFiles(s, parentId);
     personal(s);
@@ -442,7 +547,10 @@ class FeijipanConnector extends PersonalCloudConnector {
   }
 
   @override
-  Future<DownloadSpec> download(
+  Future<DownloadSpec> download(BrowseSession s, CloudFile f, Credential? c) =>
+      _withIdentity(() => _download(s, f, c), browse: s);
+
+  Future<DownloadSpec> _download(
     BrowseSession s,
     CloudFile f,
     Credential? c,
@@ -467,8 +575,12 @@ class FeijipanConnector extends PersonalCloudConnector {
           'auth': encrypt('$fileId|$ts'),
         },
       );
-      final response = await _request('GET', url);
+      final received = await _requestWithIdentity('GET', url);
+      final response = received.response;
       sessions.checkpoint(session);
+      if (response.status == 403 && _browserBlocked(response)) {
+        throw const AppException('小飞机下载请求被拦截（HTTP 403），请稍后重试');
+      }
       if ({401, 403}.contains(response.status)) {
         if (attempt == 0) {
           await _renew(session, token);
@@ -502,7 +614,7 @@ class FeijipanConnector extends PersonalCloudConnector {
       return DownloadSpec(
         url: location,
         fileName: f.name,
-        headers: _headers,
+        headers: _headersFor(received.identity),
         profile: 'feijipan',
       );
     }
@@ -534,7 +646,7 @@ class FeijipanConnector extends PersonalCloudConnector {
       final token = session?.access ?? '';
       final stamp = sessions.now();
       // The sharing API returns an encrypted URL, unlike personal-file redirects.
-      final response = await _request(
+      final received = await _requestWithIdentity(
         'GET',
         _url(
           '/ws/file/download',
@@ -552,6 +664,7 @@ class FeijipanConnector extends PersonalCloudConnector {
           },
         ),
       );
+      final response = received.response;
       if (session != null) sessions.checkpoint(session);
       Json data;
       try {
@@ -565,7 +678,7 @@ class FeijipanConnector extends PersonalCloudConnector {
       return DownloadSpec(
         url: location,
         fileName: f.name,
-        headers: _headers,
+        headers: _headersFor(received.identity),
         profile: 'feijipan',
       );
     }
@@ -645,7 +758,8 @@ class FeijipanConnector extends PersonalCloudConnector {
     UploadFile source,
     Credential c, {
     UploadProgressCallback? onProgress,
-  }) => _upload(s, parent, source, c, onProgress);
+  }) =>
+      _withIdentity(() => _upload(s, parent, source, c, onProgress), browse: s);
 
   @override
   Future<CloudFile> createFolder(

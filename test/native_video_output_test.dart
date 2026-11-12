@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
@@ -9,6 +10,12 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:media_kit_video/src/video_controller/android_video_controller/real.dart';
 import 'package:asterlink/playback/media_backend.dart';
 import 'support.dart';
+
+class _FixtureOutput extends PlatformVideoController {
+  _FixtureOutput(super.player, super.configuration);
+  @override
+  Future<void> setSize({int? width, int? height}) async {}
+}
 
 class _RecordingNative extends NativePlayer {
   _RecordingNative({this.platformOnly = false})
@@ -53,6 +60,57 @@ void main() {
         () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .setMockMethodCallHandler(channel, null),
       );
+      for (final hardware in [true, false]) {
+        test(
+          'Windows compatibility sets real mpv copy-back mode with hardware=$hardware',
+          () async {
+            debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+            addTearDown(() => debugDefaultTargetPlatformOverride = null);
+            final native = _RecordingNative();
+            await native.setProperty('ao', 'null');
+            await native.setProperty('hwdec', hardware ? 'auto' : 'no');
+            final player = Player(platformPlayer: native);
+            final backend = MediaKitBackend(
+              video: true,
+              hardwareAcceleration: hardware,
+              player: player,
+            );
+            // No native texture exists in a Flutter unit test. Supply only
+            // its configuration; property writes below use the real mpv handle.
+            backend.videoController!.platform.complete(
+              _FixtureOutput(
+                player,
+                VideoControllerConfiguration(hwdec: hardware ? 'auto' : 'no'),
+              ),
+            );
+            native.videoControllerCompleter.complete();
+            try {
+              native.properties.clear();
+              await backend.setDecoderCompatibility(true);
+              expect(
+                await native.getProperty('hwdec'),
+                hardware ? 'auto-copy' : 'no',
+              );
+              expect(
+                native.properties,
+                hardware ? [('hwdec', 'auto-copy')] : isEmpty,
+              );
+              expect(
+                backend.diagnosticFields['decoderCompatibilityRequested'],
+                hardware,
+              );
+              await backend.setDecoderCompatibility(false);
+              expect(
+                await native.getProperty('hwdec'),
+                hardware ? 'auto' : 'no',
+              );
+              expect(native.seeks, 0);
+            } finally {
+              await backend.close();
+            }
+          },
+        );
+      }
       for (final emulator in [false, true]) {
         test(
           'Android resize retains seek and playback state, emulator=$emulator',

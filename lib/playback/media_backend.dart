@@ -591,6 +591,12 @@ class MediaKitBackend extends PlaybackBackend {
   @override
   Map<String, Object?> get diagnosticFields => {
     'engine': engineName,
+    'hardwareAccelerationRequested': _hardwareAcceleration,
+    if (_video != null) 'decoderCompatibilityRequested': _copyDecoder,
+    'videoHardwarePixelFormat': ?state.videoParams.hwPixelformat,
+    'videoColorMatrix': ?state.videoParams.colormatrix,
+    'videoColorPrimaries': ?state.videoParams.primaries,
+    'videoColorTransfer': ?state.videoParams.gamma,
     ..._diagnostics.context,
     'transport': _transport,
     'networkTimeoutSeconds': ?_networkTimeoutSeconds,
@@ -726,24 +732,26 @@ class MediaKitBackend extends PlaybackBackend {
 
   @override
   Future<void> setDecoderCompatibility(bool enabled) async {
-    if (_closing ||
-        defaultTargetPlatform != TargetPlatform.android ||
-        !_hardwareAcceleration ||
-        _video == null) {
+    final mode = playbackDecoderMode(
+      defaultTargetPlatform,
+      compatible: enabled,
+    );
+    if (_closing || mode == null || !_hardwareAcceleration || _video == null) {
       return;
     }
     final videoPlatform = await _video!.platform.future;
-    if (!videoPlatform.configuration.enableHardwareAcceleration ||
-        videoPlatform.configuration.hwdec == 'no') {
+    if (videoPlatform.configuration.hwdec == 'no' ||
+        defaultTargetPlatform == TargetPlatform.android &&
+            !videoPlatform.configuration.enableHardwareAcceleration) {
       return;
     }
     final native = player.platform;
     if (native is! NativePlayer) return;
-    _copyDecoder = enabled;
-    await native.setProperty(
-      'hwdec',
-      enabled ? 'mediacodec-copy' : 'mediacodec,mediacodec-copy',
-    );
+    await _propertyGate.run(() async {
+      if (_closing) return;
+      await native.setProperty('hwdec', mode);
+      _copyDecoder = enabled;
+    });
   }
 
   @override
@@ -1171,6 +1179,7 @@ class MediaKitBackend extends PlaybackBackend {
         _lastDiagnosticSample = elapsed;
         for (final entry in {
           'hwdec-current': 'hwdecCurrent',
+          'hwdec': 'hwdecRequested',
           if (!_nativeMetrics.containsKey('videoCodec'))
             'video-format': 'videoCodec',
           'estimated-vf-fps': 'videoFps',

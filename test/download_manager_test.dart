@@ -1017,16 +1017,23 @@ void main() {
     'The native connection profile follows the download source route',
     () async {
       await manager.initialize();
-      for (final (platform, route, expectedProfile, connections) in [
-        (CloudPlatform.quark, null, 'quark_route_1', 512),
-        (CloudPlatform.quark, 'quark_route_2', 'quark_route_2', 64),
-        (CloudPlatform.uc, null, 'uc', 512),
-        (null, null, null, 64),
+      for (final (platform, route, fileName, expectedProfile, connections) in [
+        (CloudPlatform.quark, null, 'file.bin', 'quark_route_1', 128),
+        (CloudPlatform.quark, null, 'video.mkv', 'quark_route_1', 128),
+        (
+          CloudPlatform.quark,
+          'quark_route_2',
+          'video.mp4',
+          'quark_route_2',
+          64,
+        ),
+        (CloudPlatform.uc, null, 'file.bin', 'uc', 512),
+        (null, null, 'file.bin', null, 64),
       ]) {
         final id = await manager.enqueue(
           DownloadSpec(
             url: 'https://example.com/profile',
-            fileName: 'profile.bin',
+            fileName: fileName,
             expectedSize: 4,
             source: {if (platform != null) 'platform': platform.key},
             profile: route,
@@ -1060,7 +1067,7 @@ void main() {
       );
       await until(() => manager.httpConnections(id) != null);
       expect(manager.httpConnections(id), (active: 3, total: 8));
-      expect(manager.task(id)!.connections, 512);
+      expect(manager.task(id)!.connections, 128);
       expect(manager.task(id)!.toJson(), isNot(contains('activeConnections')));
       await manager.pause(id);
       expect(manager.httpConnections(id), isNull);
@@ -1280,7 +1287,7 @@ void main() {
   }
 
   test(
-    'Batch resume respects eligible tasks and captured connection settings',
+    'Batch resume respects eligible tasks and captured Quark connection settings',
     () async {
       native.finish = false;
       await store.put('settings', {'concurrent': 1, 'threads': 1});
@@ -1296,6 +1303,7 @@ void main() {
             spec: DownloadSpec(
               url: 'https://example.com/$id',
               fileName: '$id.zip',
+              source: const {'platform': 'Quark'},
             ),
             createdAt: 1,
             status: status,

@@ -538,6 +538,18 @@ void main() {
       final services = await render(tester, const Size(393, 864), 3);
       expect(find.byType(ExperimentalFeaturesPage), findsNothing);
       expect(find.text('突破文件大小限制'), findsNothing);
+      expect(find.text('实验性功能'), findsNothing);
+      await tester.scrollUntilVisible(
+        find.text('播放器与实验功能'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(find.text('播放器与实验功能'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('播放器与实验功能'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('实验性功能'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('实验性功能'));
       await tester.pumpAndSettle();
       expect(find.byType(ExperimentalFeaturesPage), findsOneWidget);
@@ -622,6 +634,22 @@ void main() {
       await changeTextScale(tester, 1.8);
       expect(tester.takeException(), isNull);
       for (final title in ['下载保存目录', '导出备份', '日志与故障排查']) {
+        final group = switch (title) {
+          '导出备份' => '备份与数据',
+          '日志与故障排查' => '帮助与诊断',
+          _ => null,
+        };
+        if (group != null) {
+          await tester.scrollUntilVisible(
+            find.text(group),
+            240,
+            scrollable: find.byType(Scrollable).first,
+          );
+          await tester.ensureVisible(find.text(group));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(group));
+          await tester.pumpAndSettle();
+        }
         await tester.scrollUntilVisible(
           find.text(title),
           240,
@@ -700,6 +728,8 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       try {
         final services = await render(tester, const Size(1100, 780), 3);
+        await tester.tap(find.text('高级下载设置'));
+        await tester.pumpAndSettle();
         await tester.tap(find.text('各网盘连接数'));
         await tester.pumpAndSettle();
         final settingsList = find.byKey(const PageStorageKey('mine'));
@@ -717,6 +747,7 @@ void main() {
               .first,
         );
         expect(find.text('夸克 · 直链'), findsOneWidget);
+        expect(find.text('HTTP 下载连接数'), findsOneWidget);
 
         await tester.runAsync(() => services.updateSettings({'theme': 'Dark'}));
         await tester.pumpAndSettle();
@@ -724,6 +755,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
         expect(find.text('夸克 · 直链'), findsOneWidget);
+        expect(find.text('HTTP 下载连接数'), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
@@ -1340,7 +1372,8 @@ void main() {
     expect(find.text('传输管理'), findsOneWidget);
     await tester.tap(find.text('我的').last);
     await tester.pumpAndSettle();
-    expect(find.text('HTTP 下载连接数'), findsOneWidget);
+    expect(find.text('下载保存目录'), findsOneWidget);
+    expect(find.text('HTTP 下载连接数'), findsNothing);
     await tester.tap(find.byTooltip('更多操作'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('打赏作者'));

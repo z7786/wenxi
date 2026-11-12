@@ -574,6 +574,7 @@ class Vault implements CredentialStore {
   }
 
   static bool accountSecret(CloudPlatform platform, String key) =>
+      key == '${platform.name}.browser_user_agent' ||
       switch (platform) {
         CloudPlatform.pan123 => key.startsWith('pan123.'),
         CloudPlatform.xunlei => key.startsWith('xunlei.'),

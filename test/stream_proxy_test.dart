@@ -1235,8 +1235,14 @@ void main() {
       expect(origin.peak, lessThanOrEqualTo(4));
       expect(proxy.cachedBytes, lessThanOrEqualTo(32768));
       expect(origin.cookies, everyElement('fixture=private'));
-      // Speculative reads beyond the consumed range may start while this
-      // request closes. Only overlapping requests indicate a cache miss.
+      // Let speculative reads settle before checking cache reuse: on a busy
+      // host their reserved bytes may evict the just-consumed range. A paused
+      // preview warms one bounded range without continuing read-ahead.
+      proxy.setPaused(true);
+      await until(() => proxy.activeRequests == 0);
+      proxy.prepareSeek();
+      expect(await read(172100, 175000), origin.bytes.sublist(172100, 175001));
+      await until(() => proxy.activeRequests == 0);
       bool overlapsSeek((int, int) range) =>
           range.$1 <= 175000 && range.$2 >= 172100;
       final count = origin.calls.where(overlapsSeek).length;

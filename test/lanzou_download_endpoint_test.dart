@@ -28,13 +28,18 @@ void main() {
   for (final endpoint in [
     'https://apifile.woozooo.com/ajaxfile.php?file=42',
     '//apifile.woozooo.com/ajaxfile.php?file=42',
+    'https://apifile.lanzouw.com/ajaxfile.php?file=42',
+    '//apifile.lanzouw.com/ajaxfile.php?file=42',
   ]) {
     test('Folder child uses complete official endpoint $endpoint', () async {
       final f = LanzouFolderFixture();
       f.frame = lanzouTestFrame.replaceAll('/ajaxm.php?file=42', endpoint);
       f.folderOverride = (request) async {
         if (request.uri.path != '/ajaxfile.php') return null;
-        if (request.uri.host != 'apifile.woozooo.com') {
+        if (request.uri.host !=
+            Uri.parse(
+              endpoint.startsWith('//') ? 'https:$endpoint' : endpoint,
+            ).host) {
           return const HttpResult(407, '');
         }
         return jsonResponse(f.result);
@@ -46,7 +51,12 @@ void main() {
       final request = f.http.calls.singleWhere(
         (call) => call.uri.path == '/ajaxfile.php',
       );
-      expect(request.uri.host, 'apifile.woozooo.com');
+      expect(
+        request.uri.host,
+        Uri.parse(
+          endpoint.startsWith('//') ? 'https:$endpoint' : endpoint,
+        ).host,
+      );
       expect(request.uri.scheme, 'https');
       expect(request.uri.queryParameters['file'], '42');
       expect(request.headers['Origin'], 'https://author.lanzouu.com');

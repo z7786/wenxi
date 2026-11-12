@@ -5,6 +5,7 @@ import '../core/json.dart';
 import '../diagnostics/app_log.dart';
 import '../data/playback_store.dart';
 import '../data/http.dart';
+import '../data/resource_pool_preview.dart';
 import '../domain/downloads.dart';
 import '../domain/file_types.dart';
 import '../domain/models.dart';
@@ -24,16 +25,26 @@ PlaybackController cloudPlayback(
   List<CloudFile> candidates, {
   String? initialHistoryKey,
   Map<String, String> parentFolders = const {},
+  ResourcePoolPreview? poolPreview,
+  PoolPreviewTarget? initialPoolTarget,
+  List<String> sourceFolders = const [],
   PlaybackBackend Function(PlaybackEntry, bool)? backendFactory,
 }) {
   session = services.cloud.bindSession(session);
   final revision = services.cloud.sessionCredential(session)?.updatedAt;
   final kind = fileKind(initial.name);
+  CloudFile withParent(CloudFile file, String? parent) =>
+      parent == null || parent == file.parentId
+      ? file
+      : CloudFile.fromJson({...file.toJson(), 'parentId': parent});
   final files = <String, CloudFile>{
     for (final file in candidates)
       if (!file.isDirectory && fileKind(file.name) == kind) file.id: file,
     initial.id: initial,
   };
+  for (final file in List.of(files.values)) {
+    files[file.id] = withParent(file, parentFolders[file.id]);
+  }
   final entries = [
     for (final file in files.values)
       PlaybackEntry(
@@ -44,18 +55,7 @@ PlaybackController cloudPlayback(
         name: file.name,
         video: kind == FileKind.video,
         platform: session.platform,
-        source: PlaybackSource.cloud(
-          DownloadOrigin(
-            session,
-            file.parentId.isEmpty && parentFolders[file.id]?.isNotEmpty == true
-                ? CloudFile.fromJson({
-                    ...file.toJson(),
-                    'parentId': parentFolders[file.id],
-                  })
-                : file,
-            revision,
-          ),
-        ),
+        source: PlaybackSource.cloud(DownloadOrigin(session, file, revision)),
       ),
   ];
   final subtitleFiles = {
@@ -65,17 +65,19 @@ PlaybackController cloudPlayback(
           SubtitleFiles.extensions.contains(
             p.extension(file.name).toLowerCase().replaceFirst('.', ''),
           ))
-        file.id: file,
+        file.id: withParent(file, parentFolders[file.id]),
   };
   void checkAccount() => require(
     services.cloud.sessionCredential(session)?.updatedAt == revision,
     '账号已变化，请重新打开文件列表',
   );
   String? startedEntry;
+  var firstPoolTarget = initialPoolTarget;
   Future<DownloadSpec> source(
     PlaybackEntry entry,
     RequestScope scope, {
     bool refresh = false,
+    bool download = false,
   }) => scope.run(() async {
     checkAccount();
     final continuing = startedEntry == entry.id;
@@ -85,7 +87,28 @@ PlaybackController cloudPlayback(
     }
     final origin = DownloadOrigin(session, files[entry.id]!, revision);
     final DownloadSpec result;
-    if (continuing) {
+    if (poolPreview != null) {
+      // The pool exposes one transferred file per share. Keep the original
+      // directory in history/episodes and resolve only the selected file.
+      var target = entry.id == initial.id && !refresh ? firstPoolTarget : null;
+      firstPoolTarget = null;
+      target ??= await poolPreview.resolve(
+        session,
+        files[entry.id]!,
+        sourceFolders,
+        scope,
+        sourceParentId: files[entry.id]!.parentId,
+      );
+      checkAccount();
+      RequestScope.checkpoint();
+      result =
+          await (download
+              ? services.cloud.prepare
+              : services.cloud.preparePlayback)(
+            target.session,
+            withParent(target.file, target.parentId),
+          );
+    } else if (continuing) {
       result = refresh
           ? await services.cloud.refreshPlayback(origin)
           : await services.cloud.continuePlayback(session, files[entry.id]!);
@@ -109,18 +132,21 @@ PlaybackController cloudPlayback(
     prepare: source,
     sourceAccepted: (entry) => startedEntry = entry.id,
     checkAhead: () => services.control.checkCloud(session.platform),
-    prepareAhead: (entry, scope) => scope.run(() async {
-      checkAccount();
-      services.control.checkCloud(session.platform);
-      return services.cloud.preparePlayback(session, files[entry.id]!);
-    }),
-    prepareDownload:
-        {
-              CloudPlatform.baidu,
-              CloudPlatform.uc,
-              CloudPlatform.aliyun,
-            }.contains(session.platform) &&
-            kind == FileKind.video
+    prepareAhead: poolPreview != null
+        ? null
+        : (entry, scope) => scope.run(() async {
+            checkAccount();
+            services.control.checkCloud(session.platform);
+            return services.cloud.preparePlayback(session, files[entry.id]!);
+          }),
+    prepareDownload: poolPreview != null
+        ? (entry, scope) => source(entry, scope, download: true)
+        : {
+                CloudPlatform.baidu,
+                CloudPlatform.uc,
+                CloudPlatform.aliyun,
+              }.contains(session.platform) &&
+              kind == FileKind.video
         ? (entry, scope) async {
             checkAccount();
             return scope.run(

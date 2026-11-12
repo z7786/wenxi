@@ -26,6 +26,27 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
       .where((p) => p != CloudPlatform.github)
       .toList();
   bool saving = false;
+  late bool incognito = widget.search.incognito;
+  bool updatingIncognito = false;
+
+  Future<void> setIncognito(bool value) async {
+    setState(() {
+      incognito = value;
+      updatingIncognito = true;
+    });
+    try {
+      await widget.search.setIncognito(value);
+    } catch (e) {
+      if (mounted) message(context, errorText(e));
+    } finally {
+      if (mounted) {
+        setState(() {
+          incognito = widget.search.incognito;
+          updatingIncognito = false;
+        });
+      }
+    }
+  }
 
   void move(int from, int to) {
     if (saving || to < 0 || to >= order.length) return;
@@ -52,45 +73,75 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 0, 16, 8),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    '网盘展示优先级',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-                  ),
-                ),
-                TextButton(
-                  key: const Key('resource-priority-reset'),
-                  onPressed: saving
-                      ? null
-                      : () => setState(
-                          () => order = ResourceSearch.defaultCloudPriority
-                              .where((p) => p != CloudPlatform.github)
-                              .toList(),
-                        ),
-                  child: const Text('恢复默认'),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Text(
-              '拖动调整顺序，也可点击箭头移动。设置保存在本机，并应用于搜索结果和网盘标签。',
-              style: TextStyle(
-                fontSize: 12,
-                height: 1.6,
-                color: secondary(context),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
           Expanded(
             child: ReorderableListView.builder(
               buildDefaultDragHandles: false,
+              header: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(24, 0, 24, 8),
+                    child: Text(
+                      '搜索设置',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  SwitchListTile(
+                    key: const Key('resource-search-incognito'),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+                    title: const Text('无痕模式'),
+                    subtitle: const Text('开启后不保存新的资源搜索和网盘搜索记录'),
+                    value: incognito,
+                    onChanged: saving || updatingIncognito
+                        ? null
+                        : setIncognito,
+                  ),
+                  const Divider(indent: 24, endIndent: 24),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 0, 16, 8),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            '网盘展示优先级',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        TextButton(
+                          key: const Key('resource-priority-reset'),
+                          onPressed: saving
+                              ? null
+                              : () => setState(
+                                  () => order = ResourceSearch
+                                      .defaultCloudPriority
+                                      .where((p) => p != CloudPlatform.github)
+                                      .toList(),
+                                ),
+                          child: const Text('恢复默认'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Text(
+                      '拖动调整顺序，也可点击箭头移动。设置保存在本机，并应用于搜索结果和网盘标签。',
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.6,
+                        color: secondary(context),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+              ),
               itemCount: order.length,
               onReorder: (from, to) {
                 if (to > from) to--;
@@ -146,7 +197,7 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
             padding: const EdgeInsets.fromLTRB(24, 12, 24, 16),
             child: FilledButton(
               key: const Key('resource-priority-save'),
-              onPressed: saving ? null : save,
+              onPressed: saving || updatingIncognito ? null : save,
               child: Text(saving ? '保存中…' : '保存顺序'),
             ),
           ),

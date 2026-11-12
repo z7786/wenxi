@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/data/cloud_browser_ua.dart';
 import 'package:asterlink/data/providers/guangya_login.dart';
 import 'package:asterlink/data/providers/ctfile.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
@@ -1418,7 +1419,7 @@ void main() {
       expect(view.params.initialSettings!.saveFormData, isFalse);
       expect(
         view.params.initialSettings!.userAgent,
-        WebLoginTarget.desktopUserAgent,
+        services.cloud.browserUa.selected(CloudPlatform.ctfile),
       );
       expect(view.params.initialUserScripts!.single.forMainFrameOnly, isTrue);
       final native = _CtfileController(301, challenge);
@@ -1546,7 +1547,7 @@ void main() {
       final view = platform.views.last;
       expect(
         view.params.initialSettings!.userAgent,
-        WebLoginTarget.desktopUserAgent,
+        services.cloud.browserUa.selected(CloudPlatform.guangya),
       );
       expect(
         view.params.initialSettings!.preferredContentMode,
@@ -1649,7 +1650,8 @@ void main() {
           final (main, controller) = attach(401);
           final expectedAgent = mobile
               ? WebLoginTarget.mobileUserAgent
-              : WebLoginTarget.desktopUserAgent;
+              : services.cloud.browserUa.selected(CloudPlatform.aliyun);
+          if (!mobile) expect(CloudBrowserUa.pooled(expectedAgent), isTrue);
           final expectedMode = mobile
               ? UserPreferredContentMode.MOBILE
               : UserPreferredContentMode.DESKTOP;
