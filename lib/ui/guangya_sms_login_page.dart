@@ -36,6 +36,12 @@ class _GuangyaSmsLoginPageState extends State<GuangyaSmsLoginPage> {
   Timer? _timer;
   DateTime? _resendAt;
   bool _busy = false, _agreed = false, _leaving = false, _completed = false;
+  late final _browserUserAgent = widget.services.vault.withAccount(
+    CloudPlatform.guangya,
+    widget.accountId ??
+        widget.services.vault.activeAccountId(CloudPlatform.guangya),
+    () => widget.services.cloud.browserUa.selected(CloudPlatform.guangya),
+  );
   String _error = '', _status = '';
 
   int get _seconds => _resendAt == null
@@ -99,7 +105,11 @@ class _GuangyaSmsLoginPageState extends State<GuangyaSmsLoginPage> {
     return Navigator.push<String>(
       context,
       MaterialPageRoute(
-        builder: (_) => GuangyaVerificationPage(widget.services, challenge),
+        builder: (_) => GuangyaVerificationPage(
+          widget.services,
+          challenge,
+          userAgent: _browserUserAgent,
+        ),
       ),
     );
   }
@@ -127,9 +137,14 @@ class _GuangyaSmsLoginPageState extends State<GuangyaSmsLoginPage> {
     try {
       widget.services.control.checkCloud(CloudPlatform.guangya);
       final challenge = await request.run(
-        () => GuangyaSmsLogin(
-          widget.services.cloud.http,
-        ).sendSms(mobile, verifyCaptcha: _captcha, onStatus: _setStatus),
+        () => widget.services.cloud.browserUa.run(
+          CloudPlatform.guangya,
+          () => GuangyaSmsLogin(
+            widget.services.cloud.browserHttp(CloudPlatform.guangya),
+          ).sendSms(mobile, verifyCaptcha: _captcha, onStatus: _setStatus),
+          userAgent: _browserUserAgent,
+          locked: true,
+        ),
       );
       if (!_active || mobile != _mobile.text.trim()) return;
       _challenge = challenge;
@@ -164,19 +179,27 @@ class _GuangyaSmsLoginPageState extends State<GuangyaSmsLoginPage> {
     FocusScope.of(context).unfocus();
     try {
       final services = widget.services;
-      await services.login.submit(CloudPlatform.guangya, (_) async {
-        final candidate = await GuangyaSmsLogin(services.cloud.http).sms(
-          challenge,
-          _code.text,
-          verifyCaptcha: _captcha,
-          onStatus: _setStatus,
-        );
-        RequestScope.checkpoint();
-        _setStatus('正在读取光鸭账号…');
-        return (services.cloud.connector(CloudPlatform.guangya)
-                as GuangyaConnector)
-            .authenticate(candidate);
-      }, accountId: widget.accountId);
+      await services.login.submit(
+        CloudPlatform.guangya,
+        (_) async {
+          final candidate =
+              await GuangyaSmsLogin(
+                services.cloud.browserHttp(CloudPlatform.guangya),
+              ).sms(
+                challenge,
+                _code.text,
+                verifyCaptcha: _captcha,
+                onStatus: _setStatus,
+              );
+          RequestScope.checkpoint();
+          _setStatus('正在读取光鸭账号…');
+          return (services.cloud.connector(CloudPlatform.guangya)
+                  as GuangyaConnector)
+              .authenticate(candidate);
+        },
+        accountId: widget.accountId,
+        browserUserAgent: _browserUserAgent,
+      );
       if (!mounted || !_active) return;
       _completed = true;
       _code.clear();

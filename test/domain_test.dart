@@ -185,7 +185,7 @@ https://github.com/example/files
       ).connectionsFor(null, 'baidu'),
       512,
     );
-    expect(defaults.connectionsFor(CloudPlatform.xunlei), 64);
+    expect(defaults.connectionsFor(CloudPlatform.xunlei), 8);
     expect(defaults.connectionsFor(null), 64);
     const custom = AppSettings(
       threads: 16,

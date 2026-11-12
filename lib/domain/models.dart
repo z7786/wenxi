@@ -511,6 +511,7 @@ class DownloadSpec {
   );
   DownloadSpec copyWith({
     String? url,
+    Map<String, String>? headers,
     String? relativePath,
     Json? source,
     String? fileName,
@@ -522,7 +523,7 @@ class DownloadSpec {
     url: url ?? this.url,
     fileName: fileName ?? this.fileName,
     relativePath: relativePath ?? this.relativePath,
-    headers: headers,
+    headers: headers ?? this.headers,
     expectedSize: expectedSize,
     checksumType: checksumType,
     checksumValue: checksumValue,

@@ -5,6 +5,7 @@ import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.view.View
 import android.view.ViewGroup
 import io.flutter.embedding.android.FlutterSurfaceView
@@ -172,6 +173,63 @@ class PlaybackLifecycleTest {
         messenger.call("end", mapOf("session" to "test-player"))
         bridge.paused(activity)
         assertTrue(messenger.sent.isEmpty())
+    }
+
+    @Test fun landscapeVideoKeepsBarsHiddenWithControlsVisibleAndRestoresOnExit() {
+        // Give Robolectric an explicit pre-playback visibility snapshot.
+        val bars = WindowInsetsCompat.Type.systemBars()
+        windowInsets = WindowInsetsCompat.Builder()
+            .setInsets(bars, CompatInsets.of(0, 24, 0, 24))
+            .setInsetsIgnoringVisibility(bars, CompatInsets.of(0, 24, 0, 24))
+            .setVisible(bars, true).build()
+        assertTrue(windowInsets!!.isVisible(WindowInsetsCompat.Type.statusBars()))
+        assertTrue(windowInsets!!.isVisible(WindowInsetsCompat.Type.navigationBars()))
+        messenger.call("begin", mapOf("session" to "test-player", "video" to true))
+        val state = mapOf("session" to "test-player", "playing" to true,
+            "controlsVisible" to true, "orientation" to "landscape")
+        fun barsHidden() = activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_FULLSCREEN != 0
+        fun navigationHidden() = activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_HIDE_NAVIGATION != 0
+        messenger.call("state", state)
+        assertTrue(barsHidden())
+        assertTrue(navigationHidden())
+        messenger.call("state", state + ("playing" to false))
+        assertTrue(barsHidden())
+        messenger.call("state", state + ("controlsVisible" to false))
+        messenger.call("state", state)
+        assertTrue(barsHidden())
+        // Android can expose bars while rotating or returning from another app.
+        activity.window.decorView.systemUiVisibility = 0
+        bridge.configurationChanged(activity)
+        assertTrue(barsHidden())
+        activity.window.decorView.systemUiVisibility = 0
+        bridge.resumed(activity)
+        assertTrue(barsHidden())
+        messenger.call("state", state + ("orientation" to "portrait"))
+        assertFalse(barsHidden())
+        assertFalse(navigationHidden())
+        messenger.call("state", state)
+        messenger.call("end", mapOf("session" to "test-player"))
+        assertFalse(barsHidden())
+        assertFalse(navigationHidden())
+        bridge.configurationChanged(activity)
+        assertFalse(barsHidden())
+    }
+
+    @Test fun systemRotationUsesActualLandscapeAndLeavesAudioBarsVisible() {
+        val state = mapOf("session" to "test-player", "playing" to true,
+            "controlsVisible" to true, "orientation" to "system")
+        messenger.call("state", state)
+        RuntimeEnvironment.setQualifiers("land")
+        assertEquals(Configuration.ORIENTATION_LANDSCAPE, activity.resources.configuration.orientation)
+        bridge.configurationChanged(activity)
+        assertTrue(activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_FULLSCREEN != 0)
+        RuntimeEnvironment.setQualifiers("port")
+        bridge.configurationChanged(activity)
+        assertEquals(0, activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_FULLSCREEN)
+        RuntimeEnvironment.setQualifiers("land")
+        messenger.call("begin", mapOf("session" to "audio", "video" to false))
+        messenger.call("state", state + ("session" to "audio"))
+        assertEquals(0, activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_FULLSCREEN)
     }
 
     @Test @Config(sdk = [30]) fun hiddenSystemBarsKeepTheSameSafeBounds() {

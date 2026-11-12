@@ -678,6 +678,34 @@ void main() {
   }
 
   testWidgets(
+    'Windows decoder compatibility persists and preserves paused progress on reload',
+    (tester) async {
+      final page = await render(tester, size: const Size(1280, 800));
+      final controller = page.fixture.controller;
+      await controller.pause();
+      await tap(tester, find.byKey(const Key('player-more')));
+      final toggle = find.byKey(const Key('player-decoder-compatibility'));
+      await scrollPanelTo(tester, toggle);
+      expect(find.textContaining('底部绿线'), findsOneWidget);
+      await tap(tester, toggle);
+      expect(controller.preferences.decoderCompatibility, isTrue);
+      expect(page.fixture.history.preferences.decoderCompatibility, isTrue);
+      expect(page.fixture.current.decoderCompatibility, isTrue);
+      expect(page.fixture.current.hardwareAcceleration, isTrue);
+      expect(controller.state.playing, isFalse);
+      expect(controller.state.position, const Duration(seconds: 120));
+      await scrollPanelTo(tester, toggle);
+      await tap(tester, toggle);
+      expect(page.fixture.current.decoderCompatibility, isFalse);
+      expect(page.fixture.history.preferences.decoderCompatibility, isFalse);
+      expect(controller.state.position, const Duration(seconds: 120));
+      expect(controller.state.playing, isFalse);
+    },
+    skip: !Platform.isWindows,
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
+
+  testWidgets(
     'Zoom and offset preview update the video immediately and persist only on slider release',
     (tester) async {
       final fixture = PlaybackFixture(count: 1)

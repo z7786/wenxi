@@ -110,7 +110,14 @@ class PlaybackBridge internal constructor(
     fun resumed(current: Activity) {
         if (activity !== current) return
         hidden = false
+        applySystemBars()
         updateFrameRate()
+    }
+    fun configurationChanged(current: Activity) {
+        if (activity !== current || session == null) return
+        // Rotation can reset system bar visibility without changing the
+        // playback state. Reapply after Flutter handles the new configuration.
+        applySystemBars()
     }
     fun windowFocused(current: Activity) {
         if (activity === current && session != null) {
@@ -158,7 +165,7 @@ class PlaybackBridge internal constructor(
                     originalOrientation = current.requestedOrientation
                     originalVolumeStream = current.volumeControlStream
                     originalKeepScreen = current.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
-                    val insets = ViewCompat.getRootWindowInsets(current.window.decorView)
+                    val insets = rootInsets(current.window.decorView)
                     originalStatusBar = insets?.isVisible(WindowInsetsCompat.Type.statusBars()) ?: true
                     originalNavigationBar = insets?.isVisible(WindowInsetsCompat.Type.navigationBars()) ?: true
                     originalBarsBehavior = WindowInsetsControllerCompat(current.window, current.window.decorView).systemBarsBehavior
@@ -266,7 +273,9 @@ class PlaybackBridge internal constructor(
         if (session == null || (Build.VERSION.SDK_INT >= 26 && current.isInPictureInPictureMode)) return
         val controller = WindowInsetsControllerCompat(current.window, current.window.decorView)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        if (video && (fullscreen || !controlsVisible || orientationLocked)) {
+        val landscape = !isTelevision() && (desiredOrientation == "landscape" ||
+            current.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        if (video && (fullscreen || landscape || !controlsVisible || orientationLocked)) {
             controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())

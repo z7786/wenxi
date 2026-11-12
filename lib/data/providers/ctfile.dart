@@ -7,6 +7,7 @@ import '../../domain/links.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
 import '../http.dart';
+import '../cloud_browser_ua.dart';
 import '../login_cookies.dart';
 import '../uploads/upload_io.dart';
 import 'token_session.dart' show checkedCloudUrl;
@@ -90,7 +91,12 @@ class CtfileConnector extends CloudConnector {
       '${CtfileCaptchaChallenge.restOrigin}/p8/public/login/login?lang=zh-hans',
     );
     final cookies = LoginCookieJar({'ctfile.com', 'rest.ctfile.com'});
-    const loginHeaders = {...headers, 'Accept-Language': 'zh-CN'};
+    final loginHeaders = http is BrowserUaJsonHttp
+        ? (http as BrowserUaJsonHttp).effectiveHeaders({
+            ...headers,
+            'Accept-Language': 'zh-CN',
+          })
+        : {...headers, 'Accept-Language': 'zh-CN'};
     CtfileCaptchaProof? proof;
     var captchaType = 'image';
     Future<void> captcha(String message) async {
@@ -426,6 +432,9 @@ class CtfileConnector extends CloudConnector {
     final challenge = CtfileCaptchaChallenge(
       type,
       share: true,
+      imageHeaders: http is BrowserUaJsonHttp
+          ? (http as BrowserUaJsonHttp).effectiveHeaders(headers)
+          : headers,
       message: '此城通分享需要安全验证，完成后将继续解析',
     );
     if (_shareChallenges.length >= 64) {
@@ -459,7 +468,17 @@ class CtfileConnector extends CloudConnector {
     CtfileCaptchaProof? proof,
     String? accessPass,
   }) async {
-    final info = await _shareInfo(link, proof: proof, accessPass: accessPass);
+    final identity =
+        _shareChallenges[_shareKey(link)]?.imageHeaders['User-Agent'];
+    Future<Json> read() =>
+        _shareInfo(link, proof: proof, accessPass: accessPass);
+    final info = http is BrowserUaJsonHttp && identity != null
+        ? await (http as BrowserUaJsonHttp).run(
+            read,
+            userAgent: identity,
+            locked: true,
+          )
+        : await read();
     final single = LinkParser.shareId(platform, link.url)!.startsWith('f');
     final root = single ? 'd0' : 'd${_number(info.str('folder_id', '0'), 'd')}';
     return BrowseSession(
@@ -473,6 +492,7 @@ class CtfileConnector extends CloudConnector {
       metadata: {
         'single': '$single',
         'info': jsonEncode(info),
+        CloudBrowserUa.sessionField: ?identity,
         if (info.str('access_pass').isNotEmpty)
           'ctfileAccessPass': info.str('access_pass'),
       },

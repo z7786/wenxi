@@ -258,6 +258,7 @@ class AppServices extends ChangeNotifier {
             (cloud.connector(CloudPlatform.tianyi) as TianyiConnector)
                 .authenticate,
       },
+      browserUa: cloud.browserUa,
     );
     favorites = CloudFavorites(store, cloud);
     backgrounds = BackgroundRepository(
