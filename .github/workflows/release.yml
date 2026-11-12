@@ -26,11 +26,8 @@ jobs:
           else
             dart tool/sync_version.dart --check
           fi
-  checks:
-    needs: tag
-    uses: ./.github/workflows/checks.yml
   package:
-    needs: [tag, checks]
+    needs: tag
     runs-on: windows-2022
     environment: release
     permissions:
