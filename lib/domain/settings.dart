@@ -99,7 +99,7 @@ class AppSettings {
     'quark_route_1': ('夸克 · 直链', 512),
     'quark_route_2': ('夸克 · 快传', 64),
     'uc': ('UC网盘', 512),
-    'xunlei': ('迅雷网盘', 64),
+    'xunlei': ('迅雷网盘', 8),
     'pan123': ('123网盘', 64),
     'guangya': ('光鸭云盘', 64),
     'aliyun': ('阿里云盘', 8),

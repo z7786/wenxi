@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -76,6 +77,7 @@ void main() {
     Size size = const Size(393, 864),
     double systemScale = 1,
     AppSettings settings = const AppSettings(theme: 'Light'),
+    String? migrationError,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;
@@ -101,6 +103,7 @@ void main() {
         clipboardReader: () async => null,
       );
       await services.downloads.initialize();
+      services.migrationError = migrationError;
     });
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
@@ -175,6 +178,133 @@ void main() {
       } finally {
         image.dispose();
       }
+    });
+  }
+
+  Future<void> showMine(WidgetTester tester, String title) async {
+    await tester.scrollUntilVisible(
+      find.text(title),
+      180,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const PageStorageKey('mine')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text(title));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets(
+    'Mine keeps common settings visible and folds low-frequency actions',
+    (tester) async {
+      final (services, _) = await render(tester);
+      expect(find.text('主题与外观'), findsOneWidget);
+      await showMine(tester, '下载保存目录');
+      expect(find.text('同时下载任务数'), findsOneWidget);
+      await showMine(tester, '检查更新');
+      expect(find.text('检查更新').hitTestable(), findsOneWidget);
+
+      for (final (group, child) in [
+        ('高级下载设置', '失败重试次数'),
+        ('链接识别', '自动识别剪贴板链接'),
+        ('备份与数据', '导出备份'),
+        ('帮助与诊断', '日志与故障排查'),
+        ('播放器与实验功能', '实验性功能'),
+      ]) {
+        await showMine(tester, group);
+        expect(find.text(child), findsNothing);
+        await tap(tester, find.text(group));
+        await showMine(tester, child);
+        expect(find.text(child).hitTestable(), findsOneWidget);
+        await showMine(tester, group);
+        await tap(tester, find.text(group));
+        expect(find.text(child), findsNothing);
+      }
+      expect(services.settings.clipboardRecognition, isTrue);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('Mine exposes a failed legacy import with its recovery action', (
+    tester,
+  ) async {
+    await render(tester, migrationError: '旧版数据未能导入，原数据已保留。');
+    await showMine(tester, '备份与数据');
+    await showMine(tester, '旧版数据导入');
+    expect(find.text('旧版数据导入').hitTestable(), findsOneWidget);
+    expect(find.textContaining('旧版数据未能导入'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'Mine advanced settings still save and retain expansion across tabs',
+    (tester) async {
+      final (services, _) = await render(tester);
+      await showMine(tester, '高级下载设置');
+      await tap(tester, find.text('高级下载设置'));
+      await showMine(tester, '失败重试次数');
+      await tap(tester, find.text('失败重试次数'));
+      await tester.enterText(find.byType(TextField), '5');
+      await tester.tap(find.widgetWithText(TextButton, '确定'));
+      await waitFor(tester, () => services.settings.retries == 5);
+      await showMine(tester, '高级下载设置');
+      expect(find.textContaining('重试 5 次'), findsOneWidget);
+      await tap(tester, find.byKey(const ValueKey('navigation-0')));
+      await tap(tester, find.byKey(const ValueKey('navigation-4')));
+      await showMine(tester, '失败重试次数');
+      expect(find.text('失败重试次数').hitTestable(), findsOneWidget);
+      expect(services.store.data.obj('settings').integer('retries'), 5);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final (name, size, platform, settings) in [
+    (
+      'mine-phone',
+      const Size(393, 864),
+      TargetPlatform.android,
+      const AppSettings(theme: 'Light'),
+    ),
+    (
+      'mine-desktop',
+      const Size(1100, 780),
+      TargetPlatform.windows,
+      const AppSettings(theme: 'Light'),
+    ),
+    (
+      'mine-phone-dark-large',
+      const Size(320, 700),
+      TargetPlatform.android,
+      const AppSettings(theme: 'Dark', fontScalePercent: 180),
+    ),
+  ]) {
+    testWidgets('$name collapsed and expanded layouts remain usable', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await render(tester, size: size, settings: settings);
+      await screenshot(tester, '$name-default');
+      await showMine(tester, '高级下载设置');
+      await tap(tester, find.text('高级下载设置'));
+      await showMine(tester, 'HTTP 下载连接数');
+      await screenshot(tester, '$name-download-expanded');
+      expect(tester.takeException(), isNull);
+      await showMine(tester, '高级下载设置');
+      await tap(tester, find.text('高级下载设置'));
+      await showMine(tester, '帮助与诊断');
+      await screenshot(tester, '$name-more');
+      await tap(tester, find.text('帮助与诊断'));
+      for (final title in ['使用帮助', '日志与故障排查', '联系作者/侵权投诉']) {
+        await showMine(tester, title);
+        expect(find.text(title).hitTestable(), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      }
+      await screenshot(tester, '$name-help-expanded');
+      debugDefaultTargetPlatformOverride = null;
     });
   }
 
