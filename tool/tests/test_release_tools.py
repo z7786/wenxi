@@ -209,6 +209,12 @@ class ReleaseFilesTest(unittest.TestCase):
         self.root = Path(self.directory.name)
         (self.root / 'pubspec.yaml').write_text('version: 1.2.3+4\n', encoding='utf-8')
 
+    def player_extractor(self, runtime):
+        extractor = runtime / 'tools/player-7za.exe'
+        extractor.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / 'native/third_party/player-7za-x64-26.01.bin', extractor)
+        return extractor
+
     def test_apk_name_and_checksum_include_the_build_number(self):
         apk = self.root / 'build/app/outputs/flutter-apk/app-release.apk'
         apk.parent.mkdir(parents=True)
@@ -227,10 +233,13 @@ class ReleaseFilesTest(unittest.TestCase):
             file = runtime / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(b'fixture')
+        self.player_extractor(runtime)
         output = release.stage(self.root, 'windows')
         with zipfile.ZipFile(output / 'asterlink-1.2.3+4-windows-x64.zip') as archive:
             self.assertIn('data/app.so', archive.namelist())
             self.assertIn('asterlink_gopeed.exe', archive.namelist())
+            self.assertEqual(hashlib.sha256(archive.read('tools/player-7za.exe')).hexdigest(),
+                             '5bea5af5215089d97749d438351d7288310d0b8a472616edbe1b34168ad1001c')
             self.assertFalse(any(name.startswith('Release/') for name in archive.namelist()))
 
     def test_runtime_with_private_key_is_rejected(self):
@@ -239,6 +248,7 @@ class ReleaseFilesTest(unittest.TestCase):
             file = runtime / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(b'fixture')
+        self.player_extractor(runtime)
         with self.assertRaises(ValueError):
             release.stage(self.root, 'windows')
 
@@ -249,6 +259,8 @@ class ReleaseFilesTest(unittest.TestCase):
                 file = runtime / name
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_bytes(architecture.encode())
+            if architecture == 'x64':
+                self.player_extractor(runtime)
             installer = self.root / (architecture + '-setup.exe')
             installer.write_bytes(architecture.encode())
             output = release.stage(self.root, 'windows', installer, architecture)
@@ -256,6 +268,22 @@ class ReleaseFilesTest(unittest.TestCase):
                 self.assertEqual(archive.read('asterlink.exe'), architecture.encode())
             self.assertEqual((output / ('asterlink-1.2.3+4-windows-' + architecture + '-setup.exe')).read_bytes(), architecture.encode())
         self.assertEqual(release.checksums(output), 4)
+
+    def test_missing_or_corrupt_player_extractor_prevents_x64_publication(self):
+        runtime = self.root / 'build/windows/x64/runner/Release'
+        for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so'):
+            file = runtime / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(b'fixture')
+        with self.assertRaisesRegex(ValueError, 'missing the player component extractor'):
+            release.stage(self.root, 'windows')
+        extractor = self.player_extractor(runtime)
+        with extractor.open('r+b') as stream:
+            stream.seek(128)
+            stream.write(b'corrupt')
+        with self.assertRaisesRegex(ValueError, 'extractor did not verify'):
+            release.stage(self.root, 'windows')
+        self.assertFalse((self.root / '.local/release-assets/asterlink-1.2.3+4-windows-x64.zip').exists())
 
     def test_invalid_architecture_is_rejected_before_staging(self):
         with self.assertRaises(ValueError):

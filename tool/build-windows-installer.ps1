@@ -46,10 +46,20 @@ $requiredFiles = @(
     'data\flutter_assets\assets\licenses\THIRD_PARTY_NOTICES.md',
     'data\flutter_assets\assets\licenses\QuickJS-NG-LICENSE.txt'
 )
-if ($Architecture -eq 'x64') { $requiredFiles += 'vcruntime140_1.dll' }
+if ($Architecture -eq 'x64') {
+    $requiredFiles += @('vcruntime140_1.dll', 'tools\player-7za.exe')
+}
 foreach ($relativePath in $requiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $runtimePath $relativePath) -PathType Leaf)) {
         throw "Incomplete Windows runtime: missing $relativePath"
+    }
+}
+if ($Architecture -eq 'x64') {
+    $extractorPath = Join-Path $runtimePath 'tools\player-7za.exe'
+    if ((Get-Item -LiteralPath $extractorPath).Length -ne 1335296 -or
+        (Get-FileHash -LiteralPath $extractorPath -Algorithm SHA256).Hash -ne
+            '5bea5af5215089d97749d438351d7288310d0b8a472616edbe1b34168ad1001c') {
+        throw 'The player component extractor did not verify. Rebuild Windows before packaging.'
     }
 }
 $runtimeVersion = (Get-Item -LiteralPath (Join-Path $runtimePath 'asterlink.exe')).VersionInfo.ProductVersion
