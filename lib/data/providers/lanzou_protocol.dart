@@ -207,7 +207,11 @@ class LanzouPage {
           .firstOrNull ??
       '';
 
-  String get ajaxUrl {
+  String get ajaxUrl => ajaxUrls.firstOrNull ?? '';
+
+  /// Keep the primary endpoint first, followed by alternatives reachable from
+  /// the same AJAX alias. Unrelated URL variables are not download endpoints.
+  List<String> get ajaxUrls {
     // New iframe templates assign the endpoint through an alias inside a
     // domain-selection branch. Resolve only plain variable assignments; never
     // evaluate page scripts or pick unrelated URL literals from the page.
@@ -217,29 +221,33 @@ class LanzouPage {
     ).allMatches(script)) {
       aliases.putIfAbsent(match[1]!, () => []).add(match[2]!);
     }
-    String resolve(String name, Set<String> seen) {
-      if (seen.length >= 32 || !seen.add(name)) return '';
+    List<String> resolve(String name, Set<String> seen) {
+      if (seen.length >= 32 || !seen.add(name)) return [];
       final literal = variables[name];
-      if (literal != null) return literal;
+      if (literal != null) return [literal];
+      final values = <String>{};
       for (final target in (aliases[name] ?? <String>[]).reversed) {
-        final value = resolve(target, {...seen});
-        if (value.isNotEmpty) return value;
+        values.addAll(resolve(target, {...seen}));
+        if (values.length >= 32) break;
       }
-      return '';
+      return values.take(32).toList();
     }
 
     for (final match in RegExp(
       r'''(?:\burl|['"]url['"])\s*:\s*('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|[A-Za-z_$][\w$]*)''',
     ).allMatches(script)) {
-      final value = _literal(match[1]!) ?? resolve(match[1]!, {});
-      final uri = Uri.tryParse(value);
-      if (uri != null &&
-          RegExp(r'(?:^|/)ajax(?:m|file)\.php$').hasMatch(uri.path) &&
-          RegExp(r'^\d+$').hasMatch(uri.queryParameters['file'] ?? '')) {
-        return value;
-      }
+      final literal = _literal(match[1]!);
+      final endpoints = <String>{
+        for (final value
+            in literal == null ? resolve(match[1]!, {}) : [literal])
+          if (Uri.tryParse(value) case final uri?)
+            if (RegExp(r'(?:^|/)ajax(?:m|file)\.php$').hasMatch(uri.path) &&
+                RegExp(r'^\d+$').hasMatch(uri.queryParameters['file'] ?? ''))
+              value,
+      };
+      if (endpoints.isNotEmpty) return endpoints.toList();
     }
-    return '';
+    return [];
   }
 
   /// Some download nodes show a plain "verify and download" button whose

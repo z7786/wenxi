@@ -133,7 +133,8 @@ void main() {
     },
   );
   for (final (platform, profile, limit) in [
-    (CloudPlatform.quark, null, 512),
+    (CloudPlatform.quark, null, 128),
+    (CloudPlatform.quark, 'quark_route_2', 64),
     (CloudPlatform.baidu, 'baidu', 8),
     (CloudPlatform.baidu, 'baidu_preview', 8),
     (CloudPlatform.baidu, 'baidu_direct', 8),

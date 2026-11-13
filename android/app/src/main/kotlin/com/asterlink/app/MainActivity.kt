@@ -69,6 +69,10 @@ class MainActivity : FlutterActivity() {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         host.playback.pipChanged(this, isInPictureInPictureMode)
     }
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        host.playback.configurationChanged(this)
+    }
     override fun onStop() {
         host.playback.stopped(this)
         super.onStop()

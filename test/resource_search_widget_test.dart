@@ -900,6 +900,71 @@ void main() {
   );
 
   testWidgets(
+    'incognito switch in search settings saves immediately on both pages',
+    (tester) async {
+      final (services, _) = await render(tester, home: true);
+      final history = services.resourceSearch.history;
+      await tester.tap(find.byKey(const Key('resource-priority-settings')));
+      await tester.pumpAndSettle();
+      final toggle = find.byKey(const Key('resource-search-incognito'));
+      expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.incognito, isTrue);
+      // Dismissing without saving the separate display order keeps incognito.
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-home-search-input')),
+        '私密搜索',
+      );
+      await tester.tap(find.byKey(const Key('resource-home-search-submit')));
+      await tester.pumpAndSettle();
+      expect(find.byType(ResourceSearchPage), findsOneWidget);
+      expect(services.resourceSearch.history, history);
+      await tester.tap(find.byKey(const Key('resource-priority-settings')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-search-input')),
+        '正常搜索',
+      );
+      await tester.tap(find.byKey(const Key('resource-search-submit')));
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.incognito, isFalse);
+      expect(services.resourceSearch.history.first, '正常搜索');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final (size, scale) in [
+    (const Size(320, 568), 1.5),
+    (const Size(844, 390), 1.3),
+    (const Size(1280, 800), 1.0),
+  ]) {
+    testWidgets('search settings fit ${size.width} at text scale $scale', (
+      tester,
+    ) async {
+      await render(tester, size: size, scale: scale);
+      await tester.tap(find.byKey(const Key('resource-priority-settings')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('resource-search-incognito')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('resource-priority-save')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
     'Android system back during a streaming search returns home and cancels the request',
     (tester) async {
       final batches = StreamController<ResourceSearchBatch>();

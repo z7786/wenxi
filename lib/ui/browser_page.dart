@@ -894,6 +894,25 @@ class _BrowserPageState extends State<BrowserPage> {
                       )),
         )
         .toList();
+    _sortFiles(result);
+    _displayInputs = inputs;
+    _displayed = List.unmodifiable(result);
+    if (timer.elapsedMilliseconds >= 100) {
+      DiagnosticLog.event(
+        'browse.sort_slow',
+        fields: {
+          'platform': session.platform.name,
+          'sort': sort,
+          'count': source.length,
+          'elapsedMs': timer.elapsedMilliseconds,
+        },
+      );
+    }
+    return _displayed;
+  }
+
+  void _sortFiles(List<CloudFile> result) {
+    final sort = _display.sort, ascending = _display.ascending;
     final dates = sort == 'date'
         ? {
             for (final file in result)
@@ -922,20 +941,39 @@ class _BrowserPageState extends State<BrowserPage> {
       if (order == 0) return positions[a]!.compareTo(positions[b]!);
       return ascending ? order : -order;
     });
-    _displayInputs = inputs;
-    _displayed = List.unmodifiable(result);
-    if (timer.elapsedMilliseconds >= 100) {
-      DiagnosticLog.event(
-        'browse.sort_slow',
-        fields: {
-          'platform': session.platform.name,
-          'sort': sort,
-          'count': source.length,
-          'elapsedMs': timer.elapsedMilliseconds,
-        },
-      );
+  }
+
+  Future<List<CloudFile>?> _previewPlaylist(
+    CloudFile file,
+    String parent,
+  ) async {
+    final kind = fileKind(file.name);
+    if (kind != FileKind.video && kind != FileKind.audio) return displayed;
+    // Search results and favorite highlighting show only matching files.
+    // Episodes and sidecar subtitles belong to the complete source directory.
+    final captured = session, current = generation;
+    final cached = _searchResults
+        ? _deepSearch.cached(captured, parent)
+        : !_hasMore
+        ? items
+        : null;
+    if (cached != null) {
+      final result = List.of(cached);
+      _sortFiles(result);
+      return result;
     }
-    return _displayed;
+    return busy(context, () async {
+      _checkAccount();
+      final files = await widget.services.cloud.list(captured, parent);
+      _checkAccount();
+      require(
+        mounted && session == captured && generation == current,
+        '目录已变化，请重新打开视频',
+      );
+      final result = List.of(files);
+      _sortFiles(result);
+      return result;
+    }, label: '正在读取选集…');
   }
 
   Future<void> _download(List<CloudFile> files) async {
@@ -1245,6 +1283,10 @@ class _BrowserPageState extends State<BrowserPage> {
     if (action == 'preview') {
       _checkAccount();
       _deepSearch.stop();
+      final trail = List.of(_trailFor(files.first));
+      final playlist = await _previewPlaylist(files.first, trail.last.$1);
+      if (!mounted || playlist == null) return;
+      _checkAccount();
       await Navigator.push<void>(
         context,
         MaterialPageRoute(
@@ -1253,13 +1295,11 @@ class _BrowserPageState extends State<BrowserPage> {
             session,
             files.first,
             poolPreview: widget.poolPreview,
-            sourceFolders: _trailFor(
-              files.first,
-            ).skip(1).map((part) => part.$2).toList(),
-            playlist: displayed,
+            sourceFolders: trail.skip(1).map((part) => part.$2).toList(),
+            playlist: playlist,
             parentFolders: {
-              for (final file in {...displayed, files.first})
-                file.id: _trailFor(file).last.$1,
+              for (final file in {...playlist, files.first})
+                file.id: trail.last.$1,
             },
           ),
         ),

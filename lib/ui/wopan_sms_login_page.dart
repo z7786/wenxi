@@ -34,6 +34,12 @@ class _WopanSmsLoginPageState extends State<WopanSmsLoginPage> {
   Timer? _timer;
   DateTime? _resendAt;
   bool _busy = false, _agreed = false, _leaving = false, _completed = false;
+  late final _browserUserAgent = widget.services.vault.withAccount(
+    CloudPlatform.wopan,
+    widget.accountId ??
+        widget.services.vault.activeAccountId(CloudPlatform.wopan),
+    () => widget.services.cloud.browserUa.selected(CloudPlatform.wopan),
+  );
   String _error = '', _status = '';
 
   int get _seconds => _resendAt == null
@@ -115,7 +121,14 @@ class _WopanSmsLoginPageState extends State<WopanSmsLoginPage> {
     try {
       widget.services.control.checkCloud(CloudPlatform.wopan);
       final challenge = await request.run(
-        () => WopanSmsLogin(widget.services.cloud.http).sendSms(mobile),
+        () => widget.services.cloud.browserUa.run(
+          CloudPlatform.wopan,
+          () => WopanSmsLogin(
+            widget.services.cloud.browserHttp(CloudPlatform.wopan),
+          ).sendSms(mobile),
+          userAgent: _browserUserAgent,
+          locked: true,
+        ),
       );
       if (!_active || mobile != _mobile.text.trim()) return;
       _challenge = challenge;
@@ -150,15 +163,21 @@ class _WopanSmsLoginPageState extends State<WopanSmsLoginPage> {
     FocusScope.of(context).unfocus();
     try {
       final services = widget.services;
-      await services.login.submit(CloudPlatform.wopan, (_) async {
-        final candidate = await WopanSmsLogin(
-          services.cloud.http,
-        ).sms(challenge, _code.text);
-        RequestScope.checkpoint();
-        _setStatus('正在读取联通账号…');
-        return (services.cloud.connector(CloudPlatform.wopan) as WopanConnector)
-            .authenticate(candidate);
-      }, accountId: widget.accountId);
+      await services.login.submit(
+        CloudPlatform.wopan,
+        (_) async {
+          final candidate = await WopanSmsLogin(
+            services.cloud.browserHttp(CloudPlatform.wopan),
+          ).sms(challenge, _code.text);
+          RequestScope.checkpoint();
+          _setStatus('正在读取联通账号…');
+          return (services.cloud.connector(CloudPlatform.wopan)
+                  as WopanConnector)
+              .authenticate(candidate);
+        },
+        accountId: widget.accountId,
+        browserUserAgent: _browserUserAgent,
+      );
       if (!mounted || !_active) return;
       _completed = true;
       _code.clear();

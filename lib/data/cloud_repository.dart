@@ -17,6 +17,7 @@ import '../domain/github_acceleration.dart';
 import 'state_store.dart';
 import 'http.dart';
 import 'http_retry.dart';
+import 'cloud_browser_ua.dart';
 import 'cleanup_outbox.dart';
 import 'providers/baidu.dart';
 import 'providers/baidu_public_parser.dart';
@@ -59,6 +60,8 @@ class CloudRepository {
   }) : http = transport is RetryingJsonHttp
            ? transport
            : RetryingJsonHttp(transport) {
+    browserUa = CloudBrowserUa(vault);
+    JsonHttp browser(CloudPlatform platform) => browserHttp(platform);
     final devices = XunleiDevices(vault);
     publicPasswords = BaiduPublicPasswords(
       http,
@@ -77,12 +80,12 @@ class CloudRepository {
         acceleration: githubAcceleration,
       ),
       CloudPlatform.pikpak: PikPakConnector(
-        http,
+        browser(CloudPlatform.pikpak),
         vault,
         stageCleanup: _stageCleanup,
       ),
       CloudPlatform.feijipan: FeijipanConnector(http, vault),
-      CloudPlatform.ctfile: CtfileConnector(http),
+      CloudPlatform.ctfile: CtfileConnector(browser(CloudPlatform.ctfile)),
       CloudPlatform.baidu: BaiduConnector(
         http,
         store: vault,
@@ -101,7 +104,7 @@ class CloudRepository {
               ),
       ),
       CloudPlatform.uc: UcConnector(
-        http,
+        browser(CloudPlatform.uc),
         store: vault,
         stageCleanup: _stageCleanup,
         directShareDownloadEnabled: directShareDownloadEnabled == null
@@ -110,44 +113,53 @@ class CloudRepository {
                   directShareDownloadEnabled!(CloudPlatform.uc, authenticated),
       ),
       CloudPlatform.pan123: Pan123Connector(
-        http,
+        browser(CloudPlatform.pan123),
         vault,
         stageCleanup: _stageCleanup,
       ),
       CloudPlatform.xunlei: XunleiConnector(
-        http,
+        browser(CloudPlatform.xunlei),
         vault,
         devices,
         stageCleanup: _stageCleanup,
         passwordLogin: (username, password) =>
             xunleiLogin.password(username, password, rememberPassword: true),
       ),
-      CloudPlatform.c139: C139Connector(http, stageCleanup: _stageCleanup),
+      CloudPlatform.c139: C139Connector(
+        browser(CloudPlatform.c139),
+        stageCleanup: _stageCleanup,
+      ),
       CloudPlatform.tianyi: TianyiConnector(
-        http,
+        browser(CloudPlatform.tianyi),
         store: vault,
         passwordLogin: (username, password) =>
             tianyiLogin.password(username, password),
       ),
-      CloudPlatform.lanzou: LanzouConnector(http),
+      CloudPlatform.lanzou: LanzouConnector(browser(CloudPlatform.lanzou)),
       CloudPlatform.guangya: GuangyaConnector(
-        http,
+        browser(CloudPlatform.guangya),
         vault,
         stageCleanup: _stageCleanup,
       ),
-      CloudPlatform.ilanzou: ILanzouConnector(http, vault),
-      CloudPlatform.weiyun: WeiyunConnector(http, vault),
-      CloudPlatform.wopan: WopanConnector(http, vault),
-      CloudPlatform.pan115: Pan115Connector(http),
+      CloudPlatform.ilanzou: ILanzouConnector(
+        browser(CloudPlatform.ilanzou),
+        vault,
+      ),
+      CloudPlatform.weiyun: WeiyunConnector(
+        browser(CloudPlatform.weiyun),
+        vault,
+      ),
+      CloudPlatform.wopan: WopanConnector(browser(CloudPlatform.wopan), vault),
+      CloudPlatform.pan115: Pan115Connector(browser(CloudPlatform.pan115)),
       CloudPlatform.aliyun: AliyunConnector(
-        http,
+        browser(CloudPlatform.aliyun),
         vault,
         stageCleanup: _stageCleanup,
       ),
     };
-    xunleiLogin = XunleiLoginService(http, devices);
+    xunleiLogin = XunleiLoginService(browser(CloudPlatform.xunlei), devices);
     tianyiLogin = TianyiLoginService(
-      http,
+      browser(CloudPlatform.tianyi),
       connectors[CloudPlatform.tianyi] as TianyiConnector,
     );
     cleanups.executeAction = (action) async {
@@ -278,6 +290,9 @@ class CloudRepository {
     };
   }
   final JsonHttp http;
+  late final CloudBrowserUa browserUa;
+  JsonHttp browserHttp(CloudPlatform platform) =>
+      BrowserUaJsonHttp(http, browserUa, platform);
   final CredentialStore vault;
   final CleanupOutbox cleanups;
   late final BaiduPublicPasswords publicPasswords;
@@ -291,8 +306,12 @@ class CloudRepository {
   final _continuationKey = Object();
   final _readPreparationKey = Object();
 
-  T _withAccount<T>(CloudPlatform p, String? id, T Function() action) =>
-      vault is Vault ? (vault as Vault).withAccount(p, id, action) : action();
+  T _withAccount<T>(CloudPlatform p, String? id, T Function() action) {
+    T scoped() => browserUa.run(p, action);
+    return vault is Vault
+        ? (vault as Vault).withAccount(p, id, scoped)
+        : scoped();
+  }
 
   String? _currentId(CloudPlatform p) =>
       vault is Vault ? (vault as Vault).accountId(p) : null;
@@ -303,10 +322,27 @@ class CloudRepository {
     return (vault as Vault).accountForRevision(p, revision);
   }
 
-  BrowseSession bindSession(BrowseSession session) =>
-      vault is Vault && session.accountId == null
-      ? session.withAccount(_currentId(session.platform))
-      : session;
+  BrowseSession bindSession(BrowseSession session) {
+    if (CloudBrowserUa.supports(session.platform)) {
+      session = BrowseSession(
+        platform: session.platform,
+        mode: session.mode,
+        title: session.title,
+        rootId: session.rootId,
+        sourceLink: session.sourceLink,
+        metadata: {
+          ...session.metadata,
+          CloudBrowserUa.sessionField:
+              session.meta(CloudBrowserUa.sessionField).isEmpty
+              ? browserUa.selected(session.platform)
+              : session.meta(CloudBrowserUa.sessionField),
+        },
+      );
+    }
+    return vault is Vault && session.accountId == null
+        ? session.withAccount(_currentId(session.platform))
+        : session;
+  }
 
   T withSession<T>(BrowseSession session, T Function() action) {
     final id = session.accountId;
@@ -317,7 +353,12 @@ class CloudRepository {
           : id.isEmpty
           ? null
           : id,
-      action,
+      () => browserUa.run(
+        session.platform,
+        action,
+        userAgent: session.meta(CloudBrowserUa.sessionField),
+        locked: session.mode == BrowseMode.share,
+      ),
     );
   }
 
@@ -442,44 +483,48 @@ class CloudRepository {
     final p = link.platform;
     require(p != null, '此链接不是支持的网盘分享');
     require(p!.supportsShareParsing, p.shareUnavailableMessage);
-    return _withAccount(p, _currentId(p), () async {
-      ensureAvailable(p);
-      final account = vault.credential(p);
-      final provider = connector(p);
-      final result = await OperationProgress.step(
-        OperationStage.verifyShare,
-        () => p != CloudPlatform.baidu && parserSiteId != null
-            ? publicParser.openShare(
-                link,
-                parserSiteId: parserSiteId,
-                passwordGrant: parserPasswordGrant,
-              )
-            : provider is BaiduConnector
-            ? provider.openShare(
-                link,
-                account,
-                route: baiduRoute,
-                parserSiteId: parserSiteId,
-                parserPasswordGrant: parserPasswordGrant,
-              )
-            : provider is CtfileConnector
-            ? provider.openShare(
-                link,
-                account,
-                proof: ctfileProof,
-                accessPass: ctfileAccessPass,
-              )
-            : provider is LanzouConnector
-            ? provider.openShare(link, account, incremental: true)
-            : provider.openShare(link, account),
-      );
-      ensureAvailable(p);
-      require(
-        vault.credential(p)?.updatedAt == account?.updatedAt,
-        '账号已变化，请重新解析分享',
-      );
-      return bindSession(result.withLink(link));
-    });
+    return _withAccount(
+      p,
+      _currentId(p),
+      () => browserUa.run(p, () async {
+        ensureAvailable(p);
+        final account = vault.credential(p);
+        final provider = connector(p);
+        final result = await OperationProgress.step(
+          OperationStage.verifyShare,
+          () => p != CloudPlatform.baidu && parserSiteId != null
+              ? publicParser.openShare(
+                  link,
+                  parserSiteId: parserSiteId,
+                  passwordGrant: parserPasswordGrant,
+                )
+              : provider is BaiduConnector
+              ? provider.openShare(
+                  link,
+                  account,
+                  route: baiduRoute,
+                  parserSiteId: parserSiteId,
+                  parserPasswordGrant: parserPasswordGrant,
+                )
+              : provider is CtfileConnector
+              ? provider.openShare(
+                  link,
+                  account,
+                  proof: ctfileProof,
+                  accessPass: ctfileAccessPass,
+                )
+              : provider is LanzouConnector
+              ? provider.openShare(link, account, incremental: true)
+              : provider.openShare(link, account),
+        );
+        ensureAvailable(p);
+        require(
+          vault.credential(p)?.updatedAt == account?.updatedAt,
+          '账号已变化，请重新解析分享',
+        );
+        return bindSession(result.withLink(link));
+      }, fresh: vault.credential(p) == null),
+    );
   }
 
   Future<ParsedLink> resolveCommand(CloudPlatform platform, String text) async {
@@ -870,6 +915,9 @@ class CloudRepository {
           }
           cleanups.retain(result.cleanup);
           return result.copyWith(
+            headers: PublicShareRoute.uses(session)
+                ? result.headers
+                : browserUa.headers(session.platform, result.headers),
             source: {
               ...DownloadOrigin(session, file, revision).toJson(),
               if (ucPlayable) 'ucVideo': result.source!['ucVideo'],

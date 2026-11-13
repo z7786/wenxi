@@ -378,6 +378,7 @@ void main() {
         'top': 24.0,
         'right': 0.0,
         'bottom': 20.0,
+        'cutout': {'left': 0.0, 'top': 24.0, 'right': 0.0, 'bottom': 0.0},
       };
       const landscapeBounds = {
         'width': 864.0,
@@ -386,6 +387,7 @@ void main() {
         'top': 24.0,
         'right': 20.0,
         'bottom': 0.0,
+        'cutout': {'left': 44.0, 'top': 0.0, 'right': 0.0, 'bottom': 0.0},
       };
       final responses = <Completer<Object?>>[];
       messenger.setMockMethodCallHandler(channel, (call) async {
@@ -407,6 +409,11 @@ void main() {
         const EdgeInsets.only(top: 24, bottom: 20),
       );
       expect(device.systemInsetsFor(landscape), isNull);
+      expect(
+        device.screenDisplayInsetsFor(portrait),
+        const EdgeInsets.only(top: 24),
+      );
+      expect(device.screenDisplayInsetsFor(landscape), EdgeInsets.zero);
       device.didChangeMetrics();
       await Future<void>.delayed(Duration.zero);
       device.didChangeMetrics();
@@ -421,16 +428,30 @@ void main() {
         const EdgeInsets.fromLTRB(44, 24, 20, 0),
       );
       expect(device.systemInsetsFor(portrait), isNull);
+      expect(
+        device.screenDisplayInsetsFor(landscape),
+        const EdgeInsets.only(left: 44),
+      );
+      expect(device.screenDisplayInsetsFor(portrait), EdgeInsets.zero);
       // Landscape direction can change without changing viewport dimensions.
       device.didChangeMetrics();
       await Future<void>.delayed(Duration.zero);
       responses.last.complete({
-        'systemInsets': {...landscapeBounds, 'left': 20.0, 'right': 44.0},
+        'systemInsets': {
+          ...landscapeBounds,
+          'left': 20.0,
+          'right': 44.0,
+          'cutout': {'left': 0.0, 'top': 0.0, 'right': 44.0, 'bottom': 0.0},
+        },
       });
       await Future<void>.delayed(Duration.zero);
       expect(
         device.systemInsetsFor(landscape),
         const EdgeInsets.fromLTRB(20, 24, 44, 0),
+      );
+      expect(
+        device.screenDisplayInsetsFor(landscape),
+        const EdgeInsets.only(right: 44),
       );
       device.didChangeMetrics();
       await Future<void>.delayed(Duration.zero);
@@ -442,9 +463,110 @@ void main() {
       responses.last.complete({'systemInsets': portraitBounds});
       await Future<void>.delayed(Duration.zero);
       expect(device.systemInsetsFor(portrait), isNull);
+      expect(device.screenDisplayInsetsFor(portrait), EdgeInsets.zero);
       expect(
         current.systemInsetsFor(portrait),
         const EdgeInsets.only(top: 24, bottom: 20),
+      );
+      expect(
+        current.screenDisplayInsetsFor(portrait),
+        const EdgeInsets.only(top: 24),
+      );
+    },
+  );
+
+  test(
+    'Screen insets use current metrics for older or invalid native cutouts',
+    () async {
+      const media = MediaQueryData(
+        size: Size(792, 360),
+        viewPadding: EdgeInsets.only(left: 32),
+      );
+      const bounds = {
+        'width': 792.0,
+        'height': 360.0,
+        'left': 44.0,
+        'top': 48.0,
+        'right': 20.0,
+        'bottom': 24.0,
+      };
+      for (final cutout in [
+        null,
+        {'left': -1.0, 'top': 0.0, 'right': 0.0, 'bottom': 0.0},
+        {'left': 800.0, 'top': 0.0, 'right': 0.0, 'bottom': 0.0},
+        {'left': 44.0},
+      ]) {
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'begin') {
+            return {
+              'systemInsets': {...bounds, 'cutout': ?cutout},
+            };
+          }
+          return null;
+        });
+        final device = NativePlaybackDevice(
+          targetPlatform: TargetPlatform.android,
+        );
+        await device.start(video: true);
+        expect(
+          device.systemInsetsFor(media),
+          const EdgeInsets.fromLTRB(44, 48, 20, 24),
+        );
+        expect(
+          device.screenDisplayInsetsFor(media),
+          const EdgeInsets.only(left: 32),
+        );
+        expect(
+          device.screenDisplayInsetsFor(
+            media.copyWith(viewPadding: EdgeInsets.zero),
+          ),
+          EdgeInsets.zero,
+        );
+        await device.finish();
+      }
+    },
+  );
+
+  test(
+    'Screen cutout changes notify even when control insets and size match',
+    () async {
+      const media = MediaQueryData(size: Size(792, 360));
+      final bounds = {
+        'width': 792.0,
+        'height': 360.0,
+        'left': 44.0,
+        'top': 24.0,
+        'right': 44.0,
+        'bottom': 0.0,
+        'cutout': {'left': 44.0, 'top': 0.0, 'right': 0.0, 'bottom': 0.0},
+      };
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'begin' || call.method == 'systemInsets') {
+          return {'systemInsets': bounds};
+        }
+        return null;
+      });
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      final controls = device.systemInsetsFor(media);
+      var changes = 0;
+      device.addListener(() => changes++);
+      bounds['cutout'] = {
+        'left': 0.0,
+        'top': 0.0,
+        'right': 44.0,
+        'bottom': 0.0,
+      };
+      device.didChangeMetrics();
+      await Future<void>.delayed(Duration.zero);
+      expect(changes, 1);
+      expect(device.systemInsetsFor(media), controls);
+      expect(
+        device.screenDisplayInsetsFor(media),
+        const EdgeInsets.only(right: 44),
       );
     },
   );

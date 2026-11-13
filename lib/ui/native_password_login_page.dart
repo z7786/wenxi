@@ -190,8 +190,11 @@ class _NativePasswordLoginPageState extends State<NativePasswordLoginPage> {
                   return Navigator.push<String>(
                     context,
                     MaterialPageRoute(
-                      builder: (_) =>
-                          GuangyaVerificationPage(services, challenge),
+                      builder: (_) => GuangyaVerificationPage(
+                        services,
+                        challenge,
+                        userAgent: services.cloud.browserUa.current,
+                      ),
                     ),
                   );
                 },

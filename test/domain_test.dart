@@ -135,7 +135,8 @@ https://github.com/example/files
   );
   test('Gopeed thread presets, global inheritance and explicit overrides', () {
     const defaults = AppSettings();
-    expect(defaults.connectionsFor(CloudPlatform.quark), 512);
+    expect(defaults.connectionsFor(CloudPlatform.quark), 128);
+    expect(defaults.connectionsFor(CloudPlatform.quark, 'quark_route_2'), 64);
     expect(defaults.connectionsFor(CloudPlatform.uc), 512);
     expect(defaults.connectionsFor(CloudPlatform.baidu), 8);
     expect(defaults.connectionsFor(CloudPlatform.baidu, 'baidu_public'), 64);
@@ -185,7 +186,7 @@ https://github.com/example/files
       ).connectionsFor(null, 'baidu'),
       512,
     );
-    expect(defaults.connectionsFor(CloudPlatform.xunlei), 64);
+    expect(defaults.connectionsFor(CloudPlatform.xunlei), 8);
     expect(defaults.connectionsFor(null), 64);
     const custom = AppSettings(
       threads: 16,
@@ -193,6 +194,18 @@ https://github.com/example/files
     );
     expect(custom.connectionsFor(CloudPlatform.quark), 16);
     expect(custom.connectionsFor(CloudPlatform.uc), 128);
+    final restoredQuark = AppSettings.fromJson({
+      'downloadThreadOverrides': {'quark_route_1': 256, 'quark_route_2': 4},
+    });
+    expect(restoredQuark.connectionsFor(CloudPlatform.quark), 256);
+    expect(
+      restoredQuark.connectionsFor(CloudPlatform.quark, 'quark_route_2'),
+      4,
+    );
+    expect(
+      AppSettings.fromJson(restoredQuark.toJson()).threadOverrides,
+      restoredQuark.threadOverrides,
+    );
     expect(
       const AppSettings(
         threadOverrides: {'xunlei': 128},

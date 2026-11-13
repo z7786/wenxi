@@ -6,10 +6,24 @@ import 'common.dart';
 import 'transfer_overlay_control.dart';
 import 'uploads_page.dart';
 
-class TransfersPage extends StatelessWidget {
+class TransfersPage extends StatefulWidget {
   const TransfersPage(this.services, {super.key, this.active = true});
   final AppServices services;
   final bool active;
+  @override
+  State<TransfersPage> createState() => _TransfersPageState();
+}
+
+class _TransfersPageState extends State<TransfersPage> {
+  AppServices get services => widget.services;
+  bool _downloadSelecting = false;
+
+  void _selectionChanged(bool value) {
+    if (mounted && value != _downloadSelecting) {
+      setState(() => _downloadSelecting = value);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<int>(
     valueListenable: services.transferTab,
@@ -84,12 +98,16 @@ class TransfersPage extends StatelessWidget {
               child: IndexedStack(
                 index: tab,
                 children: [
-                  DownloadsPage(services, active: active && tab == 0),
-                  UploadsPage(services, active: active && tab == 1),
+                  DownloadsPage(
+                    services,
+                    active: widget.active && tab == 0,
+                    onSelectionChanged: _selectionChanged,
+                  ),
+                  UploadsPage(services, active: widget.active && tab == 1),
                 ],
               ),
             ),
-            if (tab == 0)
+            if (tab == 0 && !_downloadSelecting)
               ValueListenableBuilder(
                 valueListenable: services.browserReturn,
                 builder: (context, target, _) => target == null

@@ -1430,7 +1430,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                 actions: [
                   IconButton(
                     key: const Key('resource-priority-settings'),
-                    tooltip: '网盘展示优先级',
+                    tooltip: '搜索设置',
                     onPressed: opening == null
                         ? () => showResourcePrioritySheet(context, search)
                         : null,

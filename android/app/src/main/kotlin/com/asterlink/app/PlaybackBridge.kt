@@ -110,7 +110,14 @@ class PlaybackBridge internal constructor(
     fun resumed(current: Activity) {
         if (activity !== current) return
         hidden = false
+        applySystemBars()
         updateFrameRate()
+    }
+    fun configurationChanged(current: Activity) {
+        if (activity !== current || session == null) return
+        // Rotation can reset system bar visibility without changing the
+        // playback state. Reapply after Flutter handles the new configuration.
+        applySystemBars()
     }
     fun windowFocused(current: Activity) {
         if (activity === current && session != null) {
@@ -158,12 +165,13 @@ class PlaybackBridge internal constructor(
                     originalOrientation = current.requestedOrientation
                     originalVolumeStream = current.volumeControlStream
                     originalKeepScreen = current.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
-                    val insets = ViewCompat.getRootWindowInsets(current.window.decorView)
+                    val insets = rootInsets(current.window.decorView)
                     originalStatusBar = insets?.isVisible(WindowInsetsCompat.Type.statusBars()) ?: true
                     originalNavigationBar = insets?.isVisible(WindowInsetsCompat.Type.navigationBars()) ?: true
                     originalBarsBehavior = WindowInsetsControllerCompat(current.window, current.window.decorView).systemBarsBehavior
                     current.volumeControlStream = AudioManager.STREAM_MUSIC
                     volume.start()
+                    applySystemBars()
                     val brightness = if (originalBrightness >= 0) originalBrightness
                         else runCatching { Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128) / 255f }
                             .getOrDefault(.5f)
@@ -221,7 +229,7 @@ class PlaybackBridge internal constructor(
             result.error("playback", "系统播放控制未能完成，请重试", null)
         }
     }
-    private fun systemInsets(current: Activity): Map<String, Double>? {
+    private fun systemInsets(current: Activity): Map<String, Any>? {
         val decor = current.window.decorView
         val content = current.findViewById<View>(android.R.id.content) ?: decor
         if (content.width <= 0 || content.height <= 0) return null
@@ -233,6 +241,9 @@ class PlaybackBridge internal constructor(
         val offset = IntArray(2)
         content.getLocationInWindow(offset)
         val density = current.resources.displayMetrics.density.toDouble()
+        // Hidden bars remain reserved for controls. Passive screen text only
+        // needs to avoid physical obstructions, such as the camera cutout.
+        val cutout = root.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.displayCutout())
         return mapOf(
             "width" to content.width / density,
             "height" to content.height / density,
@@ -240,6 +251,12 @@ class PlaybackBridge internal constructor(
             "top" to (insets.top - offset[1]).coerceAtLeast(0) / density,
             "right" to (insets.right - (decor.width - offset[0] - content.width)).coerceAtLeast(0) / density,
             "bottom" to (insets.bottom - (decor.height - offset[1] - content.height)).coerceAtLeast(0) / density,
+            "cutout" to mapOf(
+                "left" to (cutout.left - offset[0]).coerceAtLeast(0) / density,
+                "top" to (cutout.top - offset[1]).coerceAtLeast(0) / density,
+                "right" to (cutout.right - (decor.width - offset[0] - content.width)).coerceAtLeast(0) / density,
+                "bottom" to (cutout.bottom - (decor.height - offset[1] - content.height)).coerceAtLeast(0) / density,
+            ),
         )
     }
     private fun updateWindow() {
@@ -266,7 +283,7 @@ class PlaybackBridge internal constructor(
         if (session == null || (Build.VERSION.SDK_INT >= 26 && current.isInPictureInPictureMode)) return
         val controller = WindowInsetsControllerCompat(current.window, current.window.decorView)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        if (video && (fullscreen || !controlsVisible || orientationLocked)) {
+        if (video && (!isTelevision() || fullscreen || !controlsVisible || orientationLocked)) {
             controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())

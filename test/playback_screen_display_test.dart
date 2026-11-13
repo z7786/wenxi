@@ -9,6 +9,7 @@ void main() {
   test('old and malformed screen settings preserve useful defaults', () {
     final old = PlaybackPreferences.fromJson({});
     expect(old.screenDisplay.enabled, isFalse);
+    expect(old.screenDisplay.style, PlaybackScreenStyle.outline);
     expect(old.screenDisplay.items, contains(PlaybackScreenItem.progress));
     expect(old.screenDisplay.items, isNot(contains(PlaybackScreenItem.media)));
     final future = PlaybackScreenDisplay.fromJson({
@@ -16,6 +17,11 @@ void main() {
       'items': ['time', 'future-field', 123, 'time'],
     });
     expect(future.items, {PlaybackScreenItem.time});
+    expect(future.style, PlaybackScreenStyle.outline);
+    expect(
+      PlaybackScreenDisplay.fromJson({'style': 'future-style'}).style,
+      PlaybackScreenStyle.outline,
+    );
     expect(
       PlaybackScreenDisplay.fromJson({'enabled': true, 'items': []}).visible,
       isFalse,
@@ -34,9 +40,13 @@ void main() {
       final store = PlaybackStore(state);
       final before = store.preferencesFor('series-a');
       final selected = before.copyWith(
-        screenDisplay: const PlaybackScreenDisplay(enabled: true)
-            .withItem(PlaybackScreenItem.media, true)
-            .withItem(PlaybackScreenItem.time, false),
+        screenDisplay:
+            const PlaybackScreenDisplay(
+                  enabled: true,
+                  style: PlaybackScreenStyle.background,
+                )
+                .withItem(PlaybackScreenItem.media, true)
+                .withItem(PlaybackScreenItem.time, false),
         rate: 1.5,
       );
       await store.saveEffectivePreferences('series-a', selected, before);
@@ -47,6 +57,11 @@ void main() {
         final prefs = reopened.preferencesFor(folder);
         expect(prefs.screenDisplay.enabled, isTrue);
         expect(prefs.screenDisplay.items, selected.screenDisplay.items);
+        expect(prefs.screenDisplay.style, PlaybackScreenStyle.background);
+        expect(
+          prefs.withLayout(const PlaybackPreferences()).screenDisplay.style,
+          PlaybackScreenStyle.background,
+        );
         expect(
           prefs.withLayout(const PlaybackPreferences()).screenDisplay.items,
           selected.screenDisplay.items,
@@ -56,6 +71,7 @@ void main() {
       expect(reopened.preferencesFor('series-b').rate, 1);
       final roundTrip = PlaybackPreferences.fromJson(selected.toJson());
       expect(roundTrip.screenDisplay.items, selected.screenDisplay.items);
+      expect(roundTrip.screenDisplay.style, PlaybackScreenStyle.background);
     },
   );
 
