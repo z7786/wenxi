@@ -44,6 +44,9 @@ class CrossTransferRelay {
   final AppSettings Function()? settings;
   Future<void>? _initialization;
   Iterable<String>? _retainedTaskIds;
+  late final _spaceBudget = SpaceBudget(
+    () async => await availableSpace?.call(cache.path) ?? -1,
+  );
 
   void retainTasks(Iterable<String> ids) => _retainedTaskIds = List.of(ids);
 
@@ -126,12 +129,8 @@ class CrossTransferRelay {
     }
   }
 
-  Future<void> _space(int remaining) async {
-    if (availableSpace == null) return;
-    final free = await availableSpace!(cache.path);
-    if (free >= 0 && free < remaining + 32 * 1024 * 1024) {
-      throw const DownloadSpaceException();
-    }
+  Future<void> _space(String id, int remaining) async {
+    await _spaceBudget.reserve(id, remaining);
     RequestScope.checkpoint();
   }
 
@@ -152,6 +151,7 @@ class CrossTransferRelay {
     final payload = File(p.join(directory.path, 'payload'));
     final metadata = File(p.join(directory.path, 'verified.json'));
     final checkpoint = File(p.join(directory.path, 'download.json'));
+    final downloadId = _downloadId(directory);
     DownloadSpec? spec;
     var digest = '', sha1Digest = '';
     var ready = false, uploaded = false, retainPartial = false;
@@ -204,7 +204,7 @@ class CrossTransferRelay {
       }
       if (!ready && engine != null) {
         spec = await DownloadRequestContext(
-          id: _downloadId(directory),
+          id: downloadId,
           retries: (settings?.call() ?? const AppSettings()).retries,
         ).run(() => cloud.prepareTransfer(source, file));
         spec =
@@ -212,9 +212,9 @@ class CrossTransferRelay {
               engine: engine!,
               http: http,
               settings: settings ?? () => const AppSettings(),
-              checkSpace: _space,
+              checkSpace: (remaining) => _space(downloadId, remaining),
             ).download(
-              id: _downloadId(directory),
+              id: downloadId,
               sourceKey: _key(
                 encoded([
                   source.platform.key,
@@ -299,7 +299,7 @@ class CrossTransferRelay {
             '下载内容与所选文件大小不一致',
           );
           final total = length ?? expected;
-          await _space(total);
+          await _space(downloadId, total);
           writer = await payload.open(mode: FileMode.write);
           final md5Result = _DigestSink();
           final md5Input = md5.startChunkedConversion(md5Result);
@@ -330,7 +330,7 @@ class CrossTransferRelay {
             otherInput?.add(chunk);
             onProgress(received, total);
             if (received - checked >= 32 * 1024 * 1024) {
-              await _space((total - received).clamp(0, total));
+              await _space(downloadId, (total - received).clamp(0, total));
               checked = received;
             }
           }
@@ -386,6 +386,7 @@ class CrossTransferRelay {
         }
       }
       final size = await payload.length();
+      _spaceBudget.release(downloadId);
       RequestScope.checkpoint();
       final result = await upload(
         UploadFile(
@@ -410,6 +411,7 @@ class CrossTransferRelay {
               retryableDownloadError(error));
       rethrow;
     } finally {
+      _spaceBudget.release(downloadId);
       // Cleanup must run even inside a cancelled account/request scope.
       try {
         await RequestScope().run(() async {

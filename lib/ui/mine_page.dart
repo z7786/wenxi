@@ -541,6 +541,14 @@ class MinePage extends StatelessWidget {
     ),
     _tile(
       context,
+      CupertinoIcons.arrow_2_squarepath,
+      '同时跨盘任务数',
+      '多个任务同时传输，其余自动排队',
+      () => editCrossTransferConcurrency(context, services),
+      value: '${settings.crossTransferConcurrent} 个',
+    ),
+    _tile(
+      context,
       CupertinoIcons.folder,
       '下载保存目录',
       settings.destination ?? '系统下载目录',

@@ -322,6 +322,7 @@ class AppServices extends ChangeNotifier {
     rapidTransfers = RapidTransferManager(
       store: store,
       cloud: cloud,
+      concurrent: () => settings.crossTransferConcurrent,
       relay: CrossTransferRelay(
         cloud: cloud,
         http: transfer,
@@ -958,6 +959,7 @@ class AppServices extends ChangeNotifier {
       ).update(changes).toJson();
     });
     await downloads.settingsChanged();
+    rapidTransfers.settingsChanged();
   }
 
   Future<void> updateAppearance({

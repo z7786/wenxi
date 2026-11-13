@@ -12,6 +12,7 @@ import 'app_context_menu.dart';
 import 'app_popup_menu.dart';
 import 'download_progress.dart';
 import 'transfer_widgets.dart';
+import 'download_concurrency_dialog.dart';
 
 class UploadsPage extends StatefulWidget {
   const UploadsPage(this.services, {super.key, this.active = true});
@@ -171,6 +172,7 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
     animation: Listenable.merge([
       widget.services.uploads,
       widget.services.rapidTransfers,
+      widget.services.store,
     ]),
     builder: (context, _) {
       final all = widget.services.uploads.tasks;
@@ -301,6 +303,15 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
             overflow: TextOverflow.ellipsis,
             style: TextStyle(fontSize: 11, color: secondary(context)),
           ),
+        ),
+        IconButton(
+          key: const Key('cross-transfer-concurrency-setting'),
+          tooltip:
+              '同时跨盘任务数：${widget.services.settings.crossTransferConcurrent} 个',
+          onPressed: () =>
+              editCrossTransferConcurrency(context, widget.services),
+          icon: const Icon(CupertinoIcons.slider_horizontal_3, size: 18),
+          visualDensity: VisualDensity.compact,
         ),
         if (active > 0) ...[
           const SizedBox(width: 8),
