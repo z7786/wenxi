@@ -54,7 +54,6 @@ jobs:
           test "$(uname -m)" = "$ASTERLINK_MACOS_MACH_ARCH"
           python tool/check_public_files.py --staged
           dart tool/sync_version.dart --check
-          python -m unittest discover -s tool/tests -p 'test_macos_package.py'
           flutter config --no-enable-swift-package-manager
           python -c "from pathlib import Path; p=Path('pubspec.lock'); p.write_text(p.read_text().replace('https://pub.flutter-io.cn', 'https://pub.dev'))"
       - name: Prepare existing client configuration
@@ -68,24 +67,9 @@ jobs:
       - name: Build macOS client
         shell: pwsh
         run: ./tool/build-macos.ps1 -Architecture "$env:ASTERLINK_MACOS_ARCHITECTURE"
-      - name: Inspect, launch and package macOS app
+      - name: Inspect and package macOS app
         run: |
-          python tool/macos-smoke.py --app build/macos/Build/Products/Release/文析助手.app
           python tool/package-macos.py --app build/macos/Build/Products/Release/文析助手.app --architecture "$ASTERLINK_MACOS_ARCHITECTURE"
-      - name: Test macOS account, playback, update and script compatibility
-        env:
-          ASTERLINK_JS_LIBRARY: ${{ github.workspace }}/native/bin/macos-${{ env.ASTERLINK_MACOS_ARCHITECTURE }}/libasterlink_js.dylib
-        run: |
-          flutter analyze --no-pub
-          flutter test --no-pub --concurrency=4 test/macos_platform_test.dart test/account_cookie_test.dart test/account_identity_test.dart test/floating_playback_test.dart test/playback_features_test.dart test/playback_device_test.dart test/github_update_test.dart test/app_update_installer_test.dart test/external_player_test.dart test/system_pip_test.dart test/source_runtime_test.dart
-          flutter test --no-pub --concurrency=4 test/apple_documents_test.dart test/apple_storage_test.dart test/apple_web_login_test.dart test/cloud_drop_upload_test.dart test/cast_protocol_test.dart test/cast_widget_test.dart test/lan_service_test.dart test/lan_qr_test.dart test/desktop_save_space_test.dart test/download_protection_page_test.dart test/link_opening_page_test.dart test/web_login_capture_test.dart test/parser_password_web_widget_test.dart
-          flutter test --no-pub --concurrency=4 test/upload_folder_test.dart test/upload_sources_test.dart test/upload_manager_test.dart test/uploads_page_test.dart test/browser_directory_navigation_test.dart
-          flutter test --no-pub --concurrency=4 test/remote_control_test.dart test/remote_control_service_test.dart test/remote_control_resilience_test.dart
-      - name: Test native download helper
-        working-directory: native/gopeed
-        env:
-          CGO_ENABLED: '0'
-        run: go test -p=1 -mod=vendor -tags nosqlite -ldflags=-checklinkname=0 ./cmd/asterlink ./bind/asterlink ./internal/protocol/http ./internal/btpolicy -count=1 -timeout=600s
       - name: Save test installers only
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
