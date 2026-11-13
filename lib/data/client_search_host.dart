@@ -7,6 +7,7 @@ import 'package:html/parser.dart' as html;
 import 'package:html/dom.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../core/json.dart';
+import '../diagnostics/app_log.dart';
 import 'http.dart';
 import 'sources/host.dart';
 import 'sources/package.dart';
@@ -17,6 +18,53 @@ class ClientSearchSession {
   final cookies = <String, List<io.Cookie>>{};
   final pages = <String, (DateTime, Json)>{};
   final results = <String, (DateTime, List<Json>)>{};
+  final _pageBytes = <String, int>{}, _resultBytes = <String, int>{};
+  int get cachedBytes =>
+      _pageBytes.values.fold(0, (sum, size) => sum + size) +
+      _resultBytes.values.fold(0, (sum, size) => sum + size);
+
+  void cachePage(String key, DateTime expires, Json value) {
+    pages.remove(key);
+    pages[key] = (expires, value);
+    _pageBytes[key] =
+        utf8.encode(key).length + utf8.encode(jsonEncode(value)).length;
+    trimCache(
+      io.Platform.isIOS ? 2 * 1024 * 1024 : 8 * 1024 * 1024,
+      at: DateTime.now(),
+    );
+  }
+
+  void cacheResults(String key, DateTime expires, List<Json> value) {
+    results.remove(key);
+    results[key] = (expires, value);
+    _resultBytes[key] = utf8.encode(jsonEncode(value)).length;
+    trimCache(io.Platform.isIOS ? 2 * 1024 * 1024 : 8 * 1024 * 1024);
+  }
+
+  void trimCache(int maximumBytes, {DateTime? at}) {
+    if (maximumBytes <= 0) {
+      pages.clear();
+      results.clear();
+      _pageBytes.clear();
+      _resultBytes.clear();
+      return;
+    }
+    if (at != null) {
+      pages.removeWhere((_, entry) => !entry.$1.isAfter(at));
+      results.removeWhere((_, entry) => !entry.$1.isAfter(at));
+    }
+    _pageBytes.removeWhere((key, _) => !pages.containsKey(key));
+    _resultBytes.removeWhere((key, _) => !results.containsKey(key));
+    while (cachedBytes > maximumBytes && pages.isNotEmpty) {
+      _pageBytes.remove(pages.keys.first);
+      pages.remove(pages.keys.first);
+    }
+    while (cachedBytes > maximumBytes && results.isNotEmpty) {
+      _resultBytes.remove(results.keys.first);
+      results.remove(results.keys.first);
+    }
+  }
+
   DateTime? readyUntil;
   String visitor = '';
 }
@@ -102,7 +150,8 @@ class ClientSearchHost {
       while (_pages.length >= 64) {
         _pages.remove(_pages.keys.first);
       }
-      _pages[key] = (
+      session.cachePage(
+        key,
         DateTime.now().add(
           Duration(seconds: options.integer('cache_ttl').clamp(0, 3600)),
         ),
@@ -132,6 +181,17 @@ class ClientSearchHost {
     }
     if (method == 'browser') {
       if (fetch != null) return null;
+      if (io.Platform.isIOS) {
+        // Keep WKWebView out of background iOS searches. Browser-dependent
+        // sources use the existing server fallback; ordinary HTTP stays local.
+        failedRequests++;
+        DiagnosticLog.active?.record(
+          'search.browser_fallback',
+          fields: {'platform': 'ios', 'source': source.id},
+          flush: true,
+        );
+        throw const SourceError('SOURCE_BROWSER', '此来源改用后台补搜');
+      }
       // Android browser searches use a separate process and WebView profile.
       if (io.Platform.isAndroid) {
         browserTransport = true;
@@ -153,10 +213,7 @@ class ClientSearchHost {
         }
         return null;
       }
-      require(
-        io.Platform.isWindows || io.Platform.isMacOS || io.Platform.isIOS,
-        '此来源需要网页搜索环境',
-      );
+      require(io.Platform.isWindows || io.Platform.isMacOS, '此来源需要网页搜索环境');
       browserTransport = args.str('transport') == 'curl';
       if (!browserTransport &&
           session.readyUntil?.isAfter(DateTime.now()) == true) {
@@ -210,10 +267,7 @@ class ClientSearchHost {
     final uri = source.checkedUrl(args.str('url'));
     if (_browser != null) return;
     final ready = Completer<InAppWebViewController>();
-    require(
-      io.Platform.isWindows || io.Platform.isMacOS || io.Platform.isIOS,
-      '此来源需要网页搜索环境',
-    );
+    require(io.Platform.isWindows || io.Platform.isMacOS, '此来源需要网页搜索环境');
     WebViewEnvironment? env;
     if (io.Platform.isWindows) {
       _browserDirectory = await io.Directory.systemTemp.createTemp(

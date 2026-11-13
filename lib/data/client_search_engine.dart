@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' as io;
 import 'package:crypto/crypto.dart' as hashes;
 import 'package:dio/dio.dart';
 import 'package:pointycastle/export.dart';
@@ -48,6 +49,7 @@ class ClientSearchEngine {
   final _sessions = <String, ClientSearchSession>{};
   DateTime? _attempt;
   Future<void>? _refresh;
+  Future<void>? _searchDone;
   Json? _resultCache;
   bool _disabled = false;
   String get _key =>
@@ -56,6 +58,34 @@ class ClientSearchEngine {
   bool get available => _manifest != null && !_disabled;
   bool get disabled => _disabled;
   List<Json> get sources => _manifest?.list('sources') ?? [];
+
+  void releaseMemory() {
+    for (final session in _sessions.values) {
+      session.trimCache(0);
+    }
+    _resultCache?.clear();
+    _resultCache = null;
+  }
+
+  void _trimSessions() {
+    for (final session in _sessions.values) {
+      session.trimCache(
+        io.Platform.isIOS ? 2 * 1024 * 1024 : 8 * 1024 * 1024,
+        at: clock(),
+      );
+    }
+    final budget = io.Platform.isIOS ? 4 * 1024 * 1024 : 16 * 1024 * 1024;
+    var bytes = _sessions.values.fold(
+      0,
+      (sum, session) => sum + session.cachedBytes,
+    );
+    for (final session in _sessions.values) {
+      if (bytes <= budget) break;
+      final before = session.cachedBytes;
+      session.trimCache(0);
+      bytes -= before;
+    }
+  }
 
   Json verify(Json envelope) {
     require(
@@ -251,6 +281,34 @@ class ClientSearchEngine {
     CancelToken cancellation,
     ServerSearch backend,
   ) async* {
+    final previous = _searchDone;
+    final done = Completer<void>();
+    _searchDone = done.future;
+    try {
+      // Cancellation must drain the old native workers before another iOS
+      // search starts; otherwise repeated submissions multiply runtimes.
+      if (io.Platform.isIOS && previous != null) {
+        await Future.any<void>([
+          previous,
+          cancellation.whenCancel.then(
+            (_) => throw const AppException('搜索已取消'),
+          ),
+        ]);
+      }
+      require(!cancellation.isCancelled, '搜索已取消');
+      yield* _search(keyword, cancellation, backend);
+    } finally {
+      if (io.Platform.isIOS && previous != null) await previous;
+      done.complete();
+      if (identical(_searchDone, done.future)) _searchDone = null;
+    }
+  }
+
+  Stream<ResourceSearchBatch> _search(
+    String keyword,
+    CancelToken cancellation,
+    ServerSearch backend,
+  ) async* {
     await prepare(cancellation);
     require(!_disabled, '搜索服务暂未开放');
     require(available, '尚未缓存搜索配置，请连接后台完成首次同步');
@@ -337,7 +395,16 @@ class ClientSearchEngine {
           continue;
         }
         try {
+          DiagnosticLog.active?.record(
+            'search.source_started',
+            fields: {'source': source.str('id'), 'kind': source.str('kind')},
+            flush: io.Platform.isIOS,
+          );
           final rows = await scope.run(() => _one(source, keyword, manifest));
+          DiagnosticLog.event(
+            'search.source_finished',
+            fields: {'source': source.str('id'), 'count': rows.length},
+          );
           healthy++;
           succeeded.add(source.str('id'));
           if (!controller.isClosed) {
@@ -401,20 +468,42 @@ class ClientSearchEngine {
       }
     }
 
-    final workers = [
-      for (
-        var i = 0;
-        i < manifest.obj('limits').integer('workers', 4).clamp(1, 6);
-        i++
-      )
-        worker(),
-    ];
+    final configuredWorkers = manifest
+        .obj('limits')
+        .integer('workers', 4)
+        .clamp(1, 6);
+    final workerCount = io.Platform.isIOS
+        ? configuredWorkers.clamp(1, 2)
+        : configuredWorkers;
+    DiagnosticLog.active?.record(
+      'search.client_started',
+      fields: {
+        'platform': io.Platform.operatingSystem,
+        'workers': workerCount,
+        'localSources': local.length,
+        'serverSources': serverIds.length,
+      },
+      flush: true,
+    );
+    final workers = [for (var i = 0; i < workerCount; i++) worker()];
     final tasks = [
       server(serverIds, initial: true),
       fallback(),
       Future.wait(workers).whenComplete(() => fallbackSignal.close()),
     ];
-    unawaited(Future.wait(tasks).whenComplete(() => controller.close()));
+    final completion = Future.wait(tasks)
+        .then<void>(
+          (_) {},
+          onError: (Object error, StackTrace stack) {
+            DiagnosticLog.error('search.worker_failed', error, stack);
+          },
+        )
+        .whenComplete(() {
+          // Closing a paused stream can wait for its consumer. Native-worker
+          // cleanup must complete independently when that consumer cancels.
+          unawaited(controller.close());
+        });
+    unawaited(completion);
     try {
       await for (final rows in controller.stream) {
         require(!cancellation.isCancelled, '搜索已停止');
@@ -510,6 +599,16 @@ class ClientSearchEngine {
       timer.cancel();
       scope.cancel();
       await cancel.cancel();
+      if (io.Platform.isIOS) await completion;
+      _trimSessions();
+      DiagnosticLog.event(
+        'search.client_closed',
+        fields: {
+          'cancelled': cancellation.isCancelled,
+          'localCompleted': succeeded.length,
+          'results': output.length,
+        },
+      );
     }
   }
 
@@ -566,10 +665,12 @@ class ClientSearchEngine {
         while (session.results.length >= 12) {
           session.results.remove(session.results.keys.first);
         }
-        session.results[keyword] = (
+        session.cacheResults(
+          keyword,
           clock().add(Duration(seconds: rows.isEmpty ? ttl.clamp(0, 30) : ttl)),
           rows,
         );
+        _trimSessions();
       }
       return rows;
     } finally {

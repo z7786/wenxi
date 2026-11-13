@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import '../core/json.dart';
 import '../domain/resource_search.dart';
 import '../domain/models.dart';
+import '../diagnostics/app_log.dart';
 import 'resource_search_api.dart';
 import 'resource_link_checks.dart';
 import 'state_store.dart';
@@ -18,7 +20,7 @@ enum ResourceSearchPhase {
   failed,
 }
 
-class ResourceSearch extends ChangeNotifier {
+class ResourceSearch extends ChangeNotifier with WidgetsBindingObserver {
   ResourceSearch({
     required this.store,
     required this.api,
@@ -28,6 +30,7 @@ class ResourceSearch extends ChangeNotifier {
     this.publishDelay = const Duration(milliseconds: 250),
   }) {
     linkChecks?.addListener(_checksChanged);
+    WidgetsBinding.instance.addObserver(this);
   }
   final StateStore store;
   final ResourceSearchApi api;
@@ -527,6 +530,15 @@ class ResourceSearch extends ChangeNotifier {
     _itemsRevision++;
     phase = ResourceSearchPhase.searching;
     _checkBatch = linkChecks?.beginBatch();
+    DiagnosticLog.active?.record(
+      'search.started',
+      fields: {
+        'generation': generation,
+        'keywordLength': term.length,
+        'refresh': refresh,
+      },
+      flush: true,
+    );
     notifyListeners();
     // Search history stays in the app's private local state.
     if (!incognito) {
@@ -579,9 +591,17 @@ class ResourceSearch extends ChangeNotifier {
     _deadline = deadline;
     var targetPhase = ResourceSearchPhase.complete;
     var receivedComplete = false;
+    var receivedFirst = false;
     try {
       await for (final batch in api.search(term, cancellation)) {
         if (_closed || generation != _generation) return;
+        if (!receivedFirst || batch.complete) {
+          DiagnosticLog.event(
+            batch.complete ? 'search.results_complete' : 'search.first_results',
+            fields: {'generation': generation, 'count': batch.items.length},
+          );
+          receivedFirst = true;
+        }
         if (batch.complete) {
           deadline.cancel();
           final previous = Map<String, ResourceSearchHit>.of(_hits);
@@ -614,6 +634,12 @@ class ResourceSearch extends ChangeNotifier {
       }
     } catch (e) {
       if (_closed || generation != _generation) return;
+      DiagnosticLog.error(
+        'search.failed',
+        e,
+        null,
+        fields: {'generation': generation, 'results': _hits.length},
+      );
       targetPhase = ResourceSearchPhase.failed;
       error = e is AppException ? e.message : '搜索暂时不可用，请检查网络后重试';
     } finally {
@@ -721,6 +747,10 @@ class ResourceSearch extends ChangeNotifier {
 
   void stop() {
     if (!searching || _closed) return;
+    DiagnosticLog.event(
+      'search.stopped',
+      fields: {'generation': _generation, 'results': _hits.length},
+    );
     _publishStoppedChecks();
     _generation++;
     _deadline?.cancel();
@@ -729,6 +759,39 @@ class ResourceSearch extends ChangeNotifier {
     phase = ResourceSearchPhase.stopped;
     error = '';
     notifyListeners();
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    if (_closed || defaultTargetPlatform != TargetPlatform.iOS) return;
+    final wasSearching = searching;
+    _cache.clear();
+    final client = api;
+    if (client is HttpResourceSearchApi) client.clientSearch?.releaseMemory();
+    if (!wasSearching) return;
+    // Publish the already checked rows before freeing the running workers.
+    // The original query can be retried after iOS recovers memory.
+    stop();
+    error = '系统内存不足，已停止搜索并保留已找到的结果，请稍后重试';
+    DiagnosticLog.active?.record(
+      'search.memory_pressure_stopped',
+      level: 'warning',
+      fields: {'results': _hits.length},
+      flush: true,
+    );
+    notifyListeners();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_closed || defaultTargetPlatform != TargetPlatform.iOS) return;
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      stop();
+      _cache.clear();
+      final client = api;
+      if (client is HttpResourceSearchApi) client.clientSearch?.releaseMemory();
+    }
   }
 
   void showRecommendations() {
@@ -748,6 +811,7 @@ class ResourceSearch extends ChangeNotifier {
   @override
   void dispose() {
     _closed = true;
+    WidgetsBinding.instance.removeObserver(this);
     _discoveryScope.cancel();
     _cancelChecks();
     linkChecks?.removeListener(_checksChanged);
