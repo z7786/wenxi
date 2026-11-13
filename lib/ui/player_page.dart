@@ -94,7 +94,8 @@ class _PlayerPageState extends State<PlayerPage>
   late final PlaybackUiDiagnostics _uiDiagnostics;
   bool _disableAnimations = false;
   Object? _presentationState, _deviceState;
-  final _safeInsets = <Orientation, EdgeInsets>{};
+  Size? _safeInsetsSize;
+  EdgeInsets _safeInsets = EdgeInsets.zero;
   Completer<void>? _layoutReady;
   Future<void> _layoutWork = Future.value();
   Future<void> _deviceWork = Future.value();
@@ -2942,11 +2943,12 @@ class _PlayerPageState extends State<PlayerPage>
     final state = controller.state, pip = device.inPip;
     final desktopPip = pip && device.supportsDesktopPip;
     final media = MediaQuery.of(context);
-    final orientation = media.orientation;
-    final previousInsets = _safeInsets[orientation] ?? EdgeInsets.zero;
+    final previousInsets = _safeInsetsSize == media.size
+        ? _safeInsets
+        : EdgeInsets.zero;
     // Prefer Android's bounds with hidden bars included. The cached fallback
     // keeps other platforms and older native bridges stable during bar fades.
-    final insets =
+    final safeInsets =
         device.systemInsetsFor(media) ??
         EdgeInsets.fromLTRB(
           math.max(
@@ -2966,7 +2968,12 @@ class _PlayerPageState extends State<PlayerPage>
             math.max(media.viewPadding.bottom, media.padding.bottom),
           ),
         );
-    _safeInsets[orientation] = insets;
+    _safeInsetsSize = media.size;
+    _safeInsets = safeInsets;
+    final insets = _centerPlayerInsets(safeInsets);
+    final screenInsets = _centerPlayerInsets(
+      device.screenDisplayInsetsFor(media),
+    );
     final chromeMedia = media.copyWith(
       padding: insets,
       viewPadding: insets,
@@ -3261,7 +3268,7 @@ class _PlayerPageState extends State<PlayerPage>
                           child: PlayerScreenDisplay(
                             controller: controller,
                             television: device.isTelevision,
-                            insets: device.screenDisplayInsetsFor(media),
+                            insets: screenInsets,
                           ),
                         ),
                       if (desktopPip) _desktopPipControls(),
@@ -3489,6 +3496,15 @@ class _PlayerPageState extends State<PlayerPage>
         ),
       ),
     );
+  }
+
+  EdgeInsets _centerPlayerInsets(EdgeInsets insets) {
+    if (!Platform.isAndroid || device.isTelevision) return insets;
+    // A camera cutout on only one side shifts the safe rectangle's center.
+    // Mirror the larger inset so chrome and passive text stay centered on the
+    // player viewport, independently of video size, fit and transforms.
+    final horizontal = math.max(insets.left, insets.right);
+    return insets.copyWith(left: horizontal, right: horizontal);
   }
 
   Widget _scaleChrome(MediaQueryData media, Widget child) => LayoutBuilder(

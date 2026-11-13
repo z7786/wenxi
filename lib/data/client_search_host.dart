@@ -181,13 +181,17 @@ class ClientSearchHost {
     }
     if (method == 'browser') {
       if (fetch != null) return null;
-      if (io.Platform.isIOS) {
-        // Keep WKWebView out of background iOS searches. Browser-dependent
-        // sources use the existing server fallback; ordinary HTTP stays local.
+      if (io.Platform.isIOS || io.Platform.isWindows) {
+        // Browser-dependent sources use the existing server fallback. This
+        // avoids iOS background WKWebViews and Windows WebView2 teardown races;
+        // ordinary HTTP sources still run locally.
         failedRequests++;
         DiagnosticLog.active?.record(
           'search.browser_fallback',
-          fields: {'platform': 'ios', 'source': source.id},
+          fields: {
+            'platform': io.Platform.operatingSystem,
+            'source': source.id,
+          },
           flush: true,
         );
         throw const SourceError('SOURCE_BROWSER', '此来源改用后台补搜');
@@ -213,7 +217,7 @@ class ClientSearchHost {
         }
         return null;
       }
-      require(io.Platform.isWindows || io.Platform.isMacOS, '此来源需要网页搜索环境');
+      require(io.Platform.isMacOS, '此来源需要网页搜索环境');
       browserTransport = args.str('transport') == 'curl';
       if (!browserTransport &&
           session.readyUntil?.isAfter(DateTime.now()) == true) {
@@ -267,7 +271,7 @@ class ClientSearchHost {
     final uri = source.checkedUrl(args.str('url'));
     if (_browser != null) return;
     final ready = Completer<InAppWebViewController>();
-    require(io.Platform.isWindows || io.Platform.isMacOS, '此来源需要网页搜索环境');
+    require(io.Platform.isMacOS, '此来源需要网页搜索环境');
     WebViewEnvironment? env;
     if (io.Platform.isWindows) {
       _browserDirectory = await io.Directory.systemTemp.createTemp(
