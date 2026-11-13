@@ -50,7 +50,6 @@ void main() {
         playing: false,
         orientation: PlaybackOrientation.portrait,
       );
-      platformCalls.clear();
       await device.update(playing: true, width: 1920, height: 1080);
       expect(getOverlays(), isEmpty);
       final directions = platformCalls.where(
@@ -73,7 +72,7 @@ void main() {
     },
   );
   test(
-    'portrait controls and audio restore bars while hidden controls and lock hide them',
+    'portrait video keeps bars hidden with visible controls, pause and lock while audio shows bars',
     () async {
       final device = NativePlaybackDevice(targetPlatform: TargetPlatform.iOS);
       addTearDown(device.finish);
@@ -88,7 +87,7 @@ void main() {
         playing: false,
         orientation: PlaybackOrientation.portrait,
       );
-      expect(getOverlays(), ['SystemUiOverlay.top', 'SystemUiOverlay.bottom']);
+      expect(getOverlays(), isEmpty);
       await device.update(
         playing: false,
         orientation: PlaybackOrientation.portrait,
@@ -102,24 +101,18 @@ void main() {
       );
       expect(getOverlays(), isEmpty);
       await device.fullscreen(false);
-      expect(getOverlays(), ['SystemUiOverlay.top', 'SystemUiOverlay.bottom']);
+      expect(getOverlays(), isEmpty);
       await device.finish();
       final audio = NativePlaybackDevice(targetPlatform: TargetPlatform.iOS);
       addTearDown(audio.finish);
       await audio.start(video: false);
-      platformCalls.clear();
       await audio.update(
         playing: true,
         width: 1920,
         height: 1080,
         controlsVisible: false,
       );
-      expect(
-        platformCalls.where(
-          (call) => call.method == 'SystemChrome.setEnabledSystemUIOverlays',
-        ),
-        isEmpty,
-      );
+      expect(getOverlays(), ['SystemUiOverlay.top', 'SystemUiOverlay.bottom']);
       expect(playbackCalls.last.arguments['orientation'], 'system');
     },
   );
@@ -153,7 +146,7 @@ void main() {
     },
   );
   testWidgets(
-    'iPad window rotation updates bars when automatic rotation is disabled',
+    'iPad window rotation keeps bars hidden when automatic rotation is disabled',
     (tester) async {
       tester.view.devicePixelRatio = 1;
       tester.view.physicalSize = const Size(768, 1024);
@@ -162,13 +155,13 @@ void main() {
       addTearDown(device.finish);
       await device.start(video: true);
       await device.update(playing: true, autoRotate: false);
-      expect(getOverlays(), ['SystemUiOverlay.top', 'SystemUiOverlay.bottom']);
+      expect(getOverlays(), isEmpty);
       tester.view.physicalSize = const Size(1024, 768);
       await tester.pump();
       expect(getOverlays(), isEmpty);
       tester.view.physicalSize = const Size(768, 1024);
       await tester.pump();
-      expect(getOverlays(), ['SystemUiOverlay.top', 'SystemUiOverlay.bottom']);
+      expect(getOverlays(), isEmpty);
     },
   );
 }

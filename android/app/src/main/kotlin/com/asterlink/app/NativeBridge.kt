@@ -136,7 +136,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             return
         }
         if (call.method == "clientEnvironment") {
-            result.success(ClientEnvironment.read(context))
+            result.success(ClientEnvironment.read(activity ?: context))
             return
         }
         if (call.method == "downloadNetwork") {

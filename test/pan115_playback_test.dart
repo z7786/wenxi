@@ -140,7 +140,7 @@ class _Pan115PlaybackFixture {
       controlEnabled: false,
     );
     services.cloud.connectors[CloudPlatform.pan115] = Pan115Connector(
-      http,
+      services.cloud.browserHttp(CloudPlatform.pan115),
       cipherFactory: () => _ResponseCipher(() => response, payloads),
     );
   }
@@ -276,7 +276,9 @@ void main() {
                       r['user-agent'] ==
                           (share
                               ? Pan115Connector.shareUa
-                              : Pan115Connector.ua) &&
+                              : fixture.services.cloud.browserUa.selected(
+                                  CloudPlatform.pan115,
+                                )) &&
                       r['referer'] == 'https://115.com/' &&
                       r['range']!.startsWith('bytes='),
                 ),

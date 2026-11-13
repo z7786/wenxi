@@ -9,6 +9,7 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/data/providers/baidu.dart';
 import 'package:asterlink/domain/baidu_share_route.dart';
 import 'package:asterlink/domain/resource_search.dart';
+import 'package:asterlink/domain/quark_share_transfer.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/main.dart';
@@ -229,6 +230,31 @@ void main() {
       }
     });
   }
+
+  scenario(
+    'Quark search and recommendation opens mark mobile transfer without saving',
+    (tester) async {
+      await render(tester);
+      final pending = pageKey.currentState!.openResource(
+        ResourceSearchHit.fromRaw({
+          'title': 'fixture resource',
+          'url': 'https://pan.quark.cn/s/resource',
+          'pan_type': 'quark',
+          'password': 'aB12',
+        }),
+      );
+      await tester.pumpAndSettle();
+      final browser = tester.widget<BrowserPage>(find.byType(BrowserPage));
+      expect(QuarkShareTransfer.prefersMobile(browser.session), isTrue);
+      expect(connector.downloads, 0);
+      Navigator.of(tester.element(find.byType(BrowserPage))).pop();
+      await tester.pumpAndSettle();
+      await pending;
+      await start(tester);
+      final manual = tester.widget<BrowserPage>(find.byType(BrowserPage));
+      expect(QuarkShareTransfer.prefersMobile(manual.session), isFalse);
+    },
+  );
 
   scenario(
     'Raw GitHub files open direct download without requesting repository APIs',

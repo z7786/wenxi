@@ -5,7 +5,7 @@ import 'dart:convert';
 class LogRedactor {
   static const hidden = '[已隐藏]';
   static final _secretKey = RegExp(
-    r'cookie|authorization|password|passwd|passcode|token|secret|credential|capability|parserstate|x-parser-job-key|extract|提取码|访问码|密码|口令|skey|signature|sign$|headers|body|filename|savedpath|destination|sharetext|bduss|__puus|__pus|^pwd$|access_?code|access_?pass|login_user|sessionkey|^primary$|^secondary$|^epd$|^username$|^passport$|^mobile$|^paramid$|^lt$|^reqid$|validate|^cp$|^pb$',
+    r'cookie|authorization|password|passwd|passcode|token|secret|credential|capability|parserstate|x-parser-job-key|extract|提取码|访问码|密码|口令|skey|signature|sign$|kps$|^vcode$|service_?ticket|headers|body|filename|savedpath|destination|sharetext|bduss|__puus|__pus|^pwd$|access_?code|access_?pass|login_user|sessionkey|^primary$|^secondary$|^epd$|^username$|^passport$|^mobile$|^paramid$|^lt$|^reqid$|validate|^cp$|^pb$',
     caseSensitive: false,
   );
   static final _url = RegExp(
@@ -17,7 +17,7 @@ class LogRedactor {
     caseSensitive: false,
   );
   static final _pair = RegExp(
-    r'''((?:[\w.-]*(?:token|secret|password|passwd|passcode|credential|capability|parserstate|x-parser-job-key|skey|signature|cookie|access_?pass)[\w.-]*|BDUSS|STOKEN|__puus|__pus|pwd|access_?code|LOGIN_USER|sessionKey|primary|secondary|epd|username|passport|mobile|paramid|lt|reqid|validate|validateCode|smsValidateCode|cp|pb|提取码|访问码|密码|口令)["']?\s*[=:：]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]\r\n]+)''',
+    r'''((?:[\w.-]*(?:token|secret|password|passwd|passcode|credential|capability|parserstate|x-parser-job-key|skey|signature|cookie|access_?pass|kps|service_?ticket)[\w.-]*|sign|vcode|BDUSS|STOKEN|__puus|__pus|pwd|access_?code|LOGIN_USER|sessionKey|primary|secondary|epd|username|passport|mobile|paramid|lt|reqid|validate|validateCode|smsValidateCode|cp|pb|提取码|访问码|密码|口令)["']?\s*[=:：]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]\r\n]+)''',
     caseSensitive: false,
   );
 

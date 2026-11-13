@@ -120,6 +120,7 @@ class ResourcePoolPreview {
       );
       final target = await cloud.share(
         link!,
+        preferQuarkMobileTransfer: original.platform == CloudPlatform.quark,
         baiduRoute: BaiduShareRoute.fromSession(original),
         parserSiteId: original.meta('parserSiteId').isEmpty
             ? null

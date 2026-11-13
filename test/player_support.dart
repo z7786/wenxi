@@ -131,6 +131,12 @@ class FakePlaybackBackend extends PlaybackBackend {
     segmentSizeMiB = value;
   }
 
+  bool decoderCompatibility = false;
+  @override
+  Future<void> setDecoderCompatibility(bool enabled) async {
+    decoderCompatibility = enabled;
+  }
+
   final rates = <double>[], volumes = <double>[], seeks = <Duration>[];
   Future<void>? rateBarrier;
   double subtitleDelay = 0, audioDelay = 0;

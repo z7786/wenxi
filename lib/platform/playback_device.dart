@@ -17,6 +17,9 @@ abstract class PlaybackDevice extends ChangeNotifier {
 
   /// Safe bounds independent of system bar visibility for the current viewport.
   EdgeInsets? systemInsetsFor(MediaQueryData media) => null;
+
+  /// Passive screen text must not reserve space for hidden system bars.
+  EdgeInsets screenDisplayInsetsFor(MediaQueryData media) => media.viewPadding;
   bool get supportsPip;
   bool get supportsDesktopPip => false;
   bool get supportsIndependentPlayerWindows => false;
@@ -96,7 +99,6 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   bool get isTelevision => _isTelevision;
   bool _fullscreen = false, _previousWindowsFullscreen = false;
   bool _video = false;
-  bool _controlsVisible = true, _locked = false;
   bool? _iosUiHidden;
   PlaybackOrientation? _iosOrientation;
   double _brightness = .5;
@@ -104,6 +106,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   bool _supportsSystemVolume = false;
   Size? _systemInsetsSize;
   EdgeInsets? _systemInsets;
+  EdgeInsets? _screenDisplayInsets;
   int _systemInsetsRevision = 0;
   final _volumeGate = AsyncGate();
   String _lastUpdate = '';
@@ -135,6 +138,16 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
       return null;
     }
     return _systemInsets;
+  }
+
+  @override
+  EdgeInsets screenDisplayInsetsFor(MediaQueryData media) {
+    if (systemInsetsFor(media) == null || _screenDisplayInsets == null) {
+      // A pending rotation or older bridge uses current Flutter metrics,
+      // never the control bar's cached insets from a previous layout.
+      return super.screenDisplayInsetsFor(media);
+    }
+    return _screenDisplayInsets!;
   }
 
   Future<T?> _invoke<T>(String name, [Json arguments = const {}]) =>
@@ -196,9 +209,30 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
     }
     final size = Size(width, height);
     final insets = EdgeInsets.fromLTRB(sides[0], sides[1], sides[2], sides[3]);
-    if (size == _systemInsetsSize && insets == _systemInsets) return;
+    final cutout = bounds.obj('cutout');
+    final cutoutSides = [
+      for (final side in ['left', 'top', 'right', 'bottom'])
+        cutout.number(side, double.nan),
+    ];
+    final screenInsets =
+        cutoutSides.every((value) => value.isFinite && value >= 0) &&
+            cutoutSides[0] + cutoutSides[2] < width &&
+            cutoutSides[1] + cutoutSides[3] < height
+        ? EdgeInsets.fromLTRB(
+            cutoutSides[0],
+            cutoutSides[1],
+            cutoutSides[2],
+            cutoutSides[3],
+          )
+        : null;
+    if (size == _systemInsetsSize &&
+        insets == _systemInsets &&
+        screenInsets == _screenDisplayInsets) {
+      return;
+    }
     _systemInsetsSize = size;
     _systemInsets = insets;
+    _screenDisplayInsets = screenInsets;
     notifyListeners();
   }
 
@@ -283,8 +317,6 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
     try {
       if (_ios) {
         if (!identical(_handlerOwner, this)) return;
-        _controlsVisible = controlsVisible;
-        _locked = locked;
         if (targetOrientation != null && targetOrientation != _iosOrientation) {
           _iosOrientation = targetOrientation;
           await SystemChrome.setPreferredOrientations(
@@ -318,15 +350,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
 
   Future<void> _syncIosSystemUi({bool force = false}) async {
     if (!_ios || _closed || !identical(_handlerOwner, this)) return;
-    final views = WidgetsBinding.instance.platformDispatcher.views;
-    final size = views.isEmpty ? Size.zero : views.first.physicalSize;
-    final landscape =
-        _iosOrientation == PlaybackOrientation.landscape ||
-        (_iosOrientation == null ||
-                _iosOrientation == PlaybackOrientation.system) &&
-            size.width > size.height;
-    final hidden =
-        _video && (_fullscreen || landscape || _locked || !_controlsVisible);
+    final hidden = _video;
     if (!force && _iosUiHidden == hidden) return;
     _iosUiHidden = hidden;
     try {

@@ -460,7 +460,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                                 ),
                                 IconButton(
                                   key: const Key('resource-priority-settings'),
-                                  tooltip: '网盘展示优先级',
+                                  tooltip: '搜索设置',
                                   onPressed: () => showResourcePrioritySheet(
                                     context,
                                     widget.services.resourceSearch,

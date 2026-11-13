@@ -25,7 +25,29 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
   late List<CloudPlatform> order = widget.search.cloudPriority
       .where((p) => p != CloudPlatform.github)
       .toList();
+  late Set<CloudPlatform> disabled = widget.search.disabledClouds;
   bool saving = false;
+  late bool incognito = widget.search.incognito;
+  bool updatingIncognito = false;
+
+  Future<void> setIncognito(bool value) async {
+    setState(() {
+      incognito = value;
+      updatingIncognito = true;
+    });
+    try {
+      await widget.search.setIncognito(value);
+    } catch (e) {
+      if (mounted) message(context, errorText(e));
+    } finally {
+      if (mounted) {
+        setState(() {
+          incognito = widget.search.incognito;
+          updatingIncognito = false;
+        });
+      }
+    }
+  }
 
   void move(int from, int to) {
     if (saving || to < 0 || to >= order.length) return;
@@ -35,7 +57,7 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
   Future<void> save() async {
     setState(() => saving = true);
     try {
-      await widget.search.setCloudPriority(order);
+      await widget.search.setCloudPriority(order, disabledClouds: disabled);
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (mounted) {
@@ -52,45 +74,75 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 0, 16, 8),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    '网盘展示优先级',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-                  ),
-                ),
-                TextButton(
-                  key: const Key('resource-priority-reset'),
-                  onPressed: saving
-                      ? null
-                      : () => setState(
-                          () => order = ResourceSearch.defaultCloudPriority
-                              .where((p) => p != CloudPlatform.github)
-                              .toList(),
-                        ),
-                  child: const Text('恢复默认'),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Text(
-              '拖动调整顺序，也可点击箭头移动。设置保存在本机，并应用于搜索结果和网盘标签。',
-              style: TextStyle(
-                fontSize: 12,
-                height: 1.6,
-                color: secondary(context),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
           Expanded(
             child: ReorderableListView.builder(
               buildDefaultDragHandles: false,
+              header: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(24, 0, 24, 8),
+                    child: Text(
+                      '搜索设置',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  SwitchListTile(
+                    key: const Key('resource-search-incognito'),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+                    title: const Text('无痕模式'),
+                    subtitle: const Text('开启后不保存新的资源搜索和网盘搜索记录'),
+                    value: incognito,
+                    onChanged: saving || updatingIncognito
+                        ? null
+                        : setIncognito,
+                  ),
+                  const Divider(indent: 24, endIndent: 24),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 0, 16, 8),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            '网盘展示与排序',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        TextButton(
+                          key: const Key('resource-priority-reset'),
+                          onPressed: saving
+                              ? null
+                              : () => setState(() {
+                                  order = ResourceSearch.defaultCloudPriority
+                                      .where((p) => p != CloudPlatform.github)
+                                      .toList();
+                                  disabled.clear();
+                                }),
+                          child: const Text('恢复默认'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Text(
+                      '开关控制网盘是否展示，拖动右侧手柄调整顺序。保存后应用于搜索结果和网盘标签，关闭后仍保留排序位置。',
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.6,
+                        color: secondary(context),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+              ),
               itemCount: order.length,
               onReorder: (from, to) {
                 if (to > from) to--;
@@ -108,27 +160,24 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      IconButton(
-                        tooltip: '上移${platform.shortName}',
-                        onPressed: saving || index == 0
-                            ? null
-                            : () => move(index, index - 1),
-                        icon: const Icon(
-                          Icons.keyboard_arrow_up_rounded,
-                          size: 22,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: '下移${platform.shortName}',
-                        onPressed: saving || index == order.length - 1
-                            ? null
-                            : () => move(index, index + 1),
-                        icon: const Icon(
-                          Icons.keyboard_arrow_down_rounded,
-                          size: 22,
+                      Semantics(
+                        label: '展示${platform.label}',
+                        child: Switch(
+                          key: ValueKey('resource-enabled-${platform.key}'),
+                          value: !disabled.contains(platform),
+                          onChanged: saving
+                              ? null
+                              : (value) => setState(() {
+                                  if (value) {
+                                    disabled.remove(platform);
+                                  } else {
+                                    disabled.add(platform);
+                                  }
+                                }),
                         ),
                       ),
                       ReorderableDragStartListener(
+                        key: ValueKey('resource-drag-${platform.key}'),
                         index: index,
                         enabled: !saving,
                         child: const Padding(
@@ -146,8 +195,8 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
             padding: const EdgeInsets.fromLTRB(24, 12, 24, 16),
             child: FilledButton(
               key: const Key('resource-priority-save'),
-              onPressed: saving ? null : save,
-              child: Text(saving ? '保存中…' : '保存顺序'),
+              onPressed: saving || updatingIncognito ? null : save,
+              child: Text(saving ? '保存中…' : '保存设置'),
             ),
           ),
         ],

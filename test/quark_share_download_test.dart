@@ -8,6 +8,7 @@ import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/settings.dart';
+import 'package:asterlink/domain/quark_share_transfer.dart';
 import 'package:asterlink/download/download_request.dart';
 import 'support.dart';
 
@@ -249,6 +250,25 @@ class _Fixture {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'searched Quark keeps automatic direct recovery after web fallback quota failure',
+    () async {
+      final f = _Fixture(directPolicy: (_, _) => false)
+        ..capacityFailure = 'task'
+        ..authenticatedDirectAvailable = true;
+      final session = await f.repository.share(
+        f.link,
+        preferQuarkMobileTransfer: true,
+      );
+      expect(QuarkShareTransfer.prefersMobile(session), isTrue);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      final spec = await f.repository.prepare(session, file);
+      expect(spec.cleanup, isNull);
+      expect(f.calls('/share/sharepage/save'), hasLength(1));
+      expect(f.calls('/file/download'), hasLength(1));
+    },
+  );
 
   for (final planned in [false, true]) {
     test(

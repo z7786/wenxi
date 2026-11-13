@@ -9,6 +9,7 @@ import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
+import 'package:asterlink/domain/browser_return.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/main.dart';
@@ -235,6 +236,134 @@ void main() {
   Future<void> select(WidgetTester tester, String id) async {
     await tester.longPress(row(id));
     await tester.pumpAndSettle();
+  }
+
+  double selectionBottom(WidgetTester tester) {
+    final layout = find.byKey(const Key('downloads-task-layout'));
+    // The shell extends beneath its floating navigation bar. Its MediaQuery
+    // reserves that height; desktop rails reserve only device safe padding.
+    final inset = MediaQuery.paddingOf(tester.element(layout)).bottom;
+    return tester.getRect(layout).bottom - (inset > 8 ? inset : 8);
+  }
+
+  BrowserReturnTarget checkpoint() => BrowserReturnTarget(
+    session: const BrowseSession(
+      platform: CloudPlatform.quark,
+      mode: BrowseMode.share,
+      title: '下载来源',
+      rootId: 'root',
+    ),
+    items: const [CloudFile(id: 'video', name: '旅行回忆.mp4')],
+    trail: const [('root', '全部文件'), ('season', '旅行回忆 · 第二季')],
+    scrollOffset: 420,
+  );
+
+  for (final exit in ['back', 'filter', 'tab', 'remove', 'batch']) {
+    testWidgets(
+      'Selection footer replaces the return shortcut and restores it after $exit',
+      (tester) async {
+        final (services, _, _) = await render(tester);
+        final target = checkpoint();
+        services.browserReturn.value = target;
+        await tester.pumpAndSettle();
+        final shortcut = find.byKey(const Key('transfer-return-browser'));
+        expect(shortcut.hitTestable(), findsOneWidget);
+        await tester.tap(find.text('失败 1'));
+        await tester.pumpAndSettle();
+        await select(tester, 'failed');
+        final actions = find.byKey(const Key('downloads-selection-actions'));
+        expect(shortcut, findsNothing);
+        expect(actions, findsOneWidget);
+        expect(services.browserReturn.value, same(target));
+        final anchor = tester.getRect(actions).bottom;
+        expect(anchor, closeTo(selectionBottom(tester), .1));
+        // A new checkpoint arriving during selection must not push actions up.
+        final latest = checkpoint();
+        services.browserReturn.value = latest;
+        await tester.pumpAndSettle();
+        expect(shortcut, findsNothing);
+        expect(tester.getRect(actions).bottom, closeTo(anchor, .1));
+        switch (exit) {
+          case 'back':
+            await Navigator.of(tester.element(row('failed'))).maybePop();
+          case 'filter':
+            await tester.tap(find.text('全部'));
+          case 'tab':
+            services.transferTab.value = 1;
+            await tester.pumpAndSettle();
+            services.transferTab.value = 0;
+          case 'remove':
+            await tester.runAsync(() => services.downloads.delete('failed'));
+          case 'batch':
+            await tester.tap(action('delete'));
+            await tester.pumpAndSettle();
+            await tester.tap(find.byKey(const Key('downloads-confirm-delete')));
+            await waitFor(
+              tester,
+              () => services.downloads.task('failed') == null,
+            );
+        }
+        await tester.pumpAndSettle();
+        expect(actions, findsNothing);
+        expect(getCount(), findsNothing);
+        // Batch success shows a floating message over the restored shortcut.
+        ScaffoldMessenger.of(tester.element(shortcut)).removeCurrentSnackBar();
+        await tester.pumpAndSettle();
+        expect(shortcut.hitTestable(), findsOneWidget);
+        expect(services.browserReturn.value, same(latest));
+      },
+    );
+  }
+
+  for (final (name, size, dark, scale) in [
+    ('phone-selection-return', const Size(393, 864), false, 1.0),
+    ('phone-selection-return-dark', const Size(393, 864), true, 1.0),
+    ('narrow-selection-return', const Size(320, 700), false, 1.5),
+    ('desktop-selection-return', const Size(1280, 800), false, 1.0),
+  ]) {
+    testWidgets(
+      '$name actions stay accessible with a saved browser checkpoint',
+      (tester) async {
+        final (services, _, _) = await render(
+          tester,
+          size: size,
+          dark: dark,
+          scale: scale,
+        );
+        final target = checkpoint();
+        services.browserReturn.value = target;
+        await tester.pumpAndSettle();
+        await select(tester, 'paused');
+        expect(find.byKey(const Key('transfer-return-browser')), findsNothing);
+        for (final kind in DownloadBatchAction.values) {
+          expect(action(kind.name).hitTestable(), findsOneWidget);
+          expect(
+            tester.getSize(action(kind.name)).height,
+            greaterThanOrEqualTo(48),
+          );
+        }
+        if (size.width > 1000) {
+          for (final kind in ['copy', 'move']) {
+            expect(action(kind).hitTestable(), findsOneWidget);
+          }
+        }
+        final bounds = tester.getRect(
+          find.byKey(const Key('downloads-selection-actions')),
+        );
+        expect(bounds.width, lessThanOrEqualTo(600));
+        expect(bounds.left, greaterThanOrEqualTo(12));
+        expect(bounds.right, lessThanOrEqualTo(size.width - 12));
+        expect(bounds.bottom, closeTo(selectionBottom(tester), .1));
+        expect(tester.takeException(), isNull);
+        await expectLater(
+          find.byKey(const Key('selection-capture')),
+          matchesGoldenFile('goldens/$name.png'),
+        );
+      },
+      variant: TargetPlatformVariant.only(
+        size.width > 1000 ? TargetPlatform.windows : TargetPlatform.android,
+      ),
+    );
   }
 
   testWidgets(

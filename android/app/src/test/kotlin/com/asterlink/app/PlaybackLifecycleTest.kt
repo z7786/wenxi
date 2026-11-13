@@ -5,6 +5,7 @@ import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.view.View
 import android.view.ViewGroup
 import io.flutter.embedding.android.FlutterSurfaceView
@@ -174,6 +175,76 @@ class PlaybackLifecycleTest {
         assertTrue(messenger.sent.isEmpty())
     }
 
+    @Test fun videoKeepsBarsHiddenInBothOrientationsWithControlsVisibleAndRestoresOnExit() {
+        // Give Robolectric an explicit pre-playback visibility snapshot.
+        val bars = WindowInsetsCompat.Type.systemBars()
+        windowInsets = WindowInsetsCompat.Builder()
+            .setInsets(bars, CompatInsets.of(0, 24, 0, 24))
+            .setInsetsIgnoringVisibility(bars, CompatInsets.of(0, 24, 0, 24))
+            .setVisible(bars, true).build()
+        assertTrue(windowInsets!!.isVisible(WindowInsetsCompat.Type.statusBars()))
+        assertTrue(windowInsets!!.isVisible(WindowInsetsCompat.Type.navigationBars()))
+        messenger.call("begin", mapOf("session" to "test-player", "video" to true))
+        val state = mapOf("session" to "test-player", "playing" to true,
+            "controlsVisible" to true, "orientation" to "landscape")
+        fun barsHidden() = activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_FULLSCREEN != 0
+        fun navigationHidden() = activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_HIDE_NAVIGATION != 0
+        assertTrue(barsHidden())
+        assertTrue(navigationHidden())
+        messenger.call("state", state)
+        assertTrue(barsHidden())
+        assertTrue(navigationHidden())
+        messenger.call("state", state + ("playing" to false))
+        assertTrue(barsHidden())
+        messenger.call("state", state + ("controlsVisible" to false))
+        messenger.call("state", state)
+        assertTrue(barsHidden())
+        // Android can expose bars while rotating or returning from another app.
+        activity.window.decorView.systemUiVisibility = 0
+        bridge.configurationChanged(activity)
+        assertTrue(barsHidden())
+        activity.window.decorView.systemUiVisibility = 0
+        bridge.resumed(activity)
+        assertTrue(barsHidden())
+        messenger.call("state", state + ("orientation" to "portrait"))
+        assertTrue(barsHidden())
+        assertTrue(navigationHidden())
+        messenger.call("state", state + ("orientation" to "portrait") + ("playing" to false))
+        assertTrue(barsHidden())
+        activity.window.decorView.systemUiVisibility = 0
+        bridge.configurationChanged(activity)
+        assertTrue(barsHidden())
+        assertTrue(navigationHidden())
+        activity.window.decorView.systemUiVisibility = 0
+        bridge.resumed(activity)
+        assertTrue(barsHidden())
+        assertTrue(navigationHidden())
+        messenger.call("state", state)
+        messenger.call("end", mapOf("session" to "test-player"))
+        assertFalse(barsHidden())
+        assertFalse(navigationHidden())
+        bridge.configurationChanged(activity)
+        assertFalse(barsHidden())
+    }
+
+    @Test fun systemRotationKeepsVideoBarsHiddenAndLeavesAudioBarsVisible() {
+        val state = mapOf("session" to "test-player", "playing" to true,
+            "controlsVisible" to true, "orientation" to "system")
+        messenger.call("state", state)
+        RuntimeEnvironment.setQualifiers("land")
+        assertEquals(Configuration.ORIENTATION_LANDSCAPE, activity.resources.configuration.orientation)
+        bridge.configurationChanged(activity)
+        assertTrue(activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_FULLSCREEN != 0)
+        RuntimeEnvironment.setQualifiers("port")
+        bridge.configurationChanged(activity)
+        assertTrue(activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_FULLSCREEN != 0)
+        assertTrue(activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_HIDE_NAVIGATION != 0)
+        RuntimeEnvironment.setQualifiers("land")
+        messenger.call("begin", mapOf("session" to "audio", "video" to false))
+        messenger.call("state", state + ("session" to "audio"))
+        assertEquals(0, activity.window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_FULLSCREEN)
+    }
+
     @Test @Config(sdk = [30]) fun hiddenSystemBarsKeepTheSameSafeBounds() {
         val view = View(activity)
         activity.setContentView(view)
@@ -186,11 +257,14 @@ class PlaybackLifecycleTest {
         content.layout(0, 0, 1080, 1920)
         val bars = WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars()
         val system = CompatInsets.of(0, 72, 0, 60)
-        fun snapshot(visible: Boolean): Map<*, *> {
+        val displayCutout = WindowInsetsCompat.Type.displayCutout()
+        fun snapshot(visible: Boolean, cutout: CompatInsets = CompatInsets.NONE): Map<*, *> {
             val insets = WindowInsetsCompat.Builder()
                 .setInsets(bars, if (visible) system else CompatInsets.NONE)
                 .setInsetsIgnoringVisibility(bars, system)
                 .setVisible(bars, visible)
+                .setInsets(displayCutout, cutout)
+                .setInsetsIgnoringVisibility(displayCutout, cutout)
                 .build()
             windowInsets = insets
             val reply = messenger.call("systemInsets", mapOf("session" to "test-player")) as Map<*, *>
@@ -204,5 +278,20 @@ class PlaybackLifecycleTest {
         assertEquals(60.0 / density, hidden["bottom"] as Double, .01)
         assertEquals(1080.0 / density, hidden["width"] as Double, .01)
         assertEquals(1920.0 / density, hidden["height"] as Double, .01)
+        val screen = hidden["cutout"] as Map<*, *>
+        for (edge in listOf("left", "top", "right", "bottom")) {
+            assertEquals(0.0, screen[edge] as Double, .01)
+        }
+        val cameraLeft = snapshot(false, CompatInsets.of(90, 0, 0, 0))
+        assertEquals(90.0 / density, (cameraLeft["cutout"] as Map<*, *>)["left"] as Double, .01)
+        assertEquals(0.0, (cameraLeft["cutout"] as Map<*, *>)["top"] as Double, .01)
+        assertEquals(0.0, (cameraLeft["cutout"] as Map<*, *>)["bottom"] as Double, .01)
+        val cameraRight = snapshot(false, CompatInsets.of(0, 0, 90, 0))
+        assertEquals(0.0, (cameraRight["cutout"] as Map<*, *>)["left"] as Double, .01)
+        assertEquals(90.0 / density, (cameraRight["cutout"] as Map<*, *>)["right"] as Double, .01)
+        // Some windows already exclude the cutout; do not count it twice.
+        content.layout(90, 0, 1080, 1920)
+        val consumed = snapshot(false, CompatInsets.of(90, 0, 0, 0))
+        assertEquals(0.0, (consumed["cutout"] as Map<*, *>)["left"] as Double, .01)
     }
 }

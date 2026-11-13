@@ -66,6 +66,7 @@ class _PreviewPageState extends State<PreviewPage> {
   bool onlineConfirmed = false;
   bool onlineWebError = false;
   Future<WebViewEnvironment?>? onlineEnvironment;
+  PoolPreviewTarget? initialPoolTarget;
   @override
   void initState() {
     super.initState();
@@ -86,6 +87,9 @@ class _PreviewPageState extends State<PreviewPage> {
           file,
           playlist,
           parentFolders: parentFolders,
+          poolPreview: widget.poolPreview,
+          initialPoolTarget: initialPoolTarget,
+          sourceFolders: widget.sourceFolders,
         );
       });
     } else {
@@ -111,12 +115,16 @@ class _PreviewPageState extends State<PreviewPage> {
         ),
       );
       if (!mounted || scope.token.isCancelled) return;
-      session = target.session;
-      file = target.file;
-      playlist = target.siblings;
-      parentFolders = {
-        for (final sibling in target.siblings) sibling.id: target.parentId,
-      };
+      if (kind == FileKind.video || kind == FileKind.audio) {
+        initialPoolTarget = target;
+      } else {
+        session = target.session;
+        file = target.file;
+        playlist = target.siblings;
+        parentFolders = {
+          for (final sibling in target.siblings) sibling.id: target.parentId,
+        };
+      }
       setState(() => preparingPool = false);
       _startPreview();
     } catch (e) {

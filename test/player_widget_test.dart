@@ -87,8 +87,12 @@ class _SystemInsetsDevice extends FakePlaybackDevice {
     supportsOrientation = true;
   }
   final insets = <Size, EdgeInsets>{};
+  final displayInsets = <Size, EdgeInsets>{};
   @override
   EdgeInsets? systemInsetsFor(MediaQueryData media) => insets[media.size];
+  @override
+  EdgeInsets screenDisplayInsetsFor(MediaQueryData media) =>
+      displayInsets[media.size] ?? super.screenDisplayInsetsFor(media);
 }
 
 class _ScreenshotActions extends PlayerScreenshotActions {
@@ -247,6 +251,16 @@ void main() {
       find.byKey(const Key('player-screen-settings')),
     );
     await tap(tester, find.byKey(const Key('player-screen-enabled')));
+    await tap(tester, find.byKey(const Key('player-screen-style-background')));
+    expect(
+      page.fixture.history.preferences.screenDisplay.style,
+      PlaybackScreenStyle.background,
+    );
+    await tap(tester, find.byKey(const Key('player-screen-style-outline')));
+    expect(
+      page.fixture.history.preferences.screenDisplay.style,
+      PlaybackScreenStyle.outline,
+    );
     for (final item in PlaybackScreenItem.values) {
       final before = page.fixture.controller.preferences.screenDisplay.items
           .contains(item);
@@ -265,6 +279,9 @@ void main() {
       PlaybackScreenItem.media,
     });
     await tap(tester, find.byTooltip('关闭面板'));
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
+    await tester.tapAt(const Offset(196, 500));
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('player-screen-line-title')), findsNothing);
     expect(find.byKey(const Key('player-screen-line-progress')), findsNothing);
     expect(
@@ -307,6 +324,10 @@ void main() {
       };
       final page = await render(tester, suppliedFixture: fixture);
       final backend = fixture.current;
+      expect(find.byKey(const Key('player-screen-display')), findsNothing);
+      expect(backend.screenMonitoring, isFalse);
+      await tester.tapAt(const Offset(196, 500));
+      await tester.pumpAndSettle();
       backend.emit(
         backend.state.copyWith(
           tracks: Tracks(
@@ -335,14 +356,16 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 250));
-      expect(find.text('网速 2.00 MB/s'), findsOneWidget);
-      expect(find.text('分辨率 1920 × 1080'), findsOneWidget);
+      expect(find.text('2.00 MB/s'), findsOneWidget);
+      expect(find.text('1920 × 1080'), findsOneWidget);
       expect(find.textContaining('HEVC · 60 fps · 20 Mbps'), findsOneWidget);
-      expect(find.text('音频 AAC · 48 kHz · 2 声道'), findsOneWidget);
-      expect(find.textContaining('硬解 mediacodec'), findsOneWidget);
-      expect(find.textContaining('解码丢帧 2 · 输出丢帧 3'), findsOneWidget);
+      expect(find.text('AAC · 48 kHz · 2 声道'), findsOneWidget);
+      expect(find.textContaining('1× · mediacodec'), findsOneWidget);
+      expect(find.text('2 / 3 帧'), findsOneWidget);
       expect(find.textContaining('fixture-secret'), findsNothing);
-      final top = tester.widget(find.byKey(const Key('player-top-controls')));
+      final top = tester.widget(
+        find.byKey(const Key('player-top-controls'), skipOffstage: false),
+      );
       final video = tester.widget(
         find.byKey(const Key('player-video-surface')),
       );
@@ -354,9 +377,11 @@ void main() {
         await tester.pump(const Duration(milliseconds: 16));
       }
       await tester.pump(const Duration(milliseconds: 250));
-      expect(find.text('进度 02:21 / 10:00 · 23.5%'), findsOneWidget);
+      expect(find.text('02:21 / 10:00 · 23.5%'), findsOneWidget);
       expect(
-        tester.widget(find.byKey(const Key('player-top-controls'))),
+        tester.widget(
+          find.byKey(const Key('player-top-controls'), skipOffstage: false),
+        ),
         same(top),
       );
       expect(
@@ -369,14 +394,18 @@ void main() {
         bytesPerSecond: 0,
       );
       await tester.pump(const Duration(milliseconds: 250));
-      expect(find.text('网速 0 B/s'), findsOneWidget);
+      expect(find.text('0 B/s'), findsOneWidget);
       backend.screenInfo = const PlaybackScreenInfo(transport: 'local');
       await tester.pump(const Duration(milliseconds: 250));
-      expect(find.text('网速 本地播放'), findsOneWidget);
+      expect(find.text('本地播放'), findsOneWidget);
       await tester.tapAt(const Offset(196, 500));
       await tester.pump(const Duration(milliseconds: 350));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('player-top-controls')), findsNothing);
+      expect(find.byKey(const Key('player-top-controls')), findsOneWidget);
+      expect(find.byKey(const Key('player-screen-display')), findsNothing);
+      expect(backend.screenMonitoring, isFalse);
+      await tester.tapAt(const Offset(196, 500));
+      await tester.pumpAndSettle();
       expect(find.byKey(const Key('player-screen-display')), findsOneWidget);
       expect(backend.screenMonitoring, isTrue);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -424,8 +453,8 @@ void main() {
       final display = find.byKey(const Key('player-screen-display'));
       final bounds = tester.getRect(display);
       expect(bounds.size, size);
-      final video = tester.getRect(
-        find.byKey(const Key('player-screen-video-bounds')),
+      final viewport = tester.getRect(
+        find.byKey(const Key('player-screen-viewport-bounds')),
       );
       final title = tester.getRect(
         find.byKey(const Key('player-screen-line-title')),
@@ -436,7 +465,7 @@ void main() {
       expect(title.top, greaterThanOrEqualTo(bounds.top));
       expect(audio.bottom, lessThanOrEqualTo(bounds.bottom + .1));
       expect(title.left, greaterThanOrEqualTo(12));
-      expect(audio.right, lessThanOrEqualTo(video.center.dx));
+      expect(audio.right, lessThanOrEqualTo(viewport.center.dx));
       final progress = tester.getRect(
         find.byKey(const Key('player-screen-line-progress')),
       );
@@ -446,26 +475,28 @@ void main() {
       final network = tester.getRect(
         find.byKey(const Key('player-screen-line-network')),
       );
-      expect(title.right, lessThanOrEqualTo(video.center.dx));
-      expect(network.left, greaterThan(video.center.dx));
+      expect(title.right, lessThanOrEqualTo(viewport.center.dx));
+      expect(network.left, greaterThan(viewport.center.dx));
       expect(progress.bottom, greaterThan(title.bottom));
-      expect(resolution.left, greaterThan(progress.right));
-      expect(resolution.top, greaterThan(network.bottom));
+      expect(resolution.top, greaterThanOrEqualTo(title.bottom));
+      expect(resolution.right, lessThanOrEqualTo(viewport.center.dx));
+      expect(network.top, greaterThan(resolution.bottom));
       expect(resolution.right, lessThanOrEqualTo(size.width - 12));
-      for (final id in [
-        'top-left',
-        'top-right',
-        'bottom-left',
-        'bottom-right',
-      ]) {
+      for (final id in ['top-left', 'bottom-left', 'bottom-right']) {
         final region = tester.getRect(
           find.byKey(Key('player-screen-region-$id')),
         );
-        expect(region.left, greaterThanOrEqualTo(video.left));
-        expect(region.right, lessThanOrEqualTo(video.right));
-        expect(region.top, greaterThanOrEqualTo(video.top));
-        expect(region.bottom, lessThanOrEqualTo(video.bottom));
+        expect(region.left, greaterThanOrEqualTo(viewport.left));
+        expect(region.right, lessThanOrEqualTo(viewport.right));
+        expect(region.top, greaterThanOrEqualTo(viewport.top));
+        expect(region.bottom, lessThanOrEqualTo(viewport.bottom));
       }
+      // Time is disabled here so the golden remains deterministic. Its
+      // screen corner stays empty instead of pulling other fields into it.
+      expect(
+        find.byKey(const Key('player-screen-region-top-right')),
+        findsNothing,
+      );
       expect(tester.takeException(), isNull);
       await expectLater(
         find.byKey(const Key('player-capture')),
@@ -473,6 +504,177 @@ void main() {
       );
     });
   }
+
+  for (final style in PlaybackScreenStyle.values) {
+    testWidgets(
+      'Screen corners avoid cutouts without reserving hidden bars (${style.name})',
+      (tester) async {
+        const landscape = Size(792, 360), portrait = Size(360, 792);
+        const controlInsets = EdgeInsets.fromLTRB(44, 48, 20, 24);
+        final device = _SystemInsetsDevice()
+          ..insets[landscape] = controlInsets
+          ..insets[portrait] = const EdgeInsets.only(top: 48, bottom: 24)
+          ..displayInsets[landscape] = const EdgeInsets.only(left: 44)
+          ..displayInsets[portrait] = const EdgeInsets.only(top: 32);
+        final fixture = PlaybackFixture(
+          data: {
+            'playbackPreferences': {
+              'screenDisplay': {
+                'enabled': true,
+                'style': style.name,
+                'items': [
+                  for (final item in PlaybackScreenItem.values) item.name,
+                ],
+              },
+            },
+          },
+        );
+        tester.view.padding = const FakeViewPadding(
+          left: 44,
+          top: 48,
+          right: 20,
+          bottom: 24,
+        );
+        tester.view.viewPadding = const FakeViewPadding(
+          left: 44,
+          top: 48,
+          right: 20,
+          bottom: 24,
+        );
+        addTearDown(tester.view.resetPadding);
+        addTearDown(tester.view.resetViewPadding);
+        await render(
+          tester,
+          size: landscape,
+          suppliedFixture: fixture,
+          suppliedDevice: device,
+        );
+        final backend = fixture.current;
+        final controls = find.byKey(
+          const Key('player-top-controls'),
+          skipOffstage: false,
+        );
+        final controlBounds = tester.getRect(controls);
+        final screen = find.byKey(const Key('player-screen-viewport-bounds'));
+        void expectCorners(Size size, EdgeInsets obstruction) {
+          expect(
+            tester.getRect(screen),
+            Rect.fromLTRB(
+              obstruction.left,
+              obstruction.top,
+              size.width - obstruction.right,
+              size.height - obstruction.bottom,
+            ),
+          );
+          for (final (id, point) in [
+            ('top-left', Offset(obstruction.left + 12, obstruction.top + 12)),
+            (
+              'top-right',
+              Offset(size.width - obstruction.right - 12, obstruction.top + 12),
+            ),
+            (
+              'bottom-left',
+              Offset(
+                obstruction.left + 12,
+                size.height - obstruction.bottom - 12,
+              ),
+            ),
+            (
+              'bottom-right',
+              Offset(
+                size.width - obstruction.right - 12,
+                size.height - obstruction.bottom - 12,
+              ),
+            ),
+          ]) {
+            final rect = tester.getRect(
+              find.byKey(Key('player-screen-region-$id')),
+            );
+            final actual = switch (id) {
+              'top-left' => rect.topLeft,
+              'top-right' => rect.topRight,
+              'bottom-left' => rect.bottomLeft,
+              _ => rect.bottomRight,
+            };
+            expect(actual.dx, closeTo(point.dx, .01), reason: id);
+            expect(actual.dy, closeTo(point.dy, .01), reason: id);
+          }
+        }
+
+        await tester.tapAt(const Offset(396, 140));
+        await tester.pumpAndSettle();
+        expectCorners(landscape, const EdgeInsets.only(left: 44));
+        // Hiding bars must not move the OSD or the separately cached controls.
+        tester.view.padding = const FakeViewPadding();
+        tester.view.viewPadding = const FakeViewPadding();
+        await tester.pumpAndSettle();
+        expectCorners(landscape, const EdgeInsets.only(left: 44));
+        expect(tester.getRect(controls), controlBounds);
+        await tester.tapAt(const Offset(396, 140));
+        await tester.pumpAndSettle();
+        expect(screen, findsNothing);
+        await tap(tester, find.byKey(const Key('player-lock')));
+        expectCorners(landscape, const EdgeInsets.only(left: 44));
+        tester.view.physicalSize = portrait;
+        await tester.pumpAndSettle();
+        expectCorners(portrait, const EdgeInsets.only(top: 32));
+        // Reverse landscape can move the cutout without changing screen size.
+        device.displayInsets[landscape] = const EdgeInsets.only(right: 44);
+        tester.view.physicalSize = landscape;
+        await tester.pumpAndSettle();
+        expectCorners(landscape, const EdgeInsets.only(right: 44));
+        expect(fixture.current, same(backend));
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'Screen corners use current Flutter padding without caching old bars',
+    (tester) async {
+      final fixture = PlaybackFixture(
+        data: {
+          'playbackPreferences': {
+            'screenDisplay': {
+              'enabled': true,
+              'items': [
+                for (final item in PlaybackScreenItem.values) item.name,
+              ],
+            },
+          },
+        },
+      );
+      tester.view.padding = const FakeViewPadding(top: 48, bottom: 24);
+      tester.view.viewPadding = const FakeViewPadding(top: 48, bottom: 24);
+      addTearDown(tester.view.resetPadding);
+      addTearDown(tester.view.resetViewPadding);
+      await render(
+        tester,
+        size: const Size(792, 360),
+        suppliedFixture: fixture,
+      );
+      await tester.tapAt(const Offset(396, 140));
+      await tester.pumpAndSettle();
+      final screen = find.byKey(const Key('player-screen-viewport-bounds'));
+      expect(tester.getRect(screen), const Rect.fromLTRB(0, 48, 792, 336));
+      tester.view.padding = const FakeViewPadding();
+      tester.view.viewPadding = const FakeViewPadding();
+      await tester.pumpAndSettle();
+      expect(tester.getRect(screen), const Rect.fromLTRB(0, 0, 792, 360));
+      expect(
+        tester
+            .getRect(find.byKey(const Key('player-screen-region-top-left')))
+            .topLeft,
+        const Offset(12, 12),
+      );
+      expect(
+        tester
+            .getRect(find.byKey(const Key('player-screen-region-bottom-right')))
+            .bottomRight,
+        const Offset(780, 348),
+      );
+    },
+  );
 
   testWidgets('Screen anchors stay fixed when controls hide, lock and unlock', (
     tester,
@@ -493,15 +695,21 @@ void main() {
       for (final id in ids)
         id: tester.getRect(find.byKey(Key('player-screen-region-$id'))),
     };
-    final expected = regions();
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
     await tester.tapAt(const Offset(396, 140));
     await tester.pumpAndSettle();
-    expect(regions(), expected);
+    final expected = regions();
     await tester.tapAt(const Offset(396, 140));
+    // Hide immediately while controls are still animating into view.
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
     await tester.pumpAndSettle();
     await tap(tester, find.byKey(const Key('player-lock')));
     expect(regions(), expected);
     await tap(tester, find.byKey(const Key('player-unlock')));
+    expect(find.byKey(const Key('player-screen-display')), findsNothing);
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
     expect(regions(), expected);
   });
 
@@ -516,6 +724,8 @@ void main() {
       },
     );
     final page = await render(tester, suppliedFixture: fixture);
+    await tester.tapAt(const Offset(196, 500));
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('player-screen-display')), findsOneWidget);
     page.device.inPip = true;
     page.device.notifyListeners();
@@ -676,6 +886,34 @@ void main() {
     await scrollPanelTo(tester, find.text(label));
     await tap(tester, find.text(label));
   }
+
+  testWidgets(
+    'Windows decoder compatibility persists and preserves paused progress on reload',
+    (tester) async {
+      final page = await render(tester, size: const Size(1280, 800));
+      final controller = page.fixture.controller;
+      await controller.pause();
+      await tap(tester, find.byKey(const Key('player-more')));
+      final toggle = find.byKey(const Key('player-decoder-compatibility'));
+      await scrollPanelTo(tester, toggle);
+      expect(find.textContaining('底部绿线'), findsOneWidget);
+      await tap(tester, toggle);
+      expect(controller.preferences.decoderCompatibility, isTrue);
+      expect(page.fixture.history.preferences.decoderCompatibility, isTrue);
+      expect(page.fixture.current.decoderCompatibility, isTrue);
+      expect(page.fixture.current.hardwareAcceleration, isTrue);
+      expect(controller.state.playing, isFalse);
+      expect(controller.state.position, const Duration(seconds: 120));
+      await scrollPanelTo(tester, toggle);
+      await tap(tester, toggle);
+      expect(page.fixture.current.decoderCompatibility, isFalse);
+      expect(page.fixture.history.preferences.decoderCompatibility, isFalse);
+      expect(controller.state.position, const Duration(seconds: 120));
+      expect(controller.state.playing, isFalse);
+    },
+    skip: !Platform.isWindows,
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
 
   testWidgets(
     'Zoom and offset preview update the video immediately and persist only on slider release',

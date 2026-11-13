@@ -150,20 +150,25 @@ class _NavigationTransferIconState extends State<NavigationTransferIcon>
                     child: ExcludeSemantics(
                       child: Container(
                         key: const Key('navigation-transfer-count'),
+                        height: 16,
                         constraints: const BoxConstraints(minWidth: 16),
                         padding: const EdgeInsets.symmetric(horizontal: 3),
                         decoration: BoxDecoration(
                           color: accent,
                           borderRadius: BorderRadius.circular(9),
                         ),
-                        child: Text(
-                          status.active > 99 ? '99+' : '${status.active}',
-                          textScaler: TextScaler.noScaling,
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.onPrimary,
-                            fontSize: 11,
-                            height: 16 / 11,
-                            fontWeight: FontWeight.w600,
+                        child: Center(
+                          widthFactor: 1,
+                          child: Text(
+                            status.active > 99 ? '99+' : '${status.active}',
+                            textAlign: TextAlign.center,
+                            textScaler: TextScaler.noScaling,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.onPrimary,
+                              fontSize: 11,
+                              height: 1,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ),
                       ),

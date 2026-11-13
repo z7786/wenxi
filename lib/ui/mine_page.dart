@@ -278,63 +278,50 @@ class MinePage extends StatelessWidget {
     onTap: action,
   );
 
-  Widget _section(
-    BuildContext context,
-    String title,
-    List<Widget> children, {
-    String? footer,
-  }) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Padding(
-        padding: const EdgeInsets.only(left: 4, bottom: 10),
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: BackgroundReadable(
-            child: Text(
-              title,
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-            ),
-          ),
-        ),
-      ),
-      Material(
-        color: backgroundSurface(context),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: border(context), width: .7),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          children: [
-            for (var index = 0; index < children.length; index++) ...[
-              if (index > 0)
-                Divider(
-                  height: 1,
-                  thickness: .6,
-                  indent: 62,
-                  endIndent: 16,
-                  color: border(context),
+  Widget _section(BuildContext context, String title, List<Widget> children) =>
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 10),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: BackgroundReadable(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              children[index],
-            ],
-          ],
-        ),
-      ),
-      if (footer != null)
-        Padding(
-          padding: const EdgeInsets.fromLTRB(4, 10, 4, 0),
-          child: Text(
-            footer,
-            style: TextStyle(
-              fontSize: 11,
-              height: 1.6,
-              color: secondary(context),
+              ),
             ),
           ),
-        ),
-    ],
-  );
+          Material(
+            color: backgroundSurface(context),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: border(context), width: .7),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              children: [
+                for (var index = 0; index < children.length; index++) ...[
+                  if (index > 0)
+                    Divider(
+                      height: 1,
+                      thickness: .6,
+                      indent: 62,
+                      endIndent: 16,
+                      color: border(context),
+                    ),
+                  children[index],
+                ],
+              ],
+            ),
+          ),
+        ],
+      );
 
   Widget _appearance(
     BuildContext context,
@@ -369,6 +356,46 @@ class MinePage extends StatelessWidget {
           : '${settings.fontScalePercent}%',
     ),
   ]);
+
+  Widget _expandable(
+    BuildContext context, {
+    required String storageKey,
+    required IconData icon,
+    required String title,
+    required String summary,
+    required List<Widget> children,
+    bool initiallyExpanded = false,
+  }) => ExpansionTile(
+    key: PageStorageKey(storageKey),
+    initiallyExpanded: initiallyExpanded,
+    tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+    childrenPadding: const EdgeInsets.only(bottom: 8),
+    shape: const Border(),
+    collapsedShape: const Border(),
+    iconColor: themeAccent(context),
+    collapsedIconColor: secondary(context),
+    leading: _settingIcon(context, icon),
+    title: Text(
+      title,
+      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+    ),
+    subtitle: Text(
+      summary,
+      style: TextStyle(fontSize: 12, height: 1.5, color: secondary(context)),
+    ),
+    children: [
+      for (var index = 0; index < children.length; index++) ...[
+        Divider(
+          height: 1,
+          thickness: .6,
+          indent: 62,
+          endIndent: 16,
+          color: border(context),
+        ),
+        children[index],
+      ],
+    ],
+  );
 
   Widget _platformThreads(BuildContext context, AppSettings settings) =>
       ExpansionTile(
@@ -410,239 +437,278 @@ class MinePage extends StatelessWidget {
         ],
       );
 
-  Widget _linkRecognition(
-    BuildContext context,
-    AppSettings settings,
-  ) => _section(context, '链接识别', [
-    _tile(
-      context,
-      CupertinoIcons.link,
-      '链接唤起',
-      Platform.isAndroid ? '从浏览器、分享菜单或选中文字进入解析' : '通过网页按钮或复制链接进入解析',
-      () => Navigator.push<void>(
+  Widget _linkRecognition(BuildContext context, AppSettings settings) =>
+      _expandable(
         context,
-        MaterialPageRoute(builder: (_) => const LinkOpeningPage()),
-      ),
-    ),
-    AppSwitchListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      secondary: _settingIcon(context, CupertinoIcons.doc_on_clipboard),
-      title: const Text('自动识别剪贴板链接', style: TextStyle(fontSize: 14)),
-      subtitle: Text(
-        '启动或返回应用时识别分享、磁力和种子链接，点击后直接进入解析流程。',
-        style: TextStyle(fontSize: 12, height: 1.5, color: secondary(context)),
-      ),
-      value: settings.clipboardRecognition,
-      onChanged: (value) =>
-          services.updateSettings({'clipboardRecognition': value}),
-    ),
-  ]);
-
-  Widget _experimental(BuildContext context) => _section(context, '更多设置', [
-    if (WindowsPlayerComponents.isSupported &&
-        Theme.of(context).platform == TargetPlatform.windows)
-      AnimatedBuilder(
-        animation: WindowsPlayerComponents.shared,
-        builder: (context, _) {
-          final components = WindowsPlayerComponents.shared;
-          return KeyedSubtree(
-            key: const Key('player-components-settings'),
-            child: _tile(
+        storageKey: 'mine-link-recognition',
+        icon: CupertinoIcons.link,
+        title: '链接识别',
+        summary: '自动识别${settings.clipboardRecognition ? '已开启' : '已关闭'} · 链接唤起',
+        children: [
+          _tile(
+            context,
+            CupertinoIcons.link,
+            '链接唤起',
+            Platform.isAndroid ? '从浏览器、分享菜单或选中文字进入解析' : '通过网页按钮或复制链接进入解析',
+            () => Navigator.push<void>(
               context,
-              Icons.extension_outlined,
-              '播放器组件',
-              '${components.active == WindowsPlayerVariant.full ? '完整版' : '精简版'}'
-                  '${components.restartRequired ? ' · 重启后切换' : ' · 可按需下载完整版'}',
-              () => Navigator.push<void>(
+              MaterialPageRoute(builder: (_) => const LinkOpeningPage()),
+            ),
+          ),
+          AppSwitchListTile(
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 4,
+            ),
+            secondary: _settingIcon(context, CupertinoIcons.doc_on_clipboard),
+            title: const Text('自动识别剪贴板链接', style: TextStyle(fontSize: 14)),
+            subtitle: Text(
+              '启动或返回应用时识别分享、磁力和种子链接，点击后直接进入解析流程。',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: secondary(context),
+              ),
+            ),
+            value: settings.clipboardRecognition,
+            onChanged: (value) =>
+                services.updateSettings({'clipboardRecognition': value}),
+          ),
+        ],
+      );
+
+  Widget _experimental(BuildContext context) => _expandable(
+    context,
+    storageKey: 'mine-player-experimental',
+    icon: CupertinoIcons.lab_flask,
+    title: '播放器与实验功能',
+    summary:
+        WindowsPlayerComponents.isSupported &&
+            Theme.of(context).platform == TargetPlatform.windows
+        ? '播放器组件、夸克与 UC 下载'
+        : '夸克与 UC 网盘的下载选项',
+    children: [
+      if (WindowsPlayerComponents.isSupported &&
+          Theme.of(context).platform == TargetPlatform.windows)
+        AnimatedBuilder(
+          animation: WindowsPlayerComponents.shared,
+          builder: (context, _) {
+            final components = WindowsPlayerComponents.shared;
+            return KeyedSubtree(
+              key: const Key('player-components-settings'),
+              child: _tile(
                 context,
-                MaterialPageRoute(
-                  builder: (_) => PlayerComponentsPage(
-                    acceleration: () => services.settings.githubAcceleration,
+                Icons.extension_outlined,
+                '播放器组件',
+                '${components.active == WindowsPlayerVariant.full ? '完整版' : '精简版'}'
+                    '${components.restartRequired ? ' · 重启后切换' : ' · 可按需下载完整版'}',
+                () => Navigator.push<void>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => PlayerComponentsPage(
+                      acceleration: () => services.settings.githubAcceleration,
+                    ),
                   ),
                 ),
               ),
-            ),
-          );
-        },
-      ),
-    _tile(
-      context,
-      CupertinoIcons.lab_flask,
-      '实验性功能',
-      '夸克与 UC 网盘的下载功能与说明',
-      () => Navigator.push<void>(
-        context,
-        MaterialPageRoute(builder: (_) => ExperimentalFeaturesPage(services)),
-      ),
-    ),
-  ]);
-
-  Widget _downloads(BuildContext context, AppSettings settings) => _section(
-    context,
-    '下载设置',
-    [
-      _tile(
-        context,
-        CupertinoIcons.arrow_down_circle,
-        'HTTP 下载连接数',
-        '普通链接与设为跟随全局的网盘使用',
-        () => _number(context, '全局连接数', 'threads', settings.threads, 1, 512),
-        value: '${settings.threads}',
-      ),
-      _tile(
-        context,
-        CupertinoIcons.square_stack,
-        '同时下载任务数',
-        '其余任务自动排队',
-        () => editDownloadConcurrency(context, services),
-        value: '${settings.concurrent} 个',
-      ),
-      _platformThreads(context, settings),
-      if (services.mobileDataDownloads.supported)
-        AppSwitchListTile(
-          key: const ValueKey('mobile-data-download-warning-setting'),
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 4,
-          ),
-          secondary: _settingIcon(context, Icons.network_cell),
-          title: const Text('流量下载提醒', style: TextStyle(fontSize: 14)),
-          subtitle: Text(
-            '使用移动数据下载前提醒',
-            style: TextStyle(fontSize: 12, color: secondary(context)),
-          ),
-          value: settings.warnOnMobileDataDownload,
-          onChanged: (value) =>
-              services.updateSettings({'warnOnMobileDataDownload': value}),
+            );
+          },
         ),
       _tile(
         context,
-        CupertinoIcons.globe,
-        'GitHub 加速',
-        '常用代理与自定义加速地址',
+        CupertinoIcons.lab_flask,
+        '实验性功能',
+        '夸克与 UC 网盘的下载功能与说明',
         () => Navigator.push<void>(
           context,
-          MaterialPageRoute(builder: (_) => GitHubAccelerationPage(services)),
+          MaterialPageRoute(builder: (_) => ExperimentalFeaturesPage(services)),
         ),
-        value: settings.githubAcceleration.label,
       ),
-      _tile(
-        context,
-        CupertinoIcons.arrow_2_circlepath,
-        '失败重试次数',
-        '',
-        () => _number(
+    ],
+  );
+
+  Widget _downloads(
+    BuildContext context,
+    AppSettings settings,
+  ) => _section(context, '下载设置', [
+    _tile(
+      context,
+      CupertinoIcons.square_stack,
+      '同时下载任务数',
+      '其余任务自动排队',
+      () => editDownloadConcurrency(context, services),
+      value: '${settings.concurrent} 个',
+    ),
+    _tile(
+      context,
+      CupertinoIcons.folder,
+      '下载保存目录',
+      settings.destination ?? '系统下载目录',
+      () async {
+        final directory = await busy(
           context,
-          '失败重试次数',
-          'retries',
-          settings.retries,
-          0,
-          maxDownloadRetries,
+          services.files.chooseDirectory,
+          label: '选择下载目录…',
+        );
+        if (directory != null && context.mounted) {
+          await _changeDownloadDirectory(context, directory);
+        }
+      },
+    ),
+    if (settings.destination != null)
+      Padding(
+        padding: const EdgeInsets.only(left: 54, bottom: 8),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: () => _changeDownloadDirectory(context, null),
+            child: const Text('恢复默认目录'),
+          ),
         ),
-        value: '${settings.retries} 次',
       ),
-      _tile(
-        context,
-        CupertinoIcons.speedometer,
-        '单任务限速',
-        '',
-        () async {
-          final text = await askText(
+    if (services.mobileDataDownloads.supported)
+      AppSwitchListTile(
+        key: const ValueKey('mobile-data-download-warning-setting'),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        secondary: _settingIcon(context, Icons.network_cell),
+        title: const Text('流量下载提醒', style: TextStyle(fontSize: 14)),
+        subtitle: Text(
+          '使用移动数据下载前提醒',
+          style: TextStyle(fontSize: 12, color: secondary(context)),
+        ),
+        value: settings.warnOnMobileDataDownload,
+        onChanged: (value) =>
+            services.updateSettings({'warnOnMobileDataDownload': value}),
+      ),
+    _platformThreads(context, settings),
+    _expandable(
+      context,
+      storageKey: 'mine-advanced-downloads',
+      icon: CupertinoIcons.slider_horizontal_3,
+      title: '高级下载设置',
+      summary:
+          'HTTP ${settings.threads} 连接 · 重试 ${settings.retries} 次 · '
+          '${settings.speedLimit == 0 ? '不限速' : '${formatBytes(settings.speedLimit)}/s'}',
+      children: [
+        _tile(
+          context,
+          CupertinoIcons.arrow_down_circle,
+          'HTTP 下载连接数',
+          '普通链接与设为跟随全局的网盘使用',
+          () => _number(context, '全局连接数', 'threads', settings.threads, 1, 512),
+          value: '${settings.threads}',
+        ),
+        _tile(
+          context,
+          CupertinoIcons.globe,
+          'GitHub 加速',
+          '常用代理与自定义加速地址',
+          () => Navigator.push<void>(
             context,
-            '限速（KB/s）',
-            initial: '${settings.speedLimit ~/ 1024}',
-            hint: '0 表示不限速',
-            numeric: true,
-          );
-          if (text == null || !context.mounted) return;
-          final value = int.tryParse(text);
-          if (value == null || value < 0 || value > 10000000) {
-            message(context, '请输入有效的速度');
-            return;
-          }
-          await services.updateSettings({'speedLimit': value * 1024});
-        },
-        value: settings.speedLimit == 0
-            ? '不限速'
-            : '${formatBytes(settings.speedLimit)}/s',
-      ),
-      _tile(
-        context,
-        CupertinoIcons.arrow_up_circle,
-        'BT 上传限速',
-        '给网络留出余量，保留分片交换；恢复下载时应用',
-        () async {
-          final text = await askText(
+            MaterialPageRoute(builder: (_) => GitHubAccelerationPage(services)),
+          ),
+          value: settings.githubAcceleration.label,
+        ),
+        _tile(
+          context,
+          CupertinoIcons.arrow_2_circlepath,
+          '失败重试次数',
+          '',
+          () => _number(
             context,
-            'BT 上传限速（KB/s）',
-            initial: '${settings.btUploadLimit ~/ 1024}',
-            hint: '0 表示不限速',
-            numeric: true,
-          );
-          if (text == null || !context.mounted) return;
-          final value = int.tryParse(text);
-          if (value == null || value < 0 || value > 10000000) {
-            message(context, '请输入有效的速度');
-            return;
-          }
-          await services.updateSettings({'btUploadLimit': value * 1024});
-        },
-        value: settings.btUploadLimit == 0
-            ? '不限速'
-            : '${formatBytes(settings.btUploadLimit)}/s',
-      ),
-      _tile(
-        context,
-        CupertinoIcons.folder,
-        '下载保存目录',
-        settings.destination ?? '系统下载目录',
-        () async {
-          final directory = await busy(
+            '失败重试次数',
+            'retries',
+            settings.retries,
+            0,
+            maxDownloadRetries,
+          ),
+          value: '${settings.retries} 次',
+        ),
+        _tile(
+          context,
+          CupertinoIcons.speedometer,
+          '单任务限速',
+          '',
+          () async {
+            final text = await askText(
+              context,
+              '限速（KB/s）',
+              initial: '${settings.speedLimit ~/ 1024}',
+              hint: '0 表示不限速',
+              numeric: true,
+            );
+            if (text == null || !context.mounted) return;
+            final value = int.tryParse(text);
+            if (value == null || value < 0 || value > 10000000) {
+              message(context, '请输入有效的速度');
+              return;
+            }
+            await services.updateSettings({'speedLimit': value * 1024});
+          },
+          value: settings.speedLimit == 0
+              ? '不限速'
+              : '${formatBytes(settings.speedLimit)}/s',
+        ),
+        _tile(
+          context,
+          CupertinoIcons.arrow_up_circle,
+          'BT 上传限速',
+          '给网络留出余量，保留分片交换；恢复下载时应用',
+          () async {
+            final text = await askText(
+              context,
+              'BT 上传限速（KB/s）',
+              initial: '${settings.btUploadLimit ~/ 1024}',
+              hint: '0 表示不限速',
+              numeric: true,
+            );
+            if (text == null || !context.mounted) return;
+            final value = int.tryParse(text);
+            if (value == null || value < 0 || value > 10000000) {
+              message(context, '请输入有效的速度');
+              return;
+            }
+            await services.updateSettings({'btUploadLimit': value * 1024});
+          },
+          value: settings.btUploadLimit == 0
+              ? '不限速'
+              : '${formatBytes(settings.btUploadLimit)}/s',
+        ),
+        if (services.platformFeatures &&
+            (Platform.isAndroid ||
+                Platform.isIOS ||
+                Platform.isWindows ||
+                Platform.isMacOS))
+          _tile(
             context,
-            services.files.chooseDirectory,
-            label: '选择下载目录…',
-          );
-          if (directory != null && context.mounted) {
-            await _changeDownloadDirectory(context, directory);
-          }
-        },
-      ),
-      if (settings.destination != null)
+            CupertinoIcons.shield_lefthalf_fill,
+            '后台下载保护',
+            Platform.isIOS
+                ? '前台下载与后台续传说明'
+                : Platform.isMacOS
+                ? '最小化窗口与自动休眠保护'
+                : Platform.isWindows
+                ? '最小化到托盘与自动休眠保护'
+                : '锁屏下载、通知与系统后台设置',
+            () => Navigator.push<void>(
+              context,
+              MaterialPageRoute(builder: (_) => const DownloadProtectionPage()),
+            ),
+          ),
         Padding(
-          padding: const EdgeInsets.only(left: 54, bottom: 8),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton(
-              onPressed: () => _changeDownloadDirectory(context, null),
-              child: const Text('恢复默认目录'),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Text(
+            '连接数、重试和限速设置用于新任务。实际连接数由文件大小与服务器决定；BT 最多连接 80 个对等节点。',
+            style: TextStyle(
+              fontSize: 11,
+              height: 1.6,
+              color: secondary(context),
             ),
           ),
         ),
-      if (services.platformFeatures &&
-          (Platform.isAndroid ||
-              Platform.isIOS ||
-              Platform.isWindows ||
-              Platform.isMacOS))
-        _tile(
-          context,
-          CupertinoIcons.shield_lefthalf_fill,
-          '后台下载保护',
-          Platform.isIOS
-              ? '前台下载与后台续传说明'
-              : Platform.isMacOS
-              ? '最小化窗口与自动休眠保护'
-              : Platform.isWindows
-              ? '最小化到托盘与自动休眠保护'
-              : '锁屏下载、通知与系统后台设置',
-          () => Navigator.push<void>(
-            context,
-            MaterialPageRoute(builder: (_) => const DownloadProtectionPage()),
-          ),
-        ),
-    ],
-    footer:
-        '连接数、重试和限速设置用于新任务。更改保存目录时可同步未完成任务。实际连接数由文件大小与服务器决定；BT 最多连接 80 个对等节点。',
-  );
+      ],
+    ),
+  ]);
 
   Future<void> _changeDownloadDirectory(
     BuildContext context,
@@ -679,112 +745,129 @@ class MinePage extends StatelessWidget {
     }
   }
 
-  Widget _data(BuildContext context) => _section(context, '备份与数据', [
-    _tile(
-      context,
-      CupertinoIcons.lock_shield,
-      '导出备份',
-      '保存账号与应用设置',
-      () => _export(context),
-    ),
-    _tile(
-      context,
-      CupertinoIcons.arrow_up_doc,
-      '恢复备份',
-      '从已有备份中导入',
-      () => _restore(context),
-    ),
-    if (services.migrationError != null)
+  Widget _data(BuildContext context) => _expandable(
+    context,
+    storageKey: 'mine-backup-data',
+    icon: CupertinoIcons.lock_shield,
+    title: '备份与数据',
+    summary: services.migrationError == null
+        ? '导出账号和设置、恢复备份'
+        : '旧版数据导入需处理 · 导出与恢复备份',
+    initiallyExpanded: services.migrationError != null,
+    children: [
       _tile(
         context,
-        CupertinoIcons.arrow_2_squarepath,
-        '旧版数据导入',
-        services.migrationError!,
-        () => busy(context, services.retryLegacyImport, label: '读取旧版数据…'),
+        CupertinoIcons.lock_shield,
+        '导出备份',
+        '保存账号与应用设置',
+        () => _export(context),
       ),
-  ]);
+      _tile(
+        context,
+        CupertinoIcons.arrow_up_doc,
+        '恢复备份',
+        '从已有备份中导入',
+        () => _restore(context),
+      ),
+      if (services.migrationError != null)
+        _tile(
+          context,
+          CupertinoIcons.arrow_2_squarepath,
+          '旧版数据导入',
+          services.migrationError!,
+          () => busy(context, services.retryLegacyImport, label: '读取旧版数据…'),
+        ),
+    ],
+  );
 
-  Widget _help(BuildContext context) => _section(context, '帮助与诊断', [
-    if (services.control.platform == 'ios')
+  Widget _update(BuildContext context) => services.control.platform == 'ios'
+      ? _tile(
+          context,
+          CupertinoIcons.arrow_down_circle,
+          '版本与更新',
+          '当前版本 ${applicationVersion.split('+').first} · iOS 测试版',
+          () => message(
+            context,
+            'iOS 测试版请通过签名安装渠道更新；发布到 TestFlight 或 App Store 后，请通过对应渠道更新。',
+          ),
+        )
+      : _tile(
+          context,
+          CupertinoIcons.arrow_down_circle,
+          '检查更新',
+          services.control.checking
+              ? '正在检查…'
+              : services.control.availableUpdate != null
+              ? '发现新版本 ${services.control.availableUpdate!.version}'
+              : '当前版本 ${applicationVersion.split('+').first}',
+          () => checkForAppUpdate(
+            context,
+            services.control,
+            launcher: linkLauncher,
+            updater: services.appUpdates,
+          ),
+        );
+
+  Widget _help(BuildContext context) => _expandable(
+    context,
+    storageKey: 'mine-help-diagnostics',
+    icon: CupertinoIcons.question_circle,
+    title: '帮助与诊断',
+    summary: '使用帮助、日志、项目地址与联系作者',
+    children: [
       _tile(
         context,
-        CupertinoIcons.arrow_down_circle,
-        '版本与更新',
-        '当前版本 ${applicationVersion.split('+').first} · iOS 测试版',
-        () => message(
-          context,
-          'iOS 测试版请通过签名安装渠道更新；发布到 TestFlight 或 App Store 后，请通过对应渠道更新。',
-        ),
-      )
-    else
+        CupertinoIcons.question_circle,
+        '使用帮助',
+        services.control.config.helpUrl?.host ?? '暂未提供帮助链接',
+        () {
+          final url = services.control.config.helpUrl;
+          if (url == null) {
+            message(context, '暂未提供帮助链接');
+          } else {
+            openRemoteLink(context, url, launcher: linkLauncher);
+          }
+        },
+      ),
       _tile(
         context,
-        CupertinoIcons.arrow_down_circle,
-        '检查更新',
-        services.control.checking
-            ? '正在检查…'
-            : services.control.availableUpdate != null
-            ? '发现新版本 ${services.control.availableUpdate!.version}'
-            : '当前版本 ${applicationVersion.split('+').first}',
-        () => checkForAppUpdate(
+        CupertinoIcons.link,
+        '项目地址',
+        'github.com/z7786/wenxi',
+        () => openRemoteLink(
           context,
-          services.control,
+          Uri.parse('https://github.com/z7786/wenxi'),
           launcher: linkLauncher,
-          updater: services.appUpdates,
         ),
       ),
-    _tile(
-      context,
-      CupertinoIcons.question_circle,
-      '使用帮助',
-      services.control.config.helpUrl?.host ?? '暂未提供帮助链接',
-      () {
-        final url = services.control.config.helpUrl;
-        if (url == null) {
-          message(context, '暂未提供帮助链接');
-        } else {
-          openRemoteLink(context, url, launcher: linkLauncher);
-        }
-      },
-    ),
-    _tile(
-      context,
-      CupertinoIcons.link,
-      '项目地址',
-      'github.com/z7786/wenxi',
-      () => openRemoteLink(
+      _tile(
         context,
-        Uri.parse('https://github.com/z7786/wenxi'),
-        launcher: linkLauncher,
-      ),
-    ),
-    _tile(
-      context,
-      CupertinoIcons.doc_text_search,
-      '日志与故障排查',
-      '查看、导出崩溃与操作日志',
-      () => Navigator.push<void>(
-        context,
-        MaterialPageRoute(
-          builder: (_) => DiagnosticsPage(
-            DiagnosticBundle(
-              DiagnosticLog.active ?? DiagnosticLog.open(null),
-              snapshot: services.diagnostics,
-              nativeEnabled: services.platformFeatures,
+        CupertinoIcons.doc_text_search,
+        '日志与故障排查',
+        '查看、导出崩溃与操作日志',
+        () => Navigator.push<void>(
+          context,
+          MaterialPageRoute(
+            builder: (_) => DiagnosticsPage(
+              DiagnosticBundle(
+                DiagnosticLog.active ?? DiagnosticLog.open(null),
+                snapshot: services.diagnostics,
+                nativeEnabled: services.platformFeatures,
+              ),
+              linkLauncher: linkLauncher,
             ),
-            linkLauncher: linkLauncher,
           ),
         ),
       ),
-    ),
-    _tile(
-      context,
-      CupertinoIcons.envelope,
-      '联系作者/侵权投诉',
-      authorEmail,
-      () => showContactAuthorDialog(context),
-    ),
-  ]);
+      _tile(
+        context,
+        CupertinoIcons.envelope,
+        '联系作者/侵权投诉',
+        authorEmail,
+        () => showContactAuthorDialog(context),
+      ),
+    ],
+  );
 
   Widget _identity(BuildContext context, bool desktop) => Row(
     children: [
@@ -829,10 +912,13 @@ class MinePage extends StatelessWidget {
             MediaQuery.textScalerOf(context).scale(14) <= 21;
         final downloads = _downloads(context, settings);
         final appearance = _appearance(context, settings, desktop);
-        final recognition = _linkRecognition(context, settings);
-        final experimental = _experimental(context);
-        final data = _data(context);
-        final help = _help(context);
+        final more = _section(context, '更多设置', [
+          _update(context),
+          _linkRecognition(context, settings),
+          _data(context),
+          _help(context),
+          _experimental(context),
+        ]);
         return ListView(
           key: const PageStorageKey('mine'),
           padding: EdgeInsets.fromLTRB(
@@ -857,17 +943,7 @@ class MinePage extends StatelessWidget {
                   Expanded(
                     flex: 2,
                     child: Column(
-                      children: [
-                        appearance,
-                        const SizedBox(height: 24),
-                        recognition,
-                        const SizedBox(height: 24),
-                        experimental,
-                        const SizedBox(height: 24),
-                        data,
-                        const SizedBox(height: 24),
-                        help,
-                      ],
+                      children: [appearance, const SizedBox(height: 24), more],
                     ),
                   ),
                 ],
@@ -875,15 +951,9 @@ class MinePage extends StatelessWidget {
             else ...[
               appearance,
               const SizedBox(height: 24),
-              recognition,
-              const SizedBox(height: 24),
-              experimental,
-              const SizedBox(height: 24),
               downloads,
               const SizedBox(height: 24),
-              data,
-              const SizedBox(height: 24),
-              help,
+              more,
             ],
           ],
         );

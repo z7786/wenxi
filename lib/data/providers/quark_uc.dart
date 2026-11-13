@@ -337,7 +337,7 @@ class QuarkUcConnector extends CloudConnector {
         await stageCleanup?.call(cleanup);
         final ids = await OperationProgress.step(
           OperationStage.transfer,
-          () => _save(session, [file], directory, cookie),
+          () => saveSharedFiles(session, [file], directory, cookie),
         );
         require(ids.isNotEmpty, '${platform.shortName}转存完成但未返回新文件 ID');
         require(
@@ -555,11 +555,12 @@ class QuarkUcConnector extends CloudConnector {
     Credential c,
   ) async {
     require(s.mode == BrowseMode.share, '请打开分享链接');
-    final ids = await _save(s, files, target, c.primary);
+    final ids = await saveSharedFiles(s, files, target, c.primary);
     require(ids.isNotEmpty, '${platform.shortName}转存完成但未返回新文件 ID');
   }
 
-  Future<List<String>> _save(
+  /// Shared by explicit saves and temporary download/playback transfers.
+  Future<List<String>> saveSharedFiles(
     BrowseSession s,
     List<CloudFile> files,
     String target,

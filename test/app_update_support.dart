@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:asterlink/data/app_update_service.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/cloud_repository.dart';
+import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
@@ -11,6 +12,7 @@ import 'package:asterlink/domain/remote_control.dart';
 import 'package:asterlink/download/download_manager.dart';
 import 'package:asterlink/platform/app_update_installer.dart';
 import 'package:asterlink/platform/windows_actions.dart';
+import 'package:asterlink/platform/quark_transfer_device.dart';
 import 'support.dart';
 
 class UpdateDownloads extends ChangeNotifier implements DownloadManager {
@@ -110,10 +112,19 @@ class UpdateInstaller extends AppUpdateInstaller {
 }
 
 class UpdateFixture {
-  UpdateFixture({this.platform = 'android'}) {
-    final http = FakeHttp();
+  UpdateFixture({
+    this.platform = 'android',
+    JsonHttp? transport,
+    QuarkTransferDevice? quarkTransferDevice,
+  }) {
+    final http = transport ?? FakeHttp();
     cleanups = CleanupOutbox(store, http);
-    cloud = CloudRepository(http, Vault(store), cleanups);
+    cloud = CloudRepository(
+      http,
+      Vault(store),
+      cleanups,
+      quarkTransferDevice: quarkTransferDevice,
+    );
     cloud.connectors[CloudPlatform.lanzou] = connector;
     installer = UpdateInstaller(platform);
     service = AppUpdateService(

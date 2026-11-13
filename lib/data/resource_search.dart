@@ -296,6 +296,16 @@ class ResourceSearch extends ChangeNotifier {
 
   bool get preferSupported =>
       store.data.obj('resourceSearch').boolean('preferSupported', true);
+  bool get incognito => store.data.obj('resourceSearch').boolean('incognito');
+
+  Future<void> setIncognito(bool value) async {
+    await store.change((draft) {
+      draft['resourceSearch'] = draft.obj('resourceSearch')
+        ..['incognito'] = value;
+    });
+    if (!_closed) notifyListeners();
+  }
+
   List<String> get history =>
       (store.data['resourceSearchHistory'] as List? ?? [])
           .whereType<String>()
@@ -334,24 +344,59 @@ class ResourceSearch extends ChangeNotifier {
     ];
   }
 
-  Future<void> setCloudPriority(List<CloudPlatform> values) async {
+  Set<CloudPlatform> get disabledClouds {
+    final saved = store.data.obj('resourceSearch')['disabledClouds'];
+    return {
+      if (saved is List)
+        ...saved
+            .whereType<String>()
+            .map(CloudPlatform.fromKey)
+            .nonNulls
+            .where((p) => p != CloudPlatform.github),
+    };
+  }
+
+  List<CloudPlatform> get enabledCloudPriority {
+    final disabled = disabledClouds;
+    return cloudPriority.where((p) => !disabled.contains(p)).toList();
+  }
+
+  List<ResourceSearchHit> get enabledItems {
+    final disabled = disabledClouds;
+    return List.unmodifiable(
+      _hits.values.where((hit) => !disabled.contains(hit.platform)),
+    );
+  }
+
+  Future<void> setCloudPriority(
+    List<CloudPlatform> values, {
+    Set<CloudPlatform>? disabledClouds,
+  }) async {
     final order = {
       ...values,
       ...defaultCloudPriority,
     }.map((p) => p.key).toList();
+    final disabled = disabledClouds
+        ?.where((p) => p != CloudPlatform.github)
+        .map((p) => p.key)
+        .toList();
     await store.change((draft) {
-      draft['resourceSearch'] = draft.obj('resourceSearch')
-        ..['cloudPriority'] = order;
+      final settings = draft.obj('resourceSearch')..['cloudPriority'] = order;
+      if (disabled != null) settings['disabledClouds'] = disabled;
+      draft['resourceSearch'] = settings;
     });
+    if (this.disabledClouds.any((p) => p.label == cloudFilter)) {
+      cloudFilter = null;
+    }
     linkChecks?.clearVisible();
     if (!_closed) notifyListeners();
   }
 
   List<String> get orderedClouds {
-    final priority = cloudPriority;
+    final priority = enabledCloudPriority;
     final inputs = (_itemsRevision, priority.map((p) => p.key).join(','));
     if (_cloudInputs == inputs) return _orderedClouds;
-    final names = _hits.values.map((hit) => hit.cloudName).toSet();
+    final names = enabledItems.map((hit) => hit.cloudName).toSet();
     _cloudInputs = inputs;
     return _orderedClouds = List.unmodifiable([
       for (final platform in priority)
@@ -361,7 +406,7 @@ class ResourceSearch extends ChangeNotifier {
   }
 
   List<ResourceSearchHit> get items {
-    final priority = cloudPriority, supported = preferSupported;
+    final priority = enabledCloudPriority, supported = preferSupported;
     final inputs = (
       _itemsRevision,
       cloudFilter,
@@ -372,11 +417,13 @@ class ResourceSearch extends ChangeNotifier {
     );
     if (_itemsInputs == inputs) return _sortedItems;
     final source = linkChecks == null ? _hits.values : _published.values;
+    final disabled = disabledClouds;
     final includes = includeTerms.map((term) => term.toLowerCase()).toList();
     final excludes = excludeTerms.map((term) => term.toLowerCase()).toList();
     final values = source.where((hit) {
       final title = hit.title.toLowerCase();
-      return (cloudFilter == null || hit.cloudName == cloudFilter) &&
+      return !disabled.contains(hit.platform) &&
+          (cloudFilter == null || hit.cloudName == cloudFilter) &&
           includes.every(title.contains) &&
           !excludes.any(title.contains);
     }).toList();
@@ -482,18 +529,22 @@ class ResourceSearch extends ChangeNotifier {
     _checkBatch = linkChecks?.beginBatch();
     notifyListeners();
     // Search history stays in the app's private local state.
-    unawaited(
-      store
-          .change((draft) {
-            final recent = (draft['resourceSearchHistory'] as List? ?? [])
-                .whereType<String>();
-            draft['resourceSearchHistory'] = [
-              term,
-              ...recent.where((e) => e.toLowerCase() != term.toLowerCase()),
-            ].take(12).toList();
-          })
-          .catchError((Object _) {}),
-    );
+    if (!incognito) {
+      unawaited(
+        store
+            .change((draft) {
+              // Recheck after queued state changes, including enabling incognito.
+              if (draft.obj('resourceSearch').boolean('incognito')) return;
+              final recent = (draft['resourceSearchHistory'] as List? ?? [])
+                  .whereType<String>();
+              draft['resourceSearchHistory'] = [
+                term,
+                ...recent.where((e) => e.toLowerCase() != term.toLowerCase()),
+              ].take(12).toList();
+            })
+            .catchError((Object _) {}),
+      );
+    }
     final cached = _cache[term.toLowerCase()];
     if (!refresh &&
         !(api is HttpResourceSearchApi &&

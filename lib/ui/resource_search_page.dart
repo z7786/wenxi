@@ -192,7 +192,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
       return sorted;
     }
     final filters =
-        '${search.cloudFilter}\u0000${search.includeTerms.join('\u0000')}\u0001${search.excludeTerms.join('\u0000')}\u0001${search.cloudPriority.map((p) => p.key).join(',')}\u0001${search.preferSupported}';
+        '${search.cloudFilter}\u0000${search.includeTerms.join('\u0000')}\u0001${search.excludeTerms.join('\u0000')}\u0001${search.enabledCloudPriority.map((p) => p.key).join(',')}\u0001${search.preferSupported}';
     if (_displayGeneration != search.resultGeneration ||
         _displayFilters != filters ||
         !scroll.hasClients ||
@@ -981,7 +981,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   }
 
   void swipeCloud(DragEndDetails details) {
-    if (opening != null || search.allItems.isEmpty) return;
+    if (opening != null || search.enabledItems.isEmpty) return;
     final velocity = details.primaryVelocity ?? 0;
     if (_swipeDistance.abs() < 45 && velocity.abs() < 250) return;
     final names = <String?>[null, ...search.orderedClouds];
@@ -995,10 +995,11 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
 
   Widget cloudFilters(bool wide) {
     final counts = <String, int>{};
-    for (final hit in search.allItems) {
+    final enabled = search.enabledItems;
+    for (final hit in enabled) {
       counts.update(hit.cloudName, (v) => v + 1, ifAbsent: () => 1);
     }
-    final names = search.orderedClouds;
+    final names = [...search.orderedClouds];
     if (search.cloudFilter != null && !names.contains(search.cloudFilter)) {
       names.add(search.cloudFilter!);
     }
@@ -1058,7 +1059,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                         borderRadius: BorderRadius.circular(5),
                       ),
                       child: Text(
-                        '${name == null ? search.allItems.length : counts[name] ?? 0}',
+                        '${name == null ? enabled.length : counts[name] ?? 0}',
                         style: TextStyle(
                           fontSize: 10,
                           color: selected
@@ -1199,7 +1200,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
         '${search.checksPaused ? '检测已暂停' : '正在检测链接'} ${search.checkCompleted}/${search.checkTotal}',
       ResourceSearchPhase.stopped => '搜索已停止',
       ResourceSearchPhase.failed =>
-        search.allItems.isNotEmpty ? '已保留部分结果' : '搜索未完成',
+        search.enabledItems.isNotEmpty ? '已保留部分结果' : '搜索未完成',
       _ =>
         search.fromCache
             ? '最近搜索'
@@ -1430,7 +1431,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                 actions: [
                   IconButton(
                     key: const Key('resource-priority-settings'),
-                    tooltip: '网盘展示优先级',
+                    tooltip: '搜索设置',
                     onPressed: opening == null
                         ? () => showResourcePrioritySheet(context, search)
                         : null,
