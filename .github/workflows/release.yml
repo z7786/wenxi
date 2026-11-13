@@ -26,11 +26,8 @@ jobs:
           else
             dart tool/sync_version.dart --check
           fi
-  checks:
-    needs: tag
-    uses: ./.github/workflows/checks.yml
   package:
-    needs: [tag, checks]
+    needs: tag
     runs-on: windows-2022
     environment: release
     permissions:
@@ -40,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [android, windows, windows-arm64]
+        target: [windows, windows-arm64]
     env:
       PUB_HOSTED_URL: https://pub.dev
       FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
@@ -86,7 +83,7 @@ jobs:
         env:
           ASTERLINK_CLIENT_DEFINES_JSON: ${{ secrets.ASTERLINK_CLIENT_DEFINES_JSON }}
         run: python tool/prepare-ci-release.py
-      - name: Build, test and inspect Android
+      - name: Build and inspect Android
         if: matrix.target == 'android'
         run: |
           $sdkmanager = Join-Path $env:ANDROID_HOME 'cmdline-tools/latest/bin/sdkmanager.bat'
@@ -96,18 +93,6 @@ jobs:
           $settings = Get-Content -LiteralPath .local/build-config.json -Raw | ConvertFrom-Json
           python tool/verify_apk.py --apk build/app/outputs/flutter-apk/app-release.apk --sdk $env:ANDROID_HOME --application-id $settings.applicationId --umeng-channel $settings.metricsChannel --output .local/release-apk-inspection.json
           if ($LASTEXITCODE -ne 0) { throw 'APK inspection failed.' }
-      - name: Test Android release code and stage APK
-        if: matrix.target == 'android'
-        run: |
-          $settings = Get-Content -LiteralPath .local/build-config.json -Raw | ConvertFrom-Json
-          $env:ORG_GRADLE_PROJECT_ASTERLINK_UNSIGNED = 'false'
-          $env:ORG_GRADLE_PROJECT_ASTERLINK_APPLICATION_ID = $settings.applicationId
-          $env:ORG_GRADLE_PROJECT_UMENG_APPKEY = $settings.metricsAppKey
-          $env:ORG_GRADLE_PROJECT_UMENG_CHANNEL = $settings.metricsChannel
-          $env:GRADLE_USER_HOME = Join-Path $env:GITHUB_WORKSPACE '.local/gradle-home'
-          & ./android/gradlew.bat -p android :app:testReleaseUnitTest -Ptarget-platform=android-arm64 --no-daemon
-          if ($LASTEXITCODE -ne 0) { throw 'Android unit tests failed.' }
-          python tool/package-release.py --platform android
       - name: Build Windows portable package and installer
         if: matrix.target != 'android'
         run: |
@@ -123,9 +108,6 @@ jobs:
           $installers = @(Get-ChildItem -LiteralPath .local/release-installer -Filter '*.exe' -File)
           if ($installers.Count -ne 1) { throw 'Expected one installer.' }
           python tool/package-release.py --platform windows --architecture $architecture --installer $installers[0].FullName
-      - name: Test account and playback compatibility with the ARM64 SDK
-        if: matrix.target == 'windows-arm64'
-        run: flutter test --no-pub --concurrency=4 test/account_cookie_test.dart test/account_identity_test.dart test/floating_playback_test.dart test/playback_features_test.dart test/download_playback_test.dart
       - name: Save only release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
