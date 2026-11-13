@@ -137,7 +137,10 @@ func openStorage(storageDir, cacheDir, encodedKey string, paths map[string]strin
 		return err
 	}
 	cfg, _ := engine.GetConfig()
-	cfg.MaxRunning = 3 // Android's queue further enforces the user's 1..3 setting.
+	// Flutter's download and cross-transfer managers enforce their own limits.
+	// Leave enough native slots for both queues so relay downloads do not wait
+	// behind ordinary downloads or stop progressing when the limit exceeds 3.
+	cfg.MaxRunning = 64
 	cfg.DownloadDir = payloadRoot
 	if err = engine.PutConfig(cfg); err != nil {
 		engine.Close()

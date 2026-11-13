@@ -70,7 +70,7 @@ class _ConcurrencyDialogState extends State<_ConcurrencyDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(widget.crossTransfer ? '同时跨盘任务数' : '同时下载任务数'),
+    title: Text(widget.crossTransfer ? '同时处理数' : '同时下载任务数'),
     content: SizedBox(
       width: 400,
       child: SingleChildScrollView(
@@ -84,7 +84,7 @@ class _ConcurrencyDialogState extends State<_ConcurrencyDialog> {
               keyboardType: TextInputType.number,
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               decoration: InputDecoration(
-                labelText: widget.crossTransfer ? '同时跨盘传输的任务数' : '同时下载的任务数',
+                labelText: widget.crossTransfer ? '同时跨盘传输的文件数' : '同时下载的任务数',
                 hintText: '1–$maximum',
                 suffixText: '个',
                 errorText: error,
@@ -110,7 +110,7 @@ class _ConcurrencyDialogState extends State<_ConcurrencyDialog> {
             const SizedBox(height: 12),
             Text(
               widget.crossTransfer
-                  ? '其余任务会排队等待。每个任务内逐个传输文件；调低上限后，已开始的任务继续完成。'
+                  ? '批量选择的文件也会同时传输，多个批次共用此文件数上限。其余文件排队等待；调低上限后，已开始的文件继续完成。'
                   : '其余任务会排队等待。调低上限时，超出的进行中任务会暂停。',
             ),
           ],

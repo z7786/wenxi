@@ -25,6 +25,13 @@ class _TargetGate {
   int users = 0;
 }
 
+class _EntrySlot {
+  _EntrySlot(this.taskId);
+  final String taskId;
+  final ready = Completer<void>();
+  bool acquired = false;
+}
+
 class RapidTransferManager extends ChangeNotifier {
   RapidTransferManager({
     required this.cloud,
@@ -46,6 +53,9 @@ class RapidTransferManager extends ChangeNotifier {
   final _queued = <String>{};
   final _running = <String, _TransferRun>{};
   final _targets = <String, _TargetGate>{};
+  final _entryWaiters = <_EntrySlot>[];
+  int _entryRunning = 0;
+  String? _lastEntryTask;
   bool _scheduling = false;
   bool _closed = false;
   Future<void>? _initialization;
@@ -202,7 +212,102 @@ class RapidTransferManager extends ChangeNotifier {
 
   void settingsChanged() {
     _schedule();
+    _fillEntrySlots();
     if (!_closed) notifyListeners();
+  }
+
+  void _fillEntrySlots() {
+    while (!_closed &&
+        _entryRunning < maxConcurrent &&
+        _entryWaiters.isNotEmpty) {
+      // Rotate between batches while preserving file order within each batch.
+      final batches = _running.keys.toList();
+      final last = batches.indexOf(_lastEntryTask ?? '');
+      var index = 0;
+      for (var offset = 1; offset <= batches.length; offset++) {
+        final id = batches[(last + offset) % batches.length];
+        final waiting = _entryWaiters.indexWhere((s) => s.taskId == id);
+        if (waiting >= 0) {
+          index = waiting;
+          break;
+        }
+      }
+      final slot = _entryWaiters.removeAt(index);
+      _lastEntryTask = slot.taskId;
+      slot.acquired = true;
+      _entryRunning++;
+      slot.ready.complete();
+    }
+  }
+
+  Future<void> _withEntrySlot(
+    RapidTransferTask task,
+    Future<void> Function() action,
+  ) async {
+    RequestScope.checkpoint();
+    final slot = _EntrySlot(task.id);
+    _entryWaiters.add(slot);
+    _fillEntrySlots();
+    try {
+      await RequestScope.cancellable(slot.ready.future);
+      DiagnosticLog.event(
+        'cross_transfer.entry_start',
+        fields: {
+          'ref': DiagnosticLog.reference(task.id),
+          'activeFiles': _entryRunning,
+          'concurrent': maxConcurrent,
+        },
+      );
+      await action();
+    } finally {
+      if (slot.acquired) {
+        _entryRunning--;
+      } else {
+        _entryWaiters.remove(slot);
+      }
+      _fillEntrySlots();
+    }
+  }
+
+  Future<void> _transferEntries(
+    RapidTransferTask task,
+    RequestScope scope,
+    Future<void> Function(RapidTransferEntry entry) transfer,
+  ) async {
+    final entries = task.entries.where((e) => !e.finished).toList();
+    var next = 0;
+    Object? failure;
+    StackTrace? failureStack;
+    Future<void> worker() async {
+      try {
+        while (next < entries.length) {
+          RequestScope.checkpoint();
+          final entry = entries[next++];
+          await _withEntrySlot(task, () => transfer(entry));
+        }
+      } catch (error, stack) {
+        failure ??= error;
+        failureStack ??= stack;
+        // Account/permission failures stop this batch, including native IO.
+        scope.cancel();
+        rethrow;
+      }
+    }
+
+    try {
+      // Keep a bounded set of waiters so changing the setting fills new slots
+      // immediately without starting thousands of file operations at once.
+      await Future.wait(
+        List.generate(
+          entries.length.clamp(0, AppSettings.maxConcurrentCrossTransfers),
+          (_) => worker(),
+        ),
+        eagerError: false,
+      );
+    } catch (_) {
+      // Every worker must settle before retry can touch the batch's caches.
+      Error.throwWithStackTrace(failure!, failureStack!);
+    }
   }
 
   Future<void> _execute(RapidTransferTask t, _TransferRun run) async {
@@ -280,16 +385,15 @@ class RapidTransferManager extends ChangeNotifier {
     notifyListeners();
     final sourceOwner = cloud.sessionCredential(t.source)?.updatedAt;
     final targetOwner = cloud.sessionCredential(t.target)?.updatedAt;
-    var downloadConfirmed = false;
-    final speedClock = Stopwatch();
-    var speedBytes = 0;
-    void progress(int bytes) {
-      final elapsed = speedClock.elapsedMilliseconds;
-      if (elapsed < 250) return;
-      t.speed = ((bytes - speedBytes).clamp(0, bytes) * 1000 / elapsed).round();
-      speedBytes = bytes;
-      speedClock.reset();
-      notifyListeners();
+    Future<void>? downloadConfirmation;
+    final speeds = <RapidTransferEntry, int>{};
+    void setSpeed(RapidTransferEntry entry, int value) {
+      if (value > 0) {
+        speeds[entry] = value;
+      } else {
+        speeds.remove(entry);
+      }
+      t.speed = speeds.values.fold(0, (sum, speed) => sum + speed);
     }
 
     void guard() {
@@ -337,36 +441,49 @@ class RapidTransferManager extends ChangeNotifier {
               t.directories.clear();
             }
             if (!t.scanned) await _scan(t);
-            final sources = <String, List<CloudFile>>{};
+            final sources = <String, Future<List<CloudFile>>>{};
+            final destinations = <String, Future<String>>{};
+            Future<List<CloudFile>> sourceFiles(String parent) async {
+              final request = sources.putIfAbsent(
+                parent,
+                () => cloud.list(t.source, parent),
+              );
+              try {
+                return await request;
+              } catch (_) {
+                if (identical(sources[parent], request)) sources.remove(parent);
+                rethrow;
+              }
+            }
+
             Future<String> destination(List<String> path) async {
               var parent = t.parent;
               for (var i = 0; i < path.length; i++) {
                 final key = encoded(path.take(i + 1).toList());
-                if (t.directories.containsKey(key)) {
-                  parent = t.directories[key]!;
-                  continue;
-                }
-                final folder = await _withTarget(t, parent, path[i], () async {
-                  final entries = await cloud.list(t.target, parent);
-                  final found = entries
-                      .where(
-                        (f) => f.name.toLowerCase() == path[i].toLowerCase(),
-                      )
-                      .toList();
-                  require(
-                    found.isEmpty ||
-                        found.length == 1 && found.single.isDirectory,
-                    '目标目录有同名文件或重复文件夹：${path[i]}',
-                  );
-                  final folder = found.isNotEmpty
-                      ? found.single
-                      : await cloud.createFolder(t.target, parent, path[i]);
-                  if (found.isEmpty) entries.add(folder);
-                  return folder;
+                final ancestor = parent, name = path[i];
+                parent = await destinations.putIfAbsent(key, () async {
+                  final previous = t.directories[key];
+                  if (previous != null) return previous;
+                  final folder = await _withTarget(t, ancestor, name, () async {
+                    final entries = await cloud.list(t.target, ancestor);
+                    final found = entries
+                        .where(
+                          (f) => f.name.toLowerCase() == name.toLowerCase(),
+                        )
+                        .toList();
+                    require(
+                      found.isEmpty ||
+                          found.length == 1 && found.single.isDirectory,
+                      '目标目录有同名文件或重复文件夹：$name',
+                    );
+                    return found.isNotEmpty
+                        ? found.single
+                        : await cloud.createFolder(t.target, ancestor, name);
+                  });
+                  t.directories[key] = folder.id;
+                  await _save();
+                  return folder.id;
                 });
-                parent = folder.id;
-                t.directories[key] = parent;
-                await _save();
               }
               return parent;
             }
@@ -374,17 +491,28 @@ class RapidTransferManager extends ChangeNotifier {
             for (final folder in t.folders) {
               await destination(folder);
             }
-            for (final entry in t.entries) {
+            await _transferEntries(t, scope, (entry) async {
               guard();
-              if (entry.finished) continue;
+              final speedClock = Stopwatch();
+              var speedBytes = 0;
+              void progress(int bytes) {
+                final elapsed = speedClock.elapsedMilliseconds;
+                if (elapsed < 250) return;
+                setSpeed(
+                  entry,
+                  ((bytes - speedBytes).clamp(0, bytes) * 1000 / elapsed)
+                      .round(),
+                );
+                speedBytes = bytes;
+                speedClock.reset();
+                notifyListeners();
+              }
+
               try {
                 final originParent = entry.file.parentId.ifEmpty(
                   t.source.rootId,
                 );
-                final originFiles = sources[originParent] ??= await cloud.list(
-                  t.source,
-                  originParent,
-                );
+                final originFiles = await sourceFiles(originParent);
                 final original = originFiles.where(
                   (f) => f.id == entry.file.id,
                 );
@@ -432,7 +560,7 @@ class RapidTransferManager extends ChangeNotifier {
                   } else {
                     entry.status = RapidEntryStatus.processing;
                     entry.message = '正在判断秒传';
-                    t.speed = 0;
+                    setSpeed(entry, 0);
                     notifyListeners();
                     String? hash = contentMd5(entry.md5);
                     final rapid = cloud
@@ -488,11 +616,11 @@ class RapidTransferManager extends ChangeNotifier {
                             .canDownloadFile(t.source, entry.file),
                         '此文件不支持下载后上传',
                       );
-                      if (!downloadConfirmed) {
-                        await confirmDownload?.call();
-                        guard();
-                        downloadConfirmed = true;
-                      }
+                      // All workers in this batch share one mobile-data prompt.
+                      await (downloadConfirmation ??= Future<void>.sync(
+                        () async => await confirmDownload?.call(),
+                      ));
+                      guard();
                       entry.method = CrossTransferMethod.relay;
                       entry.submitted = false;
                       entry.status = RapidEntryStatus.downloading;
@@ -550,7 +678,7 @@ class RapidTransferManager extends ChangeNotifier {
                           entry.submitted = true;
                           speedBytes = 0;
                           speedClock.reset();
-                          t.speed = 0;
+                          setSpeed(entry, 0);
                           await _save();
                           notifyListeners();
                           return cloud.upload(
@@ -569,7 +697,7 @@ class RapidTransferManager extends ChangeNotifier {
                               if (p.phase == UploadPhase.uploading) {
                                 progress(p.sent);
                               } else {
-                                t.speed = 0;
+                                setSpeed(entry, 0);
                               }
                             },
                           );
@@ -594,16 +722,18 @@ class RapidTransferManager extends ChangeNotifier {
                     e is RapidTransferUnavailable ||
                     e is DownloadConfirmationCancelled ||
                     e is HttpRequestFailure && e.status == 429) {
+                  scope.cancel();
                   rethrow;
                 }
                 entry.status = RapidEntryStatus.failed;
                 entry.message = e is AppException ? e.message : '跨盘传输失败，请稍后重试';
+              } finally {
+                setSpeed(entry, 0);
               }
               await _save();
-              t.speed = 0;
               notifyListeners();
               await RequestScope.wait(const Duration(milliseconds: 150));
-            }
+            });
             guard();
             t.status = RapidTaskStatus.completed;
           }, guard),

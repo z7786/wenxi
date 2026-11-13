@@ -183,16 +183,20 @@ class RapidTransferTask {
                   count(RapidEntryStatus.missed) +
                   count(RapidEntryStatus.noHash) >
               0);
+  String get _runningStage {
+    if (!scanned) return '正在扫描文件夹';
+    final downloading = count(RapidEntryStatus.downloading);
+    final uploading = count(RapidEntryStatus.uploading);
+    if (downloading == 0 && uploading == 0) return '正在判断秒传';
+    return [
+      if (downloading > 0) '正在下载 $downloading 个',
+      if (uploading > 0) '正在上传 $uploading 个',
+    ].join(' · ');
+  }
+
   String get stage => switch (status) {
     RapidTaskStatus.pending => '等待传输',
-    RapidTaskStatus.running =>
-      !scanned
-          ? '正在扫描文件夹'
-          : entries.any((e) => e.status == RapidEntryStatus.downloading)
-          ? '正在下载'
-          : entries.any((e) => e.status == RapidEntryStatus.uploading)
-          ? '正在上传'
-          : '正在判断秒传',
+    RapidTaskStatus.running => _runningStage,
     RapidTaskStatus.completed => canRetry ? '部分文件待重试' : '传输完成',
     RapidTaskStatus.failed => '传输中断',
     RapidTaskStatus.cancelled => '已取消',

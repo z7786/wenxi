@@ -104,10 +104,8 @@ class CrossTransferRelay {
     final entry = _entryDirectory(taskId, entryId);
     await _discardDownload(entry);
     await _delete(entry);
-    final directory = _taskDirectory(taskId);
-    if (await directory.exists() && await directory.list().isEmpty) {
-      await _delete(directory);
-    }
+    // Another file in this batch may create its cache after an emptiness check.
+    // Only clearTask, after all workers settle, may remove the parent directory.
   }
 
   Future<void> _initialize(Iterable<String>? retainedTaskIds) async {

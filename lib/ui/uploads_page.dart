@@ -221,6 +221,7 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
             accent: accent,
             keyPrefix: 'upload-filter',
           ),
+          _concurrencyBar(),
           _summary(all, cross),
           Expanded(
             child: tasks.isEmpty
@@ -267,6 +268,59 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
     },
   );
 
+  Widget _concurrencyBar() {
+    final concurrent = widget.services.settings.crossTransferConcurrent;
+    final options = {1, 2, 3, 5, 8, concurrent}.toList()..sort();
+    return Container(
+      key: const Key('cross-transfer-concurrency-setting'),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: border(context), width: .5)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 4,
+        children: [
+          Text(
+            '同时处理数：',
+            style: TextStyle(fontSize: 12, color: secondary(context)),
+          ),
+          DropdownButton<int>(
+            key: const Key('cross-transfer-concurrency'),
+            value: concurrent,
+            underline: const SizedBox.shrink(),
+            isDense: true,
+            padding: const EdgeInsets.symmetric(vertical: 7),
+            iconSize: 16,
+            iconEnabledColor: accent,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(fontSize: 13, color: accent),
+            items: [
+              for (final value in options)
+                DropdownMenuItem(value: value, child: Text('$value')),
+              const DropdownMenuItem(value: 0, child: Text('自定义…')),
+            ],
+            selectedItemBuilder: (context) =>
+                List.generate(options.length + 1, (_) => Text('$concurrent')),
+            onChanged: (value) {
+              if (value == 0) {
+                editCrossTransferConcurrency(context, widget.services);
+              } else if (value != null) {
+                busy(
+                  context,
+                  () => widget.services.updateSettings({
+                    'crossTransferConcurrent': value,
+                  }),
+                );
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _summary(List<UploadTask> all, List<RapidTransferTask> cross) {
     final active =
         all.where((t) => t.active).length + cross.where((t) => t.active).length;
@@ -285,7 +339,11 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
             .where(
               (t) =>
                   t.active &&
-                  t.entries.any((e) => e.status == RapidEntryStatus.uploading),
+                  t.entries.any(
+                    (e) =>
+                        e.status == RapidEntryStatus.downloading ||
+                        e.status == RapidEntryStatus.uploading,
+                  ),
             )
             .fold<int>(0, (n, t) => n + t.speed);
     final canContinue =
@@ -304,18 +362,15 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
             style: TextStyle(fontSize: 11, color: secondary(context)),
           ),
         ),
-        IconButton(
-          key: const Key('cross-transfer-concurrency-setting'),
-          tooltip:
-              '同时跨盘任务数：${widget.services.settings.crossTransferConcurrent} 个',
-          onPressed: () =>
-              editCrossTransferConcurrency(context, widget.services),
-          icon: const Icon(CupertinoIcons.slider_horizontal_3, size: 18),
-          visualDensity: VisualDensity.compact,
-        ),
         if (active > 0) ...[
           const SizedBox(width: 8),
-          Icon(CupertinoIcons.arrow_up, size: 12, color: accent),
+          Icon(
+            cross.any((t) => t.active)
+                ? CupertinoIcons.arrow_up_arrow_down
+                : CupertinoIcons.arrow_up,
+            size: 12,
+            color: accent,
+          ),
           const SizedBox(width: 4),
           Text(
             speed > 0 ? '${formatBytes(speed)}/s' : '准备中',
