@@ -70,6 +70,7 @@ class _PoolConnector extends CloudConnector {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late AppServices services;
   late Directory directory;
   late SearchApiFixture api;

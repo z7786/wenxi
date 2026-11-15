@@ -6,6 +6,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:asterlink/playback/delegating_backend.dart';
 import 'package:asterlink/playback/media_backend.dart';
+import 'support.dart' show until;
 
 class _ViewportPlayer extends PlatformPlayer {
   _ViewportPlayer() : super(configuration: const PlayerConfiguration());
@@ -131,7 +132,7 @@ void main() {
         1,
         stableOrientation: true,
       );
-      await tick();
+      await until(() => fixture.output.sizes.length == 1);
       fixture.backend.setRenderViewport(
         const Size(600, 900),
         1,
@@ -145,7 +146,7 @@ void main() {
         BoxFit.contain,
         1,
       );
-      await tick();
+      await until(() => fixture.output.sizes.length == 2);
       expect(fixture.output.sizes, [
         const Size(2172, 1222),
         const Size(400, 226),

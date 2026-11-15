@@ -107,6 +107,7 @@ class SearchApiFixture
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   test('Tianyi share code is not shown as an extraction password', () {
     final hit = ResourceSearchHit.fromRaw({
       'title': '天翼资源',
