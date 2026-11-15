@@ -105,7 +105,7 @@ void main() {
         stableOrientation: true,
       );
       request(const Size(904, 407));
-      await tick();
+      await until(() => fixture.output.sizes.isNotEmpty);
       expect(fixture.output.sizes, [const Size(2172, 1222)]);
       for (final viewport in const [
         Size(407, 904),
@@ -161,7 +161,7 @@ void main() {
       void request(Size size) =>
           fixture.backend.setRenderViewport(size, 1, BoxFit.contain, 1);
       request(const Size(1920, 1080));
-      await tick();
+      await until(() => fixture.output.sizes.isNotEmpty);
       request(const Size(960, 540));
       await tick(50);
       request(const Size(1920, 1080));
@@ -177,16 +177,20 @@ void main() {
       void request(Size size) =>
           fixture.backend.setRenderViewport(size, 1, BoxFit.contain, 1);
       request(const Size(1920, 1080));
-      await tick();
+      await until(() => fixture.output.sizes.isNotEmpty);
       final barrier = Completer<void>();
+      addTearDown(() {
+        fixture.output.barrier = null;
+        if (!barrier.isCompleted) barrier.complete();
+      });
       fixture.output.barrier = barrier.future;
       request(const Size(960, 540));
-      await tick();
+      await until(() => fixture.output.sizes.length == 2);
       expect(fixture.output.sizes.last, const Size(960, 540));
       request(const Size(1920, 1080));
       fixture.output.barrier = null;
       barrier.complete();
-      await tick(280);
+      await until(() => fixture.output.sizes.length == 3);
       expect(fixture.output.sizes, [
         const Size(1920, 1080),
         const Size(960, 540),
@@ -202,11 +206,15 @@ void main() {
       void request(Size size) =>
           fixture.backend.setRenderViewport(size, 1, BoxFit.contain, 1);
       request(const Size(1920, 1080));
-      await tick();
+      await until(() => fixture.output.sizes.isNotEmpty);
       final barrier = Completer<void>();
+      addTearDown(() {
+        fixture.output.barrier = null;
+        if (!barrier.isCompleted) barrier.complete();
+      });
       fixture.output.barrier = barrier.future;
       request(const Size(960, 540));
-      await tick();
+      await until(() => fixture.output.sizes.length == 2);
       request(const Size(800, 450));
       await tick(50);
       request(const Size(640, 360));
@@ -217,7 +225,7 @@ void main() {
       ]);
       fixture.output.barrier = null;
       barrier.complete();
-      await tick(280);
+      await until(() => fixture.output.sizes.length == 3);
       expect(fixture.output.sizes, [
         const Size(1920, 1080),
         const Size(960, 540),
@@ -238,10 +246,10 @@ void main() {
         1,
       );
       request();
-      await tick(450);
+      await until(() => !fixture.output.failNext);
       expect(fixture.output.sizes, hasLength(1));
       request();
-      await tick();
+      await until(() => fixture.output.sizes.length == 2);
       expect(fixture.output.sizes, hasLength(2));
       expect(fixture.backend.diagnosticFields['renderWidth'], 1920);
     },
@@ -257,9 +265,9 @@ void main() {
         BoxFit.contain,
         1,
       );
-      await tick();
+      await until(() => fixture.output.sizes.isNotEmpty);
       fixture.native.geometry(const Size(2160, 3840));
-      await tick();
+      await until(() => fixture.output.sizes.length == 2);
       expect(fixture.output.sizes, [
         const Size(1920, 1080),
         const Size(608, 1080),
@@ -288,7 +296,7 @@ void main() {
         1,
         stableOrientation: true,
       );
-      await tick();
+      await until(() => fixture.output.sizes.isNotEmpty);
       expect(fixture.output.sizes, [const Size(400, 226)]);
     },
   );
