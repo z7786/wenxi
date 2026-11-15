@@ -13,7 +13,9 @@ import '../data/resource_pool_preview.dart';
 import '../data/cloud_search.dart';
 import '../data/cloud_search_history.dart';
 import '../domain/cloud_search_options.dart';
+import '../domain/auth.dart' show AccountLoginRequired;
 import '../domain/models.dart';
+import '../domain/quark_share_transfer.dart';
 import '../domain/browser_return.dart';
 import '../domain/aliyun_share.dart';
 import '../domain/baidu_share_route.dart';
@@ -886,7 +888,8 @@ class _BrowserPageState extends State<BrowserPage> {
     final result = source
         .where(
           (f) =>
-              f.name.toLowerCase().contains(query) &&
+              (f.displayName.toLowerCase().contains(query) ||
+                  f.name.toLowerCase().contains(query)) &&
               (!widget.picking ||
                   f.isDirectory &&
                       !widget.excludedFolders.contains(
@@ -894,6 +897,25 @@ class _BrowserPageState extends State<BrowserPage> {
                       )),
         )
         .toList();
+    _sortFiles(result);
+    _displayInputs = inputs;
+    _displayed = List.unmodifiable(result);
+    if (timer.elapsedMilliseconds >= 100) {
+      DiagnosticLog.event(
+        'browse.sort_slow',
+        fields: {
+          'platform': session.platform.name,
+          'sort': sort,
+          'count': source.length,
+          'elapsedMs': timer.elapsedMilliseconds,
+        },
+      );
+    }
+    return _displayed;
+  }
+
+  void _sortFiles(List<CloudFile> result) {
+    final sort = _display.sort, ascending = _display.ascending;
     final dates = sort == 'date'
         ? {
             for (final file in result)
@@ -906,7 +928,7 @@ class _BrowserPageState extends State<BrowserPage> {
     // Valid modification dates do not need a pinyin key. Build names lazily
     // only for name sorting or the missing-date fallback.
     NaturalName name(CloudFile file) =>
-        _nameKeys[file] ??= NaturalName(file.name);
+        _nameKeys[file] ??= NaturalName(file.displayName);
     final positions = {for (final (index, file) in result.indexed) file: index};
     result.sort((a, b) {
       if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
@@ -922,20 +944,39 @@ class _BrowserPageState extends State<BrowserPage> {
       if (order == 0) return positions[a]!.compareTo(positions[b]!);
       return ascending ? order : -order;
     });
-    _displayInputs = inputs;
-    _displayed = List.unmodifiable(result);
-    if (timer.elapsedMilliseconds >= 100) {
-      DiagnosticLog.event(
-        'browse.sort_slow',
-        fields: {
-          'platform': session.platform.name,
-          'sort': sort,
-          'count': source.length,
-          'elapsedMs': timer.elapsedMilliseconds,
-        },
-      );
+  }
+
+  Future<List<CloudFile>?> _previewPlaylist(
+    CloudFile file,
+    String parent,
+  ) async {
+    final kind = fileKind(file.name);
+    if (kind != FileKind.video && kind != FileKind.audio) return displayed;
+    // Search results and favorite highlighting show only matching files.
+    // Episodes and sidecar subtitles belong to the complete source directory.
+    final captured = session, current = generation;
+    final cached = _searchResults
+        ? _deepSearch.cached(captured, parent)
+        : !_hasMore
+        ? items
+        : null;
+    if (cached != null) {
+      final result = List.of(cached);
+      _sortFiles(result);
+      return result;
     }
-    return _displayed;
+    return busy(context, () async {
+      _checkAccount();
+      final files = await widget.services.cloud.list(captured, parent);
+      _checkAccount();
+      require(
+        mounted && session == captured && generation == current,
+        '目录已变化，请重新打开视频',
+      );
+      final result = List.of(files);
+      _sortFiles(result);
+      return result;
+    }, label: '正在读取选集…');
   }
 
   Future<void> _download(List<CloudFile> files) async {
@@ -1026,11 +1067,14 @@ class _BrowserPageState extends State<BrowserPage> {
     );
   }
 
-  Future<String?> _destination(List<CloudFile> files) async {
+  Future<String?> _destination(
+    List<CloudFile> files, {
+    bool restoreSaveLocation = false,
+  }) async {
     _pickedDestination = null;
-    final personal = await busy(
-      context,
-      () => session.platform == CloudPlatform.github
+    final cloud = widget.services.cloud;
+    final location = await busy(context, () async {
+      final personal = await (session.platform == CloudPlatform.github
           ? Future.value(
               BrowseSession(
                 platform: session.platform,
@@ -1044,21 +1088,50 @@ class _BrowserPageState extends State<BrowserPage> {
               ),
             )
           : session.mode == BrowseMode.personal
-          ? widget.services.cloud.reopenSpace(session)
-          : widget.services.cloud.personal(
-              session.platform,
-              accountId: session.accountId,
-            ),
-      label: '读取目标目录…',
-    );
-    if (personal == null || !mounted) return null;
+          ? cloud.reopenSpace(session)
+          : cloud.personal(session.platform, accountId: session.accountId));
+      var trail = restoreSaveLocation
+          ? widget.services.saveLocations.read(personal)
+          : null;
+      CloudFilePage? page;
+      var unavailable = false;
+      if (trail != null && trail.length > 1) {
+        final revision = cloud.sessionCredential(personal)?.updatedAt;
+        try {
+          page = await cloud.listPage(personal, trail.last.$1);
+        } catch (e) {
+          RequestScope.checkpoint();
+          cloud.ensureAvailable(personal.platform);
+          if (e is AccountLoginRequired ||
+              cloud.sessionCredential(personal)?.updatedAt != revision) {
+            rethrow;
+          }
+          trail = null;
+          unavailable = true;
+        }
+      }
+      return (
+        session: personal,
+        trail: trail,
+        page: page,
+        unavailable: unavailable,
+      );
+    }, label: '读取目标目录…');
+    if (location == null || !mounted) return null;
+    if (location.unavailable) {
+      message(context, '上次转存目录无法读取，已返回全部文件，请重新选择');
+    }
     return Navigator.push<String>(
       context,
       MaterialPageRoute(
         builder: (_) => BrowserPage(
           widget.services,
-          personal,
+          location.session,
           picking: true,
+          initialTrail: location.trail,
+          initialItems: location.page?.files,
+          initialCursor: location.page?.nextCursor,
+          popAtInitialDirectory: location.trail != null,
           onDestinationPicked: (target, trail) {
             _pickedDestination = (target, List.of(trail));
           },
@@ -1245,6 +1318,10 @@ class _BrowserPageState extends State<BrowserPage> {
     if (action == 'preview') {
       _checkAccount();
       _deepSearch.stop();
+      final trail = List.of(_trailFor(files.first));
+      final playlist = await _previewPlaylist(files.first, trail.last.$1);
+      if (!mounted || playlist == null) return;
+      _checkAccount();
       await Navigator.push<void>(
         context,
         MaterialPageRoute(
@@ -1253,13 +1330,11 @@ class _BrowserPageState extends State<BrowserPage> {
             session,
             files.first,
             poolPreview: widget.poolPreview,
-            sourceFolders: _trailFor(
-              files.first,
-            ).skip(1).map((part) => part.$2).toList(),
-            playlist: displayed,
+            sourceFolders: trail.skip(1).map((part) => part.$2).toList(),
+            playlist: playlist,
             parentFolders: {
-              for (final file in {...displayed, files.first})
-                file.id: _trailFor(file).last.$1,
+              for (final file in {...playlist, files.first})
+                file.id: trail.last.$1,
             },
           ),
         ),
@@ -1284,7 +1359,7 @@ class _BrowserPageState extends State<BrowserPage> {
       if (name == null || name.trim().isEmpty || !mounted) return;
     }
     if (action == 'move' || action == 'save') {
-      target = await _destination(files);
+      target = await _destination(files, restoreSaveLocation: action == 'save');
       if (target == null || !mounted) return;
     }
     if (action == 'delete') {
@@ -1293,7 +1368,7 @@ class _BrowserPageState extends State<BrowserPage> {
             session.platform == CloudPlatform.github
                 ? '删除 GitHub 文件'
                 : '删除网盘文件',
-            '${session.platform == CloudPlatform.github ? '代码文件会从当前分支删除；发布附件会被永久删除。\n' : ''}确认删除选中的 ${files.length} 项？\n${files.take(3).map((f) => f.name).join('\n')}',
+            '${session.platform == CloudPlatform.github ? '代码文件会从当前分支删除；发布附件会被永久删除。\n' : ''}确认删除选中的 ${files.length} 项？\n${files.take(3).map((f) => f.displayName).join('\n')}',
             action: '删除',
             destructive: true,
           ) ||
@@ -1308,6 +1383,7 @@ class _BrowserPageState extends State<BrowserPage> {
       );
       if (options == null || !mounted) return;
     }
+    final destination = action == 'save' ? _pickedDestination : null;
     final result = await busy<Object>(
       context,
       () => widget.services.cloud.withSession(session, () async {
@@ -1359,7 +1435,20 @@ class _BrowserPageState extends State<BrowserPage> {
         ),
       );
     } else if (result == true) {
-      final destination = _pickedDestination;
+      if (action == 'save' && destination != null) {
+        unawaited(
+          widget.services.saveLocations
+              .remember(destination.$1, destination.$2)
+              .catchError((Object error, StackTrace stack) {
+                DiagnosticLog.error(
+                  'browse.save_location_failed',
+                  error,
+                  stack,
+                  fields: {'platform': destination.$1.platform.name},
+                );
+              }),
+        );
+      }
       if (action == 'save' &&
           AliyunShareLink.isFastTransfer(session) &&
           destination != null) {
@@ -1393,7 +1482,7 @@ class _BrowserPageState extends State<BrowserPage> {
             children: [
               ListTile(
                 leading: FileGlyph(file.name, directory: file.isDirectory),
-                title: Text(file.name, maxLines: 2),
+                title: Text(file.displayName, maxLines: 2),
                 subtitle: _fileMetadata(file),
               ),
               if (_hit(file) != null)
@@ -1999,6 +2088,7 @@ class _BrowserPageState extends State<BrowserPage> {
         require(link != null, '原分享信息缺失，请返回首页重新解析');
         return widget.services.cloud.share(
           link!,
+          preferQuarkMobileTransfer: QuarkShareTransfer.prefersMobile(previous),
           baiduRoute: BaiduShareRoute.fromSession(previous),
           parserSiteId: previous.meta('parserSiteId').isEmpty
               ? null
@@ -2082,6 +2172,9 @@ class _BrowserPageState extends State<BrowserPage> {
           _checkAccount();
           final next = await widget.services.cloud.share(
             link,
+            preferQuarkMobileTransfer: QuarkShareTransfer.prefersMobile(
+              previous,
+            ),
             baiduRoute: route,
             parserSiteId: parserSiteId,
             parserPasswordGrant: grant,
@@ -2649,9 +2742,9 @@ class _BrowserPageState extends State<BrowserPage> {
         ],
       ),
       title: widget.searchPage
-          ? CloudSearchFileName(file.name, search.text)
+          ? CloudSearchFileName(file.displayName, search.text)
           : Text(
-              file.name,
+              file.displayName,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 14),
@@ -2660,7 +2753,7 @@ class _BrowserPageState extends State<BrowserPage> {
       trailing: widget.picking
           ? const Icon(CupertinoIcons.chevron_right, size: 14)
           : IconButton(
-              tooltip: '${file.name}操作',
+              tooltip: '${file.displayName}操作',
               icon: const Icon(CupertinoIcons.ellipsis, size: 20),
               onPressed: () => _menu(file),
             ),
@@ -2761,7 +2854,7 @@ class _BrowserPageState extends State<BrowserPage> {
                         right: 0,
                         top: 0,
                         child: IconButton(
-                          tooltip: '${file.name}操作',
+                          tooltip: '${file.displayName}操作',
                           icon: Container(
                             width: 28,
                             height: 28,
@@ -2785,7 +2878,7 @@ class _BrowserPageState extends State<BrowserPage> {
                   SizedBox(
                     height: titleHeight,
                     child: Text(
-                      file.name,
+                      file.displayName,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 14, height: 1.35),
@@ -4014,7 +4107,14 @@ class _ShareOptionsDialogState extends State<_ShareOptionsDialog> {
             else
               TextField(
                 controller: passcode,
-                decoration: const InputDecoration(labelText: '提取码（可选）'),
+                decoration: InputDecoration(
+                  labelText: widget.platform == CloudPlatform.baidu
+                      ? '提取码（留空自动生成）'
+                      : '提取码（可选）',
+                  helperText: widget.platform == CloudPlatform.baidu
+                      ? '4 位字母或数字'
+                      : null,
+                ),
               ),
           ],
         ),

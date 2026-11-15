@@ -68,6 +68,22 @@ class FakePlaybackBackend extends PlaybackBackend {
   bool videoSurface = false;
   BoxFit? lastFit;
   double? lastAspectRatio;
+  Size? lastRenderViewport;
+  double? lastRenderScale;
+  bool stableRenderOrientation = false;
+  @override
+  void setRenderViewport(
+    Size viewport,
+    double pixelRatio,
+    BoxFit fit,
+    double scale, {
+    bool stableOrientation = false,
+  }) {
+    lastRenderViewport = viewport;
+    lastRenderScale = scale;
+    stableRenderOrientation = stableOrientation;
+  }
+
   @override
   Widget? buildVideo({required BoxFit fit, double? aspectRatio}) {
     lastFit = fit;
@@ -129,6 +145,12 @@ class FakePlaybackBackend extends PlaybackBackend {
   @override
   Future<void> setSegmentSizeMiB(int value) async {
     segmentSizeMiB = value;
+  }
+
+  bool decoderCompatibility = false;
+  @override
+  Future<void> setDecoderCompatibility(bool enabled) async {
+    decoderCompatibility = enabled;
   }
 
   final rates = <double>[], volumes = <double>[], seeks = <Duration>[];

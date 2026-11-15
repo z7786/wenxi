@@ -166,6 +166,51 @@ void main() {
   }
 
   browserTest(
+    'Decoded filename search highlights display text and keeps raw download identity',
+    (tester) async {
+      const file = CloudFile(
+        id: 'episode-15',
+        name: '[第15話 Φ&#39;s VS χ].mkv',
+        displayName: "[第15話 Φ's VS χ].mkv",
+        parentId: 'work',
+        token: 'file-token',
+      );
+      connector.tree['work'] = [file];
+      await fixture.render(tester);
+      await recursive(tester);
+      await search(tester, "Φ's");
+      expect(find.text('搜索完成 · 共 1 项'), findsOneWidget);
+      final label = find.text("[第15話 Φ's VS χ].mkv");
+      expect(label, findsOneWidget);
+      expect(find.text('[第15話 Φ&#39;s VS χ].mkv'), findsNothing);
+      final spans = tester.widget<Text>(label).textSpan! as TextSpan;
+      expect(
+        spans.children!
+            .whereType<TextSpan>()
+            .singleWhere((span) => span.text == "Φ's")
+            .style!
+            .fontWeight,
+        FontWeight.w600,
+      );
+      await search(tester, '&#39;');
+      expect(find.text('搜索完成 · 共 1 项'), findsOneWidget);
+      expect(label, findsOneWidget);
+      await menu(tester, "[第15話 Φ's VS χ].mkv", '收藏');
+      final favorite = fixture.services.favorites.all.single;
+      expect(favorite.name, file.displayName);
+      expect(favorite.file.name, file.name);
+      await menu(tester, "[第15話 Φ's VS χ].mkv", '下载');
+      await tester.runAsync(() => until(() => connector.downloaded.isNotEmpty));
+      final downloaded = connector.downloaded.single.$2;
+      expect(downloaded.name, file.name);
+      expect(downloaded.id, file.id);
+      expect(downloaded.token, file.token);
+      expect(downloaded.parentId, file.parentId);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  browserTest(
     'Search opens a separate page, waits for submission and remembers history',
     (tester) async {
       await fixture.render(tester);

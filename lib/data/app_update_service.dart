@@ -166,7 +166,10 @@ class AppUpdateService extends ChangeNotifier {
       link = link.withPasscode(update.inAppPasscode);
     }
     if (link.kind == LinkKind.cloudShare && link.platform != null) {
-      final session = await cloud.share(link);
+      final session = await cloud.share(
+        link,
+        preferQuarkMobileTransfer: link.platform == CloudPlatform.quark,
+      );
       _checkCurrent(update);
       final entries = await cloud.list(session, session.rootId);
       _checkCurrent(update);

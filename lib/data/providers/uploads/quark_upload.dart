@@ -25,12 +25,14 @@ extension _QuarkUpload on QuarkUcConnector {
     final pre = success(response);
     final taskId = pre.str('task_id');
     require(taskId.isNotEmpty, '网盘未返回上传任务');
+    final digests = await io.hashes(whole: ['md5', 'sha1']);
     final hashes = await post('file/update/hash', {
-      'md5': await io.digest(md5),
-      'sha1': await io.digest(sha1),
+      'md5': digests.whole['md5'],
+      'sha1': digests.whole['sha1'],
       'task_id': taskId,
     }, c.primary);
     if (!hashes.boolean('finish')) {
+      io.notSavedYet();
       final bucket = pre.str('bucket'), object = pre.str('obj_key');
       final uploadId = pre.str('upload_id');
       final endpoint = Uri.tryParse(pre.str('upload_url'));
@@ -50,11 +52,13 @@ extension _QuarkUpload on QuarkUcConnector {
           )
           .toString();
       Future<String> authorize(String meta) async {
-        final result = await post('file/upload/auth', {
-          'auth_info': pre['auth_info'],
-          'auth_meta': meta,
-          'task_id': taskId,
-        }, c.primary);
+        final result = await io.temporary(
+          () => post('file/upload/auth', {
+            'auth_info': pre['auth_info'],
+            'auth_meta': meta,
+            'task_id': taskId,
+          }, c.primary),
+        );
         final key = result.str('auth_key');
         require(key.isNotEmpty, '网盘未签发上传授权');
         return key;
@@ -66,9 +70,9 @@ extension _QuarkUpload on QuarkUcConnector {
           .obj('metadata')
           .integer('part_size', 8 * 1024 * 1024);
       require(partSize > 0, '网盘上传分段大小无效');
-      final count = math.max(1, (source.size / partSize).ceil()),
-          etags = <String>[];
-      for (var i = 0; i < count; i++) {
+      final count = math.max(1, (source.size / partSize).ceil());
+      final etags = List.filled(count, '');
+      await io.parts(count, (i) async {
         final date = HttpDate.format(DateTime.now().toUtc());
         final key = await authorize(
           'PUT\n\n${source.mimeType}\n$date\n'
@@ -79,6 +83,7 @@ extension _QuarkUpload on QuarkUcConnector {
           query(address, {'partNumber': i + 1, 'uploadId': uploadId}),
           start: i * partSize,
           end: math.min(source.size, (i + 1) * partSize),
+          commitsFile: false,
           headers: {
             'Authorization': key,
             'Content-Type': source.mimeType,
@@ -89,8 +94,9 @@ extension _QuarkUpload on QuarkUcConnector {
         );
         final etag = result.header('etag');
         require(etag.isNotEmpty, '网盘未确认上传分段');
-        etags.add(etag);
-      }
+        etags[i] = etag;
+      });
+      io.notSavedYet();
       io.progress(UploadPhase.finishing, source.size);
       final xml = UploadIO.completeXml(etags),
           date = HttpDate.format(DateTime.now().toUtc());

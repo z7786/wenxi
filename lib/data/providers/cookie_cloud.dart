@@ -6,6 +6,7 @@ import '../../domain/auth.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
 import '../../domain/file_types.dart';
+import '../../domain/quark_share_transfer.dart';
 import '../../download/download_request.dart';
 import '../http.dart';
 import '../state_store.dart';
@@ -56,6 +57,11 @@ class CookieCloudConnector extends QuarkUcConnector {
 
   final _CookieCloudHttp _sessions;
   final bool Function(bool authenticated)? directShareDownloadEnabled;
+  void checkAccountContext() {
+    RequestScope.checkpoint();
+    _sessions.checkpoint();
+  }
+
   @override
   String get ua => quark ? _sessions.apiUserAgent : _sessions.webUserAgent;
   @override
@@ -283,7 +289,10 @@ class CookieCloudConnector extends QuarkUcConnector {
       final link = session.sourceLink;
       require(link != null, '原分享链接已缺失，请重新解析');
       RequestScope.checkpoint();
-      final freshSession = await openShare(link!, account);
+      final freshSession = QuarkShareTransfer.inherit(
+        session,
+        await openShare(link!, account),
+      );
       final parent = file.parentId == session.rootId || file.parentId.isEmpty
           ? freshSession.rootId
           : file.parentId;
@@ -567,8 +576,8 @@ class CookieCloudConnector extends QuarkUcConnector {
     Credential? credential,
   ) => _prepare(session, file, credential, forPlayback: true);
 
-  /// Share transfer still uses the web account, while a stream resolver owns
-  /// its separate authorization, media size, and CDN headers.
+  /// Share transfer uses the account's preferred route, while a stream resolver
+  /// owns its separate authorization, media size, and CDN headers.
   Future<DownloadSpec> prepareStream(
     BrowseSession session,
     CloudFile file,
@@ -1037,6 +1046,21 @@ class _CookieCloudHttp extends JsonHttp {
     final session = current;
     require(session != null, '${platform.shortName} 请求缺少账号上下文');
     final uri = Uri.parse(url);
+    // Mobile signatures own their authentication. Never inject web cookies or
+    // replay a mobile save as part of the PC cookie refresh loop.
+    if (platform == CloudPlatform.quark && uri.host == 'drive-m.quark.cn') {
+      checkpoint();
+      final result = await transport.request(
+        method,
+        url,
+        body: body,
+        headers: headers,
+        followRedirects: followRedirects,
+        contentType: contentType,
+      );
+      checkpoint();
+      return result;
+    }
     final domain = platform == CloudPlatform.quark ? 'quark.cn' : 'uc.cn';
     if (uri.host != domain && !uri.host.endsWith('.$domain')) {
       checkpoint();

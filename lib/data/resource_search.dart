@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import '../core/json.dart';
 import '../domain/resource_search.dart';
 import '../domain/models.dart';
+import '../diagnostics/app_log.dart';
 import 'resource_search_api.dart';
 import 'resource_link_checks.dart';
 import 'state_store.dart';
@@ -18,7 +20,7 @@ enum ResourceSearchPhase {
   failed,
 }
 
-class ResourceSearch extends ChangeNotifier {
+class ResourceSearch extends ChangeNotifier with WidgetsBindingObserver {
   ResourceSearch({
     required this.store,
     required this.api,
@@ -28,6 +30,7 @@ class ResourceSearch extends ChangeNotifier {
     this.publishDelay = const Duration(milliseconds: 250),
   }) {
     linkChecks?.addListener(_checksChanged);
+    WidgetsBinding.instance.addObserver(this);
   }
   final StateStore store;
   final ResourceSearchApi api;
@@ -296,6 +299,16 @@ class ResourceSearch extends ChangeNotifier {
 
   bool get preferSupported =>
       store.data.obj('resourceSearch').boolean('preferSupported', true);
+  bool get incognito => store.data.obj('resourceSearch').boolean('incognito');
+
+  Future<void> setIncognito(bool value) async {
+    await store.change((draft) {
+      draft['resourceSearch'] = draft.obj('resourceSearch')
+        ..['incognito'] = value;
+    });
+    if (!_closed) notifyListeners();
+  }
+
   List<String> get history =>
       (store.data['resourceSearchHistory'] as List? ?? [])
           .whereType<String>()
@@ -334,24 +347,59 @@ class ResourceSearch extends ChangeNotifier {
     ];
   }
 
-  Future<void> setCloudPriority(List<CloudPlatform> values) async {
+  Set<CloudPlatform> get disabledClouds {
+    final saved = store.data.obj('resourceSearch')['disabledClouds'];
+    return {
+      if (saved is List)
+        ...saved
+            .whereType<String>()
+            .map(CloudPlatform.fromKey)
+            .nonNulls
+            .where((p) => p != CloudPlatform.github),
+    };
+  }
+
+  List<CloudPlatform> get enabledCloudPriority {
+    final disabled = disabledClouds;
+    return cloudPriority.where((p) => !disabled.contains(p)).toList();
+  }
+
+  List<ResourceSearchHit> get enabledItems {
+    final disabled = disabledClouds;
+    return List.unmodifiable(
+      _hits.values.where((hit) => !disabled.contains(hit.platform)),
+    );
+  }
+
+  Future<void> setCloudPriority(
+    List<CloudPlatform> values, {
+    Set<CloudPlatform>? disabledClouds,
+  }) async {
     final order = {
       ...values,
       ...defaultCloudPriority,
     }.map((p) => p.key).toList();
+    final disabled = disabledClouds
+        ?.where((p) => p != CloudPlatform.github)
+        .map((p) => p.key)
+        .toList();
     await store.change((draft) {
-      draft['resourceSearch'] = draft.obj('resourceSearch')
-        ..['cloudPriority'] = order;
+      final settings = draft.obj('resourceSearch')..['cloudPriority'] = order;
+      if (disabled != null) settings['disabledClouds'] = disabled;
+      draft['resourceSearch'] = settings;
     });
+    if (this.disabledClouds.any((p) => p.label == cloudFilter)) {
+      cloudFilter = null;
+    }
     linkChecks?.clearVisible();
     if (!_closed) notifyListeners();
   }
 
   List<String> get orderedClouds {
-    final priority = cloudPriority;
+    final priority = enabledCloudPriority;
     final inputs = (_itemsRevision, priority.map((p) => p.key).join(','));
     if (_cloudInputs == inputs) return _orderedClouds;
-    final names = _hits.values.map((hit) => hit.cloudName).toSet();
+    final names = enabledItems.map((hit) => hit.cloudName).toSet();
     _cloudInputs = inputs;
     return _orderedClouds = List.unmodifiable([
       for (final platform in priority)
@@ -361,7 +409,7 @@ class ResourceSearch extends ChangeNotifier {
   }
 
   List<ResourceSearchHit> get items {
-    final priority = cloudPriority, supported = preferSupported;
+    final priority = enabledCloudPriority, supported = preferSupported;
     final inputs = (
       _itemsRevision,
       cloudFilter,
@@ -372,11 +420,13 @@ class ResourceSearch extends ChangeNotifier {
     );
     if (_itemsInputs == inputs) return _sortedItems;
     final source = linkChecks == null ? _hits.values : _published.values;
+    final disabled = disabledClouds;
     final includes = includeTerms.map((term) => term.toLowerCase()).toList();
     final excludes = excludeTerms.map((term) => term.toLowerCase()).toList();
     final values = source.where((hit) {
       final title = hit.title.toLowerCase();
-      return (cloudFilter == null || hit.cloudName == cloudFilter) &&
+      return !disabled.contains(hit.platform) &&
+          (cloudFilter == null || hit.cloudName == cloudFilter) &&
           includes.every(title.contains) &&
           !excludes.any(title.contains);
     }).toList();
@@ -480,20 +530,33 @@ class ResourceSearch extends ChangeNotifier {
     _itemsRevision++;
     phase = ResourceSearchPhase.searching;
     _checkBatch = linkChecks?.beginBatch();
+    DiagnosticLog.active?.record(
+      'search.started',
+      fields: {
+        'generation': generation,
+        'keywordLength': term.length,
+        'refresh': refresh,
+      },
+      flush: true,
+    );
     notifyListeners();
     // Search history stays in the app's private local state.
-    unawaited(
-      store
-          .change((draft) {
-            final recent = (draft['resourceSearchHistory'] as List? ?? [])
-                .whereType<String>();
-            draft['resourceSearchHistory'] = [
-              term,
-              ...recent.where((e) => e.toLowerCase() != term.toLowerCase()),
-            ].take(12).toList();
-          })
-          .catchError((Object _) {}),
-    );
+    if (!incognito) {
+      unawaited(
+        store
+            .change((draft) {
+              // Recheck after queued state changes, including enabling incognito.
+              if (draft.obj('resourceSearch').boolean('incognito')) return;
+              final recent = (draft['resourceSearchHistory'] as List? ?? [])
+                  .whereType<String>();
+              draft['resourceSearchHistory'] = [
+                term,
+                ...recent.where((e) => e.toLowerCase() != term.toLowerCase()),
+              ].take(12).toList();
+            })
+            .catchError((Object _) {}),
+      );
+    }
     final cached = _cache[term.toLowerCase()];
     if (!refresh &&
         !(api is HttpResourceSearchApi &&
@@ -528,9 +591,17 @@ class ResourceSearch extends ChangeNotifier {
     _deadline = deadline;
     var targetPhase = ResourceSearchPhase.complete;
     var receivedComplete = false;
+    var receivedFirst = false;
     try {
       await for (final batch in api.search(term, cancellation)) {
         if (_closed || generation != _generation) return;
+        if (!receivedFirst || batch.complete) {
+          DiagnosticLog.event(
+            batch.complete ? 'search.results_complete' : 'search.first_results',
+            fields: {'generation': generation, 'count': batch.items.length},
+          );
+          receivedFirst = true;
+        }
         if (batch.complete) {
           deadline.cancel();
           final previous = Map<String, ResourceSearchHit>.of(_hits);
@@ -563,6 +634,12 @@ class ResourceSearch extends ChangeNotifier {
       }
     } catch (e) {
       if (_closed || generation != _generation) return;
+      DiagnosticLog.error(
+        'search.failed',
+        e,
+        null,
+        fields: {'generation': generation, 'results': _hits.length},
+      );
       targetPhase = ResourceSearchPhase.failed;
       error = e is AppException ? e.message : '搜索暂时不可用，请检查网络后重试';
     } finally {
@@ -670,6 +747,10 @@ class ResourceSearch extends ChangeNotifier {
 
   void stop() {
     if (!searching || _closed) return;
+    DiagnosticLog.event(
+      'search.stopped',
+      fields: {'generation': _generation, 'results': _hits.length},
+    );
     _publishStoppedChecks();
     _generation++;
     _deadline?.cancel();
@@ -678,6 +759,39 @@ class ResourceSearch extends ChangeNotifier {
     phase = ResourceSearchPhase.stopped;
     error = '';
     notifyListeners();
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    if (_closed || defaultTargetPlatform != TargetPlatform.iOS) return;
+    final wasSearching = searching;
+    _cache.clear();
+    final client = api;
+    if (client is HttpResourceSearchApi) client.clientSearch?.releaseMemory();
+    if (!wasSearching) return;
+    // Publish the already checked rows before freeing the running workers.
+    // The original query can be retried after iOS recovers memory.
+    stop();
+    error = '系统内存不足，已停止搜索并保留已找到的结果，请稍后重试';
+    DiagnosticLog.active?.record(
+      'search.memory_pressure_stopped',
+      level: 'warning',
+      fields: {'results': _hits.length},
+      flush: true,
+    );
+    notifyListeners();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_closed || defaultTargetPlatform != TargetPlatform.iOS) return;
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      stop();
+      _cache.clear();
+      final client = api;
+      if (client is HttpResourceSearchApi) client.clientSearch?.releaseMemory();
+    }
   }
 
   void showRecommendations() {
@@ -697,6 +811,7 @@ class ResourceSearch extends ChangeNotifier {
   @override
   void dispose() {
     _closed = true;
+    WidgetsBinding.instance.removeObserver(this);
     _discoveryScope.cancel();
     _cancelChecks();
     linkChecks?.removeListener(_checksChanged);

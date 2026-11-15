@@ -672,6 +672,8 @@ class _CloudListSettingsPageState extends State<CloudListSettingsPage> {
                                   enabled: !_saving,
                                   child: const Tooltip(
                                     message: '拖动排序',
+                                    // A touch tooltip must not win a held drag.
+                                    triggerMode: TooltipTriggerMode.manual,
                                     child: SizedBox(
                                       width: 48,
                                       height: 48,

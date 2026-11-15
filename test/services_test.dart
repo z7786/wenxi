@@ -10,6 +10,7 @@ import 'native_login_support.dart';
 import 'support.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   test(
     'Tianyi auto-login failure marks the cloud card even when triggered by browsing',
     () async {

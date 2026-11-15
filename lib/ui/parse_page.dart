@@ -588,6 +588,7 @@ class ParsePageState extends State<ParsePage> {
             () => _progress.run(() async {
               final session = await widget.services.cloud.share(
                 link,
+                preferQuarkMobileTransfer: _openingResource,
                 baiduRoute: _publicRoute(platform)
                     ? BaiduShareRoute.publicParser
                     : BaiduShareRoute.account,

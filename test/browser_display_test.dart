@@ -153,6 +153,27 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  for (final view in ['list', 'grid']) {
+    browserTest('File $view labels use the decoded display name', (
+      tester,
+    ) async {
+      final value = await fixture(tester, view: view);
+      value.services.cloud.connectors[CloudPlatform.tianyi] =
+          _FileListConnector(const [
+            CloudFile(
+              id: 'episode-15',
+              name: '[第15話 Φ&#39;s VS χ].mkv',
+              displayName: "[第15話 Φ's VS χ].mkv",
+            ),
+          ]);
+      await value.render(tester);
+      expect(find.text("[第15話 Φ's VS χ].mkv"), findsOneWidget);
+      expect(find.text('[第15話 Φ&#39;s VS χ].mkv'), findsNothing);
+      expect(find.byTooltip("[第15話 Φ's VS χ].mkv操作"), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   browserTest(
     'Aliyun folder loading shows file counts and rate limit waiting',
     (tester) async {

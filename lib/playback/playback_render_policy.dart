@@ -9,6 +9,7 @@ Size? playbackRenderSize({
   required BoxFit fit,
   double scale = 1,
   double quality = 1,
+  bool stableOrientation = false,
 }) {
   if (!source.isFinite ||
       source.isEmpty ||
@@ -18,15 +19,22 @@ Size? playbackRenderSize({
       pixelRatio <= 0) {
     return null;
   }
-  final x = viewport.width * pixelRatio / source.width;
-  final y = viewport.height * pixelRatio / source.height;
+  // Android's embedded GPU output must be rebuilt when its texture is resized.
+  // Reserve the larger of the two phone orientations, still bounded by the
+  // source. Flutter can then rotate and fit the same texture without reattaching
+  // the decoder's surfaces. Desktop windows and PiP use their actual viewport.
+  double viewportFactor(Size size) {
+    final x = size.width * pixelRatio / source.width;
+    final y = size.height * pixelRatio / source.height;
+    return fit == BoxFit.contain ? math.min(x, y) : math.max(x, y);
+  }
+
+  final normal = viewportFactor(viewport);
+  final needed = stableOrientation
+      ? math.max(normal, viewportFactor(Size(viewport.height, viewport.width)))
+      : normal;
   final factor =
-      math.min(
-        1.0,
-        (fit == BoxFit.contain ? math.min(x, y) : math.max(x, y)) *
-            scale.clamp(.1, 4),
-      ) *
-      quality.clamp(.5, 1);
+      math.min(1.0, needed * scale.clamp(.1, 4)) * quality.clamp(.5, 1);
   return Size(
     math.max(2, (source.width * factor / 2).ceil() * 2).toDouble(),
     math.max(2, (source.height * factor / 2).ceil() * 2).toDouble(),

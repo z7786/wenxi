@@ -31,16 +31,19 @@ class BaiduConnector extends CloudConnector {
     CredentialStore? store,
     BaiduAppClient? client,
     BaiduLinkLookup? linkLookup,
+    BaiduDownloadResolver? downloadResolver,
     BaiduPublicParser? publicParser,
     BaiduPlaybackClient? playbackClient,
   }) : _client = client ?? BaiduAppClient(store: store),
-       _linkLookup = linkLookup ?? BaiduDownloadResolver(http).resolve,
+       _linkLookup = linkLookup,
+       _downloadResolver = downloadResolver ?? BaiduDownloadResolver(http),
        _publicParser = publicParser ?? BaiduPublicParser(http, store: store),
        _playbackClient = playbackClient ?? BaiduPlaybackClient(http);
   final JsonHttp http;
   final BaiduAppClient _client;
   final Future<void> Function(DownloadCleanup)? stageCleanup;
-  final BaiduLinkLookup _linkLookup;
+  final BaiduLinkLookup? _linkLookup;
+  final BaiduDownloadResolver _downloadResolver;
   final BaiduPublicParser _publicParser;
   final BaiduPlaybackClient _playbackClient;
   @override
@@ -608,7 +611,8 @@ class BaiduConnector extends CloudConnector {
     );
   }
 
-  /// 账号视频下载使用在线播放取链，非视频优先中转直链再回退内置预览。
+  /// 账号视频下载使用在线播放取链，小于 300 MB 的普通文件优先内置预览。
+  /// 其余普通文件及预览失败时使用中转直链，保留原本的本地回退。
   /// 公益分享使用独立解析站；文件内容由客户端直接读取返回的媒体地址。
   /// 因百度网盘接口的特殊性，服务端取链实现暂不开源，避免公开后接口很快失效。
   /// 后续会根据接口稳定性和实际情况考虑开源；此处保留客户端对接与下载流程。
@@ -672,7 +676,7 @@ class BaiduConnector extends CloudConnector {
         transfer = {'directory': directory, 'file': saved!.toJson()};
         direct = await OperationProgress.step(
           OperationStage.downloadLink,
-          () => _downloadUrl(saved.token, saved.id, account),
+          () => _downloadUrl(saved, account),
         );
         DiagnosticLog.event(
           'baidu.share_download_ready',
@@ -690,10 +694,9 @@ class BaiduConnector extends CloudConnector {
         rethrow;
       }
     } else {
-      final path = file.token.ifEmpty(file.id.startsWith('/') ? file.id : '');
       direct = await OperationProgress.step(
         OperationStage.downloadLink,
-        () => _downloadUrl(path, file.id, account),
+        () => _downloadUrl(file, account),
       );
     }
     require(direct.url.isNotEmpty, '百度没有返回可用下载链接');
@@ -822,21 +825,27 @@ class BaiduConnector extends CloudConnector {
     );
   }
 
-  Future<BaiduResolvedLink> _downloadUrl(
-    String path,
-    String fsId,
-    Credential c,
-  ) async {
+  Future<BaiduResolvedLink> _downloadUrl(CloudFile file, Credential c) async {
     final ck = cookie(c), id = appId(c);
+    final path = file.token.ifEmpty(file.id.startsWith('/') ? file.id : '');
     await _client.prepare();
     RequestScope.checkpoint();
-    final result = await _linkLookup(
-      cookie: ck,
-      path: path,
-      fileId: fsId,
-      appId: id,
-      device: _client.serviceDevice,
-    );
+    final result =
+        await (_linkLookup?.call(
+              cookie: ck,
+              path: path,
+              fileId: file.id,
+              appId: id,
+              device: _client.serviceDevice,
+            ) ??
+            _downloadResolver.resolve(
+              cookie: ck,
+              path: path,
+              fileId: file.id,
+              appId: id,
+              device: _client.serviceDevice,
+              fileSize: file.size,
+            ));
     RequestScope.checkpoint();
     return result;
   }
@@ -938,18 +947,35 @@ class BaiduConnector extends CloudConnector {
     final io = UploadIO(http, source, onProgress), ck = cookie(c);
     final path = '${parent.replaceFirst(RegExp(r'/+$'), '')}/${source.name}';
     const chunkSize = 4 * 1024 * 1024;
-    final count = (source.size / chunkSize).ceil(), blocks = <String>[];
-    for (var i = 0; i < count; i++) {
-      blocks.add(
-        await io.digest(
-          md5,
-          start: i * chunkSize,
-          end: math.min(source.size, (i + 1) * chunkSize),
-        ),
+    final digests = await io.hashes(
+      whole: ['md5'],
+      partAlgorithm: 'md5',
+      partSize: chunkSize,
+      prefixAlgorithm: 'md5',
+      prefixSize: 256 * 1024,
+    );
+    final count = (source.size / chunkSize).ceil(), blocks = digests.parts;
+    final whole = digests.whole['md5']!, prefix = digests.prefix!;
+    CloudFile? receipt(Json data) {
+      if (data.str('fs_id').isEmpty ||
+          data.str('server_filename').isEmpty ||
+          !data.containsKey('size') ||
+          !data.containsKey('isdir')) {
+        return null;
+      }
+      final savedPath = data.str('path');
+      require(savedPath.isEmpty || savedPath == path, '百度上传回执的目录不一致，请刷新后确认');
+      return CloudFile(
+        id: data.str('fs_id'),
+        name: data.str('server_filename'),
+        size: data.integer('size', -1),
+        isDirectory: data.integer('isdir', -1) != 0,
+        parentId: parent,
+        token: savedPath.ifEmpty(path),
+        modifiedAt: data.str('server_mtime'),
       );
     }
-    final whole = await io.digest(md5),
-        prefix = await io.digest(md5, end: math.min(source.size, 256 * 1024));
+
     final params = await _appParams(ck, appId(c));
     final pre = check(
       await http.postForm(
@@ -975,14 +1001,28 @@ class BaiduConnector extends CloudConnector {
       final servers = (needed as List).isEmpty
           ? <String>[]
           : await _uploadServers(c, pre.str('uploadsign'));
-      var serverIndex = 0;
       final uploaded = <int>{};
+      final indexes = <int>[];
       for (final raw in needed) {
         final index = int.tryParse('$raw');
         require(
           index != null && index >= 0 && index < count && uploaded.add(index),
           '百度返回的上传分段序号无效',
         );
+        indexes.add(index!);
+      }
+      for (var i = 0; i < count; i++) {
+        if (!uploaded.contains(i)) {
+          io.reusePart(
+            i * chunkSize,
+            math.min(source.size, (i + 1) * chunkSize),
+          );
+        }
+      }
+      io.notSavedYet();
+      await io.parts(indexes.length, (part) async {
+        final index = indexes[part];
+        var serverIndex = 0;
         late Json result;
         for (;;) {
           RequestScope.checkpoint();
@@ -997,11 +1037,12 @@ class BaiduConnector extends CloudConnector {
                 'partseq': index,
               }),
               method: 'POST',
-              start: index! * chunkSize,
+              start: index * chunkSize,
               end: math.min(source.size, (index + 1) * chunkSize),
               fields: const {},
               headers: diskHeaders(ck),
               retry: false,
+              commitsFile: false,
             );
             result = check(response, allowMissingCode: true);
             break;
@@ -1014,7 +1055,8 @@ class BaiduConnector extends CloudConnector {
           }
         }
         require(result.str('md5').toLowerCase() == blocks[index], '百度上传分段校验失败');
-      }
+      });
+      io.notSavedYet();
       io.progress(UploadPhase.finishing, source.size);
       final completed = check(
         await http.postForm(
@@ -1031,11 +1073,16 @@ class BaiduConnector extends CloudConnector {
           diskHeaders(ck),
         ),
       );
-      return io.confirm(() => list(s, parent, c), id: completed.str('fs_id'));
+      return io.confirm(
+        () => list(s, parent, c),
+        id: completed.str('fs_id'),
+        receipt: receipt(completed),
+      );
     }
     return io.confirm(
       () => list(s, parent, c),
       id: pre.obj('info').str('fs_id'),
+      receipt: receipt(pre.obj('info')),
     );
   }
 
@@ -1192,32 +1239,64 @@ class BaiduConnector extends CloudConnector {
     Credential c,
   ) async {
     personal(s);
-    final password = options.passcode ?? '';
+    final requestedPassword = (options.passcode ?? '').trim();
+    require(
+      requestedPassword.isEmpty ||
+          RegExp(r'^[A-Za-z0-9]{4}$').hasMatch(requestedPassword),
+      '百度提取码需为 4 位字母或数字，留空可自动生成',
+    );
     require(
       files.isNotEmpty &&
           files.every((f) => f.token.ifEmpty(f.id).startsWith('/')),
       '百度文件路径缺失，请刷新列表后重试',
     );
-    final j = check(
-      await http.postForm(
-        query(
-          'https://pan.baidu.com/share/pset',
-          await _appParams(cookie(c), appId(c)),
-        ),
-        form({
-          'path_list': encoded(
-            files.map((f) => f.token.ifEmpty(f.id)).toList(),
-          ),
-          'schannel': 4,
-          'channel_list': '[]',
-          'period': {1, 7, 30}.contains(options.expiryDays)
-              ? options.expiryDays
-              : 0,
-          'pwd': password,
-        }),
-        diskHeaders(cookie(c)),
-      ),
+    // Baidu rejects public links (schannel=0, errno=115) and private links
+    // without a code (schannel=4, errno=2). Generate the code before sending
+    // the single creation request and include it in the copied share text.
+    const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+    final random = math.Random.secure();
+    final password = requestedPassword.isEmpty
+        ? List.generate(
+            4,
+            (_) => alphabet[random.nextInt(alphabet.length)],
+          ).join()
+        : requestedPassword;
+    final period = {1, 7, 30}.contains(options.expiryDays)
+        ? options.expiryDays
+        : 0;
+    final ck = cookie(c);
+    final result = await http.postForm(
+      query('https://pan.baidu.com/share/pset', await _appParams(ck, appId(c))),
+      form({
+        'path_list': encoded(files.map((f) => f.token.ifEmpty(f.id)).toList()),
+        'schannel': 4,
+        'channel_list': '[]',
+        'period': period,
+        'pwd': password,
+      }),
+      diskHeaders(ck),
     );
+    Json? reply;
+    try {
+      reply = result.json;
+    } on AppException {
+      // Preserve check()'s login and malformed-response error handling.
+    }
+    DiagnosticLog.event(
+      'baidu.share_create_response',
+      fields: {
+        'httpStatus': result.status,
+        'errno': reply?.integer(
+          'errno',
+          reply.integer('error_code', -1),
+        ),
+        'fileCount': files.length,
+        'directoryCount': files.where((f) => f.isDirectory).length,
+        'period': period,
+        'codeSource': requestedPassword.isEmpty ? 'automatic' : 'manual',
+      },
+    );
+    final j = check(result);
     final url = j.str('shorturl').ifEmpty(j.str('link'));
     require(url.isNotEmpty, '百度没有返回分享链接');
     return ShareCreation(url, password, options.title);

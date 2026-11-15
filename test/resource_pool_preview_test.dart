@@ -9,6 +9,7 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/baidu_share_route.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/resource_search.dart';
+import 'package:asterlink/domain/quark_share_transfer.dart';
 import 'resource_search_test.dart' show SearchApiFixture;
 import 'support.dart';
 
@@ -161,6 +162,7 @@ void main() {
         RequestScope(),
       );
       expect(result.file.id, 'newchild');
+      expect(QuarkShareTransfer.prefersMobile(result.session), isTrue);
       expect(result.parentId, 'newroot');
       expect(connector.listed, ['newroot']);
       expect(api.openSelections.single.fileId, 'nestedfile');

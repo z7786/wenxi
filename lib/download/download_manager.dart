@@ -39,6 +39,16 @@ import 'aliyun_transfer_recovery.dart';
 
 class _Stopped implements Exception {}
 
+const _legacyChecksumFailure = '文件校验失败，请删除此任务后重新下载';
+const _checksumFailure = '文件校验失败，点击重试将重新下载';
+
+class _ChecksumMismatch extends AppException {
+  const _ChecksumMismatch() : super(_checksumFailure);
+}
+
+bool _isChecksumFailure(String message) =>
+    message == _legacyChecksumFailure || message == _checksumFailure;
+
 class _RecoverBaidu implements Exception {
   const _RecoverBaidu(this.action);
   final BaiduRecoveryAction action;
@@ -1343,6 +1353,13 @@ class DownloadManager extends ChangeNotifier {
       'error': '',
       'recoveryAction': DownloadRecoveryAction.none.name,
       'phase': '',
+      // Older versions retained a completed native checkpoint after a digest
+      // mismatch. Retrying must not verify those same damaged bytes again.
+      if (_isChecksumFailure(current.error)) ...{
+        'identity': const RemoteIdentity(0, null, null).toJson(),
+        'payloadReady': false,
+        'downloaded': 0,
+      },
     });
     _schedule();
   });
@@ -1480,6 +1497,11 @@ class DownloadManager extends ChangeNotifier {
           if (action == DownloadBatchAction.resume) ...{
             'error': '',
             'recoveryAction': DownloadRecoveryAction.none.name,
+            if (_isChecksumFailure(task.error)) ...{
+              'identity': const RemoteIdentity(0, null, null).toJson(),
+              'payloadReady': false,
+              'downloaded': 0,
+            },
           },
         });
       }
@@ -2501,7 +2523,7 @@ class DownloadManager extends ChangeNotifier {
         final task = _tasks[id]!;
         completedSpec = task.spec;
         final verifyClock = Stopwatch()..start();
-        if (task.hls.isEmpty) await _verify(output, task.spec, run);
+        if (task.hls.isEmpty) await _verify(id, output, task.spec, run);
         final verifyMs = verifyClock.elapsedMilliseconds;
         run.check();
         final length = await output.length();
@@ -2635,6 +2657,12 @@ class DownloadManager extends ChangeNotifier {
         await _update(id, {
           'status': run.stopped || e is _Stopped ? 'paused' : 'failed',
           'error': message,
+          // Keep the failed payload for inspection until the user retries.
+          // Its identity must no longer authorize native breakpoint reuse.
+          if (e is _ChecksumMismatch) ...{
+            'identity': const RemoteIdentity(0, null, null).toJson(),
+            'payloadReady': false,
+          },
           'recoveryAction': !run.stopped && e is UcTvAuthorizationRequired
               ? DownloadRecoveryAction.ucAuthorization.name
               : DownloadRecoveryAction.none.name,
@@ -3463,7 +3491,12 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
-  Future<void> _verify(File file, DownloadSpec spec, _Run run) async {
+  Future<void> _verify(
+    String id,
+    File file,
+    DownloadSpec spec,
+    _Run run,
+  ) async {
     if (spec.checksumValue?.isNotEmpty != true) return;
     final algorithm = spec.checksumType?.toLowerCase().replaceAll('-', '');
     final hash = switch (algorithm) {
@@ -3487,10 +3520,26 @@ class DownloadManager extends ChangeNotifier {
                 .first)
             .toString();
     run.check();
-    require(
-      digest.toLowerCase() == spec.checksumValue!.toLowerCase(),
-      '文件校验失败，请删除此任务后重新下载',
-    );
+    if (digest.toLowerCase() != spec.checksumValue!.toLowerCase()) {
+      DiagnosticLog.event(
+        'download.checksum_mismatch',
+        fields: {
+          'ref': DiagnosticLog.reference(id),
+          'profile': spec.profile,
+          'algorithm': algorithm,
+          'expectedBytes': spec.expectedSize,
+          'actualBytes': await file.length(),
+          // Fingerprints correlate repeat failures without logging content
+          // identifiers, filenames, credentials or signed download URLs.
+          'expectedDigestRef': DiagnosticLog.reference(
+            spec.checksumValue!.toLowerCase(),
+          ),
+          'actualDigestRef': DiagnosticLog.reference(digest),
+        },
+      );
+      run.check();
+      throw const _ChecksumMismatch();
+    }
   }
 
   Future<File> _hls(String id, _Run run) async {

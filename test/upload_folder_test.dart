@@ -28,7 +28,7 @@ class _FolderConnector extends CloudConnector {
   bool foldersAllowed = true;
   Completer<void>? hold;
   Future<void> Function()? afterFolder;
-  int sequence = 0;
+  int sequence = 0, inFlight = 0, maxInFlight = 0;
 
   BrowseSession get session => BrowseSession(
     platform: platform,
@@ -78,30 +78,36 @@ class _FolderConnector extends CloudConnector {
     Credential c, {
     UploadProgressCallback? onProgress,
   }) async {
-    started.add((parent, source.name));
-    owners.add(c.label);
-    onProgress?.call(UploadProgress(UploadPhase.uploading, 0, source.size));
-    if (source.name == holdName && hold != null) {
-      await RequestScope.cancellable(hold!.future);
+    inFlight++;
+    if (inFlight > maxInFlight) maxInFlight = inFlight;
+    try {
+      started.add((parent, source.name));
+      owners.add(c.label);
+      onProgress?.call(UploadProgress(UploadPhase.uploading, 0, source.size));
+      if (source.name == holdName && hold != null) {
+        await RequestScope.cancellable(hold!.future);
+      }
+      if (source.name == failName) throw const AppException('网络中断');
+      final bytes = await source.openRead().expand((b) => b).toList();
+      onProgress?.call(
+        UploadProgress(UploadPhase.uploading, bytes.length, source.size),
+      );
+      onProgress?.call(
+        UploadProgress(UploadPhase.finishing, bytes.length, source.size),
+      );
+      RequestScope.checkpoint();
+      final file = CloudFile(
+        id: 'file-${sequence++}',
+        name: source.name,
+        parentId: parent,
+        size: source.size,
+      );
+      files.add(file);
+      payloads[file.id] = bytes;
+      return file;
+    } finally {
+      inFlight--;
     }
-    if (source.name == failName) throw const AppException('网络中断');
-    final bytes = await source.openRead().expand((b) => b).toList();
-    onProgress?.call(
-      UploadProgress(UploadPhase.uploading, bytes.length, source.size),
-    );
-    onProgress?.call(
-      UploadProgress(UploadPhase.finishing, bytes.length, source.size),
-    );
-    RequestScope.checkpoint();
-    final file = CloudFile(
-      id: 'file-${sequence++}',
-      name: source.name,
-      parentId: parent,
-      size: source.size,
-    );
-    files.add(file);
-    payloads[file.id] = bytes;
-    return file;
   }
 
   @override
@@ -153,7 +159,12 @@ void main() {
     provider = _FolderConnector();
     cloud.connectors[provider.platform] = provider;
     sources = UploadSources(android: false, ios: false);
-    manager = UploadManager(store: store, cloud: cloud, sources: sources);
+    manager = UploadManager(
+      store: store,
+      cloud: cloud,
+      sources: sources,
+      concurrent: 1,
+    );
     await manager.initialize();
   });
   tearDown(() async {
@@ -185,6 +196,59 @@ void main() {
       expect(provider.payloads[remote('同名.txt', a.id).id], [4, 5]);
       expect(provider.payloads[remote('同名.txt', b.id).id], [6, 7, 8, 9]);
       expect(task.fileId, root.id);
+    },
+  );
+
+  test(
+    'folder files share two slots with standalone uploads and continue after cancellation',
+    () async {
+      await manager.close();
+      manager.dispose();
+      manager = UploadManager(store: store, cloud: cloud, sources: sources);
+      await local('01.txt');
+      await local('02.txt');
+      await local('03.txt');
+      provider.holdName = '01.txt';
+      provider.hold = Completer<void>();
+      final id = await enqueue();
+      await until(() => manager.task(id)!.folder!.completedFiles == 2);
+      expect(provider.started.map((file) => file.$2), [
+        '01.txt',
+        '02.txt',
+        '03.txt',
+      ]);
+      expect(provider.maxInFlight, 2);
+      final extra = File(p.join(workspace.path, 'extra.txt'));
+      await extra.writeAsBytes([9]);
+      final other = (await manager.enqueue(
+        cloud.bindSession(provider.session),
+        '0',
+        'Root',
+        [XFile(extra.path)],
+      )).single;
+      await settled(other);
+      expect(provider.maxInFlight, 2);
+      await manager.cancel(id);
+      provider.hold = null;
+      await manager.retry(id);
+      await settled(id);
+      expect(
+        manager.task(id)!.status,
+        UploadStatus.completed,
+        reason: manager.task(id)!.error,
+      );
+      expect(
+        provider.started.where((file) => file.$2 == '02.txt'),
+        hasLength(1),
+      );
+      expect(
+        provider.started.where((file) => file.$2 == '03.txt'),
+        hasLength(1),
+      );
+      expect(
+        provider.started.where((file) => file.$2 == '01.txt'),
+        hasLength(2),
+      );
     },
   );
 

@@ -115,7 +115,10 @@ extension _TianyiRapidTransfer on TianyiConnector {
           'isLog': '0',
         });
     if (response.status == 429) {
-      throw const RapidTransferUnavailable('天翼请求过于频繁，请稍后继续任务');
+      throw const RapidTransferUnavailable(
+        '天翼请求过于频繁，请稍后继续任务',
+        mayHaveSaved: false,
+      );
     }
     final state = response.json;
     final code = state
@@ -132,6 +135,7 @@ extension _TianyiRapidTransfer on TianyiConnector {
         code == 'UserDayFlowOverLimited'
             ? '天翼今日流量额度已用尽，请晚些时候继续任务'
             : '天翼剩余空间不足，请清理后继续任务',
+        mayHaveSaved: false,
       );
     }
     final created = _checked(response);
