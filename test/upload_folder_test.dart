@@ -212,11 +212,11 @@ void main() {
       provider.hold = Completer<void>();
       final id = await enqueue();
       await until(() => manager.task(id)!.folder!.completedFiles == 2);
-      expect(provider.started.map((file) => file.$2), [
-        '01.txt',
-        '02.txt',
-        '03.txt',
-      ]);
+      // Concurrent file validation can reach the provider in either order.
+      expect(
+        provider.started.map((file) => file.$2),
+        unorderedEquals(['01.txt', '02.txt', '03.txt']),
+      );
       expect(provider.maxInFlight, 2);
       final extra = File(p.join(workspace.path, 'extra.txt'));
       await extra.writeAsBytes([9]);
