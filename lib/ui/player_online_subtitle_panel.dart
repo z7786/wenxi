@@ -9,7 +9,6 @@ import '../domain/playback.dart';
 import '../playback/online_subtitles.dart';
 import '../playback/playback_controller.dart';
 import 'loading_indicator.dart';
-import 'player_theme.dart';
 
 class PlayerOnlineSubtitlePanel extends StatefulWidget {
   const PlayerOnlineSubtitlePanel({
@@ -163,87 +162,85 @@ class _PlayerOnlineSubtitlePanelState extends State<PlayerOnlineSubtitlePanel> {
     }
   }
 
-  Widget _message(
-    String text, {
-    bool busy = false,
-    bool retry = false,
-    bool embedded = false,
-  }) => ListView(
-    shrinkWrap: true,
-    physics: embedded ? const NeverScrollableScrollPhysics() : null,
-    padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
-    children: [
-      if (busy) ...[
-        const Center(child: AppLoadingIndicator()),
-        const SizedBox(height: 16),
-      ],
-      Text(
-        text,
-        textAlign: TextAlign.center,
-        style: const TextStyle(color: Colors.white70, height: 1.5),
-      ),
-      if (retry) ...[
-        const SizedBox(height: 12),
-        TextButton(onPressed: _search, child: const Text('重新搜索')),
-      ],
-    ],
-  );
+  Widget _message(String text, {bool busy = false, bool retry = false}) =>
+      Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (busy) ...[
+              const Center(child: AppLoadingIndicator()),
+              const SizedBox(height: 16),
+            ],
+            Text(
+              text,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, height: 1.5),
+            ),
+            if (retry) ...[
+              const SizedBox(height: 12),
+              TextButton(onPressed: _search, child: const Text('重新搜索')),
+            ],
+          ],
+        ),
+      );
 
-  Widget _resultsList({bool embedded = false}) {
+  Widget _resultsSliver() {
     if (_stale) {
-      return _message('视频已切换，请为当前视频重新打开在线字幕', embedded: embedded);
+      return SliverToBoxAdapter(child: _message('视频已切换，请为当前视频重新打开在线字幕'));
     }
     if (_searching) {
-      return _message('正在搜索在线字幕…', busy: true, embedded: embedded);
+      return SliverToBoxAdapter(child: _message('正在搜索在线字幕…', busy: true));
     }
     if (_results.isEmpty) {
-      return _message(
-        _error ?? '没有找到可用字幕，可以修改视频名称后重新搜索',
-        retry: _error != null,
-        embedded: embedded,
+      return SliverToBoxAdapter(
+        child: _message(
+          _error ?? '没有找到可用字幕，可以修改视频名称后重新搜索',
+          retry: _error != null,
+        ),
       );
     }
-    return ListView.builder(
-      shrinkWrap: true,
-      physics: embedded ? const NeverScrollableScrollPhysics() : null,
+    return SliverPadding(
       padding: const EdgeInsets.only(bottom: 20),
-      itemCount: _results.length + 1,
-      itemBuilder: (context, index) {
-        if (index == 0) {
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
-            child: Text(
-              _error ?? '找到 ${_results.length} 个字幕，点击加载',
-              style: TextStyle(
-                fontSize: 12,
-                color: _error == null
-                    ? Colors.white60
-                    : Theme.of(context).colorScheme.error,
+      sliver: SliverList.builder(
+        itemCount: _results.length + 1,
+        itemBuilder: (context, index) {
+          if (index == 0) {
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+              child: Text(
+                _error ?? '找到 ${_results.length} 个字幕，点击加载',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _error == null
+                      ? Colors.white60
+                      : Theme.of(context).colorScheme.error,
+                ),
               ),
+            );
+          }
+          final subtitle = _results[index - 1];
+          final details = [
+            if (subtitle.languages.isNotEmpty) subtitle.languages.join(' / '),
+            subtitle.format.toUpperCase(),
+            if (subtitle.duration != null)
+              '时长 ${playbackTime(subtitle.duration!)}',
+          ].join(' · ');
+          return ListTile(
+            key: ValueKey('online-subtitle-${subtitle.url}'),
+            title: Text(
+              subtitle.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
+            subtitle: Text(details),
+            trailing: _loading == subtitle
+                ? const AppLoadingIndicator(semanticLabel: '正在加载字幕')
+                : const Icon(CupertinoIcons.arrow_down_circle, size: 22),
+            onTap: _loading == null ? () => _load(subtitle) : null,
           );
-        }
-        final subtitle = _results[index - 1];
-        final details = [
-          if (subtitle.languages.isNotEmpty) subtitle.languages.join(' / '),
-          subtitle.format.toUpperCase(),
-          if (subtitle.duration != null)
-            '时长 ${playbackTime(subtitle.duration!)}',
-        ].join(' · ');
-        return ListTile(
-          key: ValueKey('online-subtitle-${subtitle.url}'),
-          title: Text(
-            subtitle.title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          subtitle: Text(details),
-          trailing: _loading == subtitle
-              ? const AppLoadingIndicator(semanticLabel: '正在加载字幕')
-              : const Icon(CupertinoIcons.arrow_down_circle, size: 22),
-          onTap: _loading == null ? () => _load(subtitle) : null,
-        );
-      },
+        },
+      ),
     );
   }
 
@@ -264,14 +261,6 @@ class _PlayerOnlineSubtitlePanelState extends State<PlayerOnlineSubtitlePanel> {
               helperText: '可修改名称或集数，字幕来源：迅雷',
               helperMaxLines: 2,
               counterText: '',
-              labelStyle: const TextStyle(color: Colors.white70),
-              helperStyle: const TextStyle(color: Colors.white60),
-              enabledBorder: const OutlineInputBorder(
-                borderSide: BorderSide(color: Colors.white24),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderSide: BorderSide(color: playerAccent(context)),
-              ),
             ),
             onSubmitted: (_) => _search(),
           ),
@@ -288,26 +277,14 @@ class _PlayerOnlineSubtitlePanelState extends State<PlayerOnlineSubtitlePanel> {
   );
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) {
-      // A landscape keyboard can leave less space than the search field.
-      // Let the entire form scroll while that space is constrained.
-      if (constraints.maxHeight < 220 ||
-          MediaQuery.viewInsetsOf(context).bottom > 0) {
-        return SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [_searchField(), _resultsList(embedded: true)],
-          ),
-        );
-      }
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _searchField(),
-          Flexible(child: _resultsList()),
-        ],
-      );
-    },
+  Widget build(BuildContext context) => CustomScrollView(
+    key: const Key('online-subtitle-list'),
+    shrinkWrap: true,
+    // Keep the input at the same location in the widget tree as the keyboard
+    // resizes the panel, preserving its focus and IME composing text.
+    slivers: [
+      SliverToBoxAdapter(child: _searchField()),
+      _resultsSliver(),
+    ],
   );
 }

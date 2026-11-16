@@ -11,6 +11,7 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/playback/online_subtitles.dart';
 import 'package:asterlink/playback/subtitle_files.dart';
+import 'package:asterlink/ui/app_theme.dart';
 import 'package:asterlink/ui/player_online_subtitle_panel.dart';
 import 'package:asterlink/ui/player_page.dart';
 import 'package:asterlink/ui/player_theme.dart';
@@ -84,6 +85,7 @@ void main() {
     double scale = 1,
     _Service? service,
     bool television = false,
+    Brightness brightness = Brightness.light,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;
@@ -103,7 +105,10 @@ void main() {
         key: const Key('online-subtitle-capture'),
         child: MaterialApp(
           debugShowCheckedModeBanner: false,
-          theme: ThemeData(fontFamily: fixtureFont ? 'FixtureUI' : null),
+          theme: appTheme(
+            brightness,
+            fontFamily: fixtureFont ? 'FixtureUI' : null,
+          ),
           locale: const Locale('zh', 'CN'),
           supportedLocales: const [Locale('zh', 'CN')],
           localizationsDelegates: GlobalMaterialLocalizations.delegates,
@@ -419,9 +424,93 @@ void main() {
       await tap(tester, find.byKey(const Key('online-subtitle-search')));
       expect(page.service.searches.last, 'S01E02');
       expect(page.fixture.controller.generation, expectedGeneration);
+      await tester.scrollUntilVisible(
+        find.text(_subtitle.title),
+        80,
+        scrollable: find
+            .descendant(
+              of: find.byKey(const Key('online-subtitle-list')),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
       expect(find.text(_subtitle.title), findsOneWidget);
     },
   );
+
+  for (final (label, size, keyboardHeight) in [
+    ('phone', const Size(393, 864), 320.0),
+    ('landscape', const Size(792, 360), 216.0),
+  ]) {
+    testWidgets(
+      'Online subtitle input retains focus as $label keyboard opens',
+      (tester) async {
+        final page = await render(tester, size: size);
+        await openOnline(tester);
+        final input = find.byKey(const Key('online-subtitle-query'));
+        final editable = find.descendant(
+          of: input,
+          matching: find.byType(EditableText),
+        );
+        await tester.showKeyboard(input);
+        await tester.pump();
+        final original = tester.state<EditableTextState>(editable);
+        final focus = original.widget.focusNode;
+        addTearDown(tester.view.resetViewInsets);
+        for (final fraction in [.25, .5, 1.0]) {
+          tester.view.viewInsets = FakeViewPadding(
+            bottom: keyboardHeight * fraction,
+          );
+          await tester.pump();
+          expect(tester.state<EditableTextState>(editable), same(original));
+          expect(focus.hasFocus, isTrue);
+          expect(tester.testTextInput.isVisible, isTrue);
+          expect(tester.takeException(), isNull);
+        }
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '中文第二集',
+            selection: TextSelection.collapsed(offset: 5),
+            composing: TextRange(start: 2, end: 5),
+          ),
+        );
+        await tester.pump();
+        expect(original.widget.controller.text, '中文第二集');
+        expect(focus.hasFocus, isTrue);
+        expect(tester.testTextInput.isVisible, isTrue);
+        tester.view.viewInsets = FakeViewPadding.zero;
+        await tester.pump();
+        expect(tester.state<EditableTextState>(editable), same(original));
+        expect(focus.hasFocus, isTrue);
+        await tap(tester, find.byKey(const Key('online-subtitle-search')));
+        expect(page.service.searches.last, '中文第二集');
+      },
+    );
+  }
+
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'Online subtitle form matches the player in $brightness theme',
+      (tester) async {
+        await render(tester, brightness: brightness);
+        await openOnline(tester);
+        final input = find.byKey(const Key('online-subtitle-query'));
+        final decorator = tester.widget<InputDecorator>(
+          find.descendant(of: input, matching: find.byType(InputDecorator)),
+        );
+        final fill = decorator.decoration.fillColor!;
+        expect(decorator.decoration.filled, isTrue);
+        expect(fill.computeLuminance(), lessThan(.08));
+        expect(
+          (decorator.decoration.enabledBorder! as OutlineInputBorder)
+              .borderRadius,
+          BorderRadius.circular(12),
+        );
+        expect(decorator.baseStyle!.color, Colors.white);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 
   for (final (label, size, scale, television) in [
     ('phone', const Size(393, 864), 1.0, false),
