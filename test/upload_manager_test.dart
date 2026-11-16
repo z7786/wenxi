@@ -178,7 +178,11 @@ void main() {
             .skip(1)
             .every((id) => manager.task(id)!.status == UploadStatus.completed),
       );
-      expect(provider.files.map((file) => file.name), ['b.txt', 'c.txt']);
+      // Parallel uploads may finish in either order after both are released.
+      expect(
+        provider.files.map((file) => file.name),
+        unorderedEquals(['b.txt', 'c.txt']),
+      );
       expect(provider.maxInFlight, 2);
     },
   );
