@@ -66,6 +66,7 @@ class _PreviewPageState extends State<PreviewPage> {
   bool onlineConfirmed = false;
   bool onlineWebError = false;
   Future<WebViewEnvironment?>? onlineEnvironment;
+  PoolPreviewTarget? initialPoolTarget;
   @override
   void initState() {
     super.initState();
@@ -86,6 +87,9 @@ class _PreviewPageState extends State<PreviewPage> {
           file,
           playlist,
           parentFolders: parentFolders,
+          poolPreview: widget.poolPreview,
+          initialPoolTarget: initialPoolTarget,
+          sourceFolders: widget.sourceFolders,
         );
       });
     } else {
@@ -111,12 +115,16 @@ class _PreviewPageState extends State<PreviewPage> {
         ),
       );
       if (!mounted || scope.token.isCancelled) return;
-      session = target.session;
-      file = target.file;
-      playlist = target.siblings;
-      parentFolders = {
-        for (final sibling in target.siblings) sibling.id: target.parentId,
-      };
+      if (kind == FileKind.video || kind == FileKind.audio) {
+        initialPoolTarget = target;
+      } else {
+        session = target.session;
+        file = target.file;
+        playlist = target.siblings;
+        parentFolders = {
+          for (final sibling in target.siblings) sibling.id: target.parentId,
+        };
+      }
       setState(() => preparingPool = false);
       _startPreview();
     } catch (e) {
@@ -267,7 +275,7 @@ class _PreviewPageState extends State<PreviewPage> {
       );
     }
     return PageFrame(
-      title: widget.file.name,
+      title: widget.file.displayName,
       actions: [
         IconButton(
           tooltip:
@@ -363,7 +371,7 @@ class _PreviewPageState extends State<PreviewPage> {
                 : (kind == FileKind.pdf || office) && spec != null
                 ? _onlinePreview(spec!)
                 : EmptyPanel(
-                    widget.file.name,
+                    widget.file.displayName,
                     '${formatBytes(widget.file.size)}\n此类型文件可下载后查看',
                     icon: CupertinoIcons.doc,
                     action: FilledButton.icon(
@@ -420,7 +428,7 @@ class _PreviewPageState extends State<PreviewPage> {
     final uri = _onlineViewerUri(source);
     if (uri == null) {
       return EmptyPanel(
-        widget.file.name,
+        widget.file.displayName,
         '临时链接过长或格式不受支持，请下载后查看',
         icon: CupertinoIcons.doc_text,
         action: FilledButton.icon(

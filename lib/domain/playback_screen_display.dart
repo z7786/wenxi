@@ -10,10 +10,13 @@ enum PlaybackScreenItem {
   media,
 }
 
+enum PlaybackScreenStyle { outline, background }
+
 /// Global viewing preferences, independent of a video's folder and layout.
 class PlaybackScreenDisplay {
   const PlaybackScreenDisplay({
     this.enabled = false,
+    this.style = PlaybackScreenStyle.outline,
     this.items = const {
       PlaybackScreenItem.time,
       PlaybackScreenItem.network,
@@ -24,6 +27,7 @@ class PlaybackScreenDisplay {
   });
 
   final bool enabled;
+  final PlaybackScreenStyle style;
   final Set<PlaybackScreenItem> items;
   bool get visible => enabled && items.isNotEmpty;
 
@@ -31,6 +35,10 @@ class PlaybackScreenDisplay {
     final saved = json['items'];
     return PlaybackScreenDisplay(
       enabled: json.boolean('enabled'),
+      style: PlaybackScreenStyle.values.firstWhere(
+        (style) => style.name == json.str('style'),
+        orElse: () => PlaybackScreenStyle.outline,
+      ),
       items: saved is List
           ? Set.unmodifiable(
               PlaybackScreenItem.values.where(
@@ -43,18 +51,24 @@ class PlaybackScreenDisplay {
 
   Json toJson() => {
     'enabled': enabled,
+    'style': style.name,
     'items': [
       for (final item in PlaybackScreenItem.values)
         if (items.contains(item)) item.name,
     ],
   };
 
-  PlaybackScreenDisplay copyWith({bool? enabled}) =>
-      PlaybackScreenDisplay(enabled: enabled ?? this.enabled, items: items);
+  PlaybackScreenDisplay copyWith({bool? enabled, PlaybackScreenStyle? style}) =>
+      PlaybackScreenDisplay(
+        enabled: enabled ?? this.enabled,
+        style: style ?? this.style,
+        items: items,
+      );
 
   PlaybackScreenDisplay withItem(PlaybackScreenItem item, bool show) =>
       PlaybackScreenDisplay(
         enabled: enabled,
+        style: style,
         items: Set.unmodifiable({
           for (final value in items)
             if (value != item || show) value,

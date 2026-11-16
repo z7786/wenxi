@@ -7,8 +7,12 @@ import '../../domain/models.dart';
 import '../../diagnostics/app_log.dart';
 import '../playback_failure.dart';
 import '../external_stream.dart';
+import 'cast_network.dart';
 import 'cast_platform.dart';
+import 'cast_subtitles.dart';
 import 'dlna.dart';
+
+enum _CommandObservation { unverified, pending, completed, failed, replaced }
 
 /// Owns the TV commands and the LAN relay for exactly one playback source.
 /// Closing joins outstanding commands before Stop, so a late Play cannot
@@ -29,7 +33,7 @@ class CastSession extends ChangeNotifier {
     this.prepareSource = true,
   }) : client = client ?? DlnaClient(),
        platform = platform ?? CastPlatform(),
-       localAddress = localAddress ?? _route,
+       localAddress = localAddress ?? CastNetworkRoute().localAddress,
        streamFactory =
            streamFactory ??
            ((source, address) =>
@@ -51,6 +55,8 @@ class CastSession extends ChangeNotifier {
   Timer? _timer;
   Future<void>? _closing;
   bool _closed = false, _ownsTransport = false;
+  String _connectionStage = 'route';
+  String get connectionStage => _connectionStage;
   Future<void>? _refreshing;
   bool _playWhenReady = true;
   bool get playWhenReady => _playWhenReady;
@@ -80,6 +86,58 @@ class CastSession extends ChangeNotifier {
   }
 
   bool connected = false, seekSupported = true, volumeSupported = false;
+  bool muteSupported = false;
+  bool? muted;
+  bool _muteQueryAvailable = true;
+  Tracks _tracks = const Tracks();
+  Track _track = const Track();
+  String subtitleWarning = '';
+  String get subtitleUrl => _stream?.subtitleUrl ?? '';
+  bool get subtitleDelivered => subtitleUrl.isNotEmpty;
+
+  AudioTrack? get _sourceAudio {
+    final tracks = _tracks.audio.where(
+      (t) => !t.uri && !{'auto', 'no'}.contains(t.id),
+    );
+    // Passing the original container does not change its default audio track.
+    // DIDL must describe the source, not falsely claim a local selection was
+    // remuxed into it. The selected codec is logged separately below.
+    return tracks.where((t) => t.isDefault == true).firstOrNull ??
+        tracks.firstOrNull;
+  }
+
+  String get audioDescription {
+    final audio = _sourceAudio;
+    if (audio == null) return '';
+    final codec = _codec(audio.codec);
+    final channels = audio.channelscount ?? audio.audiochannels;
+    return [
+      if (codec.isNotEmpty) codec.toUpperCase(),
+      if (channels != null && channels > 0) '$channels 声道',
+    ].join(' · ');
+  }
+
+  static String _codec(String? value) =>
+      value != null && RegExp(r'^[a-zA-Z0-9_+-]{1,64}$').hasMatch(value)
+      ? value.toLowerCase()
+      : '';
+
+  /// Called before start so a replacement owns its own immutable subtitle
+  /// snapshot. No decoder, subtitle file or account URL is held by the TV.
+  void configureMedia({
+    required Tracks tracks,
+    required Track track,
+    CastSubtitle? subtitle,
+    String subtitleWarning = '',
+  }) {
+    require(!_closed && _stream == null, '投屏会话已开始');
+    _tracks = tracks;
+    _track = track;
+    _subtitle = subtitle;
+    this.subtitleWarning = subtitleWarning;
+  }
+
+  CastSubtitle? _subtitle;
   bool transportReplaced = false,
       _positionSupported = true,
       _transportSupported = true;
@@ -94,16 +152,19 @@ class CastSession extends ChangeNotifier {
 
   void _check() => require(!_closed, '投屏已取消');
 
-  static Future<InternetAddress> _route(CastDevice device) async {
-    final socket = await Socket.connect(
-      device.transport.control.host,
-      device.transport.control.port,
-      timeout: const Duration(seconds: 5),
-    );
+  Future<T> _connectionStep<T>(
+    String stage,
+    Future<T> Function() action,
+  ) async {
+    _connectionStage = stage;
     try {
-      return socket.address;
-    } finally {
-      socket.destroy();
+      return await action();
+    } on SocketException catch (error) {
+      throw CastNetworkException(stage, error);
+    } on HttpException catch (error) {
+      throw CastNetworkException(stage, error);
+    } on TimeoutException catch (error) {
+      throw CastNetworkException(stage, error);
     }
   }
 
@@ -123,10 +184,17 @@ class CastSession extends ChangeNotifier {
       duration: duration,
       buffering: true,
     );
-    final address = await localAddress(device);
+    final address = await _connectionStep('route', () => localAddress(device));
+    _event('route_selected', {
+      'local': DiagnosticLog.reference(address.address),
+      'family': address.type == InternetAddressType.IPv4 ? 'ipv4' : 'ipv6',
+    });
     _check();
-    if (_ownsPlatform) await platform.active(true);
+    if (_ownsPlatform) {
+      await _connectionStep('platform', () => platform.active(true));
+    }
     _check();
+    _connectionStage = 'relay_start';
     final stream = _stream = streamFactory(source, address);
     final priorFailure = stream.onFailure;
     stream.onFailure = (failure) {
@@ -137,31 +205,65 @@ class CastSession extends ChangeNotifier {
       });
       _changed();
     };
-    await stream.start();
+    await _connectionStep('relay_start', stream.start);
+    if (_subtitle case final subtitle?) stream.attachSubtitle(subtitle);
     if (prepareSource) {
-      await stream.prepareMedia(connections: streamConnections);
+      await _connectionStep(
+        'source_prepare',
+        () => stream.prepareMedia(connections: streamConnections),
+      );
     }
     _check();
-    await beforeSetMedia?.call();
+    await _connectionStep('handoff', () async => await beforeSetMedia?.call());
     _check();
     // Even a lost SetAVTransportURI response can have changed the TV.
     _ownsTransport = true;
-    await client.setMedia(
-      device,
-      stream.url,
-      title,
-      stream.mimeType,
-      duration,
-      size: stream.mediaSize,
+    await _connectionStep(
+      'set_media',
+      () => client.setMedia(
+        device,
+        stream.url,
+        title,
+        stream.mimeType,
+        duration,
+        size: stream.mediaSize,
+        subtitleUrl: stream.subtitleUrl,
+        audioChannels:
+            _sourceAudio?.channelscount ?? _sourceAudio?.audiochannels,
+        audioSampleRate: _sourceAudio?.samplerate,
+      ),
     );
+    _event('media_tracks', {
+      'audio_codec': _codec(_sourceAudio?.codec),
+      'audio_channels':
+          _sourceAudio?.channelscount ?? _sourceAudio?.audiochannels,
+      'audio_sample_rate': _sourceAudio?.samplerate,
+      'selected_audio_codec': _codec(_track.audio.codec),
+      'audio_tracks': _tracks.audio
+          .where((t) => !{'auto', 'no'}.contains(t.id))
+          .length,
+      'subtitle_tracks': _tracks.subtitle
+          .where((t) => !{'auto', 'no'}.contains(t.id))
+          .length,
+      'selected_subtitle_codec': _codec(_track.subtitle.codec),
+      'subtitle_external': _track.subtitle.uri || _track.subtitle.data,
+      'subtitle_delivered': stream.subtitleUrl != null,
+      'subtitle_cues': _subtitle?.cues,
+    });
     _check();
-    await _readyCommand(() => client.transport(device, 'Play', {'Speed': '1'}));
+    await _connectionStep(
+      'play',
+      () => _readyCommand(
+        'Play',
+        () => client.transport(device, 'Play', {'Speed': '1'}),
+      ),
+    );
     _check();
     _state = _state.copyWith(playing: true, buffering: false, rate: 1);
     if (position > Duration.zero) {
       _resumeBookmark = position;
       try {
-        await _readyCommand(() => _seek(position));
+        await _connectionStep('seek', () => _seek(position));
       } on CastSoapException catch (e) {
         if (e.unsupported) {
           seekSupported = false;
@@ -181,11 +283,15 @@ class CastSession extends ChangeNotifier {
     // DLNA receivers often need Play before Seek. Pause after preparation when
     // the handoff came from paused playback, rather than losing that intent.
     if (!playWhenReady) {
-      await _readyCommand(() => client.transport(device, 'Pause'));
+      await _connectionStep(
+        'pause',
+        () => _readyCommand('Pause', () => client.transport(device, 'Pause')),
+      );
       _check();
       _state = _state.copyWith(playing: false);
     }
     connected = true;
+    _connectionStage = 'connected';
     _elapsed.start();
     _changed();
     _timer = Timer.periodic(pollInterval, (_) => unawaited(refresh()));
@@ -193,10 +299,14 @@ class CastSession extends ChangeNotifier {
   });
 
   Future<void> _seek(Duration position) async {
-    await client.transport(device, 'Seek', {
-      'Unit': 'REL_TIME',
-      'Target': castTime(position),
-    });
+    await _readyCommand(
+      'Seek',
+      () => client.transport(device, 'Seek', {
+        'Unit': 'REL_TIME',
+        'Target': castTime(position),
+      }),
+      position: position,
+    );
     _check();
     _seekTarget = position;
     _seekSent = DateTime.now();
@@ -204,15 +314,124 @@ class CastSession extends ChangeNotifier {
     _state = _state.copyWith(position: position, completed: false);
   }
 
-  Future<T> _readyCommand<T>(Future<T> Function() command) async {
-    try {
-      return await command();
-    } on CastSoapException catch (e) {
-      if (e.code != 701) rethrow;
-      await Future<void>.delayed(const Duration(milliseconds: 500));
+  Future<void> _readyCommand(
+    String action,
+    Future<void> Function() command, {
+    Duration? position,
+  }) async {
+    // These absolute controls may be repeated once, but only while the TV
+    // still reports this relay. Never replay SetAVTransportURI or unknown
+    // writes after an ambiguous response.
+    assert({'Play', 'Pause', 'Seek'}.contains(action));
+    for (var attempt = 0; attempt < 2; attempt++) {
       _check();
-      return command();
+      try {
+        await command();
+        return;
+      } on CastSoapException catch (error) {
+        if (error.code != 701 || attempt != 0) rethrow;
+        _event('command_retry', {'action': action, 'code': error.code});
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        _check();
+      } on CastControlException catch (failure) {
+        _check();
+        _event('control_failed', {
+          ...castFailureFields(failure, stage: _connectionStage),
+          'attempt': attempt + 1,
+        });
+        if (!failure.uncertain) rethrow;
+        // Let a receiver finish the command before observing its current URI;
+        // do not leave an extra retry delay after the ownership check.
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        _check();
+        final observed = await _observeCommand(action, position: position);
+        _check();
+        if (observed == _CommandObservation.completed) {
+          _event('command_confirmed', {
+            'action': action,
+            'attempt': attempt + 1,
+          });
+          return;
+        }
+        if (observed == _CommandObservation.replaced) {
+          throw AppException(error);
+        }
+        if (attempt != 0 || observed != _CommandObservation.pending) rethrow;
+        _event('command_retry', {
+          'action': action,
+          'reason': 'response_interrupted',
+        });
+      }
     }
+  }
+
+  Future<_CommandObservation> _observeCommand(
+    String action, {
+    Duration? position,
+  }) async {
+    final watch = Stopwatch()..start();
+    const budget = Duration(seconds: 3);
+    Future<Map<String, String>?> query(String name) async {
+      _check();
+      final remaining = budget - watch.elapsed;
+      if (remaining <= Duration.zero) return null;
+      try {
+        final response = await client.action(device.transport, name, {
+          'InstanceID': '0',
+        }, remaining);
+        _check();
+        return response;
+      } catch (failure) {
+        _check();
+        _event('control_probe_failed', {
+          ...castFailureFields(failure, stage: _connectionStage),
+          'action': name,
+        });
+        return null;
+      }
+    }
+
+    final progress = await query('GetPositionInfo');
+    var track = Uri.tryParse(progress?['TrackURI'] ?? '');
+    if (track == null || !track.hasScheme) {
+      final media = await query('GetMediaInfo');
+      track = Uri.tryParse(media?['CurrentURI'] ?? '');
+    }
+    if (track == null || !track.hasScheme) {
+      return _CommandObservation.unverified;
+    }
+    if (!_sameTrack(track)) {
+      _markTransportReplaced();
+      return _CommandObservation.replaced;
+    }
+    if (!_ownsTransport) return _CommandObservation.unverified;
+    final transport = await query('GetTransportInfo');
+    if (transport?['CurrentTransportStatus'] == 'ERROR_OCCURRED') {
+      return _CommandObservation.failed;
+    }
+    final state = transport?['CurrentTransportState'];
+    final elapsed = parseCastTime(progress?['RelTime']);
+    final confirmed = switch (action) {
+      'Play' => state == 'PLAYING',
+      'Pause' => state == 'PAUSED_PLAYBACK',
+      'Seek' =>
+        position != null &&
+            elapsed != null &&
+            elapsed >= position - const Duration(seconds: 3) &&
+            elapsed <= position + const Duration(seconds: 10),
+      _ => false,
+    };
+    return confirmed
+        ? _CommandObservation.completed
+        : _CommandObservation.pending;
+  }
+
+  void _markTransportReplaced() {
+    _ownsTransport = false;
+    transportReplaced = true;
+    error = '电视已切换到其他内容，投屏已结束';
+    _state = _state.copyWith(playing: false, buffering: false);
+    _changed();
   }
 
   // A replacement first prepares its relay while this session remains alive.
@@ -237,14 +456,20 @@ class CastSession extends ChangeNotifier {
       _stream!.mimeType,
       _state.duration,
       size: _stream!.mediaSize,
+      subtitleUrl: _stream!.subtitleUrl,
+      audioChannels: _sourceAudio?.channelscount ?? _sourceAudio?.audiochannels,
+      audioSampleRate: _sourceAudio?.samplerate,
     );
     _check();
-    await _readyCommand(() => client.transport(device, 'Play', {'Speed': '1'}));
+    await _readyCommand(
+      'Play',
+      () => client.transport(device, 'Play', {'Speed': '1'}),
+    );
     if (bookmarkState.position > Duration.zero) {
-      await _readyCommand(() => _seek(bookmarkState.position));
+      await _seek(bookmarkState.position);
     }
     if (!_playWhenReady) {
-      await _readyCommand(() => client.transport(device, 'Pause'));
+      await _readyCommand('Pause', () => client.transport(device, 'Pause'));
     }
     _check();
     _suspended = false;
@@ -258,7 +483,10 @@ class CastSession extends ChangeNotifier {
 
   Future<void> play() => _commands.run(() async {
     _check();
-    await _readyCommand(() => client.transport(device, 'Play', {'Speed': '1'}));
+    await _readyCommand(
+      'Play',
+      () => client.transport(device, 'Play', {'Speed': '1'}),
+    );
     _check();
     _state = _state.copyWith(playing: true, completed: false);
     _playWhenReady = true;
@@ -267,7 +495,7 @@ class CastSession extends ChangeNotifier {
   });
   Future<void> pause() => _commands.run(() async {
     _check();
-    await _readyCommand(() => client.transport(device, 'Pause'));
+    await _readyCommand('Pause', () => client.transport(device, 'Pause'));
     _check();
     _state = _state.copyWith(playing: false);
     _playWhenReady = false;
@@ -278,7 +506,7 @@ class CastSession extends ChangeNotifier {
     require(seekSupported, '电视不支持拖动进度，请使用电视遥控器');
     final bookmark = bookmarkState.position;
     try {
-      await _readyCommand(() => _seek(position));
+      await _seek(position);
       _resumeBookmark = null;
     } on CastSoapException catch (e) {
       _resumeBookmark = bookmark;
@@ -296,15 +524,53 @@ class CastSession extends ChangeNotifier {
       device.rendering != null && volumeSupported,
       '电视不支持远程调节音量，请使用电视遥控器',
     );
+    require(value.isFinite, '音量无效');
+    final volume = value.round().clamp(0, 100);
+    final raised = volume > _state.volume;
     await client.action(device.rendering!, 'SetVolume', {
       'InstanceID': '0',
       'Channel': 'Master',
-      'DesiredVolume': value.round().clamp(0, 100).toString(),
+      'DesiredVolume': volume.toString(),
     });
     _check();
-    _state = _state.copyWith(volume: value.clamp(0, 100));
+    _state = _state.copyWith(volume: volume.toDouble());
+    // Raising a muted TV's volume should also make that intentional change
+    // audible. Starting a cast never changes the user's TV volume or mute.
+    try {
+      if (raised && muteSupported && muted == true) {
+        await _setMuted(false);
+      }
+    } finally {
+      _changed();
+    }
+  });
+
+  Future<void> setMuted(bool value) => _commands.run(() async {
+    _check();
+    require(device.rendering != null && muteSupported, '电视不支持远程静音，请使用电视遥控器');
+    await _setMuted(value);
     _changed();
   });
+
+  Future<void> _setMuted(bool value) async {
+    try {
+      await client.action(device.rendering!, 'SetMute', {
+        'InstanceID': '0',
+        'Channel': 'Master',
+        'DesiredMute': value ? '1' : '0',
+      });
+    } on CastSoapException catch (error) {
+      if (error.unsupported) {
+        muteSupported = false;
+        _muteQueryAvailable = false;
+        _changed();
+      }
+      rethrow;
+    }
+    _check();
+    muted = value;
+    _event('mute_changed', {'muted': value});
+  }
 
   Future<void> refresh() {
     if (_closed ||
@@ -366,11 +632,7 @@ class CastSession extends ChangeNotifier {
         }
         final trackUri = Uri.tryParse(track ?? '');
         if (trackUri != null && trackUri.hasScheme && !_sameTrack(trackUri)) {
-          _ownsTransport = false;
-          transportReplaced = true;
-          error = '电视已切换到其他内容，投屏已结束';
-          _state = _state.copyWith(playing: false, buffering: false);
-          _changed();
+          _markTransportReplaced();
           return;
         }
         final status = transport['CurrentTransportState'];
@@ -436,9 +698,7 @@ class CastSession extends ChangeNotifier {
                   'Target': castTime(target),
                 });
               } catch (e) {
-                _event('seek_unconfirmed', {
-                  'error_type': e.runtimeType.toString(),
-                });
+                _event('seek_unconfirmed', castFailureFields(e, stage: 'seek'));
               }
               warning = '电视尚未确认定位，原进度已保留；可使用遥控器定位';
             }
@@ -476,6 +736,7 @@ class CastSession extends ChangeNotifier {
           duration: total,
         );
         if (_polls++ % 5 == 0 && device.rendering != null) {
+          bool volumeAvailable;
           try {
             final volume = await client.action(device.rendering!, 'GetVolume', {
               'InstanceID': '0',
@@ -483,13 +744,57 @@ class CastSession extends ChangeNotifier {
             });
             _check();
             final value = double.tryParse(volume['CurrentVolume'] ?? '');
-            volumeSupported = value != null && value.isFinite;
-            if (volumeSupported) {
-              _state = _state.copyWith(volume: value!.clamp(0, 100));
+            volumeAvailable = value != null && value.isFinite;
+            if (volumeAvailable) {
+              _state = _state.copyWith(volume: value.clamp(0, 100));
             }
           } catch (_) {
-            volumeSupported = false;
+            volumeAvailable = false;
           }
+          if (_muteQueryAvailable) {
+            try {
+              final result = await client.action(device.rendering!, 'GetMute', {
+                'InstanceID': '0',
+                'Channel': 'Master',
+              }, const Duration(seconds: 2));
+              _check();
+              final value = switch (result['CurrentMute']?.toLowerCase()) {
+                '1' || 'true' || 'yes' => true,
+                '0' || 'false' || 'no' => false,
+                _ => null,
+              };
+              if (value != muted || muteSupported != (value != null)) {
+                _event('mute_state', {'muted': value});
+              }
+              muteSupported = value != null;
+              muted = value;
+              if (value == null) _muteQueryAvailable = false;
+            } on CastSoapException catch (error) {
+              muteSupported = false;
+              muted = null;
+              if (error.unsupported || error.code == 501) {
+                _muteQueryAvailable = false;
+              }
+            } on TimeoutException {
+              // Some renderers advertise RenderingControl but never answer
+              // GetMute. Do not delay every future pause or seek with it.
+              muteSupported = false;
+              muted = null;
+              _muteQueryAvailable = false;
+            } on CastControlException catch (failure) {
+              muteSupported = false;
+              muted = null;
+              if (failure.cause is TimeoutException) {
+                _muteQueryAvailable = false;
+              }
+            } catch (_) {
+              muteSupported = false;
+              muted = null;
+            }
+          }
+          // Publish controls together after optional rendering queries settle;
+          // an initial volume result must not expose a half-finished poll.
+          volumeSupported = volumeAvailable;
         }
         _check();
         _failures = 0;
@@ -510,8 +815,7 @@ class CastSession extends ChangeNotifier {
         ++_failures;
         _event('poll_failed', {
           'failures': _failures,
-          'code': e is CastSoapException ? e.code : null,
-          'error_type': e.runtimeType.toString(),
+          ...castFailureFields(e, stage: 'poll'),
         });
       }
       if (!_closed && _failures >= 3) {
@@ -553,6 +857,7 @@ class CastSession extends ChangeNotifier {
       }
     });
     client.close();
+    _subtitle = null;
     try {
       await _stream?.close();
     } finally {

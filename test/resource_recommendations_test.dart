@@ -17,6 +17,7 @@ ResourceSearchHit recommendation(int id) => ResourceSearchHit.fromRaw({
 });
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   test(
     'refresh sends the current recommendation IDs and preserves old cards on failure',
     () async {

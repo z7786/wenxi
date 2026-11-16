@@ -9,6 +9,7 @@ import '../../domain/auth.dart';
 import '../../domain/uploads.dart';
 import '../../domain/links.dart';
 import '../http.dart';
+import '../desktop_browser_ua.dart';
 import '../uploads/upload_io.dart';
 import '../../core/operation_progress.dart';
 import '../login_cookies.dart';
@@ -23,12 +24,14 @@ class LanzouConnector extends CloudConnector {
     this.http, {
     DateTime Function()? clock,
     Future<void> Function(Duration)? delay,
+    math.Random? random,
   }) : clock = clock ?? DateTime.now,
-       _delay = delay ?? Future<void>.delayed;
+       _delay = delay ?? Future<void>.delayed,
+       _userAgents = DesktopBrowserUaPool(random: random);
   final JsonHttp http;
   final DateTime Function() clock;
   final Future<void> Function(Duration) _delay;
-  static const webUa = WebLoginTarget.desktopUserAgent;
+  final DesktopBrowserUaPool _userAgents;
   static const _cacheLifetime = Duration(minutes: 15);
   final _cache = <String, _LanzouShare>{};
   final _folders = <String, _LanzouFolder>{};
@@ -47,7 +50,10 @@ class LanzouConnector extends CloudConnector {
     return _cache[_key(link)];
   }
 
-  Future<_LanzouLanding> _landing(ParsedLink link) async {
+  Future<_LanzouLanding> _landing(
+    ParsedLink link, {
+    DesktopBrowserUaSession? identity,
+  }) async {
     RequestScope.checkpoint();
     final uri = _shareUri(link.url);
     require(
@@ -56,10 +62,22 @@ class LanzouConnector extends CloudConnector {
           LinkParser.shareId(platform, uri.toString()) == link.shareId,
       '蓝奏分享链接无效',
     );
-    final transport = _LanzouTransport(http, uri, clock);
-    final (pageUri, response) = await transport.page(uri, uri);
-    final page = LanzouPage(response.body);
-    return (uri: pageUri, page: page, transport: transport);
+    identity ??= _userAgents.start();
+    while (true) {
+      final transport = _LanzouTransport(http, uri, clock, identity);
+      try {
+        final (pageUri, response) = await transport.page(uri, uri);
+        return (
+          uri: pageUri,
+          page: LanzouPage(response.body),
+          transport: transport,
+        );
+      } on _LanzouUaBlocked {
+        if (!identity.rotate()) {
+          throw const AppException('蓝奏分享页面被拦截（HTTP 403），请稍后重试');
+        }
+      }
+    }
   }
 
   Future<_LanzouShare> _resolve(
@@ -67,7 +85,24 @@ class LanzouConnector extends CloudConnector {
     _LanzouLanding? landing,
   }) async {
     RequestScope.checkpoint();
-    final opened = landing ?? await _landing(link);
+    var opened = landing ?? await _landing(link);
+    while (true) {
+      try {
+        return await _resolveOpened(link, opened);
+      } on _LanzouUaBlocked {
+        final identity = opened.transport.identity;
+        if (!identity.rotate()) {
+          throw const AppException('蓝奏解析服务响应异常（HTTP 403），请稍后重试');
+        }
+        opened = await _landing(link, identity: identity);
+      }
+    }
+  }
+
+  Future<_LanzouShare> _resolveOpened(
+    ParsedLink link,
+    _LanzouLanding opened,
+  ) async {
     final pageUri = opened.uri,
         page = opened.page,
         transport = opened.transport;
@@ -85,23 +120,42 @@ class LanzouConnector extends CloudConnector {
       require(!downloadPage.unavailable, '蓝奏文件已取消分享或不存在');
     }
     final fields = downloadPage.parameters(passcode: link.passcode);
-    final api = _downloadApiUri(referer, downloadPage.ajaxUrl);
-    final result = await transport.request(
-      'POST',
-      api,
-      referer,
-      body: form(fields),
+    final apis = downloadPage.ajaxUrls
+        .map((endpoint) => _downloadApiUri(referer, endpoint))
+        .toSet()
+        .toList();
+    final primary = apis.first;
+    require(
+      apis.every(
+        (api) => api.path == primary.path && api.query == primary.query,
+      ),
+      '蓝奏下载接口文件信息不一致，请重新解析',
     );
-    RequestScope.checkpoint();
-    DiagnosticLog.event(
-      'lanzou.download_api_response',
-      fields: {
-        'status': result.status,
-        'apiHost': api.host,
-        'userAgent': webUa,
-        'bodyCharacters': result.body.length,
-      },
-    );
+    late HttpResult result;
+    for (var attempt = 0; attempt < apis.length; attempt++) {
+      final api = apis[attempt];
+      result = await transport.request(
+        'POST',
+        api,
+        referer,
+        body: form(fields),
+      );
+      RequestScope.checkpoint();
+      DiagnosticLog.event(
+        'lanzou.download_api_response',
+        fields: {
+          'status': result.status,
+          'apiHost': api.host,
+          'attempt': attempt + 1,
+          'userAgent': transport.userAgent,
+          'bodyCharacters': result.body.length,
+        },
+      );
+      // The official page supplies both API domains. Try its alternate once
+      // when security blocks the primary; never retry password errors or 429.
+      if (result.status != 403) break;
+    }
+    if (result.status == 403) throw _LanzouUaBlocked();
     require(result.status != 429, '蓝奏请求过于频繁，请稍后再试');
     require(result.successful, '蓝奏解析服务响应异常（HTTP ${result.status}），请稍后重试');
     require(result.body.length <= 65536, '蓝奏解析服务返回内容过大，请稍后重试');
@@ -278,12 +332,41 @@ class LanzouConnector extends CloudConnector {
     _LanzouFolder? previous,
     int? pageLimit,
   }) async {
+    var opened = previous?.landing ?? landing ?? await _landing(link);
+    while (true) {
+      try {
+        return await _resolveFolderOpened(
+          root,
+          link,
+          initialList: initialList,
+          landing: opened,
+          previous: previous,
+          pageLimit: pageLimit,
+        );
+      } on _LanzouUaBlocked {
+        final identity = opened.transport.identity;
+        if (!identity.rotate()) {
+          throw const AppException('蓝奏文件夹请求被拦截（HTTP 403），请稍后重试');
+        }
+        opened = await _landing(link, identity: identity);
+      }
+    }
+  }
+
+  Future<_LanzouFolder> _resolveFolderOpened(
+    ParsedLink root,
+    ParsedLink link, {
+    required _LanzouLanding landing,
+    bool initialList = false,
+    _LanzouFolder? previous,
+    int? pageLimit,
+  }) async {
     RequestScope.checkpoint();
     final timer = Stopwatch()..start();
     final parent = _folderId(link), key = _folderKey(root, link);
     // A failed or cancelled refresh must not expose an older partial result.
     if (previous == null) _folders.remove(key);
-    final opened = previous?.landing ?? landing ?? await _landing(link);
+    final opened = landing;
     final pageUri = opened.uri,
         page = opened.page,
         transport = opened.transport;
@@ -334,6 +417,7 @@ class LanzouConnector extends CloudConnector {
         pageUri,
         body: form({...fields, 'pg': '$pg'}),
       );
+      if (result.status == 403) throw _LanzouUaBlocked();
       require(result.status != 429, '蓝奏请求过于频繁，请稍后再试');
       require(
         result.successful && result.body.length <= 1024 * 1024,
@@ -681,7 +765,10 @@ class LanzouConnector extends CloudConnector {
     final uri = _downloadUri(referer.resolve(endpoint).toString());
     require(
       (uri.origin == referer.origin ||
-              uri.origin == 'https://apifile.woozooo.com') &&
+              {
+                'https://apifile.woozooo.com',
+                'https://apifile.lanzouw.com',
+              }.contains(uri.origin)) &&
           {'/ajaxm.php', '/ajaxfile.php'}.contains(uri.path) &&
           !uri.hasFragment &&
           uri.queryParametersAll['file']?.length == 1,
@@ -887,18 +974,25 @@ class _LanzouPagedFolder {
 }
 
 class _LanzouTransport {
-  _LanzouTransport(this.http, Uri share, DateTime Function() clock)
-    : cookies = LoginCookieJar({
+  _LanzouTransport(
+    this.http,
+    Uri share,
+    DateTime Function() clock,
+    this.identity,
+  ) : userAgent = identity.current.value,
+      cookies = LoginCookieJar({
         share.host,
         share.host.split('.').skip(share.host.split('.').length - 2).join('.'),
       }, clock: clock);
   final JsonHttp http;
   final LoginCookieJar cookies;
+  final DesktopBrowserUaSession identity;
+  final String userAgent;
 
   Map<String, String> headers(Uri uri, Uri referer) {
     final cookie = cookies.header(uri);
     return {
-      'User-Agent': LanzouConnector.webUa,
+      'User-Agent': userAgent,
       'Referer': referer.toString(),
       if (cookie.isNotEmpty) 'Cookie': cookie,
     };
@@ -974,6 +1068,7 @@ class _LanzouTransport {
         continue;
       }
       require(response.status != 429, '蓝奏请求过于频繁，请稍后再试');
+      if (response.status == 403) throw _LanzouUaBlocked();
       require(response.successful, '蓝奏分享页面无法访问，请确认链接后重试');
       return (uri, response);
     }
@@ -985,6 +1080,8 @@ class _LanzouTransport {
 }
 
 class _LanzouLinkExpired implements Exception {}
+
+class _LanzouUaBlocked implements Exception {}
 
 class _LanzouShare {
   _LanzouShare({

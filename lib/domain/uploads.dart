@@ -67,7 +67,9 @@ class UploadFile {
     },
     read: (start, end) async* {
       checkpoint();
-      await for (final chunk in openRead(start, end)) {
+      // The outer source owns first/last validation and byte-count checks.
+      // Re-entering openRead here would stat the same document twice per range.
+      await for (final chunk in read(start, end)) {
         checkpoint();
         yield chunk;
       }

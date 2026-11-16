@@ -933,14 +933,48 @@ class _MainShellState extends State<MainShell>
           await widget.services.rapidTransfers.clearCompleted();
         });
       case 'clear-failed-uploads':
-        if (await confirm(
-              context,
-              '清理失败传输',
-              '删除未完成且已停止的跨盘传输记录，并清理对应的已下载中转文件？目标网盘中已完成的文件会保留。',
-            ) &&
-            mounted) {
-          await busy(context, widget.services.rapidTransfers.clearFailed);
-        }
+        await _clearFailedCrossTransfers();
+    }
+  }
+
+  Future<void> _clearFailedCrossTransfers() async {
+    final manager = widget.services.rapidTransfers;
+    final ids = manager.tasks
+        .where((t) => !t.active && t.canRetry)
+        .map((t) => t.id)
+        .toList(growable: false);
+    if (ids.isEmpty) {
+      message(context, '暂无可清理的失败跨盘传输');
+      return;
+    }
+    if (!await confirm(
+          context,
+          '清理失败跨盘传输',
+          '将清理当前 ${ids.length} 个已停止且未完成的跨盘任务及中转缓存，清理后无法继续这些任务。目标网盘中已完成的文件会保留。',
+          action: '清理',
+          destructive: true,
+        ) ||
+        !mounted) {
+      return;
+    }
+    final result = await busy(
+      context,
+      () => manager.clearFailed(ids: ids),
+      label: '正在清理失败跨盘传输…',
+    );
+    if (!mounted || result == null) return;
+    if (result.failed.isNotEmpty) {
+      message(
+        context,
+        '已清理 ${result.succeeded.length} 条记录，${result.failed.length} 条暂未清理：${errorText(result.failed.values.first)}',
+      );
+    } else if (result.succeeded.isEmpty) {
+      message(context, '任务状态已变化，暂无可清理的失败跨盘传输');
+    } else {
+      message(
+        context,
+        '已清理 ${result.succeeded.length} 条失败跨盘传输${result.skipped.isNotEmpty ? '，状态变化的 ${result.skipped.length} 条已跳过' : ''}',
+      );
     }
   }
 

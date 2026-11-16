@@ -249,7 +249,8 @@ class CloudDirectorySearch extends ChangeNotifier {
         scannedEntries++;
         final key = jsonEncode([folder.id, file.id]);
         if (!run.seenFiles.add(key)) continue;
-        if (file.name.toLowerCase().contains(run.query) &&
+        if ((file.displayName.toLowerCase().contains(run.query) ||
+                file.name.toLowerCase().contains(run.query)) &&
             (run.matches?.call(file) ?? true)) {
           final hit = CloudSearchHit(file, folder.trail);
           _hits.add(hit);

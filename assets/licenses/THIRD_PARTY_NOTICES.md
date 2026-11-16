@@ -93,6 +93,8 @@ Windows ARM64 构建使用 shinchiro/mpv-winbuild-cmake 的 20261021 ARM64 libmp
 
 设备互联的 Android 离线扫码使用 ZXing Android Embedded 4.3.0（https://github.com/journeyapps/zxing-android-embedded）及 ZXing Core 3.4.1（https://github.com/zxing/zxing），均为 Apache-2.0；完整许可位于 assets/licenses/ZXing-LICENSE.txt。
 
+解析页二维码图片识别使用纯 Dart ZXing 移植 zxing_lib 1.1.4（https://github.com/shirne/zxing-dart）及其字符集依赖 charset 2.0.1（https://github.com/shirne/charset-dart），均为 Apache-2.0；完整许可位于 assets/licenses/ZXing-LICENSE.txt。解码在本机后台线程执行；手机相机扫码复用 Android ZXing 和 iOS AVFoundation。
+
 Gopeed AAR 附带 NDK 28.2.13676358 的 libc++_shared.so。LLVM 及附带组件的完整 NOTICE 位于 assets/licenses/android-ndk-NOTICE.txt，也保留在 AAR 的 META-INF/licenses/ 中。Android / Jetpack 组件保留各自的 Apache-2.0 等许可，具体依赖声明见 android/app/build.gradle.kts 与各插件构建文件。
 
 ## 字幕字体

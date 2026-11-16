@@ -46,8 +46,8 @@ func TestBaiduPreviewBoundedRequestsAndRestart(t *testing.T) {
 						defer active.Add(-1)
 						for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
 						}
-						// Keep each request open long enough to observe the parallel
-						// request budget even on a fast local loopback connection.
+						// Keep local responses open briefly to observe parallelism.
+						// Configured workers need not reach the server simultaneously.
 						time.Sleep(15 * time.Millisecond)
 						if afterRestart.Load() {
 							resumedMu.Lock()
@@ -115,8 +115,8 @@ func TestBaiduPreviewBoundedRequestsAndRestart(t *testing.T) {
 						t.Fatalf("requests=%d downloaded=%d", requests.Load(), state.Downloaded)
 					}
 				}
-				if peak.Load() != int32(connections) {
-					t.Fatalf("peak connections=%d, want %d", peak.Load(), connections)
+				if peak.Load() < 1 || peak.Load() > int32(connections) || connections > 1 && peak.Load() < 2 {
+					t.Fatalf("peak connections=%d, want parallel requests within limit %d", peak.Load(), connections)
 				}
 			})
 		}

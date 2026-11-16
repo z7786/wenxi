@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
@@ -166,7 +167,12 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
         decoder,
         configuration: VideoControllerConfiguration(
           enableHardwareAcceleration: supportsNativeHardwareRendering,
-          hwdec: preferences.hardwareAcceleration ? null : 'no',
+          hwdec: preferences.hardwareAcceleration
+              ? playbackDecoderMode(
+                  defaultTargetPlatform,
+                  compatible: preferences.decoderCompatibility,
+                )
+              : 'no',
         ),
       );
       setState(() {});

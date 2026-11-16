@@ -1,15 +1,406 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:asterlink/core/json.dart';
+import 'package:asterlink/diagnostics/app_log.dart';
+import 'package:asterlink/playback/cast/cast_network.dart';
 import 'package:asterlink/playback/cast/cast_session.dart';
 import 'package:asterlink/playback/playback_controller.dart';
 import 'package:asterlink/playback/playback_failure.dart';
 import 'package:asterlink/playback/cast/dlna.dart';
 import 'package:asterlink/playback/external_stream.dart';
+import 'package:asterlink/playback/playback_state.dart';
+import 'package:asterlink/playback/subtitle_matching.dart';
 import 'cast_support.dart';
 import 'player_support.dart';
+import 'support.dart' show until;
 
 void main() {
+  test(
+    'automatic next-episode casting waits for its own matching subtitle',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final root = await Directory.systemTemp.createTemp(
+        'asterlink-player-cast-auto-caption-',
+      );
+      addTearDown(() => removePlayerFixture(root));
+      final nextRead = Completer<void>();
+      var requestedNext = false;
+      final fixture = PlaybackFixture(
+        subtitlesFor: (entry) => [
+          PlaybackSubtitle(
+            'caption-${entry.id}',
+            p.setExtension(entry.name, '.srt'),
+          ),
+        ],
+        readSubtitle: (entry, _, scope) async {
+          if (entry.id == '1') {
+            requestedNext = true;
+            await nextRead.future;
+          }
+          require(!scope.token.isCancelled, '字幕请求已取消');
+          return File(
+            '${root.path}/${entry.id}.srt',
+          ).writeAsString('1\n00:00:02,000 --> 00:00:04,000\n字幕-${entry.id}\n');
+        },
+      );
+      final controller = fixture.controller;
+      addTearDown(controller.close);
+      await controller.start();
+      await controller.castTo(tv.device);
+      expect(controller.castSession!.subtitleDelivered, isTrue);
+      final first = controller.castSession!;
+      final advancing = controller.load(1, automaticAdvance: true);
+      await until(() => requestedNext);
+      expect(tv.metadata, contains(first.subtitleUrl));
+      nextRead.complete();
+      await advancing;
+      expect(controller.casting, isTrue);
+      expect(controller.cloudSubtitleId, 'caption-1');
+      expect(controller.castSession!.subtitleDelivered, isTrue);
+      expect(tv.metadata, contains(controller.castSession!.subtitleUrl));
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final response = await (await client.getUrl(
+        Uri.parse(controller.castSession!.subtitleUrl),
+      )).close();
+      expect(await utf8.decoder.bind(response).join(), contains('字幕-1'));
+      expect(fixture.current.state.playing, isFalse);
+    },
+  );
+
+  test('a slow automatic caption cannot prevent casting the video', () async {
+    final tv = TestTv();
+    await tv.start();
+    addTearDown(tv.close);
+    final root = await Directory.systemTemp.createTemp(
+      'asterlink-player-cast-slow-caption-',
+    );
+    addTearDown(() => removePlayerFixture(root));
+    final read = Completer<void>();
+    final fixture = PlaybackFixture(
+      subtitlesFor: (entry) => [
+        PlaybackSubtitle('caption', p.setExtension(entry.name, '.srt')),
+      ],
+      readSubtitle: (entry, _, scope) async {
+        await read.future;
+        require(!scope.token.isCancelled, '字幕请求已取消');
+        return File(
+          '${root.path}/late.srt',
+        ).writeAsString('1\n00:00:02,000 --> 00:00:04,000\n迟到字幕\n');
+      },
+    );
+    final controller = fixture.controller;
+    addTearDown(() async {
+      if (!read.isCompleted) read.complete();
+      await controller.close();
+    });
+    await controller.start();
+    await controller.castTo(tv.device).timeout(const Duration(seconds: 6));
+    expect(controller.casting, isTrue);
+    expect(controller.castSession!.subtitleDelivered, isFalse);
+    expect(controller.castSession!.subtitleWarning, contains('仍在加载'));
+    expect(tv.transport, 'PLAYING');
+    read.complete();
+    await until(() => !controller.subtitleLoading);
+    expect(controller.cloudSubtitleId, 'caption');
+    await controller.castTo(tv.device, reconnect: true);
+    expect(controller.castSession!.subtitleDelivered, isTrue);
+    expect(controller.castSession!.subtitleWarning, isEmpty);
+  });
+
+  test(
+    'cancelling a pending caption wait does not delay or start the TV',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final root = await Directory.systemTemp.createTemp(
+        'asterlink-player-cast-cancel-caption-',
+      );
+      addTearDown(() => removePlayerFixture(root));
+      final read = Completer<void>();
+      final fixture = PlaybackFixture(
+        subtitlesFor: (entry) => [
+          PlaybackSubtitle('caption', p.setExtension(entry.name, '.srt')),
+        ],
+        readSubtitle: (_, _, scope) async {
+          await read.future;
+          require(!scope.token.isCancelled, '字幕请求已取消');
+          return File(
+            '${root.path}/caption.srt',
+          ).writeAsString('1\n00:00:02,000 --> 00:00:04,000\n字幕\n');
+        },
+      );
+      final controller = fixture.controller;
+      addTearDown(() async {
+        if (!read.isCompleted) read.complete();
+        await controller.close();
+      });
+      await controller.start();
+      final rejected = expectLater(
+        controller.castTo(tv.device),
+        throwsA(isA<AppException>()),
+      );
+      await until(() => controller.connectingCast);
+      await controller.disconnectCast().timeout(const Duration(seconds: 1));
+      await rejected.timeout(const Duration(seconds: 1));
+      expect(controller.casting, isFalse);
+      expect(tv.events, isNot(contains('SetAVTransportURI')));
+      expect(tv.events, isNot(contains('Play')));
+      read.complete();
+      await until(() => !controller.subtitleLoading);
+      expect(fixture.leases.values, everyElement(1));
+    },
+  );
+
+  test(
+    'selected staged subtitle survives reconnect and is absent after switching episodes',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final root = await Directory.systemTemp.createTemp(
+        'asterlink-player-cast-subtitle-',
+      );
+      addTearDown(() => removePlayerFixture(root));
+      final fixture = PlaybackFixture(
+        castSessionFactory: (device, source) => CastSession(
+          device,
+          source,
+          prepareSource: false,
+          pollInterval: const Duration(days: 1),
+        ),
+      );
+      final controller = fixture.controller;
+      addTearDown(controller.close);
+      await controller.start();
+      final file = await File('${root.path}/caption.ass').writeAsString(
+        '[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
+        'Dialogue: 0,0:00:02.00,0:00:04.00,Default,,0,0,0,,中文字幕\n',
+      );
+      await controller.attachSubtitle(file, '中文字幕.ass', controller.generation);
+      await controller.setSubtitleDelay(.5);
+      await controller.castTo(tv.device);
+      final first = controller.castSession!;
+      expect(first.subtitleDelivered, isTrue);
+      expect(tv.metadata, contains(first.subtitleUrl));
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      Future<String> readCaption(String url) async {
+        final response = await (await client.getUrl(Uri.parse(url))).close();
+        expect(response.statusCode, 200);
+        return utf8.decoder.bind(response).join();
+      }
+
+      final text = await readCaption(first.subtitleUrl);
+      expect(text, contains('00:00:02,500 --> 00:00:04,500\n中文字幕'));
+      await controller.castTo(tv.device, reconnect: true);
+      expect(controller.castSession!.subtitleUrl, isNot(first.subtitleUrl));
+      expect(await readCaption(controller.castSession!.subtitleUrl), text);
+      expect(fixture.current.state.playing, isFalse);
+      final closedUrl = controller.castSession!.subtitleUrl;
+      await controller.next();
+      expect(controller.casting, isTrue);
+      expect(controller.castSession!.subtitleDelivered, isFalse);
+      expect(tv.metadata, isNot(contains('CaptionInfo')));
+      expect(await file.exists(), isFalse);
+      await expectLater(
+        (() async => (await client.getUrl(Uri.parse(closedUrl))).close())(),
+        throwsA(isA<SocketException>()),
+      );
+    },
+  );
+
+  test(
+    'bad subtitle does not fail the video handoff or resume local audio',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final root = await Directory.systemTemp.createTemp(
+        'asterlink-player-cast-subtitle-invalid-',
+      );
+      addTearDown(() => removePlayerFixture(root));
+      final fixture = PlaybackFixture();
+      addTearDown(fixture.controller.close);
+      await fixture.controller.start();
+      final file = await File(
+        '${root.path}/bad.srt',
+      ).writeAsString('invalid caption');
+      await fixture.controller.attachSubtitle(
+        file,
+        'bad.srt',
+        fixture.controller.generation,
+      );
+      await fixture.controller.castTo(tv.device);
+      expect(fixture.controller.casting, isTrue);
+      expect(fixture.current.state.playing, isFalse);
+      expect(fixture.controller.castSession!.subtitleDelivered, isFalse);
+      expect(fixture.controller.castSession!.subtitleWarning, contains('无法转换'));
+      expect(tv.transport, 'PLAYING');
+      expect(tv.metadata, isNot(contains('CaptionInfo')));
+    },
+  );
+
+  test(
+    'subtitle-off handoff does not expose a previously attached caption',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final root = await Directory.systemTemp.createTemp(
+        'asterlink-player-cast-subtitle-off-',
+      );
+      addTearDown(() => removePlayerFixture(root));
+      final fixture = PlaybackFixture();
+      addTearDown(fixture.controller.close);
+      await fixture.controller.start();
+      final file = await File(
+        '${root.path}/caption.srt',
+      ).writeAsString('1\n00:00:02,000 --> 00:00:04,000\n中文字幕\n');
+      await fixture.controller.attachSubtitle(
+        file,
+        'caption.srt',
+        fixture.controller.generation,
+      );
+      await fixture.controller.setSubtitleTrack(SubtitleTrack.no());
+      await fixture.controller.castTo(tv.device);
+      expect(fixture.controller.castSession!.subtitleDelivered, isFalse);
+      expect(tv.metadata, isNot(contains('CaptionInfo')));
+    },
+  );
+
+  test(
+    'cast logs keep audio format and caption availability without titles, URLs or subtitle text',
+    () async {
+      final log = DiagnosticLog.open(null);
+      final previous = DiagnosticLog.active;
+      DiagnosticLog.active = log;
+      addTearDown(() {
+        DiagnosticLog.active = previous;
+        log.close();
+      });
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final root = await Directory.systemTemp.createTemp(
+        'asterlink-player-cast-log-',
+      );
+      addTearDown(() => removePlayerFixture(root));
+      final fixture = PlaybackFixture();
+      fixture.configureBackend = (backend) => backend.emit(
+        backend.state.copyWith(
+          tracks: const Tracks(
+            audio: [
+              AudioTrack(
+                '1',
+                'private-audio-title',
+                'zho',
+                codec: 'aac',
+                channelscount: 2,
+                samplerate: 48000,
+              ),
+            ],
+          ),
+          track: const Track(
+            audio: AudioTrack(
+              '1',
+              'private-audio-title',
+              'zho',
+              codec: 'aac',
+              channelscount: 2,
+              samplerate: 48000,
+            ),
+          ),
+        ),
+      );
+      addTearDown(fixture.controller.close);
+      await fixture.controller.start();
+      final file = await File('${root.path}/private-caption.srt').writeAsString(
+        '1\n00:00:02,000 --> 00:00:04,000\nprivate-subtitle-text\n',
+      );
+      await fixture.controller.attachSubtitle(
+        file,
+        'private-subtitle-title',
+        fixture.controller.generation,
+      );
+      await fixture.controller.castTo(tv.device);
+      final entry = log.entries().singleWhere(
+        (e) => e.event == 'cast.media_tracks',
+      );
+      final fields = entry.data['fields'] as Map;
+      expect(fields['audio_codec'], 'aac');
+      expect(fields['audio_channels'], 2);
+      expect(fields['audio_sample_rate'], 48000);
+      expect(fields['subtitle_delivered'], isTrue);
+      expect(fields['subtitle_cues'], 1);
+      for (final text in [
+        'private-audio-title',
+        'private-subtitle-title',
+        'private-subtitle-text',
+        file.uri.toString(),
+        fixture.controller.castSession!.subtitleUrl,
+      ]) {
+        expect(entry.detail, isNot(contains(text)));
+      }
+    },
+  );
+
+  test(
+    'route failure keeps local playback and emits stage plus errno',
+    () async {
+      final log = DiagnosticLog.open(null);
+      final previous = DiagnosticLog.active;
+      DiagnosticLog.active = log;
+      addTearDown(() {
+        DiagnosticLog.active = previous;
+        log.close();
+      });
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final platform = TestCastPlatform();
+      final fixture = PlaybackFixture(
+        castPlatform: platform,
+        castSessionFactory: (device, source) => CastSession(
+          device,
+          source,
+          localAddress: (_) async => throw const SocketException(
+            'No route to host',
+            osError: OSError('No route to host', 113),
+          ),
+        ),
+      );
+      final controller = fixture.controller;
+      addTearDown(controller.close);
+      await controller.start();
+      final local = fixture.current;
+      await expectLater(
+        controller.castTo(tv.device),
+        throwsA(isA<CastNetworkException>()),
+      );
+      expect(controller.state.playing, isTrue);
+      expect(local.closed, isFalse);
+      expect(controller.casting, isFalse);
+      expect(controller.connectingCast, isFalse);
+      expect(tv.events, isEmpty);
+      expect(platform.events, ['active:true', 'active:false']);
+      final failure = log
+          .entries()
+          .singleWhere((entry) => entry.event == 'cast.connect_failed')
+          .data['fields'];
+      expect(failure['stage'], 'route');
+      expect(failure['errno'], 113);
+      expect(failure['os_error'], 'No route to host');
+      expect(failure['error_type'], 'SocketException');
+      expect(fixture.leases.values.single, 1);
+    },
+  );
   test(
     'expired initial source preparation refreshes once without a local backend failure',
     () async {

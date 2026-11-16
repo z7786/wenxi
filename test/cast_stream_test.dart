@@ -7,9 +7,135 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/playback/external_stream.dart';
 import 'package:asterlink/playback/cast/cast_session.dart';
+import 'package:asterlink/playback/cast/cast_subtitles.dart';
 import 'cast_support.dart';
 
 void main() {
+  test(
+    'TV reads staged captions via GET, HEAD and ranges while video bytes and headers remain intact',
+    () async {
+      final root = await Directory.systemTemp.createTemp('cast-caption-relay-');
+      addTearDown(() => root.delete(recursive: true));
+      final movie = await File(
+        '${root.path}/movie.mp4',
+      ).writeAsBytes(List.generate(256, (i) => i));
+      final stream = ExternalPlaybackStream.lan(
+        DownloadSpec(url: movie.uri.toString(), fileName: 'movie.mp4'),
+        lanAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(stream.close);
+      await stream.start();
+      final caption = CastSubtitle.fromText(
+        '1\n00:00:01,000 --> 00:00:03,000\n电视字幕\n',
+      );
+      stream.attachSubtitle(caption);
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final url = Uri.parse(stream.subtitleUrl!);
+      expect(url.host, Uri.parse(stream.url).host);
+      expect(url.port, Uri.parse(stream.url).port);
+      final get = await (await client.getUrl(url)).close();
+      expect(get.statusCode, 200);
+      expect(get.contentLength, caption.bytes.length);
+      expect(get.headers.contentType?.mimeType, 'text/srt');
+      expect(get.headers.contentType?.charset, 'utf-8');
+      expect(
+        await get.fold<List<int>>([], (list, bytes) => list..addAll(bytes)),
+        caption.bytes,
+      );
+      expect(stream.requestsServed, 0);
+      final head = await (await client.openUrl('HEAD', url)).close();
+      expect(head.statusCode, 200);
+      expect(head.contentLength, caption.bytes.length);
+      expect(
+        await head.fold<List<int>>([], (list, bytes) => list..addAll(bytes)),
+        isEmpty,
+      );
+      final request = await client.getUrl(url);
+      request.headers.set('Range', 'bytes=3-10');
+      final range = await request.close();
+      expect(range.statusCode, 206);
+      expect(
+        range.headers.value('Content-Range'),
+        'bytes 3-10/${caption.bytes.length}',
+      );
+      expect(
+        await range.fold<List<int>>([], (list, bytes) => list..addAll(bytes)),
+        caption.bytes.sublist(3, 11),
+      );
+      final invalid = await client.getUrl(url);
+      invalid.headers.set('Range', 'bytes=99999-');
+      final rejected = await invalid.close();
+      expect(rejected.statusCode, 416);
+      await rejected.drain<void>();
+      final video = await (await client.getUrl(Uri.parse(stream.url))).close();
+      expect(video.headers.value('CaptionInfo.sec'), url.toString());
+      expect(video.headers.value('CaptionInfoEx.sec'), url.toString());
+      expect(
+        await video.fold<List<int>>([], (list, bytes) => list..addAll(bytes)),
+        List.generate(256, (i) => i),
+      );
+      expect(stream.requestsServed, 1);
+      await stream.close();
+      expect(stream.subtitleUrl, isNull);
+      await expectLater(
+        (() async => (await client.getUrl(url)).close())(),
+        throwsA(isA<SocketException>()),
+      );
+    },
+  );
+
+  test(
+    'online video serves caption headers without passing cookies or subtitle queries upstream',
+    () async {
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => origin.close(force: true));
+      var upstream = 0;
+      origin.listen((request) async {
+        upstream++;
+        expect(request.uri.path, '/private-video');
+        expect(request.uri.query, 'signature=fixture');
+        expect(request.headers.value('Cookie'), 'owner=private');
+        request.response.headers.contentType = ContentType.binary;
+        request.response.contentLength = 4;
+        request.response.add([1, 2, 3, 4]);
+        await request.response.close();
+      });
+      final stream = ExternalPlaybackStream.lan(
+        DownloadSpec(
+          url:
+              'http://127.0.0.1:${origin.port}/private-video?signature=fixture',
+          fileName: 'movie.mp4',
+          headers: const {'Cookie': 'owner=private'},
+        ),
+        lanAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(stream.close);
+      await stream.start();
+      stream.attachSubtitle(
+        CastSubtitle.fromText('1\n00:00:01,000 --> 00:00:02,000\n字幕\n'),
+      );
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final caption = await (await client.getUrl(
+        Uri.parse('${stream.subtitleUrl!}?renderer=probe'),
+      )).close();
+      expect(caption.statusCode, 200);
+      await caption.drain<void>();
+      expect(upstream, 0);
+      final video = await (await client.getUrl(Uri.parse(stream.url))).close();
+      expect(video.headers.value('CaptionInfo.sec'), stream.subtitleUrl);
+      expect(video.headers.value('Set-Cookie'), isNull);
+      expect(video.headers.value('Cookie'), isNull);
+      expect(video.headers.value('Content-Type'), 'video/mp4');
+      expect(
+        await video.fold<List<int>>([], (list, bytes) => list..addAll(bytes)),
+        [1, 2, 3, 4],
+      );
+      expect(upstream, 1);
+    },
+  );
+
   test(
     'range worker 403 stays an expired source failure instead of a generic relay 502',
     () async {

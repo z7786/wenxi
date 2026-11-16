@@ -2,6 +2,7 @@ import 'dart:convert';
 import '../core/json.dart';
 import '../data/state_store.dart';
 import '../data/http.dart';
+import '../data/cloud_browser_ua.dart';
 import 'models.dart';
 import 'pikpak_web_login.dart';
 import 'tianyi_web_login.dart';
@@ -516,8 +517,10 @@ class AccountLoginService {
     this.validate, {
     this.webAuthenticators = const {},
     this.checkAccess,
+    this.browserUa,
   });
   final CredentialStore store;
+  final CloudBrowserUa? browserUa;
   final Future<CloudAccount> Function(CloudPlatform, Credential) validate;
   final void Function(CloudPlatform)? checkAccess;
   final Map<CloudPlatform, Future<LoginResult> Function(Credential)>
@@ -541,59 +544,68 @@ class AccountLoginService {
     String raw, {
     String? appId,
     String? accountId,
+    String? browserUserAgent,
     Map<String, String> rememberedLogin = const {},
-  }) => submit(p, (existing) async {
-    var candidate = LoginCredentials.candidate(p, raw, existing);
-    if (p == CloudPlatform.aliyun &&
-        rememberedLogin['loginUsername']?.isNotEmpty == true &&
-        rememberedLogin['loginPassword']?.isNotEmpty == true) {
-      candidate = candidate.withFields({
-        'loginUsername': rememberedLogin['loginUsername']!,
-        'loginPassword': rememberedLogin['loginPassword']!,
-      });
-    }
-    if (p == CloudPlatform.baidu && appId != null) {
-      final value = appId.trim();
-      require(
-        value.isEmpty || RegExp(r'^\d+$').hasMatch(value),
-        '百度应用 ID 格式无效，可清空后使用默认值',
-      );
-      candidate = candidate.withFields({'appId': value});
-    }
-    final authenticate = webAuthenticators[p];
-    if (authenticate != null) return authenticate(candidate);
-    CloudAccount account;
-    if (p == CloudPlatform.c139) {
-      if (candidate.field('authorization').isEmpty) {
-        throw const AccountLoginRequired('移动云盘登录尚未完成，请在网页进入网盘首页后重新保存');
+  }) => submit(
+    p,
+    (existing) async {
+      var candidate = LoginCredentials.candidate(p, raw, existing);
+      if (p == CloudPlatform.aliyun &&
+          rememberedLogin['loginUsername']?.isNotEmpty == true &&
+          rememberedLogin['loginPassword']?.isNotEmpty == true) {
+        candidate = candidate.withFields({
+          'loginUsername': rememberedLogin['loginUsername']!,
+          'loginPassword': rememberedLogin['loginPassword']!,
+        });
       }
-      try {
+      if (p == CloudPlatform.baidu && appId != null) {
+        final value = appId.trim();
+        require(
+          value.isEmpty || RegExp(r'^\d+$').hasMatch(value),
+          '百度应用 ID 格式无效，可清空后使用默认值',
+        );
+        candidate = candidate.withFields({'appId': value});
+      }
+      final authenticate = webAuthenticators[p];
+      if (authenticate != null) return authenticate(candidate);
+      CloudAccount account;
+      if (p == CloudPlatform.c139) {
+        if (candidate.field('authorization').isEmpty) {
+          throw const AccountLoginRequired('移动云盘登录尚未完成，请在网页进入网盘首页后重新保存');
+        }
+        try {
+          account = await validate(p, candidate);
+        } on AccountLoginRequired {
+          rethrow;
+        } on AppException {
+          account = LoginCredentials.c139Account(candidate.primary);
+        }
+      } else if (p == CloudPlatform.pan123) {
         account = await validate(p, candidate);
-      } on AccountLoginRequired {
-        rethrow;
-      } on AppException {
-        account = LoginCredentials.c139Account(candidate.primary);
+      } else {
+        try {
+          account = await validate(p, candidate);
+        } on AccountLoginRequired {
+          rethrow;
+        } on AppException {
+          account = CloudAccount('${p.shortName}用户');
+        }
       }
-    } else if (p == CloudPlatform.pan123) {
-      account = await validate(p, candidate);
-    } else {
-      try {
-        account = await validate(p, candidate);
-      } on AccountLoginRequired {
-        rethrow;
-      } on AppException {
-        account = CloudAccount('${p.shortName}用户');
-      }
-    }
-    return LoginResult(candidate, account);
-  }, accountId: accountId);
+      return LoginResult(candidate, account);
+    },
+    accountId: accountId,
+    browserUserAgent: browserUserAgent,
+  );
   Future<LoginResult> submit(
     CloudPlatform p,
     Future<LoginResult> Function(Credential?) authenticate, {
     String? accountId,
+    String? browserUserAgent,
   }) async {
     final vault = store;
-    if (vault is! Vault) return _submit(p, authenticate);
+    if (vault is! Vault) {
+      return _submit(p, authenticate, browserUserAgent: browserUserAgent);
+    }
     final revision = _revision[p] ?? 0;
     final selection = vault.activeAccountId(p);
     bool stillSelected() => vault.activeAccountId(p) == selection;
@@ -609,6 +621,7 @@ class AccountLoginService {
         () => _submit(
           p,
           authenticate,
+          browserUserAgent: browserUserAgent,
           canCommit: stillSelected,
           commit: (expected, replacement, canCommit) async {
             final saved = await vault.commitLogin(
@@ -639,6 +652,7 @@ class AccountLoginService {
     CloudPlatform p,
     Future<LoginResult> Function(Credential?) authenticate, {
     bool Function()? canCommit,
+    String? browserUserAgent,
     Future<bool> Function(Credential?, Credential, bool Function())? commit,
   }) async {
     checkAccess?.call(p);
@@ -647,7 +661,24 @@ class AccountLoginService {
     _requests[p] = requestScope;
     try {
       final revision = _revision[p] ?? 0, previous = store.credential(p);
-      final result = await requestScope.run(() => authenticate(previous));
+      Future<LoginResult> authenticateBound() async {
+        final result = await authenticate(previous);
+        return LoginResult(
+          browserUa?.bindCredential(p, result.credential) ?? result.credential,
+          result.account,
+        );
+      }
+
+      final result = await requestScope.run(
+        () =>
+            browserUa?.run(
+              p,
+              authenticateBound,
+              userAgent: browserUserAgent,
+              locked: true,
+            ) ??
+            authenticateBound(),
+      );
       checkAccess?.call(p);
       require((_revision[p] ?? 0) == revision, '登录已取消或账号发生变化');
       var timestamp = DateTime.now().millisecondsSinceEpoch;

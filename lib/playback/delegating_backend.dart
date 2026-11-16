@@ -34,8 +34,15 @@ class DelegatingPlaybackBackend extends PlaybackBackend {
     Size viewport,
     double pixelRatio,
     BoxFit fit,
-    double scale,
-  ) => delegate.setRenderViewport(viewport, pixelRatio, fit, scale);
+    double scale, {
+    bool stableOrientation = false,
+  }) => delegate.setRenderViewport(
+    viewport,
+    pixelRatio,
+    fit,
+    scale,
+    stableOrientation: stableOrientation,
+  );
   @override
   Widget? buildVideo({required BoxFit fit, double? aspectRatio}) =>
       delegate.buildVideo(fit: fit, aspectRatio: aspectRatio);

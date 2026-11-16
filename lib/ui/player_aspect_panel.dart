@@ -186,6 +186,11 @@ class _PlayerAspectPanelState extends State<PlayerAspectPanel> {
         child: const Text('应用自定义比例'),
       ),
       const SizedBox(height: 24),
+      const Text(
+        '也可在画面上双指捏合缩放，松手后记住比例。',
+        style: TextStyle(color: Colors.white60, fontSize: 12),
+      ),
+      const SizedBox(height: 8),
       Text(
         '视频缩放 · ${(widget.preferences.videoScale * 100).round()}%',
         style: const TextStyle(color: Colors.white60, fontSize: 12),

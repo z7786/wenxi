@@ -183,6 +183,37 @@ void main() {
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
         expect(find.text(downloadLabel(count)), findsOneWidget);
+        final fileList = find.byKey(const PageStorageKey('torrent-files'));
+        Future<void> revealFile(int index) async {
+          final row = find.byKey(ValueKey('torrent-file-$index'));
+          if (row.evaluate().isEmpty) {
+            tester
+                .state<ScrollableState>(
+                  find.descendant(
+                    of: fileList,
+                    matching: find.byType(Scrollable),
+                  ),
+                )
+                .position
+                .jumpTo(0);
+            await tester.pumpAndSettle();
+          }
+          await tester.scrollUntilVisible(
+            row,
+            180,
+            scrollable: find.descendant(
+              of: fileList,
+              matching: find.byType(Scrollable),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(row.hitTestable(), findsOneWidget);
+        }
+
+        if (name.contains('narrow-large-text')) {
+          // Deep folder rows may fill a small screen before its first file.
+          await revealFile(0);
+        }
         final preview = Platform.environment['APP_BT_PREVIEW_DIR'];
         if (preview != null) {
           final boundary = tester.renderObject<RenderRepaintBoundary>(
@@ -206,7 +237,7 @@ void main() {
           final listRect = tester.getRect(
             find.byKey(const PageStorageKey('torrent-files')),
           );
-          final fullyVisible = find.byType(CheckboxListTile).evaluate().where((
+          final fullyVisible = find.byType(ListTile).evaluate().where((
             element,
           ) {
             final box = element.renderObject as RenderBox;
@@ -214,7 +245,9 @@ void main() {
             return top >= listRect.top &&
                 top + box.size.height <= listRect.bottom;
           }).length;
+          // Count both folder and file rows in the expanded tree.
           expect(fullyVisible, greaterThanOrEqualTo(10));
+          expect(find.byKey(const ValueKey('torrent-file-0')), findsOneWidget);
         }
         if (name.contains('long-paths')) {
           final first = find.byKey(const ValueKey('torrent-file-0'));
@@ -247,8 +280,7 @@ void main() {
         );
         for (final index in [0, 1]) {
           final row = find.byKey(ValueKey('torrent-file-$index'));
-          await tester.ensureVisible(row);
-          await tester.pumpAndSettle();
+          await revealFile(index);
           await tester.tap(
             find.descendant(of: row, matching: find.byType(Checkbox)),
           );
@@ -271,6 +303,7 @@ void main() {
           await tester.pumpAndSettle();
         }
         for (final index in [0, 1]) {
+          await revealFile(index);
           expect(
             tester
                 .widget<CheckboxListTile>(
@@ -280,10 +313,7 @@ void main() {
             isTrue,
           );
         }
-        await tester.ensureVisible(
-          find.byKey(const ValueKey('torrent-file-0')),
-        );
-        await tester.pumpAndSettle();
+        await revealFile(0);
         await tester.tap(find.byKey(const ValueKey('torrent-file-0')));
         await tester.pump();
         expect(find.text(downloadLabel(1)), findsOneWidget);

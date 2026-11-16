@@ -176,6 +176,18 @@ void main() {
   );
 
   Future<void> tapMine(WidgetTester tester, String label) async {
+    if (['使用帮助', '项目地址'].contains(label) &&
+        find.text(label).evaluate().isEmpty) {
+      await tester.scrollUntilVisible(
+        find.text('帮助与诊断'),
+        350,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(find.text('帮助与诊断'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('帮助与诊断'));
+      await tester.pumpAndSettle();
+    }
     await tester.scrollUntilVisible(
       find.text(label),
       350,
@@ -520,7 +532,13 @@ void main() {
         find.byKey(const ValueKey('control-announcement-dialog')),
         findsNothing,
       );
-      expect(find.text('发现新版本 0.4.0'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('control-update-dialog')),
+          matching: find.text('发现新版本 0.4.0'),
+        ),
+        findsOneWidget,
+      );
       expect(find.byType(AlertDialog), findsOneWidget);
       expect(services!.control.unreadAnnouncement, isNull);
       await tester.tap(find.byKey(const ValueKey('control-update-later')));

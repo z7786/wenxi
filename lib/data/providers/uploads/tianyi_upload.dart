@@ -77,40 +77,42 @@ extension _TianyiUpload on TianyiConnector {
     }
 
     const partSize = 10 * 1024 * 1024;
-    final fileHash = await io.digest(md5), hashes = <String>[];
+    final digests = await io.hashes(
+      whole: ['md5'],
+      partAlgorithm: 'md5',
+      partSize: partSize,
+    );
+    final fileHash = digests.whole['md5']!;
+    final hashes = digests.parts.map((hash) => hash.toUpperCase()).toList();
     final count = math.max(1, (source.size / partSize).ceil());
-    for (var i = 0; i < count; i++) {
-      hashes.add(
-        (await io.digest(
-          md5,
-          start: i * partSize,
-          end: math.min(source.size, (i + 1) * partSize),
-        )).toUpperCase(),
-      );
-    }
     final sliceHash = source.size <= partSize
         ? fileHash
         : md5.convert(utf8.encode(hashes.join('\n'))).toString();
-    final pre = (await call('/person/initMultiUpload', {
-      'parentFolderId': parent,
-      'fileName': Uri.encodeQueryComponent(source.name),
-      'fileSize': '${source.size}',
-      'sliceSize': '$partSize',
-      'fileMd5': fileHash,
-      'sliceMd5': sliceHash,
-    })).obj('data');
+    final pre = (await io.temporary(
+      () => call('/person/initMultiUpload', {
+        'parentFolderId': parent,
+        'fileName': Uri.encodeQueryComponent(source.name),
+        'fileSize': '${source.size}',
+        'sliceSize': '$partSize',
+        'fileMd5': fileHash,
+        'sliceMd5': sliceHash,
+      }),
+    )).obj('data');
     final uploadId = pre.str('uploadFileId');
     require(uploadId.isNotEmpty, '天翼未创建上传任务');
     if (pre.integer('fileDataExists') != 1) {
-      for (var i = 0; i < count; i++) {
+      io.notSavedYet();
+      await io.parts(count, (i) async {
         final hashBytes = [
           for (var j = 0; j < 32; j += 2)
             int.parse(hashes[i].substring(j, j + 2), radix: 16),
         ];
-        final data = await call('/person/getMultiUploadUrls', {
-          'partInfo': '${i + 1}-${base64Encode(hashBytes)}',
-          'uploadFileId': uploadId,
-        });
+        final data = await io.temporary(
+          () => call('/person/getMultiUploadUrls', {
+            'partInfo': '${i + 1}-${base64Encode(hashBytes)}',
+            'uploadFileId': uploadId,
+          }),
+        );
         final part = data.obj('uploadUrls').obj('partNumber_${i + 1}');
         final headers = <String, String>{};
         for (final pair in Uri.decodeComponent(
@@ -123,10 +125,12 @@ extension _TianyiUpload on TianyiConnector {
           part.str('requestURL'),
           start: i * partSize,
           end: math.min(source.size, (i + 1) * partSize),
+          commitsFile: false,
           headers: headers,
         );
-      }
+      });
     }
+    io.notSavedYet();
     io.progress(UploadPhase.finishing, source.size);
     final completed = (await call('/person/commitMultiUploadFile', {
       'uploadFileId': uploadId,
@@ -135,6 +139,18 @@ extension _TianyiUpload on TianyiConnector {
       'lazyCheck': '1',
       'opertype': '3',
     })).obj('data');
-    return io.confirm(() => list(s, parent, c), id: completed.str('fileId'));
+    CloudFile? receipt;
+    if (completed.str('fileId').isNotEmpty &&
+        completed.str('fileName').isNotEmpty &&
+        completed.containsKey('fileSize')) {
+      final folder = completed.str('parentFolderId');
+      require(folder.isEmpty || folder == parent, '天翼上传回执的目录不一致，请刷新后确认');
+      receipt = _file(completed, parent, false);
+    }
+    return io.confirm(
+      () => list(s, parent, c),
+      id: completed.str('fileId'),
+      receipt: receipt,
+    );
   }
 }

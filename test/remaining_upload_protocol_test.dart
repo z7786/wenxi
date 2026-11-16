@@ -196,7 +196,9 @@ void main() {
         if (badHash) {
           await expectLater(request, throwsA(isA<AppException>()));
           expect(commits, 0);
-          expect(parts, 1);
+          // Other temporary blocks may already be in flight; none can merge
+          // after a failed digest, regardless of completion order.
+          expect(parts, inInclusiveRange(1, 2));
         } else {
           expect((await request).id, '99');
           expect(commits, 1);

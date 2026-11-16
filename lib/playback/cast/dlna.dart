@@ -122,6 +122,35 @@ class CastSoapException extends AppException {
   bool get unsupported => {401, 602, 710, 711}.contains(code);
 }
 
+/// An incomplete response does not prove that a renderer rejected a command.
+/// The session can verify its own media before retrying an absolute control.
+class CastControlException extends AppException {
+  CastControlException({
+    required this.action,
+    required this.phase,
+    this.cause,
+    this.status,
+  }) : super(
+         status != null && (status < 200 || status >= 300)
+             ? '电视控制响应异常（HTTP $status），请重新连接'
+             : cause is HttpException ||
+                   cause is SocketException ||
+                   cause is TimeoutException
+             ? '电视控制响应中断，请检查网络后重新连接'
+             : '电视返回了无效的控制响应，请重新连接',
+       );
+  final String action, phase;
+  final Object? cause;
+  final int? status;
+
+  bool get uncertain =>
+      (status == null || status! >= 200 && status! < 300) &&
+      (cause is HttpException ||
+          cause is SocketException ||
+          cause is TimeoutException ||
+          cause is FormatException);
+}
+
 String castMimeType(String name) {
   final path = Uri.tryParse(name)?.path.toLowerCase() ?? name.toLowerCase();
   if (path.endsWith('.m3u8')) return 'application/vnd.apple.mpegurl';
@@ -150,17 +179,21 @@ Duration? parseCastTime(String? value) {
   return Duration(hours: h, minutes: m, seconds: s);
 }
 
-/// One bounded HTTP client per discovery/session. It never follows redirects
-/// or includes any cloud account headers in requests to a renderer.
+/// One bounded HTTP client per discovery/session, with a separate connection
+/// for each control request: many renderers do not reliably support keep-alive.
+/// It never follows redirects or sends cloud account headers to a renderer.
 class DlnaClient {
   DlnaClient({this.timeout = const Duration(seconds: 8)});
   final Duration timeout;
   final _http = HttpClient()..connectionTimeout = const Duration(seconds: 5);
   bool _closed = false;
 
-  Future<String> _read(HttpClientResponse response) async {
+  Future<String> _read(
+    HttpClientResponse response, [
+    Duration? readTimeout,
+  ]) async {
     final bytes = BytesBuilder(copy: false);
-    await for (final chunk in response.timeout(timeout)) {
+    await for (final chunk in response.timeout(readTimeout ?? timeout)) {
       bytes.add(chunk);
       require(bytes.length <= 1024 * 1024, '电视响应过大');
     }
@@ -171,6 +204,7 @@ class DlnaClient {
     require(!_closed && castEndpoint(uri), '电视地址无效');
     final request = await _http.getUrl(uri).timeout(timeout);
     request.followRedirects = false;
+    request.persistentConnection = false;
     try {
       final response = await request.close().timeout(timeout);
       require(response.statusCode == 200, '无法读取电视信息，请确认电视已开启投屏');
@@ -184,33 +218,62 @@ class DlnaClient {
     CastService service,
     String name, [
     Map<String, String> arguments = const {},
+    Duration? actionTimeout,
   ]) async {
+    final limit = actionTimeout != null && actionTimeout < timeout
+        ? actionTimeout
+        : timeout;
+    final watch = actionTimeout == null ? null : (Stopwatch()..start());
+    Duration remaining() {
+      final budget = watch == null ? limit : limit - watch.elapsed;
+      if (budget <= Duration.zero) {
+        throw TimeoutException('电视控制响应超时', limit);
+      }
+      return budget;
+    }
+
     require(!_closed && castEndpoint(service.control), '投屏连接已关闭');
-    final request = await _http.postUrl(service.control).timeout(timeout);
-    request.followRedirects = false;
-    request.headers.set(
-      'Content-Type',
-      'text/xml; charset=utf-8',
-      preserveHeaderCase: true,
-    );
-    request.headers.set(
-      'SOAPAction',
-      '"${service.type}#$name"',
-      preserveHeaderCase: true,
-    );
-    final body =
-        '<?xml version="1.0" encoding="utf-8"?>'
-        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
-        's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
-        '<s:Body><u:$name xmlns:u="${xmlText(service.type)}">'
-        '${arguments.entries.map((e) => '<${e.key}>${xmlText(e.value)}</${e.key}>').join()}'
-        '</u:$name></s:Body></s:Envelope>';
-    final bytes = utf8.encode(body);
-    request.contentLength = bytes.length;
-    request.add(bytes);
+    String phase = 'connect';
+    int? status;
+    var abandoned = false;
+    HttpClientRequest? request;
     try {
-      final response = await request.close().timeout(timeout);
-      final text = await _read(response).timeout(timeout);
+      final opening = _http.postUrl(service.control);
+      unawaited(
+        opening.then<void>((request) {
+          if (abandoned || _closed) request.abort();
+        }, onError: (Object _) {}),
+      );
+      request = await opening.timeout(remaining());
+      require(!_closed, '投屏连接已关闭');
+      request.followRedirects = false;
+      request.persistentConnection = false;
+      request.headers.set(
+        'Content-Type',
+        'text/xml; charset=utf-8',
+        preserveHeaderCase: true,
+      );
+      request.headers.set(
+        'SOAPAction',
+        '"${service.type}#$name"',
+        preserveHeaderCase: true,
+      );
+      final body =
+          '<?xml version="1.0" encoding="utf-8"?>'
+          '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+          's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+          '<s:Body><u:$name xmlns:u="${xmlText(service.type)}">'
+          '${arguments.entries.map((e) => '<${e.key}>${xmlText(e.value)}</${e.key}>').join()}'
+          '</u:$name></s:Body></s:Envelope>';
+      final bytes = utf8.encode(body);
+      request.contentLength = bytes.length;
+      request.add(bytes);
+      phase = 'response';
+      final response = await request.close().timeout(remaining());
+      status = response.statusCode;
+      phase = 'read';
+      final text = await _read(response, limit).timeout(remaining());
+      phase = 'parse';
       final doc = XmlDocument.parse(text);
       final nodes = doc.descendants.whereType<XmlElement>();
       final fault = nodes.where((e) => e.name.local == 'Fault').firstOrNull;
@@ -234,21 +297,58 @@ class DlnaClient {
         };
         throw CastSoapException(message, code);
       }
-      require(
-        response.statusCode >= 200 && response.statusCode < 300,
-        '电视响应异常，请重新连接',
-      );
+      if (status < 200 || status >= 300) {
+        throw CastControlException(
+          action: name,
+          phase: 'status',
+          status: status,
+        );
+      }
       final result = nodes
           .where((e) => e.name.local == '${name}Response')
           .firstOrNull;
-      require(result != null, '电视返回了无效的控制响应');
+      if (result == null) {
+        throw CastControlException(
+          action: name,
+          phase: phase,
+          status: status,
+          cause: const FormatException('Missing SOAP action response'),
+        );
+      }
       return {
-        for (final e in result!.childElements) e.name.local: e.innerText.trim(),
+        for (final e in result.childElements) e.name.local: e.innerText.trim(),
       };
-    } on FormatException {
-      throw const AppException('电视返回的信息无法识别，请重试');
+    } on HttpException catch (error) {
+      throw CastControlException(
+        action: name,
+        phase: phase,
+        status: status,
+        cause: error,
+      );
+    } on SocketException catch (error) {
+      throw CastControlException(
+        action: name,
+        phase: phase,
+        status: status,
+        cause: error,
+      );
+    } on TimeoutException catch (error) {
+      throw CastControlException(
+        action: name,
+        phase: phase,
+        status: status,
+        cause: error,
+      );
+    } on FormatException catch (error) {
+      throw CastControlException(
+        action: name,
+        phase: phase,
+        status: status,
+        cause: error,
+      );
     } finally {
-      request.abort();
+      abandoned = true;
+      request?.abort();
     }
   }
 
@@ -265,20 +365,43 @@ class DlnaClient {
     String mime,
     Duration duration, {
     int? size,
+    String? subtitleUrl,
+    int? audioChannels,
+    int? audioSampleRate,
   }) async {
+    // Only session-owned LAN URLs may appear in the caption metadata.
+    final caption = subtitleUrl == null ? null : Uri.tryParse(subtitleUrl);
+    final media = Uri.tryParse(url);
+    require(
+      subtitleUrl == null ||
+          caption != null &&
+              castEndpoint(caption) &&
+              caption.scheme == media?.scheme &&
+              caption.host == media?.host &&
+              caption.port == media?.port,
+      '电视字幕地址无效',
+    );
     final features = mime.toLowerCase().contains('mpegurl')
         ? 'DLNA.ORG_OP=00;DLNA.ORG_CI=0'
         : 'DLNA.ORG_OP=01;DLNA.ORG_CI=0';
     final metadata =
         '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
         'xmlns:dc="http://purl.org/dc/elements/1.1/" '
-        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"'
+        '${caption == null ? '' : ' xmlns:sec="http://www.sec.co.kr/" xmlns:pv="http://www.pv.com/pvns/"'}>'
         '<item id="0" parentID="-1" restricted="1"><dc:title>${xmlText(title)}</dc:title>'
         '<upnp:class>object.item.videoItem</upnp:class>'
         '<res protocolInfo="http-get:*:${xmlText(mime)}:$features"'
         '${size != null && size > 0 ? ' size="$size"' : ''}'
+        '${audioChannels != null && audioChannels > 0 ? ' nrAudioChannels="$audioChannels"' : ''}'
+        '${audioSampleRate != null && audioSampleRate > 0 ? ' sampleFrequency="$audioSampleRate"' : ''}'
+        '${caption == null ? '' : ' pv:subtitleFileType="SRT" pv:subtitleFileUri="${xmlText(subtitleUrl!)}"'}'
         '${duration > Duration.zero ? ' duration="${castTime(duration)}"' : ''}>'
-        '${xmlText(url)}</res></item></DIDL-Lite>';
+        '${xmlText(url)}</res>'
+        '${caption == null ? '' : '<res protocolInfo="http-get:*:text/srt:*">${xmlText(subtitleUrl!)}</res>'
+                  '<sec:CaptionInfoEx sec:type="srt">${xmlText(subtitleUrl)}</sec:CaptionInfoEx>'
+                  '<sec:CaptionInfo sec:type="srt">${xmlText(subtitleUrl)}</sec:CaptionInfo>'}'
+        '</item></DIDL-Lite>';
     await transport(device, 'SetAVTransportURI', {
       'CurrentURI': url,
       'CurrentURIMetaData': metadata,

@@ -208,7 +208,10 @@ void main() {
         await until(() => native.snapshots >= 7);
         expect(native.begins.length, 1);
         expect(native.begins.single.containsKey('aliyunGroup'), isFalse);
-        expect(native.begins.single.integer('connections'), greaterThan(8));
+        expect(
+          native.begins.single.integer('connections'),
+          platform == CloudPlatform.xunlei ? equals(8) : greaterThan(8),
+        );
         expect(manager.task(id)!.phase, isEmpty);
         await manager.pause(id);
       },

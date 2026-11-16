@@ -43,7 +43,7 @@ class CloudFavorite {
   final int? sortOrder;
   final bool isShareLink, pinned;
   final String customName;
-  String get name => customName.ifEmpty(file.name);
+  String get name => customName.ifEmpty(file.displayName);
   String get location => isShareLink
       ? '分享链接 / ${session.sourceLink?.url ?? ''}'
       : [

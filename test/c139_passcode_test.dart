@@ -46,6 +46,22 @@ void main() {
           ),
         ),
       );
+  HttpResult cursorPage({
+    int nodes = 10,
+    List<Json> folders = const [],
+    List<Json> files = const [],
+    String? next,
+  }) => jsonResponse({
+    'resultCode': '0',
+    'data': {
+      'nodNum': nodes,
+      'caLength': '${folders.length}',
+      'coLength': '${files.length}',
+      'caLst': folders.isEmpty ? null : folders,
+      'coLst': files.isEmpty ? null : files,
+      'nextPageCursor': next,
+    },
+  });
   String file(int index, {String size = '1073741824'}) =>
       '<outLinkCoInfo><coID>file-$index</coID><coName>第 $index 集.mp4</coName>'
       '<coSize>$size</coSize><udTime>20260922192512</udTime></outLinkCoInfo>';
@@ -480,6 +496,210 @@ void main() {
       expect(begins, [1, 201]);
       expect(files, hasLength(201));
       expect(files.last.parentId, 'nested-folder');
+      expect(http.calls, hasLength(3));
+    },
+  );
+
+  test(
+    'Reported symbolic command browses nested directories when nodNum includes descendants',
+    () async {
+      const input = '/*391R8TRNLu2U:/';
+      final parsed = C139Passcode.parse(input)!;
+      expect(parsed.code, '391R8TRNLu2U');
+      expect(parsed.codeType, 1);
+      expect(parsed.password, isNull);
+      final parents = <String>[];
+      final http = FakeHttp((request) {
+        final payload = asJson(
+          jsonDecode(C139Protocol.decrypt(request.body as String)),
+        );
+        if (request.uri.path.endsWith('/getOutLinkGeneral')) {
+          expect(payload.obj('getOutLinkGeneralReq')['linkCode'], parsed.code);
+          return general();
+        }
+        final values = payload.obj('getOutLinkInfoReq');
+        expect(values.str('linkID'), 'resolved-share');
+        expect(values.integer('bNum'), 1);
+        final parent = values.str('pCaID');
+        parents.add(parent);
+        return switch (parent) {
+          'root' => cursorPage(
+            nodes: 1,
+            folders: [
+              {'caID': 'shared-folder', 'caName': '分享目录'},
+            ],
+          ),
+          'shared-folder' => cursorPage(
+            nodes: 10,
+            folders: [
+              {'caID': 'nested', 'caName': '子目录'},
+              {'caID': 'empty', 'caName': '空目录'},
+            ],
+          ),
+          'nested' => cursorPage(
+            nodes: 7,
+            folders: [
+              {'caID': 'deep', 'caName': '下级目录'},
+            ],
+            files: [
+              {'coID': 'video', 'coName': '视频.mp4', 'coSize': 1024},
+            ],
+          ),
+          'empty' => cursorPage(nodes: 10),
+          _ => throw StateError('Unexpected directory'),
+        };
+      });
+      final link = await CloudCommandResolver(
+        http,
+      ).resolve(CloudPlatform.c139, input);
+      expect(http.calls, isEmpty);
+      expect(link.url, LinkParser.parse(input).single.url);
+      final connector = C139Connector(http);
+      final session = await connector.openShare(link, credential);
+      final root = await connector.list(session, 'root', credential);
+      final child = await connector.list(session, root.single.id, credential);
+      expect(child.map((file) => file.id), ['nested', 'empty']);
+      final nested = await connector.list(session, child.first.id, credential);
+      expect(nested.map((file) => file.id), ['deep', 'video']);
+      expect(nested.last.size, 1024);
+      expect(nested.every((file) => file.parentId == 'nested'), isTrue);
+      expect(await connector.list(session, 'empty', credential), isEmpty);
+      final returned = await connector.list(
+        session,
+        root.single.id,
+        credential,
+      );
+      expect(returned.map((file) => file.id), child.map((file) => file.id));
+      expect(parents, [
+        'root',
+        'shared-folder',
+        'nested',
+        'empty',
+        'shared-folder',
+      ]);
+      expect(http.calls, hasLength(6));
+    },
+  );
+
+  test(
+    'Web command pagination follows nextPageCursor rather than recursive nodNum',
+    () async {
+      final begins = <int>[];
+      final http = FakeHttp((request) {
+        if (request.uri.path.endsWith('/getOutLinkGeneral')) return general();
+        final values = asJson(
+          jsonDecode(C139Protocol.decrypt(request.body as String)),
+        ).obj('getOutLinkInfoReq');
+        final begin = values.integer('bNum');
+        begins.add(begin);
+        expect(values.integer('eNum'), begin + 199);
+        return cursorPage(
+          nodes: 950,
+          next: begin == 1 ? 'next-page' : null,
+          files: [
+            for (var i = begin; i <= (begin == 1 ? 200 : 201); i++)
+              {'coID': 'file-$i', 'coName': '$i.mp4', 'coSize': 1024},
+          ],
+        );
+      });
+      final connector = C139Connector(http);
+      final session = await connector.openShare(
+        LinkParser.parse(command).single,
+        credential,
+      );
+      final files = await connector.list(session, 'root', credential);
+      expect(files, hasLength(201));
+      expect(files.last.id, 'file-201');
+      expect(begins, [1, 201]);
+    },
+  );
+
+  for (final endCursor in [null, '', 'null']) {
+    test('Terminal web cursor ends a full command page: $endCursor', () async {
+      final http = FakeHttp(
+        (request) => request.uri.path.endsWith('/getOutLinkGeneral')
+            ? general()
+            : cursorPage(
+                nodes: 800,
+                next: endCursor,
+                files: [
+                  for (var i = 1; i <= 200; i++)
+                    {'coID': 'file-$i', 'coName': '$i.mp4', 'coSize': 1024},
+                ],
+              ),
+      );
+      final connector = C139Connector(http);
+      final session = await connector.openShare(
+        LinkParser.parse(command).single,
+        credential,
+      );
+      expect(await connector.list(session, 'root', credential), hasLength(200));
+      expect(http.calls, hasLength(2));
+    });
+  }
+
+  for (final invalid in <Json>[
+    {'nextPageCursor': null},
+    {
+      'caLst': null,
+      'coLst': null,
+      'caLength': '1',
+      'coLength': '0',
+      'nextPageCursor': null,
+    },
+    {'caLst': null, 'coLst': null, 'nextPageCursor': 1},
+    {'caLst': null, 'coLst': null, 'nextPageCursor': 'more'},
+  ]) {
+    test(
+      'Malformed cursor page fails instead of hiding missing files: $invalid',
+      () async {
+        final http = FakeHttp(
+          (request) => request.uri.path.endsWith('/getOutLinkGeneral')
+              ? general()
+              : jsonResponse({'resultCode': '0', 'data': invalid}),
+        );
+        final connector = C139Connector(http);
+        final session = await connector.openShare(
+          LinkParser.parse(command).single,
+          credential,
+        );
+        await expectLater(
+          connector.list(session, 'root', credential),
+          throwsA(isA<AppException>()),
+        );
+        expect(http.calls, hasLength(2));
+      },
+    );
+  }
+
+  test(
+    'Repeated cursor pages fail instead of looping or hiding later files',
+    () async {
+      final http = FakeHttp(
+        (request) => request.uri.path.endsWith('/getOutLinkGeneral')
+            ? general()
+            : cursorPage(
+                next: 'more',
+                files: [
+                  {'coID': 'same-file', 'coName': '视频.mp4', 'coSize': 1024},
+                ],
+              ),
+      );
+      final connector = C139Connector(http);
+      final session = await connector.openShare(
+        LinkParser.parse(command).single,
+        credential,
+      );
+      await expectLater(
+        connector.list(session, 'root', credential),
+        throwsA(
+          isA<AppException>().having(
+            (error) => error.message,
+            'message',
+            contains('分页重复'),
+          ),
+        ),
+      );
       expect(http.calls, hasLength(3));
     },
   );

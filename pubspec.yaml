@@ -1,7 +1,7 @@
 name: asterlink
 description: 文析助手，支持网盘解析、下载和 BT 在线播放。
 publish_to: none
-version: 2.3.0+230
+version: 2.3.5+235
 
 environment:
   sdk: '>=3.11.0 <4.0.0'
@@ -14,6 +14,7 @@ dependencies:
   cupertino_icons: 1.0.8
   flutter_svg: 2.3.0
   qr_flutter: 4.1.0
+  zxing_lib: 1.1.4
   dio: 5.11.1
   ffi: 2.2.0
   html: 0.15.7

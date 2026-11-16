@@ -134,6 +134,70 @@ void main() {
       expect(http.calls.any((r) => r.uri.host == 'd.pcs.baidu.com'), isTrue);
     },
   );
+  for (final failAt in ['passport', 'activation', 'preview-cdn']) {
+    test(
+      'Preview-only $failAt failure leaves fallback to the caller',
+      () async {
+        final http = FakeHttp((r) {
+          if (r.uri.path == '/rest/2.0/xpan/nas') {
+            return jsonResponse({'errno': 0, 'vip_type': 0});
+          }
+          if (r.uri.host == 'passport.baidu.com') {
+            return failAt == 'passport'
+                ? const HttpResult(503, 'unavailable')
+                : jsonResponse({'errno': 0, 'uid': '123456789'});
+          }
+          if (r.uri.path == '/api/report/user') {
+            return failAt == 'activation'
+                ? const HttpResult(503, 'unavailable')
+                : jsonResponse({
+                    'errno': 0,
+                    'uinfo': 'RLs/VygyH/SSzONO6GIxAXLEsLVtm3s=',
+                  });
+          }
+          expect(r.uri.host, 'd.pcs.baidu.com');
+          expect(r.uri.queryParameters['use'], '1');
+          return const HttpResult(503, 'unavailable');
+        });
+        await expectLater(
+          BaiduLocalPreview(http).resolvePreview(
+            cookie: 'BDUSS=fixture',
+            path: '/original.bin',
+            fileId: '123',
+            appId: '250528',
+            device: _device,
+          ),
+          throwsA(isA<HttpRequestFailure>()),
+        );
+        expect(
+          http.calls,
+          hasLength(switch (failAt) {
+            'passport' => 2,
+            'activation' => 3,
+            _ => 4,
+          }),
+        );
+        expect(http.calls.any((r) => r.uri.path == '/api/filemetas'), isFalse);
+      },
+    );
+  }
+  test(
+    'Missing path does not turn preview-only into an ordinary file lookup',
+    () async {
+      final http = FakeHttp();
+      await expectLater(
+        BaiduLocalPreview(http).resolvePreview(
+          cookie: 'BDUSS=fixture',
+          path: '',
+          fileId: '123',
+          appId: '250528',
+          device: _device,
+        ),
+        throwsA(isA<AppException>()),
+      );
+      expect(http.calls, isEmpty);
+    },
+  );
   test(
     'Legacy file ID metadata keeps large IDs and rejects unrelated hosts',
     () async {

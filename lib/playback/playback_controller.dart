@@ -20,6 +20,8 @@ import 'subtitle_matching.dart';
 import 'external_stream.dart';
 import 'system_pip.dart';
 import 'cast/cast_session.dart';
+import 'cast/cast_network.dart';
+import 'cast/cast_subtitles.dart';
 import 'cast/dlna.dart';
 import 'cast/cast_platform.dart';
 
@@ -57,6 +59,7 @@ class _Session {
       failurePaused = false,
       playRequested = false;
   bool subtitleSearchStarted = false;
+  Future<void>? automaticSubtitleLoad;
   bool aheadAttempted = false;
   int errorRevision = 0;
   final metadataReady = Completer<void>();
@@ -948,7 +951,9 @@ class PlaybackController extends ChangeNotifier {
     session.subtitleSearchStarted = true;
     final candidate = matchingSubtitle(session.entry.name, availableSubtitles);
     if (candidate != null) {
-      unawaited(loadCloudSubtitle(candidate, automatic: true));
+      final task = loadCloudSubtitle(candidate, automatic: true);
+      session.automaticSubtitleLoad = task;
+      unawaited(task);
     }
   }
 

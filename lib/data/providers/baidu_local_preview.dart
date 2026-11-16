@@ -19,6 +19,22 @@ class BaiduLocalPreview {
     required String appId,
     required Json device,
   }) => _PreviewRequest(http, cookie, path, fileId, appId, device).resolve();
+
+  /// Try only preview activation so the caller can choose the next route.
+  Future<BaiduResolvedLink> resolvePreview({
+    required String cookie,
+    required String path,
+    required String fileId,
+    required String appId,
+    required Json device,
+  }) => _PreviewRequest(
+    http,
+    cookie,
+    path,
+    fileId,
+    appId,
+    device,
+  ).resolve(previewOnly: true);
 }
 
 class _PreviewRequest {
@@ -144,7 +160,7 @@ class _PreviewRequest {
     return data;
   }
 
-  Future<BaiduResolvedLink> resolve() async {
+  Future<BaiduResolvedLink> resolve({bool previewOnly = false}) async {
     RequestScope.checkpoint();
     require(
       cookie.length <= 32768 && !RegExp(r'[\x00-\x1f\x7f]').hasMatch(cookie),
@@ -191,6 +207,7 @@ class _PreviewRequest {
         rethrow;
       } catch (_) {
         RequestScope.checkpoint();
+        if (previewOnly) rethrow;
       }
       try {
         return BaiduResolvedLink(
@@ -203,6 +220,7 @@ class _PreviewRequest {
         if (!numericId) rethrow;
       }
     }
+    require(!previewOnly, '百度文件路径不可用，无法使用本地预览');
     final data = await request(
       'https://pan.baidu.com/api/filemetas',
       query: {
