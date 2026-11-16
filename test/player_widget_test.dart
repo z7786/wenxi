@@ -1061,6 +1061,28 @@ void main() {
       tester.widget<Slider>(horizontal).onChangeEnd!(.5);
       await tester.pumpAndSettle();
       expect(page.fixture.history.preferences.videoOffsetX, .5);
+      final rotation = find.byKey(const Key('player-video-rotation-slider'));
+      await scrollPanelTo(tester, rotation);
+      tester.widget<Slider>(rotation).onChanged!(35);
+      await tester.pump();
+      expect(controller.preferences.videoRotation, 35);
+      expect(page.fixture.history.preferences.videoRotation, 0);
+      final matrix = tester
+          .widget<Transform>(find.byKey(const Key('player-video-rotation')))
+          .transform;
+      expect(matrix.storage[0], closeTo(.819152, .000001));
+      expect(matrix.storage[1], closeTo(.573576, .000001));
+      tester.widget<Slider>(rotation).onChangeEnd!(35);
+      await tester.pumpAndSettle();
+      expect(page.fixture.history.preferences.videoRotation, 35);
+      final reset = find.byKey(const Key('player-video-transform-reset'));
+      await scrollPanelTo(tester, reset);
+      await tap(tester, reset);
+      expect(controller.preferences.videoScale, 1);
+      expect(controller.preferences.videoOffsetX, 0);
+      expect(controller.preferences.videoOffsetY, 0);
+      expect(controller.preferences.videoRotation, 0);
+      expect(page.fixture.history.preferences.videoRotation, 0);
       expect(fixture.current.lastFit, BoxFit.contain);
       expect(fixture.preparations, 1);
       expect(tester.takeException(), isNull);
@@ -1457,6 +1479,7 @@ void main() {
           videoScale: 1.5,
           videoOffsetX: .4,
           videoOffsetY: .2,
+          videoRotation: 35,
         ),
       );
       await openMenuAction(tester, find.byKey(const Key('player-pip')));
@@ -1501,6 +1524,7 @@ void main() {
       expect(backend.lastFit, BoxFit.cover);
       expect(backend.lastAspectRatio, 4 / 3);
       expect(result.fixture.controller.preferences.videoScale, 1.5);
+      expect(result.fixture.controller.preferences.videoRotation, 35);
       expect(tester.takeException(), isNull);
     },
   );

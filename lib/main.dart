@@ -1084,6 +1084,12 @@ class _MainShellState extends State<MainShell>
             child: Builder(
               builder: (context) {
                 final rail = constraints.maxWidth >= 820;
+                final mobileTablet =
+                    const {
+                      TargetPlatform.android,
+                      TargetPlatform.iOS,
+                    }.contains(Theme.of(context).platform) &&
+                    MediaQuery.sizeOf(context).shortestSide >= 600;
                 final desktopHeader =
                     (selected == 0 || selected == 4) &&
                     Theme.of(context).platform == TargetPlatform.windows;
@@ -1148,7 +1154,11 @@ class _MainShellState extends State<MainShell>
                     bottom: rail,
                     child: Center(
                       child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 1120),
+                        constraints: BoxConstraints(
+                          maxWidth: mobileTablet && selected == 0
+                              ? double.infinity
+                              : 1120,
+                        ),
                         child: Column(
                           children: [
                             RemoteControlPrompts(

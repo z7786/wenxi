@@ -40,6 +40,10 @@ void main() {
         'subtitleBackgroundColor': -1,
         'subtitleBackgroundOpacity': double.nan,
         'fit': 'unknown',
+        'videoScale': double.infinity,
+        'videoOffsetX': double.nan,
+        'videoOffsetY': double.infinity,
+        'videoRotation': double.nan,
       });
       expect(preferences.rate, 1);
       expect(preferences.boostRate, 2);
@@ -52,9 +56,45 @@ void main() {
       expect(preferences.subtitleBackgroundOpacity, .5);
       expect(preferences.subtitleBackgroundArgb, isNull);
       expect(preferences.fit, PlaybackFit.contain);
+      expect(preferences.videoScale, 1);
+      expect(preferences.videoOffsetX, 0);
+      expect(preferences.videoOffsetY, 0);
+      expect(preferences.videoRotation, 0);
       expect(preferences.copyWith(rate: .1, volume: -4).rate, .25);
       expect(preferences.copyWith(rate: 8).rate, 4);
       expect(preferences.copyWith(volume: -4).volume, 0);
+    },
+  );
+  test(
+    'Video transforms retain old defaults and persist wrapped angles',
+    () async {
+      final old = PlaybackPreferences.fromJson({
+        'videoScale': 1.25,
+        'videoOffsetX': .4,
+        'videoOffsetY': -.2,
+      });
+      expect(old.videoScale, 1.25);
+      expect(old.videoOffsetX, .4);
+      expect(old.videoOffsetY, -.2);
+      expect(old.videoRotation, 0);
+      for (final (input, expected) in [
+        (180.0, 180.0),
+        (-180.0, -180.0),
+        (390.0, 30.0),
+        (-390.0, -30.0),
+        (720.0, 0.0),
+      ]) {
+        expect(old.copyWith(videoRotation: input).videoRotation, expected);
+      }
+      final history = PlaybackStore(StateStore.memory());
+      await history.savePreferences(
+        old.copyWith(videoOffsetX: 1.5, videoOffsetY: -2, videoRotation: 395),
+      );
+      final saved = PlaybackStore(history.store).preferences;
+      expect(saved.videoOffsetX, 1.5);
+      expect(saved.videoOffsetY, -2);
+      expect(saved.videoRotation, 35);
+      expect(saved.copyWith(videoRotation: double.infinity).videoRotation, 0);
     },
   );
   test('Subtitle appearance survives store reload and mode changes', () async {

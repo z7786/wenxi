@@ -19,6 +19,7 @@ import 'package:asterlink/ui/experimental_features_page.dart';
 import 'package:asterlink/ui/browser_page.dart';
 import 'package:asterlink/ui/player_page.dart';
 import 'package:asterlink/ui/preview_page.dart';
+import 'package:asterlink/ui/parse_page.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/windows_actions.dart';
 import 'support.dart';
@@ -428,6 +429,10 @@ void main() {
         ('phone-parse-dark', const Size(393, 864), 0, true, 1),
         ('phone-parse-favorites', const Size(393, 864), 0, false, 1),
         ('phone-parse-large-text', const Size(320, 700), 0, false, 1.8),
+        ('tablet-parse-portrait', const Size(768, 1024), 0, false, 1),
+        ('tablet-parse-landscape', const Size(1280, 800), 0, false, 1),
+        ('tablet-parse-large-text', const Size(1280, 800), 0, false, 1.8),
+        ('ipad-parse-landscape', const Size(1366, 1024), 0, true, 1),
         ('desktop-parse', const Size(1100, 780), 0, false, 1),
         ('desktop-parse-favorites', const Size(1100, 780), 0, false, 1),
         ('phone-mine', const Size(393, 864), 3, false, 1),
@@ -438,6 +443,10 @@ void main() {
     testWidgets('$name layout and reference snapshot', (tester) async {
       if (name.startsWith('desktop-parse') || name == 'desktop-mine') {
         debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      } else if (name.startsWith('tablet-parse')) {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      } else if (name.startsWith('ipad-parse')) {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       }
       try {
         final services = await render(
@@ -516,6 +525,22 @@ void main() {
           );
           FocusManager.instance.primaryFocus?.unfocus();
           await tester.pumpAndSettle();
+        }
+        if (name.startsWith('tablet-parse') || name.startsWith('ipad-parse')) {
+          final viewport = tester.getRect(find.byType(ParsePage));
+          expect(
+            viewport.right,
+            closeTo(size.width, 1),
+            reason: 'The tablet body must use the width beside navigation',
+          );
+          expect(viewport.width, greaterThan(size.width - 150));
+          final form = tester.getRect(find.byKey(const Key('parse-tools')));
+          expect(form.left, closeTo(viewport.left + 28, 1));
+          if (name.endsWith('landscape')) {
+            expect(form.width, greaterThan(680));
+          } else {
+            expect(form.right, closeTo(viewport.right - 28, 1));
+          }
         }
         expect(tester.takeException(), isNull);
         // Reference images use the Windows Microsoft YaHei font.

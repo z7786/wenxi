@@ -27,6 +27,7 @@ const playbackFolderFields = {
   'videoScale',
   'videoOffsetX',
   'videoOffsetY',
+  'videoRotation',
 };
 
 const playbackAspectRatios = <String, double>{
@@ -135,6 +136,7 @@ class PlaybackPreferences {
     this.videoScale = 1,
     this.videoOffsetX = 0,
     this.videoOffsetY = 0,
+    this.videoRotation = 0,
     this.controlsScale = 1,
     this.showResolution = true,
     this.showCastButton = true,
@@ -168,7 +170,11 @@ class PlaybackPreferences {
   final bool decoderCompatibility;
   final PlaybackFit fit;
   final double aspectRatio;
-  final double videoScale, videoOffsetX, videoOffsetY, controlsScale;
+  final double videoScale,
+      videoOffsetX,
+      videoOffsetY,
+      videoRotation,
+      controlsScale;
   final bool showResolution,
       showCastButton,
       showSpeedButton,
@@ -200,6 +206,16 @@ class PlaybackPreferences {
   static const minRate = .25, maxRate = 4.0;
   static const minBoostRate = 1.25, maxBoostRate = 4.0;
   static const minSubtitleSize = 14.0, maxSubtitleSize = 120.0;
+  // Focal zoom and rotation can place the centre beyond half a viewport.
+  // Retain legacy offsets while allowing gestures to keep their selected point.
+  static const maxVideoOffset = 16.0;
+
+  static double _normalizeVideoRotation(double degrees) {
+    if (!degrees.isFinite) return 0;
+    final wrapped = (degrees + 180) % 360 - 180;
+    return wrapped == -180 && degrees > 0 ? 180 : wrapped;
+  }
+
   factory PlaybackPreferences.fromJson(Json value) => PlaybackPreferences(
     rate: finiteRange(value.number('rate', 1), 1, minRate, maxRate),
     boostRate: finiteRange(
@@ -267,8 +283,19 @@ class PlaybackPreferences {
       orElse: () => PlaybackFit.contain,
     ),
     videoScale: finiteRange(value.number('videoScale', 1), 1, .5, 3),
-    videoOffsetX: finiteRange(value.number('videoOffsetX'), 0, -1, 1),
-    videoOffsetY: finiteRange(value.number('videoOffsetY'), 0, -1, 1),
+    videoOffsetX: finiteRange(
+      value.number('videoOffsetX'),
+      0,
+      -maxVideoOffset,
+      maxVideoOffset,
+    ),
+    videoOffsetY: finiteRange(
+      value.number('videoOffsetY'),
+      0,
+      -maxVideoOffset,
+      maxVideoOffset,
+    ),
+    videoRotation: _normalizeVideoRotation(value.number('videoRotation')),
     controlsScale: finiteRange(value.number('controlsScale', 1), 1, .8, 1.4),
     showResolution: value.boolean('showResolution', true),
     showCastButton: value.boolean('showCastButton', true),
@@ -306,6 +333,7 @@ class PlaybackPreferences {
     'videoScale': videoScale,
     'videoOffsetX': videoOffsetX,
     'videoOffsetY': videoOffsetY,
+    'videoRotation': videoRotation,
     'controlsScale': controlsScale,
     'showResolution': showResolution,
     'showCastButton': showCastButton,
@@ -342,6 +370,7 @@ class PlaybackPreferences {
     double? videoScale,
     double? videoOffsetX,
     double? videoOffsetY,
+    double? videoRotation,
     double? controlsScale,
     bool? showResolution,
     bool? showCastButton,
@@ -380,6 +409,7 @@ class PlaybackPreferences {
     'videoScale': videoScale ?? this.videoScale,
     'videoOffsetX': videoOffsetX ?? this.videoOffsetX,
     'videoOffsetY': videoOffsetY ?? this.videoOffsetY,
+    'videoRotation': videoRotation ?? this.videoRotation,
     'controlsScale': controlsScale ?? this.controlsScale,
     'showResolution': showResolution ?? this.showResolution,
     'showCastButton': showCastButton ?? this.showCastButton,

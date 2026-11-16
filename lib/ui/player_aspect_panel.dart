@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../domain/playback.dart';
@@ -18,6 +19,14 @@ class PlayerAspectPanel extends StatefulWidget {
 }
 
 class _PlayerAspectPanelState extends State<PlayerAspectPanel> {
+  late final _horizontalRange = math.max(
+    1.0,
+    widget.preferences.videoOffsetX.abs(),
+  );
+  late final _verticalRange = math.max(
+    1.0,
+    widget.preferences.videoOffsetY.abs(),
+  );
   late final _width = TextEditingController(
     text: widget.preferences.aspectRatio > 0
         ? widget.preferences.aspectRatio.toStringAsFixed(4)
@@ -187,7 +196,7 @@ class _PlayerAspectPanelState extends State<PlayerAspectPanel> {
       ),
       const SizedBox(height: 24),
       const Text(
-        '也可在画面上双指捏合缩放，松手后记住比例。',
+        '双指可围绕选中位置缩放、旋转和移动，松手后记住画面。',
         style: TextStyle(color: Colors.white60, fontSize: 12),
       ),
       const SizedBox(height: 8),
@@ -231,8 +240,8 @@ class _PlayerAspectPanelState extends State<PlayerAspectPanel> {
           key: Key(
             horizontal ? 'player-video-offset-x' : 'player-video-offset-y',
           ),
-          min: -1,
-          max: 1,
+          min: -(horizontal ? _horizontalRange : _verticalRange),
+          max: horizontal ? _horizontalRange : _verticalRange,
           divisions: 40,
           value: horizontal
               ? widget.preferences.videoOffsetX
@@ -253,6 +262,24 @@ class _PlayerAspectPanelState extends State<PlayerAspectPanel> {
           ),
         ),
       ],
+      Text(
+        '旋转角度 · ${widget.preferences.videoRotation.round()}°',
+        style: const TextStyle(color: Colors.white60, fontSize: 12),
+      ),
+      Slider(
+        key: const Key('player-video-rotation-slider'),
+        min: -180,
+        max: 180,
+        divisions: 360,
+        value: widget.preferences.videoRotation,
+        label: '${widget.preferences.videoRotation.round()}°',
+        onChanged: (value) => _transform(
+          widget.preferences.copyWith(videoRotation: value),
+          false,
+        ),
+        onChangeEnd: (value) =>
+            _transform(widget.preferences.copyWith(videoRotation: value), true),
+      ),
       OutlinedButton(
         key: const Key('player-video-transform-reset'),
         onPressed: () => widget.onChanged(
@@ -260,9 +287,10 @@ class _PlayerAspectPanelState extends State<PlayerAspectPanel> {
             videoScale: 1,
             videoOffsetX: 0,
             videoOffsetY: 0,
+            videoRotation: 0,
           ),
         ),
-        child: const Text('重置缩放与位置'),
+        child: const Text('还原屏幕'),
       ),
       const SizedBox(height: 24),
     ],

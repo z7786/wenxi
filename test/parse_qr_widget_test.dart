@@ -10,6 +10,7 @@ import 'package:asterlink/app_services.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/main.dart';
 import 'package:asterlink/platform/native_engine.dart';
+import 'package:asterlink/ui/cloud_favorites_page.dart';
 import 'package:asterlink/ui/parse_page.dart';
 import 'qr_image_support.dart';
 import 'support.dart';
@@ -69,9 +70,10 @@ void main() {
     TargetPlatform platform = TargetPlatform.android,
     Size size = const Size(430, 960),
     double scale = 1,
+    double pixelRatio = 1,
   }) async {
-    tester.view.devicePixelRatio = 1;
-    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = pixelRatio;
+    tester.view.physicalSize = size * pixelRatio;
     tester.platformDispatcher.textScaleFactorTestValue = scale;
     final previous = FileSelectorPlatform.instance;
     picker = _QrPicker();
@@ -278,6 +280,143 @@ void main() {
     await settle(tester);
     expect(tester.takeException(), isNull);
   }, platform: TargetPlatform.windows);
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final (width, scale, pixelRatio) in [
+      (360.0, 1.0, 3.0),
+      (393.0, 1.8, 2.75),
+      (320.0, 2.0, 2.0),
+    ]) {
+      scenario(
+        '$platform mobile header keeps tools beside the title at $width / $scale',
+        (tester) async {
+          await render(
+            tester,
+            platform: platform,
+            size: Size(width, 960),
+            scale: scale,
+            pixelRatio: pixelRatio,
+          );
+          void expectHeaderAlignment() {
+            final paste = tester.getRect(find.byKey(const Key('parse-paste')));
+            final qr = tester.getRect(find.byKey(const Key('parse-qr')));
+            final history = tester.getRect(
+              find.byKey(const Key('parse-history')),
+            );
+            expect(qr.center.dy, closeTo(paste.center.dy, 1));
+            expect(history.center.dy, closeTo(paste.center.dy, 1));
+            expect(qr.left, greaterThanOrEqualTo(paste.right));
+            expect(history.left, greaterThanOrEqualTo(qr.right));
+            expect(history.right, lessThanOrEqualTo(width - 38));
+            expect(qr.size.shortestSide, greaterThanOrEqualTo(48 - 1e-6));
+            expect(history.size.shortestSide, greaterThanOrEqualTo(48 - 1e-6));
+            expect(
+              find.byKey(const Key('parse-qr')).hitTestable(),
+              findsOneWidget,
+            );
+            expect(
+              find.byKey(const Key('parse-history')).hitTestable(),
+              findsOneWidget,
+            );
+            expect(tester.takeException(), isNull);
+          }
+
+          expectHeaderAlignment();
+          page.currentState!.acceptClipboard('$share\n$original');
+          await tester.pumpAndSettle();
+          expectHeaderAlignment();
+          expect(page.currentState!.links, hasLength(2));
+          await tester.tap(find.byKey(const Key('parse-history')));
+          await tester.pumpAndSettle();
+          expect(find.text('历史解析'), findsOneWidget);
+          await tester.tap(find.byTooltip('关闭历史'));
+          await tester.pumpAndSettle();
+          await chooseImage(tester);
+          expect(picker.opens, 1);
+          expect(page.currentState!.input.text, '$share\n$original');
+          expectHeaderAlignment();
+        },
+        platform: platform,
+      );
+    }
+  }
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final (size, scale, twoColumns) in [
+      (const Size(768, 1024), 1.0, false),
+      (const Size(1280, 800), 1.0, true),
+      (const Size(1280, 800), 1.8, false),
+    ]) {
+      scenario(
+        '$platform tablet parser fills $size at text scale $scale',
+        (tester) async {
+          await render(tester, platform: platform, size: size, scale: scale);
+          final main = tester.getRect(find.byKey(const Key('parse-tools')));
+          final summaries = tester.getRect(find.byType(CloudFavoritesSummary));
+          expect(main.left, closeTo(28, 1));
+          expect(summaries.right, closeTo(size.width - 28, 1));
+          if (twoColumns) {
+            expect(main.width, greaterThan(680));
+            expect(summaries.left, greaterThan(main.right));
+            expect(summaries.top, closeTo(main.top, 1));
+          } else {
+            expect(main.width, closeTo(size.width - 56, 1));
+            expect(summaries.left, closeTo(main.left, 1));
+            expect(summaries.top, greaterThan(main.bottom));
+          }
+          expect(
+            tester
+                .widget<TextField>(find.byKey(const Key('parse-input')))
+                .minLines,
+            6,
+          );
+          expect(tester.takeException(), isNull);
+        },
+        platform: platform,
+      );
+    }
+    scenario(
+      '$platform tablet rotation retains editor and composing text',
+      (tester) async {
+        await render(
+          tester,
+          platform: platform,
+          size: const Size(1280, 800),
+          pixelRatio: 2,
+        );
+        final inputFinder = find.byKey(const Key('parse-input'));
+        await tester.showKeyboard(inputFinder);
+        const draft = TextEditingValue(
+          text: '分享链接和未完成的拼音',
+          selection: TextSelection.collapsed(offset: 11),
+          composing: TextRange(start: 5, end: 11),
+        );
+        tester.testTextInput.updateEditingValue(draft);
+        await tester.pump();
+        final editor = tester.state(
+          find.descendant(of: inputFinder, matching: find.byType(EditableText)),
+        );
+        for (final next in [const Size(800, 1280), const Size(1280, 800)]) {
+          tester.view.physicalSize = next * 2;
+          await tester.pumpAndSettle();
+          expect(
+            tester.state(
+              find.descendant(
+                of: inputFinder,
+                matching: find.byType(EditableText),
+              ),
+            ),
+            same(editor),
+          );
+          expect(page.currentState!.focus.hasFocus, isTrue);
+          expect(page.currentState!.input.value, draft);
+          expect(tester.testTextInput.isVisible, isTrue);
+          expect(tester.takeException(), isNull);
+        }
+      },
+      platform: platform,
+    );
+  }
 
   for (final platform in [TargetPlatform.android, TargetPlatform.windows]) {
     scenario('$platform narrow large-text QR entry stays accessible', (

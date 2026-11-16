@@ -373,18 +373,21 @@ class _FloatingSurfaceState extends State<_FloatingSurface> {
               ),
               child: Transform.scale(
                 scale: controller.preferences.videoScale,
-                child:
-                    controller.backend?.buildVideo(
-                      fit: switch (controller.preferences.fit) {
-                        PlaybackFit.contain => BoxFit.contain,
-                        PlaybackFit.cover => BoxFit.cover,
-                        PlaybackFit.stretch => BoxFit.fill,
-                      },
-                      aspectRatio: controller.preferences.aspectRatio > 0
-                          ? controller.preferences.aspectRatio
-                          : controller.videoGeometry?.aspectRatio,
-                    ) ??
-                    const SizedBox.expand(),
+                child: Transform.rotate(
+                  angle: controller.preferences.videoRotation * math.pi / 180,
+                  child:
+                      controller.backend?.buildVideo(
+                        fit: switch (controller.preferences.fit) {
+                          PlaybackFit.contain => BoxFit.contain,
+                          PlaybackFit.cover => BoxFit.cover,
+                          PlaybackFit.stretch => BoxFit.fill,
+                        },
+                        aspectRatio: controller.preferences.aspectRatio > 0
+                            ? controller.preferences.aspectRatio
+                            : controller.videoGeometry?.aspectRatio,
+                      ) ??
+                      const SizedBox.expand(),
+                ),
               ),
             ),
             if (controller.preferences.subtitles)

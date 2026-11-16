@@ -1211,85 +1211,100 @@ class ParsePageState extends State<ParsePage> {
         },
       );
     }
-    final pasteControl = InkWell(
-      key: const Key('parse-paste'),
-      onTap: working ? null : paste,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Row(
-          children: [
-            Icon(
-              CupertinoIcons.doc_text,
-              color: themeAccent(context),
-              size: 27,
-            ),
-            const SizedBox(width: 17),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '粘贴内容',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 3),
-                  recognitionControl,
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-    final historyControl = TextButton.icon(
-      key: const Key('parse-history'),
-      onPressed: working ? null : _history,
-      style: TextButton.styleFrom(
-        backgroundColor: themeAccent(context).withValues(alpha: .11),
-        foregroundColor: themeAccent(context),
-        minimumSize: const Size(0, 32),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-        shape: const StadiumBorder(),
-      ),
-      icon: const Icon(CupertinoIcons.clock, size: 17),
-      label: const Text(
-        '历史',
-        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-      ),
-    );
-    final tools = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        IconButton(
-          key: const Key('parse-qr'),
-          tooltip: _readingQr ? '正在识别二维码' : '识别二维码',
-          onPressed: qrEnabled ? _readQr : null,
-          color: themeAccent(context),
-          icon: qrIcon,
-        ),
-        const SizedBox(width: 4),
-        historyControl,
-      ],
-    );
     return LayoutBuilder(
       builder: (context, bounds) {
-        if (bounds.maxWidth < 300 ||
-            MediaQuery.textScalerOf(context).scale(14) > 21) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              pasteControl,
-              const SizedBox(height: 8),
-              Align(alignment: Alignment.centerRight, child: tools),
-            ],
-          );
-        }
+        final compact =
+            bounds.maxWidth < 300 ||
+            MediaQuery.textScalerOf(context).scale(14) > 21;
+        // Keep both actions beside the title on narrow screens and large text.
+        // Compact icons leave room for the text without shrinking system fonts.
+        final pasteControl = InkWell(
+          key: const Key('parse-paste'),
+          onTap: working ? null : paste,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              children: [
+                if (!compact) ...[
+                  Icon(
+                    CupertinoIcons.doc_text,
+                    color: themeAccent(context),
+                    size: 27,
+                  ),
+                  const SizedBox(width: 17),
+                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '粘贴内容',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      recognitionControl,
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+        final historyControl = compact
+            ? IconButton(
+                key: const Key('parse-history'),
+                tooltip: '历史解析',
+                onPressed: working ? null : _history,
+                constraints: const BoxConstraints.tightFor(
+                  width: 48,
+                  height: 48,
+                ),
+                style: IconButton.styleFrom(
+                  backgroundColor: themeAccent(context).withValues(alpha: .11),
+                  foregroundColor: themeAccent(context),
+                ),
+                icon: const Icon(CupertinoIcons.clock, size: 20),
+              )
+            : TextButton.icon(
+                key: const Key('parse-history'),
+                onPressed: working ? null : _history,
+                style: TextButton.styleFrom(
+                  backgroundColor: themeAccent(context).withValues(alpha: .11),
+                  foregroundColor: themeAccent(context),
+                  minimumSize: const Size(0, 48),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 7,
+                  ),
+                  shape: const StadiumBorder(),
+                ),
+                icon: const Icon(CupertinoIcons.clock, size: 17),
+                label: const Text(
+                  '历史',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                ),
+              );
         return Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Expanded(child: pasteControl),
             const SizedBox(width: 8),
-            tools,
+            IconButton(
+              key: const Key('parse-qr'),
+              tooltip: _readingQr ? '正在识别二维码' : '识别二维码',
+              onPressed: qrEnabled ? _readQr : null,
+              color: themeAccent(context),
+              constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+              icon: qrIcon,
+            ),
+            const SizedBox(width: 4),
+            historyControl,
           ],
         );
       },
@@ -1356,16 +1371,18 @@ class ParsePageState extends State<ParsePage> {
           children: [
             Icon(CupertinoIcons.add_circled_solid, size: 18),
             SizedBox(width: 8),
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  '添加BT',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                ),
-                SizedBox(height: 2),
-                Text('选择种子文件', style: TextStyle(fontSize: 10, height: 1.2)),
-              ],
+            Flexible(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '添加BT',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
+                  SizedBox(height: 2),
+                  Text('选择种子文件', style: TextStyle(fontSize: 10, height: 1.2)),
+                ],
+              ),
             ),
           ],
         ),
@@ -1573,6 +1590,7 @@ class ParsePageState extends State<ParsePage> {
       TargetPlatform.windows,
       TargetPlatform.macOS,
     }.contains(Theme.of(context).platform);
+    final tablet = !desktop && MediaQuery.sizeOf(context).shortestSide >= 600;
     final hint = Theme.of(context).brightness == Brightness.dark
         ? const Color(0xff77777c)
         : const Color(0xffc4c4c7);
@@ -1628,7 +1646,7 @@ class ParsePageState extends State<ParsePage> {
                   controller: input,
                   focusNode: focus,
                   readOnly: working,
-                  minLines: desktop ? 6 : 4,
+                  minLines: desktop || tablet ? 6 : 4,
                   maxLines: desktop ? 10 : 7,
                   style: TextStyle(fontSize: desktop ? 14 : 16, height: 1.6),
                   decoration: InputDecoration(
@@ -1815,6 +1833,7 @@ class ParsePageState extends State<ParsePage> {
             ),
           );
           final parseTools = Column(
+            key: const Key('parse-tools'),
             children: [
               form,
               const SizedBox(height: 18),
@@ -1983,19 +2002,47 @@ class ParsePageState extends State<ParsePage> {
           return ListView(
             key: const PageStorageKey('parse'),
             padding: EdgeInsets.fromLTRB(
-              bounds.maxWidth > 720 ? (bounds.maxWidth - 680) / 2 : 18,
+              tablet ? 28 : 18,
               18,
-              bounds.maxWidth > 720 ? (bounds.maxWidth - 680) / 2 : 18,
+              tablet ? 28 : 18,
               28 + MediaQuery.paddingOf(context).bottom,
             ),
             children: [
-              parseTools,
-              const SizedBox(height: 18),
-              favorites,
-              const SizedBox(height: 18),
-              recent,
-              const SizedBox(height: 18),
-              support,
+              LayoutBuilder(
+                builder: (context, contentBounds) {
+                  final twoColumns =
+                      tablet &&
+                      contentBounds.maxWidth >= 980 &&
+                      MediaQuery.textScalerOf(context).scale(14) <= 21;
+                  final sidebarWidth = twoColumns
+                      ? (contentBounds.maxWidth * .3).clamp(300.0, 400.0)
+                      : contentBounds.maxWidth;
+                  final formWidth = twoColumns
+                      ? contentBounds.maxWidth - sidebarWidth - 22
+                      : contentBounds.maxWidth;
+                  // Keep the same children when resizing or rotating so the
+                  // editor retains focus, selection and composing text.
+                  return Wrap(
+                    spacing: 22,
+                    runSpacing: 18,
+                    children: [
+                      SizedBox(width: formWidth, child: parseTools),
+                      SizedBox(
+                        width: sidebarWidth,
+                        child: Column(
+                          children: [
+                            favorites,
+                            const SizedBox(height: 18),
+                            recent,
+                            const SizedBox(height: 18),
+                            support,
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
             ],
           );
         },

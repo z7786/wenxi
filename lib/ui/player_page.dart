@@ -9,6 +9,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:asterlink/playback/playback_state.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
@@ -138,6 +139,15 @@ class _PlayerPageState extends State<PlayerPage>
   final _surfaceTouches = <int, Offset>{};
   bool _multiTouch = false, _pinching = false, _pinchChanged = false;
   double _pinchInitialSpan = 0, _pinchInitialScale = 1, _pinchRenderScale = 1;
+  double _pinchInitialRotation = 0,
+      _pinchLastAngle = 0,
+      _pinchRotationDelta = 0;
+  Offset _pinchInitialFocal = Offset.zero, _pinchInitialOffset = Offset.zero;
+  Size _pinchViewport = Size.zero;
+  PlaybackPreferences? _pinchPreview;
+  int? _pinchPreviewFrame;
+  Timer? _pinchResetTimer;
+  bool _pinchResetVisible = false, _pinchResetShown = false;
   int _pinchGeneration = -1, _touchSequence = 0, _multiTouchSequence = -1;
   DoubleTapGestureRecognizer? _doubleTapGesture;
   int? _lastSingleTapPointer;
@@ -272,6 +282,8 @@ class _PlayerPageState extends State<PlayerPage>
       }
     }
     if (_seenGeneration != controller.generation) {
+      _discardPinchPreview();
+      _hidePinchReset(refresh: false);
       _saveBrightnessGesture();
       _volumeTimer?.cancel();
       _volumeTimer = null;
@@ -291,6 +303,14 @@ class _PlayerPageState extends State<PlayerPage>
       _pauseWithoutControls = false;
       locked = false;
       visible = true;
+    }
+    if (controller.casting ||
+        controller.playingExternally ||
+        controller.openingExternalPlayer ||
+        controller.usingSystemPip ||
+        controller.preparingSystemPip) {
+      _finishPinch(refresh: false);
+      _hidePinchReset(refresh: false);
     }
     if (controller.notice.isNotEmpty && controller.notice != _seenNotice) {
       _seenNotice = controller.notice;
@@ -582,7 +602,10 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _onDevice() {
     if (mounted) {
-      if (device.inPip) _finishPinch();
+      if (device.inPip) {
+        _finishPinch();
+        _hidePinchReset(refresh: false);
+      }
       if (device.inPip && _editingLayout) _cancelLayout();
       if (device.supportsSystemVolume) {
         _run(
@@ -605,6 +628,7 @@ class _PlayerPageState extends State<PlayerPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final revision = ++_lifecycleRevision;
+    if (state != AppLifecycleState.resumed) _hidePinchReset();
     if (state != AppLifecycleState.resumed && _pinching) {
       _finishPinch();
       _surfaceTouches.clear();
@@ -644,6 +668,7 @@ class _PlayerPageState extends State<PlayerPage>
     _hudTimer?.cancel();
     _volumeTimer?.cancel();
     _boostIndicatorTimer?.cancel();
+    _hidePinchReset(refresh: false);
     _chrome.dispose();
     _nativeSubtitleTimer?.cancel();
     _lockTimer?.cancel();
@@ -986,6 +1011,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _toggleLock() {
     _finishPinch();
+    _hidePinchReset(refresh: false);
     _hideTimer?.cancel();
     _hudTimer?.cancel();
     _lockTimer?.cancel();
@@ -1026,6 +1052,8 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
     if (_pipBusy) return;
+    _finishPinch(refresh: false);
+    _hidePinchReset(refresh: false);
     if (controller.usingSystemPip) {
       await controller.restoreSystemPip(resume: true);
       return;
@@ -1070,6 +1098,8 @@ class _PlayerPageState extends State<PlayerPage>
       _showHud('请先断开电视投屏');
       return;
     }
+    _finishPinch(refresh: false);
+    _hidePinchReset(refresh: false);
     _pipBusy = true;
     final route = ModalRoute.of(context);
     final navigator = Navigator.of(context);
@@ -1143,9 +1173,12 @@ class _PlayerPageState extends State<PlayerPage>
       !device.inPip &&
       !_pipBusy;
 
-  double get _touchSpan => _surfaceTouches.length == 2
-      ? (_surfaceTouches.values.first - _surfaceTouches.values.last).distance
-      : 0;
+  Offset get _touchVector => _surfaceTouches.length == 2
+      ? _surfaceTouches.values.last - _surfaceTouches.values.first
+      : Offset.zero;
+
+  Offset get _touchFocal =>
+      (_surfaceTouches.values.first + _surfaceTouches.values.last) / 2;
 
   void _surfacePointerDown(PointerDownEvent event) {
     if (Platform.isWindows &&
@@ -1184,6 +1217,7 @@ class _PlayerPageState extends State<PlayerPage>
       if (_canPinch) {
         _pinching = true;
         _pinchChanged = false;
+        _pinchResetShown = false;
         _pinchGeneration = controller.generation;
         _pinchRenderScale = controller.preferences.videoScale;
         _rebasePinch();
@@ -1195,16 +1229,28 @@ class _PlayerPageState extends State<PlayerPage>
         _showLock();
       }
     } else if (_pinching) {
-      // Adding a third finger suspends scaling. Rebase when two remain so that
-      // replacing a finger cannot jump to an unrelated span.
+      // Keep the last preview, then suspend all transforms while three fingers
+      // are down. Rebase the focal point and angle when two remain.
+      _flushPinchPreview();
       _pinchInitialSpan = 0;
     }
     if (_multiTouch) _clearTapSequence();
   }
 
   void _rebasePinch() {
-    _pinchInitialSpan = _touchSpan;
-    _pinchInitialScale = controller.preferences.videoScale;
+    _flushPinchPreview();
+    final value = controller.preferences;
+    _pinchViewport = Size(_viewportWidth, _viewportHeight);
+    _pinchInitialSpan = _touchVector.distance;
+    _pinchLastAngle = _touchVector.direction;
+    _pinchRotationDelta = 0;
+    _pinchInitialScale = value.videoScale;
+    _pinchInitialRotation = value.videoRotation;
+    _pinchInitialFocal = _touchFocal;
+    _pinchInitialOffset = Offset(
+      value.videoOffsetX * _viewportWidth / 2,
+      value.videoOffsetY * _viewportHeight / 2,
+    );
   }
 
   void _surfacePointerMove(PointerMoveEvent event) {
@@ -1215,24 +1261,140 @@ class _PlayerPageState extends State<PlayerPage>
       _finishPinch();
       return;
     }
-    final span = _touchSpan;
-    if (_pinchInitialSpan <= 0) {
+    final vector = _touchVector, span = vector.distance;
+    if (span < 1) {
+      // Overlapping fingers have no reliable angle. Rebase once separated.
+      _pinchInitialSpan = 0;
+      return;
+    }
+    if (_pinchInitialSpan < 1 ||
+        _pinchViewport != Size(_viewportWidth, _viewportHeight)) {
       _rebasePinch();
       return;
     }
+    final angle = vector.direction, delta = angle - _pinchLastAngle;
+    // Accumulate the shortest change, including crossings of +/-180 degrees.
+    _pinchRotationDelta += math.atan2(math.sin(delta), math.cos(delta));
+    _pinchLastAngle = angle;
     final scale = (_pinchInitialScale * span / _pinchInitialSpan)
         .clamp(.5, 3.0)
         .toDouble();
-    if ((scale - controller.preferences.videoScale).abs() < .001) return;
+    final center = _pinchViewport.center(Offset.zero);
+    final anchor = _pinchInitialFocal - center - _pinchInitialOffset;
+    final cosine = math.cos(_pinchRotationDelta);
+    final sine = math.sin(_pinchRotationDelta);
+    final rotated = Offset(
+      anchor.dx * cosine - anchor.dy * sine,
+      anchor.dx * sine + anchor.dy * cosine,
+    );
+    // Keep the selected video point under the moving midpoint, including when
+    // the scale reaches its limits or the video was already transformed.
+    final offset =
+        _touchFocal - center - rotated * (scale / _pinchInitialScale);
+    final value = controller.preferences.copyWith(
+      videoScale: scale,
+      videoOffsetX: offset.dx * 2 / _pinchViewport.width,
+      videoOffsetY: offset.dy * 2 / _pinchViewport.height,
+      videoRotation:
+          _pinchInitialRotation + _pinchRotationDelta * 180 / math.pi,
+    );
+    final previous = _pinchPreview ?? controller.preferences;
+    if ((value.videoScale - previous.videoScale).abs() < .0001 &&
+        (value.videoRotation - previous.videoRotation).abs() < .01 &&
+        (value.videoOffsetX - previous.videoOffsetX).abs() *
+                _pinchViewport.width <
+            .1 &&
+        (value.videoOffsetY - previous.videoOffsetY).abs() *
+                _pinchViewport.height <
+            .1) {
+      return;
+    }
     _pinchChanged = true;
+    _showPinchReset();
+    _pinchPreview = value;
+    // Both fingers can report several events per display frame. Apply only the
+    // latest combined transform, with no preference writes during movement.
+    _pinchPreviewFrame ??= SchedulerBinding.instance.scheduleFrameCallback((_) {
+      _pinchPreviewFrame = null;
+      _flushPinchPreview();
+    });
+  }
+
+  String _pinchHud(PlaybackPreferences value) =>
+      '缩放  ${(value.videoScale * 100).round()}%'
+      '${value.videoRotation.abs() < .5 ? '' : ' · 旋转 ${value.videoRotation.round()}°'}';
+
+  void _discardPinchPreview() {
+    final frame = _pinchPreviewFrame;
+    if (frame != null) {
+      SchedulerBinding.instance.cancelFrameCallbackWithId(frame);
+    }
+    _pinchPreviewFrame = null;
+    _pinchPreview = null;
+  }
+
+  void _flushPinchPreview() {
+    final preview = _pinchPreview;
+    _discardPinchPreview();
+    if (preview == null ||
+        _pinchGeneration != controller.generation ||
+        controller.closed) {
+      return;
+    }
+    final value = controller.preferences.copyWith(
+      videoScale: preview.videoScale,
+      videoOffsetX: preview.videoOffsetX,
+      videoOffsetY: preview.videoOffsetY,
+      videoRotation: preview.videoRotation,
+    );
+    _run(() => controller.updatePreferences(value, save: false));
+    final text = _pinchHud(value);
+    if (mounted && _pinching && hud != text) setState(() => hud = text);
+  }
+
+  void _showPinchReset() {
+    if (_pinchResetShown) return;
+    _pinchResetShown = true;
+    _pinchResetTimer?.cancel();
+    setState(() => _pinchResetVisible = true);
+    // Moves and finger replacement do not extend this three-second prompt.
+    _pinchResetTimer = Timer(const Duration(seconds: 3), _hidePinchReset);
+  }
+
+  void _hidePinchReset({bool refresh = true}) {
+    _pinchResetTimer?.cancel();
+    _pinchResetTimer = null;
+    final changed = _pinchResetVisible;
+    _pinchResetVisible = false;
+    if (refresh && changed && mounted) setState(() {});
+  }
+
+  void _resetVideoTransform() {
+    if (!_canPinch) return;
+    _discardPinchPreview();
+    _hidePinchReset(refresh: false);
+    _hudTimer?.cancel();
+    _clearTapSequence();
+    _pinchChanged = false;
     _run(
       () => controller.updatePreferences(
-        controller.preferences.copyWith(videoScale: scale),
-        save: false,
+        controller.preferences.copyWith(
+          videoScale: 1,
+          videoOffsetX: 0,
+          videoOffsetY: 0,
+          videoRotation: 0,
+        ),
       ),
     );
-    final text = '缩放  ${(scale * 100).round()}%';
-    if (hud != text) setState(() => hud = text);
+    if (_pinching) {
+      _pinchRenderScale = 1;
+      if (_surfaceTouches.length == 2) {
+        _rebasePinch();
+      } else {
+        _pinchInitialSpan = 0;
+      }
+    }
+    setState(() => hud = '');
   }
 
   void _surfacePointerEnd(PointerEvent event) {
@@ -1264,16 +1426,21 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _finishPinch({bool refresh = true}) {
     if (!_pinching) return;
+    _pinching = false;
+    _flushPinchPreview();
     final save =
         _pinchChanged &&
         _pinchGeneration == controller.generation &&
         !controller.closed;
-    _pinching = _pinchChanged = false;
+    _pinchChanged = false;
     if (save) {
       _run(() => controller.updatePreferences(controller.preferences));
     }
     if (refresh && mounted) {
-      _showHud('缩放  ${(controller.preferences.videoScale * 100).round()}%');
+      _showHud(_pinchHud(controller.preferences));
+    } else {
+      _hudTimer?.cancel();
+      hud = '';
     }
   }
 
@@ -1545,6 +1712,8 @@ class _PlayerPageState extends State<PlayerPage>
     bool previewSubtitles = false,
   }) async {
     if (_activePanel != null || device.inPip) return;
+    _finishPinch(refresh: false);
+    _hidePinchReset();
     _modalDepth++;
     _hideTimer?.cancel();
     // Show the selected subtitle position while the side panel is open, rather
@@ -2100,6 +2269,8 @@ class _PlayerPageState extends State<PlayerPage>
 
   Future<void> _layout() async {
     if (_editingLayout || device.inPip || !mounted) return;
+    _finishPinch(refresh: false);
+    _hidePinchReset(refresh: false);
     _hideTimer?.cancel();
     _clearTapSequence();
     _modalDepth++;
@@ -2900,6 +3071,28 @@ class _PlayerPageState extends State<PlayerPage>
     return math.max(safeTop + 12, videoTop + gap);
   }
 
+  double _pinchResetTop(
+    Size viewport,
+    EdgeInsets insets,
+    TextScaler textScaler,
+  ) {
+    var top = _boostIndicatorTop(viewport, insets.top);
+    if (visible) {
+      final titleHeight = math.max(44.0, textScaler.scale(15) * 1.4);
+      final resolutionHeight =
+          _chromePreferences.showResolution && _resolutionLabel != null
+          ? textScaler.scale(11) * 1.4 + 8
+          : 0.0;
+      top = math.max(
+        top,
+        insets.top +
+            (titleHeight + resolutionHeight + 30) *
+                _chromePreferences.controlsScale,
+      );
+    }
+    return math.min(top, math.max(0, viewport.height - insets.bottom - 48));
+  }
+
   Widget _boostSetting() => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
@@ -3022,6 +3215,8 @@ class _PlayerPageState extends State<PlayerPage>
     if (_leaving || controller.openingExternalPlayer || controller.loading) {
       return;
     }
+    _finishPinch(refresh: false);
+    _hidePinchReset();
     _modalDepth++;
     _hideTimer?.cancel();
     try {
@@ -3361,7 +3556,15 @@ class _PlayerPageState extends State<PlayerPage>
                                   scale: desktopPip
                                       ? 1
                                       : controller.preferences.videoScale,
-                                  child: video,
+                                  child: Transform.rotate(
+                                    key: const Key('player-video-rotation'),
+                                    angle: desktopPip
+                                        ? 0
+                                        : controller.preferences.videoRotation *
+                                              math.pi /
+                                              180,
+                                    child: video,
+                                  ),
                                 ),
                               ),
                             ),
@@ -3736,6 +3939,39 @@ class _PlayerPageState extends State<PlayerPage>
                                   color: Colors.white,
                                   fontSize: 15,
                                 ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (_pinchResetVisible && _canPinch)
+                        Positioned(
+                          top: _pinchResetTop(
+                            box.biggest,
+                            insets,
+                            media.textScaler,
+                          ),
+                          left: 16 + insets.left,
+                          right: 16 + insets.right,
+                          child: Align(
+                            child: TextButton.icon(
+                              key: const Key('player-pinch-reset'),
+                              onPressed: _resetVideoTransform,
+                              icon: const Icon(
+                                CupertinoIcons.arrow_counterclockwise,
+                                size: 16,
+                              ),
+                              label: const Text('还原屏幕'),
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.white,
+                                backgroundColor: const Color(0xb320232a),
+                                minimumSize: const Size(0, 48),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                textStyle: const TextStyle(fontSize: 13),
                               ),
                             ),
                           ),
