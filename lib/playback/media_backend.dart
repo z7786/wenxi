@@ -246,6 +246,16 @@ class MediaKitBackend extends PlaybackBackend {
         if (hint != null) {
           _failureHint = hint;
           _hintAt = DateTime.now();
+          if (hint.decoderUnavailable &&
+              native is NativePlayer &&
+              (value.prefix == 'ffmpeg' || value.prefix == 'ffmpeg/video') &&
+              _video != null &&
+              _hardwareAcceleration &&
+              _wantsPlay &&
+              state.playing &&
+              !state.completed) {
+            _reportFailure(hint, origin: 'mediacodec_released');
+          }
         }
       }),
     );
@@ -254,8 +264,6 @@ class MediaKitBackend extends PlaybackBackend {
         if (_closing) return;
         DiagnosticLog.error('player.backend', value, null);
         // media_kit also emits recoverable TCP and decoder log lines here.
-        // Native playback is failed only by END_FILE_REASON_ERROR or by a
-        // demanded proxy read that can no longer return verified bytes.
         if (native is! NativePlayer &&
             !RegExp(
               r'subtitle|sub-add',
@@ -1093,8 +1101,6 @@ class MediaKitBackend extends PlaybackBackend {
     _resumeBufferSeconds = resume;
   });
 
-  // Native getProperty is synchronous FFI even though it returns a Future.
-  // Yield an event turn between reads so frame notifications can be serviced.
   Future<String> _readProperty(NativePlayer native, String name) async {
     await Future<void>.delayed(Duration.zero);
     if (_closing) return '';

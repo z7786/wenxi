@@ -1041,6 +1041,7 @@ class PlaybackController extends ChangeNotifier {
         connectingCast ||
         usingSystemPip ||
         openingExternalPlayer ||
+        session.backend.failure?.decoderUnavailable == true ||
         session.backend.failure?.kind != PlaybackFailureKind.decoder) {
       return false;
     }

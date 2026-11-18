@@ -1,2 +1,2 @@
 // Generated from pubspec.yaml by tool/sync_version.dart. Do not edit by hand.
-const applicationVersion = '2.3.5+235';
+const applicationVersion = '2.3.5+236';

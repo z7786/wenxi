@@ -9,6 +9,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 // ignore: implementation_imports
 import 'package:media_kit_video/src/video_controller/android_video_controller/real.dart';
 import 'package:asterlink/playback/media_backend.dart';
+import 'package:asterlink/domain/models.dart';
 import 'support.dart';
 
 class _FixtureOutput extends PlatformVideoController {
@@ -24,11 +25,14 @@ class _RecordingNative extends NativePlayer {
   final properties = <(String, String)>[];
   int seeks = 0;
   void emitVideoParams(VideoParams value) => videoParamsController.add(value);
+  void emitErrorLog(String prefix, String text) =>
+      logController.add(PlayerLog(prefix: prefix, level: 'error', text: text));
   @override
   Future<void> setProperty(
     String property,
     String value, {
     bool waitForInitialization = true,
+    Duration timeout = const Duration(seconds: 5),
   }) async {
     properties.add((property, value));
     if (!platformOnly) {
@@ -111,6 +115,70 @@ void main() {
           },
         );
       }
+      test(
+        'A released MediaCodec during playback reports once without END_FILE',
+        () async {
+          final native = _RecordingNative();
+          await native.setProperty('ao', 'null');
+          final player = Player(platformPlayer: native);
+          final backend = MediaKitBackend(video: true, player: player);
+          backend.videoController!.platform.complete(
+            _FixtureOutput(player, const VideoControllerConfiguration()),
+          );
+          native.videoControllerCompleter.complete();
+          addTearDown(backend.close);
+          final failures = <int>[];
+          final subscription = native.playbackFailures.listen(failures.add);
+          addTearDown(subscription.cancel);
+          await backend.open(
+            DownloadSpec(
+              url: File('test/fixtures/player-sample.mkv').absolute.path,
+              fileName: 'sample.mkv',
+            ),
+            Duration.zero,
+          );
+          const released =
+              'amediacodec: flush() is valid only at Executing states; currently at Released state';
+          Future<void> emit(String prefix, String text) async {
+            final delivered = player.stream.log.firstWhere(
+              (entry) => entry.text == text,
+            );
+            native.emitErrorLog(prefix, text);
+            await delivered;
+          }
+
+          await emit('ffmpeg', released);
+          expect(backend.failure, isNull);
+          await backend.play();
+          await until(
+            () =>
+                player.state.playing &&
+                player.state.position.inMilliseconds > 100,
+          );
+          await emit(
+            'ffmpeg/video',
+            'h264_mediacodec: Both surface and native_window are NULL',
+          );
+          await emit(
+            'vo/gpu/aimagereader',
+            'acquireLatestImage failed: -30001',
+          );
+          await emit('ffmpeg/audio', released);
+          await emit(
+            'ffmpeg/video',
+            'h264_mediacodec: Failed to dequeue output buffer (status=-542398533)',
+          );
+          expect(backend.errorRevision, 0);
+          await emit('ffmpeg', released);
+          await emit(
+            'ffmpeg/video',
+            'h264_mediacodec: Failed to dequeue output buffer (status=-542398533)',
+          );
+          expect(backend.failure?.decoderUnavailable, isTrue);
+          expect(backend.errorRevision, 1);
+          expect(failures, isEmpty);
+        },
+      );
       for (final emulator in [false, true]) {
         test(
           'Android resize retains seek and playback state, emulator=$emulator',
