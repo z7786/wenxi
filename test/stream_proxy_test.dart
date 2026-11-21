@@ -209,6 +209,48 @@ void main() {
     return builder.takeBytes();
   }
 
+  for (final isolated in [false, true]) {
+    test(
+      'Memory pressure trims idle ranges and preserves exact streaming (worker: $isolated)',
+      () async {
+        if (isolated) {
+          await proxy.close();
+          proxy = IsolatedPlaybackStreamProxy(
+            DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+            connections: 4,
+            chunkBytes: 8192,
+            maxCacheBytes: 32768,
+            onFailure: failures.add,
+          );
+        }
+        expect(await proxy.start(), isTrue);
+        expect(await read(0, 24000), origin.bytes.sublist(0, 24001));
+        await until(() => proxy.activeRequests == 0 && proxy.cachedBytes > 0);
+        final before = proxy.cachedBytes;
+        expect(await proxy.trimMemoryAsync(), greaterThan(0));
+        expect(proxy.cachedBytes, lessThan(before));
+        final barrier = Completer<void>();
+        origin.firstPacketBytes = 512;
+        origin.bodyRemainderBarrier = barrier.future;
+        final transfer = read(48000, 160000);
+        await until(() => proxy.activeRequests > 0);
+        await proxy.trimMemoryAsync();
+        barrier.complete();
+        expect(
+          await transfer.timeout(const Duration(seconds: 5)),
+          origin.bytes.sublist(48000, 160001),
+        );
+        expect(failures, isEmpty);
+        expect(
+          await read(250000, 290000),
+          origin.bytes.sublist(250000, 290001),
+        );
+        await proxy.close();
+        expect(await proxy.trimMemoryAsync(), 0);
+      },
+    );
+  }
+
   test(
     'Worker streams exact bytes, controls seek/pause and acknowledges cache budgets',
     () async {
@@ -1235,8 +1277,15 @@ void main() {
       expect(origin.peak, lessThanOrEqualTo(4));
       expect(proxy.cachedBytes, lessThanOrEqualTo(32768));
       expect(origin.cookies, everyElement('fixture=private'));
-      // Speculative reads beyond the consumed range may start while this
-      // request closes. Only overlapping requests indicate a cache miss.
+      // Let speculative reads settle before checking cache reuse: on a busy
+      // host their reserved bytes may evict the just-consumed range. Warm the
+      // complete paused chunk: a shorter read can cancel its unfinished suffix
+      // before it becomes a reusable completed cache entry.
+      proxy.setPaused(true);
+      await until(() => proxy.activeRequests == 0);
+      proxy.prepareSeek();
+      expect(await read(172100, 180223), origin.bytes.sublist(172100, 180224));
+      await until(() => proxy.activeRequests == 0);
       bool overlapsSeek((int, int) range) =>
           range.$1 <= 175000 && range.$2 >= 172100;
       final count = origin.calls.where(overlapsSeek).length;

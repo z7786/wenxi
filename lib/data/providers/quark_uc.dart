@@ -4,11 +4,13 @@ import 'dart:math' as math;
 import 'package:crypto/crypto.dart';
 
 import '../../core/json.dart';
+import '../../core/html_entities.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
 import '../http.dart';
 import '../uploads/upload_io.dart';
 import '../../core/operation_progress.dart';
+import '../../diagnostics/app_log.dart';
 
 part 'uploads/quark_upload.dart';
 
@@ -249,10 +251,12 @@ class QuarkUcConnector extends CloudConnector {
         if (!seen.add(j.str('fid'))) continue;
         added++;
         final checksum = quark ? '' : _md5(j.str('md5'));
+        final name = j.str('file_name').ifEmpty(j.str('fname'));
         result.add(
           CloudFile(
             id: j.str('fid'),
-            name: j.str('file_name').ifEmpty(j.str('fname')),
+            name: name,
+            displayName: quark ? unescapeDisplayName(name) : null,
             size: j.integer('size', j.integer('fsize')),
             isDirectory: j.boolean(
               'dir',
@@ -337,7 +341,7 @@ class QuarkUcConnector extends CloudConnector {
         await stageCleanup?.call(cleanup);
         final ids = await OperationProgress.step(
           OperationStage.transfer,
-          () => _save(session, [file], directory, cookie),
+          () => saveSharedFiles(session, [file], directory, cookie),
         );
         require(ids.isNotEmpty, '${platform.shortName}转存完成但未返回新文件 ID');
         require(
@@ -555,11 +559,12 @@ class QuarkUcConnector extends CloudConnector {
     Credential c,
   ) async {
     require(s.mode == BrowseMode.share, '请打开分享链接');
-    final ids = await _save(s, files, target, c.primary);
+    final ids = await saveSharedFiles(s, files, target, c.primary);
     require(ids.isNotEmpty, '${platform.shortName}转存完成但未返回新文件 ID');
   }
 
-  Future<List<String>> _save(
+  /// Shared by explicit saves and temporary download/playback transfers.
+  Future<List<String>> saveSharedFiles(
     BrowseSession s,
     List<CloudFile> files,
     String target,
@@ -608,7 +613,8 @@ class QuarkUcConnector extends CloudConnector {
         30 => 4,
         _ => 1,
       },
-      if (quark) 'support_error_code': ['41060'] else 'public_search': false,
+      // UC rejects a JSON boolean here; its web client sends numeric 0/1.
+      if (quark) 'support_error_code': ['41060'] else 'public_search': 0,
       if (passcode.isNotEmpty) 'passcode': passcode,
     }, c.primary);
     require(data.str('task_id').isNotEmpty, '创建分享未返回任务 ID');

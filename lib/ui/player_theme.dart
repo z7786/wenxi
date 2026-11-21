@@ -7,6 +7,7 @@ Color playerAccent(BuildContext context) => Color(
       .darkAccent,
 );
 const playerPanelColor = Color(0xff18191c);
+const playerInputColor = Color(0xff242529);
 
 /// Media controls stay readable over video regardless of the surrounding app theme.
 ThemeData playerTheme(ThemeData inherited) {
@@ -64,6 +65,39 @@ ThemeData playerTheme(ThemeData inherited) {
         foregroundColor: Colors.white,
         side: const BorderSide(color: Colors.white24),
       ),
+    ),
+    inputDecorationTheme: inherited.inputDecorationTheme.copyWith(
+      filled: true,
+      fillColor: playerInputColor,
+      focusColor: Colors.transparent,
+      hoverColor: Colors.white.withValues(alpha: .04),
+      labelStyle: const TextStyle(color: Colors.white70),
+      floatingLabelStyle: TextStyle(color: accent),
+      helperStyle: const TextStyle(color: Colors.white60),
+      hintStyle: const TextStyle(color: Colors.white54),
+      prefixIconColor: Colors.white60,
+      suffixIconColor: Colors.white60,
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Colors.white12),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Colors.white12),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(color: accent, width: 1.5),
+      ),
+      disabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Colors.white10),
+      ),
+    ),
+    textSelectionTheme: inherited.textSelectionTheme.copyWith(
+      cursorColor: accent,
+      selectionColor: accent.withValues(alpha: .28),
+      selectionHandleColor: accent,
     ),
     sliderTheme: inherited.sliderTheme.copyWith(
       activeTrackColor: accent,

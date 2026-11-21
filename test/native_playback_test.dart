@@ -61,6 +61,38 @@ void main() {
       }
 
       test(
+        'Paused/background sessions suspend native metric sampling and resume normally',
+        () async {
+          await open();
+          expect(backend.diagnosticFields['videoCodec'], isNull);
+          await Future<void>.delayed(const Duration(milliseconds: 2300));
+          expect(backend.diagnosticFields['hwdecRequested'], isNull);
+          backend.setVideoMonitoringEnabled(false);
+          await backend.play();
+          await Future<void>.delayed(const Duration(milliseconds: 2300));
+          expect(backend.diagnosticFields['hwdecRequested'], isNull);
+          backend.setVideoMonitoringEnabled(true);
+          await until(
+            () => backend.diagnosticFields.containsKey('hwdecRequested'),
+          );
+          expect(backend.failure, isNull);
+          await backend.pause();
+          final requests =
+              (player.platform as NativePlayer).pendingNativeRequests;
+          await Future<void>.delayed(const Duration(milliseconds: 2300));
+          expect(
+            (player.platform as NativePlayer).pendingNativeRequests,
+            lessThanOrEqualTo(requests),
+          );
+          await backend.seek(const Duration(seconds: 1));
+          await backend.play();
+          await until(
+            () => player.state.position > const Duration(milliseconds: 1300),
+          );
+        },
+      );
+
+      test(
         'Output frame availability and exact seeking use supported native properties',
         () async {
           final native = player.platform as NativePlayer;
@@ -345,13 +377,17 @@ void main() {
                   start + const Duration(milliseconds: 300),
             );
             await backend.pause();
-            await until(() => backend.screenInfo.bytesPerSecond != null);
             expect(backend.screenInfo.transport, 'direct');
-            expect(backend.screenInfo.bytesPerSecond, greaterThanOrEqualTo(0));
             expect(
               player.state.position,
               lessThan(start + const Duration(seconds: 2)),
             );
+            await backend.play();
+            await until(() => backend.screenInfo.bytesPerSecond != null);
+            expect(backend.screenInfo.bytesPerSecond, greaterThanOrEqualTo(0));
+            await backend.pause();
+            await Future<void>.delayed(const Duration(milliseconds: 2200));
+            expect(backend.screenInfo.bytesPerSecond, isNull);
           }
         },
       );

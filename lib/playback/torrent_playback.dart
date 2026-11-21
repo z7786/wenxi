@@ -13,6 +13,7 @@ import 'media_backend.dart';
 import 'delegating_backend.dart';
 import 'playback_backend_factory.dart';
 import 'playback_controller.dart';
+import 'playback_runtime.dart';
 
 typedef TorrentBackendFactory =
     PlaybackBackend Function(PlaybackEntry entry, bool hardware);
@@ -160,6 +161,9 @@ PlaybackController _playback(
         }
       }
     },
+    initializePlayback: backendFactory == null
+        ? PlaybackRuntime.shared.ensureInitialized
+        : null,
     backendFactory:
         backendFactory ??
         (entry, hardware) => TorrentMediaBackend(
@@ -177,10 +181,11 @@ class TorrentMediaBackend extends DelegatingPlaybackBackend {
     bool hardwareAcceleration = true,
     PlaybackBackend? delegate,
   }) : super(
-         delegate ?? createPlaybackBackend(
-           video: video,
-           hardwareAcceleration: hardwareAcceleration,
-         ),
+         delegate ??
+             createPlaybackBackend(
+               video: video,
+               hardwareAcceleration: hardwareAcceleration,
+             ),
        );
   final GopeedEngine engine;
   Json _torrentStats = {};

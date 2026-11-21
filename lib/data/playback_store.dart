@@ -1,6 +1,8 @@
+import 'dart:async';
 import '../core/json.dart';
 import '../domain/playback.dart';
 import '../domain/playback_source.dart';
+import '../domain/torrent.dart';
 import 'state_store.dart';
 
 class PlaybackStore {
@@ -9,6 +11,10 @@ class PlaybackStore {
   static final _pendingBookmarks = Expando<Map<String, PlaybackBookmark>>(
     'playback.pending',
   );
+  static final _writes = Expando<Map<String, _BookmarkWrite>>(
+    'playback.writes',
+  );
+  static final _removals = Expando<Map<String, Object>>('playback.removals');
   static final _pendingBrightness =
       Expando<Map<String, ({double value, Object token})>>(
         'playback.brightness',
@@ -22,7 +28,8 @@ class PlaybackStore {
   List<PlaybackRecord> get recent {
     final bookmarks = {
       for (final entry in store.data.obj('playbackHistory').entries)
-        if (entry.value is Map)
+        if (entry.value is Map &&
+            _removals[store]?.containsKey(entry.key) != true)
           entry.key: PlaybackBookmark.fromJson(asJson(entry.value)),
       ...?_pendingBookmarks[store],
     };
@@ -38,6 +45,7 @@ class PlaybackStore {
   PlaybackBookmark? bookmark(String key) {
     final pending = _pendingBookmarks[store]?[key];
     if (pending != null) return pending;
+    if (_removals[store]?.containsKey(key) == true) return null;
     final value = store.data.obj('playbackHistory')[key];
     return value is Map ? PlaybackBookmark.fromJson(asJson(value)) : null;
   }
@@ -175,66 +183,151 @@ class PlaybackStore {
           ),
         );
       });
-  Future<void> save(String key, PlaybackBookmark bookmark) {
+  Future<void> save(
+    String key,
+    PlaybackBookmark bookmark, {
+    bool touch = false,
+  }) {
     // A closing player can return before its durable write finishes. Every
     // PlaybackStore for this device sees the captured progress during that gap.
     final previous = this.bookmark(key);
+    var source = bookmark.source ?? previous?.source;
+    final oldSource = previous?.source;
+    // Coalescing may replace a rich in-memory BT origin with a restored origin.
+    // Retain auxiliary torrent data that an earlier queued save would persist.
+    if (source?.kind == PlaybackSourceKind.torrent &&
+        oldSource?.kind == PlaybackSourceKind.torrent &&
+        source!.torrentHash == oldSource!.torrentHash &&
+        (oldSource.torrentData.isNotEmpty ||
+            oldSource.torrentFiles.isNotEmpty)) {
+      source = PlaybackSource.torrent(
+        source.torrentHash,
+        TorrentFile(source.torrentIndex, source.path, source.size),
+        torrentData: source.torrentData.isNotEmpty
+            ? source.torrentData
+            : oldSource.torrentData,
+        torrentFiles: {
+          for (final file in oldSource.torrentFiles) file.index: file,
+          for (final file in source.torrentFiles) file.index: file,
+        }.values.toList(),
+      );
+    }
     final pending = PlaybackBookmark(
       position: bookmark.position,
       duration: bookmark.duration,
       updatedAt: bookmark.updatedAt,
       completed: bookmark.completed,
       name: bookmark.name,
-      source: bookmark.source ?? previous?.source,
+      source: source,
     );
     final bookmarks = _pendingBookmarks[store] ??= {};
+    final writes = _writes[store] ??= {};
+    if (!touch &&
+        _sameProgress(previous, pending) &&
+        !_needsTorrentCache(pending.source)) {
+      return writes[key]?.done.future ?? Future<void>.value();
+    }
     bookmarks[key] = pending;
-    return _save(key, bookmark).whenComplete(() {
-      // An older completion must not erase the next player's pending progress.
-      if (identical(bookmarks[key], pending)) bookmarks.remove(key);
-    });
+    final existing = writes[key];
+    if (existing != null) {
+      existing.latest = pending;
+      return existing.done.future;
+    }
+    final write = writes[key] = _BookmarkWrite(pending);
+    unawaited(_drain(key, write));
+    return write.done.future;
   }
 
-  Future<void> _save(String key, PlaybackBookmark bookmark) => store.change((
-    draft,
-  ) {
-    final history = draft.obj('playbackHistory');
-    final previous = asJson(history[key]);
-    history[key] = {
-      ...bookmark.toJson(),
-      if (bookmark.source == null && previous['source'] is Map)
-        'source': previous['source'],
-    };
-    final entries = history.entries.toList()
-      ..sort(
-        (a, b) => asJson(
-          b.value,
-        ).integer('updatedAt').compareTo(asJson(a.value).integer('updatedAt')),
-      );
-    draft['playbackHistory'] = Map.fromEntries(entries.take(historyLimit));
-    final source = bookmark.source;
-    if (source?.kind == PlaybackSourceKind.torrent &&
-        source!.torrentData.isNotEmpty) {
-      final cache = draft.obj('playbackTorrents');
-      final previous = asJson(cache.remove(source.torrentHash));
-      final files = <int, Json>{
-        for (final file in previous.list('files')) file.integer('index'): file,
-        for (final file in source.torrentFiles)
-          file.index: {
-            'index': file.index,
-            'path': file.path,
-            'size': file.size,
-          },
-      };
-      cache[source.torrentHash] = {
-        'hash': source.torrentHash,
-        'data': source.torrentData,
-        'files': files.values.toList(),
-      };
-      draft['playbackTorrents'] = cache;
+  static bool _sameProgress(PlaybackBookmark? a, PlaybackBookmark b) =>
+      a != null &&
+      a.position == b.position &&
+      a.duration == b.duration &&
+      a.completed == b.completed &&
+      a.name == b.name &&
+      (identical(a.source, b.source) ||
+          encoded(a.source?.toJson()) == encoded(b.source?.toJson()));
+
+  bool _needsTorrentCache(PlaybackSource? source) {
+    if (source == null ||
+        source.kind != PlaybackSourceKind.torrent ||
+        source.torrentData.isEmpty) {
+      return false;
     }
-    _pruneTorrents(draft);
-  });
+    final cached = store.data.obj('playbackTorrents').obj(source.torrentHash);
+    if (cached.str('data') != source.torrentData) return true;
+    final files = {for (final f in cached.list('files')) f.integer('index'): f};
+    return source.torrentFiles.any(
+      (f) =>
+          files[f.index]?.str('path') != f.path ||
+          files[f.index]?.integer('size') != f.size,
+    );
+  }
+
+  Future<void> _drain(String key, _BookmarkWrite write) async {
+    final writes = _writes[store]!;
+    try {
+      while (identical(writes[key], write)) {
+        PlaybackBookmark? committed;
+        await _save(key, () {
+          // Removal/clear invalidates queued writes, including across stores.
+          if (!identical(writes[key], write)) return null;
+          return committed = write.latest;
+        });
+        if (identical(committed, write.latest)) break;
+      }
+      write.done.complete();
+    } catch (error, stack) {
+      write.done.completeError(error, stack);
+    } finally {
+      if (identical(writes[key], write)) {
+        writes.remove(key);
+        _pendingBookmarks[store]?.remove(key);
+      }
+    }
+  }
+
+  Future<void> _save(String key, PlaybackBookmark? Function() latest) =>
+      store.change((draft) {
+        final bookmark = latest();
+        if (bookmark == null) return;
+        final history = draft.obj('playbackHistory');
+        final previous = asJson(history[key]);
+        history[key] = {
+          ...bookmark.toJson(),
+          if (bookmark.source == null && previous['source'] is Map)
+            'source': previous['source'],
+        };
+        final entries = history.entries.toList()
+          ..sort(
+            (a, b) => asJson(b.value)
+                .integer('updatedAt')
+                .compareTo(asJson(a.value).integer('updatedAt')),
+          );
+        draft['playbackHistory'] = Map.fromEntries(entries.take(historyLimit));
+        final source = bookmark.source;
+        if (source?.kind == PlaybackSourceKind.torrent &&
+            source!.torrentData.isNotEmpty) {
+          final cache = draft.obj('playbackTorrents');
+          final previous = asJson(cache.remove(source.torrentHash));
+          final files = <int, Json>{
+            for (final file in previous.list('files'))
+              file.integer('index'): file,
+            for (final file in source.torrentFiles)
+              file.index: {
+                'index': file.index,
+                'path': file.path,
+                'size': file.size,
+              },
+          };
+          cache[source.torrentHash] = {
+            'hash': source.torrentHash,
+            'data': source.torrentData,
+            'files': files.values.toList(),
+          };
+          draft['playbackTorrents'] = cache;
+        }
+        _pruneTorrents(draft);
+      });
   static void _pruneTorrents(Json draft) {
     final used = draft
         .obj('playbackHistory')
@@ -276,24 +369,54 @@ class PlaybackStore {
         completed: previous?.completed ?? false,
         updatedAt: DateTime.now().millisecondsSinceEpoch,
       ),
+      touch: true,
     );
   }
 
   Future<void> remove(String key) {
+    final token = Object();
+    final removals = _removals[store] ??= {};
+    removals[key] = token;
+    _writes[store]?.remove(key);
     _pendingBookmarks[store]?.remove(key);
-    return store.change((draft) {
-      draft['playbackHistory'] = draft.obj('playbackHistory')..remove(key);
-      draft['playbackVideoInfo'] = draft.obj('playbackVideoInfo')..remove(key);
-      _pruneTorrents(draft);
-    });
+    return store
+        .change((draft) {
+          draft['playbackHistory'] = draft.obj('playbackHistory')..remove(key);
+          draft['playbackVideoInfo'] = draft.obj('playbackVideoInfo')
+            ..remove(key);
+          _pruneTorrents(draft);
+        })
+        .whenComplete(() {
+          if (identical(removals[key], token)) removals.remove(key);
+        });
   }
 
   Future<void> clearHistory() {
+    final token = Object();
+    final removals = _removals[store] ??= {};
+    for (final key in {
+      ...store.data.obj('playbackHistory').keys,
+      ...?_pendingBookmarks[store]?.keys,
+      ...?_writes[store]?.keys,
+    }) {
+      removals[key] = token;
+    }
+    _writes[store]?.clear();
     _pendingBookmarks[store]?.clear();
-    return store.change((draft) {
-      draft['playbackHistory'] = <String, dynamic>{};
-      draft.remove('playbackVideoInfo');
-      draft.remove('playbackTorrents');
-    });
+    return store
+        .change((draft) {
+          draft['playbackHistory'] = <String, dynamic>{};
+          draft.remove('playbackVideoInfo');
+          draft.remove('playbackTorrents');
+        })
+        .whenComplete(
+          () => removals.removeWhere((_, value) => identical(value, token)),
+        );
   }
+}
+
+class _BookmarkWrite {
+  _BookmarkWrite(this.latest);
+  PlaybackBookmark latest;
+  final done = Completer<void>();
 }

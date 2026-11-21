@@ -12,6 +12,8 @@ enum OperationStage {
   parserQueue('等待解析'),
   serverParse('解析文件'),
   deleteDownloads('删除下载任务'),
+  deleteCrossTransfers('清理跨盘传输'),
+  stopCrossTransfers('等待跨盘传输停止'),
   waitDownloadOperation('等待任务操作完成'),
   stopDownloads('停止下载'),
   deleteFiles('删除本地文件'),

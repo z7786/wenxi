@@ -192,6 +192,9 @@ class IsolatedPlaybackStreamProxy extends PlaybackStreamProxy {
   @override
   bool resizeCache(int bytes) => false; // A remote resize needs acknowledgement.
   @override
+  Future<int> trimMemoryAsync() async =>
+      _closed ? 0 : (await _call('trimMemory') as int? ?? 0);
+  @override
   Future<bool> resizeCacheAsync(int bytes) async =>
       !_closed && await _call('resize', bytes) == true;
   @override
@@ -317,6 +320,8 @@ Future<void> _proxyWorker(Map<String, Object?> config) async {
           proxy.interruptReadForSeek();
         case 'resize':
           result = proxy.resizeCache(message['value'] as int);
+        case 'trimMemory':
+          result = await proxy.trimMemoryAsync();
         case 'throughput':
           final (received, required, buffering) =
               message['value'] as (double, double, bool);

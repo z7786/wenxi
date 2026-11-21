@@ -4,9 +4,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/quark_share_transfer.dart';
 import 'package:asterlink/domain/remote_control.dart';
 import 'package:asterlink/platform/file_access.dart';
+import 'package:asterlink/platform/quark_transfer_device.dart';
 import 'app_update_support.dart';
+import 'support.dart';
+
+// Synthetic mobile credentials shared with the independent signing vector.
+const _mobileKps =
+    'AASVvziY9xCitAbP9nqPFJEUGWMrUves7gInDbUtknHZ1+gXpTTh/OOcDdoVjpCVQrdHXX0SJCM25vH4QVXOXQHnManr8A76OxZcB/2QLeS8sw==';
 
 void main() {
   late UpdateFixture f;
@@ -29,8 +36,236 @@ void main() {
         jsonDecode(jsonEncode(task.toJson())),
       );
       expect(restored.spec.appUpdateKey, task.spec.appUpdateKey);
+      expect(
+        QuarkShareTransfer.prefersMobile(
+          DownloadOrigin.fromJson(restored.spec.source!).session,
+        ),
+        isFalse,
+      );
     },
   );
+
+  for (final platform in ['android', 'windows']) {
+    for (final rejectMobile in [false, true]) {
+      test(
+        '$platform Quark update ${platform != 'android'
+            ? 'always uses web transfer'
+            : rejectMobile
+            ? 'falls back to web'
+            : 'uses phone transfer'}',
+        () async {
+          final packageName = platform == 'android' ? 'app.apk' : 'setup.exe';
+          final http = FakeHttp((r) {
+            final mobile = r.uri.host == 'drive-m.quark.cn';
+            switch (r.uri.path) {
+              case '/account/info':
+                return jsonResponse({
+                  'success': true,
+                  'data': {'mobilekps': _mobileKps},
+                });
+              case '/1/clouddrive/config':
+                return jsonResponse({'status': 200, 'code': 0, 'data': {}});
+              case '/1/clouddrive/share/sharepage/token':
+                expect(r.json['passcode'], 'new1');
+                return jsonResponse({
+                  'status': 200,
+                  'code': 0,
+                  'data': {
+                    'stoken': mobile ? 'mobile-stoken' : 'web-stoken',
+                    'first_fid': '0',
+                  },
+                });
+              case '/1/clouddrive/share/sharepage/detail':
+                return jsonResponse({
+                  'status': 200,
+                  'code': 0,
+                  'data': {
+                    'list': [
+                      {
+                        'fid': 'package',
+                        'file_name': packageName,
+                        'size': 1024,
+                        'dir': false,
+                        'share_fid_token': mobile
+                            ? 'mobile-token'
+                            : 'web-token',
+                      },
+                    ],
+                  },
+                });
+              case '/1/clouddrive/file/sort':
+                return jsonResponse({
+                  'status': 200,
+                  'code': 0,
+                  'data': {
+                    'list': [
+                      {
+                        'fid': 'temp-base',
+                        'file_name': '文析助手临时转存',
+                        'dir': true,
+                      },
+                    ],
+                  },
+                });
+              case '/1/clouddrive/file':
+                return jsonResponse({
+                  'status': 200,
+                  'code': 0,
+                  'data': {'fid': 'temp-update'},
+                });
+              case '/1/clouddrive/share/sharepage/save':
+                if (mobile && rejectMobile) {
+                  return jsonResponse({'status': 400, 'code': 14007}, 400);
+                }
+                return jsonResponse({
+                  'status': 200,
+                  'code': 0,
+                  'data': {'task_id': mobile ? 'mobile-task' : 'web-task'},
+                });
+              case '/1/clouddrive/task':
+                return jsonResponse({
+                  'status': 200,
+                  'code': 0,
+                  'data': {
+                    'status': 2,
+                    'save_as': {
+                      'save_as_top_fids': ['saved-package'],
+                    },
+                  },
+                });
+              case '/1/clouddrive/file/download':
+                // Preserve the normal adaptive direct attempt before transfer.
+                if (r.json.containsKey('pwd_id')) {
+                  return jsonResponse({'status': 403, 'code': 23018}, 403);
+                }
+                expect(r.json['fids'], ['saved-package']);
+                return jsonResponse({
+                  'status': 200,
+                  'code': 0,
+                  'data': [
+                    {
+                      'fid': 'saved-package',
+                      'file_name': packageName,
+                      'size': 1024,
+                      'download_url': 'https://cdn.quark.cn/$packageName',
+                    },
+                  ],
+                });
+            }
+            throw StateError('Unexpected update request ${r.uri.path}');
+          });
+          f.close();
+          f = UpdateFixture(
+            platform: platform,
+            transport: http,
+            quarkTransferDevice: QuarkTransferDevice(
+              platform: platform,
+              readEnvironment: () async => {
+                'deviceType': 'phone',
+                'model': 'fixture-update-phone',
+                'osVersion': '15',
+                'screenWidth': 393,
+                'screenHeight': 852,
+                'locale': 'zh-Hans-CN',
+                'networkTransport': 'cellular',
+                'cellularSubtype': 13,
+              },
+            ),
+          );
+          await f.cloud.vault.putCredential(
+            CloudPlatform.quark,
+            Credential('fixture', {
+              'primary': '__pus=fixture-account; __puus=fixture-session',
+              'quarkSessionRefreshedAt':
+                  '${DateTime.now().millisecondsSinceEpoch}',
+            }, updatedAt: 42),
+          );
+          f.current = RemoteUpdate(
+            '1.2.0',
+            120,
+            Uri.parse('https://pan.quark.cn/s/updatefixture?pwd=old1'),
+            '',
+            // Exercise both the dedicated URL and downloadUrl fallback.
+            inAppDownloadUrl: platform == 'android'
+                ? Uri.parse('https://pan.quark.cn/s/updatefixture?pwd=old1')
+                : null,
+            inAppPasscode: 'new1',
+          );
+          expect(await f.service.start(f.current!), isTrue);
+          expect(
+            http.calls.where((r) => r.uri.path.endsWith('/save')),
+            isEmpty,
+          );
+          final restored = DownloadTask.fromJson(
+            jsonDecode(jsonEncode(f.downloads.tasks.single.toJson())),
+          );
+          final origin = DownloadOrigin.fromJson(restored.spec.source!);
+          expect(QuarkShareTransfer.prefersMobile(origin.session), isTrue);
+          expect(origin.session.sourceLink?.passcode, 'new1');
+          expect(restored.spec.appUpdateKey, f.service.keyFor(f.current!));
+          final prepared = await f.cloud.refresh(restored.spec);
+          expect(prepared.url, 'https://cdn.quark.cn/$packageName');
+          expect(prepared.cleanup?.url, contains('drive-pc.quark.cn'));
+          expect(
+            QuarkShareTransfer.prefersMobile(
+              DownloadOrigin.fromJson(prepared.source!).session,
+            ),
+            isTrue,
+          );
+          final mobileSaves = http.calls.where(
+            (r) =>
+                r.uri.host == 'drive-m.quark.cn' &&
+                r.uri.path.endsWith('/save'),
+          );
+          expect(mobileSaves, hasLength(platform == 'android' ? 1 : 0));
+          if (platform == 'android') {
+            final mobileSave = mobileSaves.single;
+            expect(mobileSave.json['fid_list'], ['package']);
+            expect(mobileSave.json['fid_token_list'], ['mobile-token']);
+            expect(mobileSave.json['to_pdir_fid'], 'temp-update');
+            expect(
+              mobileSave.uri.queryParameters['device_model'],
+              'fixture-update-phone',
+            );
+            expect(mobileSave.uri.queryParameters['ss'], '393x852');
+            expect(mobileSave.uri.queryParameters['la'], 'zh');
+            expect(mobileSave.uri.queryParameters['nt'], '6');
+            expect(mobileSave.uri.queryParameters['nw'], '4G');
+            expect(
+              mobileSave.uri.queryParameters['ve'],
+              QuarkTransferDeviceInfo.clientVersion,
+            );
+            expect(
+              mobileSave.headers.keys.map((k) => k.toLowerCase()),
+              isNot(contains('cookie')),
+            );
+          } else {
+            expect(
+              http.calls.where((r) => r.uri.host == 'drive-m.quark.cn'),
+              isEmpty,
+            );
+            expect(
+              http.calls.where((r) => r.uri.path == '/account/info'),
+              isEmpty,
+            );
+          }
+          final webSaves = http.calls.where(
+            (r) =>
+                r.uri.host == 'drive-pc.quark.cn' &&
+                r.uri.path.endsWith('/save'),
+          );
+          expect(
+            webSaves,
+            hasLength(platform != 'android' || rejectMobile ? 1 : 0),
+          );
+          if (platform != 'android' || rejectMobile) {
+            expect(webSaves.single.json['fid_token_list'], ['web-token']);
+          }
+          expect(f.installer.opens, 0);
+        },
+      );
+    }
+  }
 
   test(
     'Repeated clicks coalesce and reuse paused, failed and finished tasks',

@@ -321,6 +321,7 @@ class CloudFile {
   const CloudFile({
     required this.id,
     required this.name,
+    String? displayName,
     this.size = 0,
     this.isDirectory = false,
     this.parentId = '',
@@ -329,8 +330,11 @@ class CloudFile {
     this.hashType,
     this.hashValue,
     this.thumbnailUrl = '',
-  });
-  final String id, name, parentId, token, modifiedAt;
+  }) : displayName = displayName ?? name;
+  final String id, parentId, token, modifiedAt;
+  // Protocol names stay unchanged for transfers, renames and local file paths.
+  final String name;
+  final String displayName;
   final int size;
   final bool isDirectory;
   final String? hashType, hashValue;
@@ -340,6 +344,7 @@ class CloudFile {
   Json toJson() => {
     'id': id,
     'name': name,
+    if (displayName != name) 'displayName': displayName,
     'size': size,
     'isDirectory': isDirectory,
     'parentId': parentId,
@@ -351,6 +356,7 @@ class CloudFile {
   factory CloudFile.fromJson(Json j) => CloudFile(
     id: j.str('id'),
     name: j.str('name'),
+    displayName: j['displayName']?.toString(),
     size: j.integer('size'),
     isDirectory: j.boolean('isDirectory'),
     parentId: j.str('parentId'),
@@ -511,6 +517,7 @@ class DownloadSpec {
   );
   DownloadSpec copyWith({
     String? url,
+    Map<String, String>? headers,
     String? relativePath,
     Json? source,
     String? fileName,
@@ -522,7 +529,7 @@ class DownloadSpec {
     url: url ?? this.url,
     fileName: fileName ?? this.fileName,
     relativePath: relativePath ?? this.relativePath,
-    headers: headers,
+    headers: headers ?? this.headers,
     expectedSize: expectedSize,
     checksumType: checksumType,
     checksumValue: checksumValue,

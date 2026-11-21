@@ -17,6 +17,7 @@ import 'support.dart';
 class _SubtitleCloud extends QuarkConnector {
   _SubtitleCloud() : super(FakeHttp());
   final files = <String>[];
+  final requested = <CloudFile>[];
   @override
   Future<DownloadSpec> playback(BrowseSession s, CloudFile f, Credential? c) =>
       download(s, f, c);
@@ -27,6 +28,7 @@ class _SubtitleCloud extends QuarkConnector {
     Credential? c,
   ) async {
     files.add(f.id);
+    requested.add(f);
     return DownloadSpec(
       url: 'https://example.invalid/${f.id}',
       fileName: f.name,
@@ -131,6 +133,52 @@ void main() {
     await services.close();
     await removePlayerFixture(root);
   });
+
+  test(
+    'Playback labels decode while source and subtitle names stay raw',
+    () async {
+      await controller.close();
+      const episode = CloudFile(
+        id: 'episode-15',
+        name: '[第15話 Φ&#39;s VS χ].mkv',
+        displayName: "[第15話 Φ's VS χ].mkv",
+        parentId: 'folder',
+        size: 2213557610,
+      );
+      const subtitle = CloudFile(
+        id: 'encoded-subtitle',
+        name: 'Φ&#39;s.srt',
+        displayName: "Φ's.srt",
+        parentId: 'folder',
+        size: 64,
+      );
+      controller = cloudPlayback(
+        services,
+        const BrowseSession(
+          platform: CloudPlatform.quark,
+          mode: BrowseMode.personal,
+          title: 'fixture',
+          rootId: 'folder',
+        ),
+        episode,
+        const [episode, subtitle],
+        backendFactory: (entry, _) =>
+            backend = FakePlaybackBackend(entry.id, []),
+      );
+      expect(controller.current.name, episode.displayName);
+      expect(controller.current.source!.cloud!.file.name, episode.name);
+      expect(controller.current.source!.cloud!.file.token, episode.token);
+      await controller.start();
+      expect(controller.error, isEmpty);
+      expect(controller.current.name, episode.displayName);
+      expect(backend.openedSource!.fileName, episode.name);
+      expect(controller.availableSubtitles.single.name, subtitle.displayName);
+      await controller.loadCloudSubtitle(controller.availableSubtitles.single);
+      expect(cloud.files, contains(subtitle.id));
+      expect(cloud.requested.first.name, episode.name);
+      expect(cloud.requested.last.name, subtitle.name);
+    },
+  );
 
   test(
     'A same-directory subtitle uses its own authenticated source and a bounded private copy',

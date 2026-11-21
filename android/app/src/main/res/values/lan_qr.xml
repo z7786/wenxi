@@ -3,6 +3,8 @@
     <string name="lan_qr_title">扫码连接</string>
     <string name="lan_qr_close">关闭扫码</string>
     <string name="lan_qr_hint">扫描对方的设备连接或文件分享二维码\n两台设备需连接同一 Wi-Fi</string>
+    <string name="parse_qr_title">识别二维码</string>
+    <string name="parse_qr_hint">扫描分享二维码，内容会自动填入解析框</string>
     <style name="LanQrScanTheme" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>

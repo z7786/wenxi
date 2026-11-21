@@ -1,6 +1,7 @@
 import Flutter
 import UIKit
 import AVFoundation
+import PhotosUI
 
 final class AppleQrScanner: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
   private let capture = AVCaptureSession()
@@ -9,9 +10,11 @@ final class AppleQrScanner: UIViewController, AVCaptureMetadataOutputObjectsDele
   private var completed = false
   private var requestedCamera = false
   private var completion: ((String?, String?) -> Void)?
+  private let scanHint: String
 
-  init(completion: @escaping (String?, String?) -> Void) {
+  init(hint: String = "将设备二维码放入画面中", completion: @escaping (String?, String?) -> Void) {
     self.completion = completion
+    self.scanHint = hint
     super.init(nibName: nil, bundle: nil)
     modalPresentationStyle = .fullScreen
   }
@@ -29,8 +32,10 @@ final class AppleQrScanner: UIViewController, AVCaptureMetadataOutputObjectsDele
     close.addTarget(self, action: #selector(cancel), for: .touchUpInside)
     view.addSubview(close)
     let hint = UILabel()
-    hint.text = "将设备二维码放入画面中"
+    hint.text = scanHint
     hint.textColor = .white
+    hint.numberOfLines = 0
+    hint.textAlignment = .center
     hint.translatesAutoresizingMaskIntoConstraints = false
     view.addSubview(hint)
     NSLayoutConstraint.activate([
@@ -38,7 +43,8 @@ final class AppleQrScanner: UIViewController, AVCaptureMetadataOutputObjectsDele
       close.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
       close.widthAnchor.constraint(equalToConstant: 100),
       close.heightAnchor.constraint(equalToConstant: 44),
-      hint.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+      hint.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 20),
+      hint.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -20),
       hint.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -36)
     ])
   }
@@ -121,5 +127,119 @@ final class AppleQrScanner: UIViewController, AVCaptureMetadataOutputObjectsDele
   override func viewDidDisappear(_ animated: Bool) {
     super.viewDidDisappear(animated)
     if !completed { finish(nil, nil) }
+  }
+}
+
+/// System photo selection returns only the chosen image; no full-library access.
+final class AppleQrImagePicker: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
+  private var pending: FlutterResult?
+  private var picker: UIViewController?
+  private var photoDelegate: AnyObject?
+  private var generation = UUID()
+  private static let maxBytes = 24 * 1024 * 1024
+
+  func pick(result: @escaping FlutterResult) {
+    guard pending == nil, let parent = AppleDocuments.presenter else {
+      result(FlutterError(code: "qr_busy", message: "请先关闭当前图片选择窗口", details: nil)); return
+    }
+    pending = result
+    let request = UUID()
+    generation = request
+    let view: UIViewController
+    if #available(iOS 14.0, *) {
+      var configuration = PHPickerConfiguration()
+      configuration.filter = .images
+      configuration.selectionLimit = 1
+      configuration.preferredAssetRepresentationMode = .compatible
+      let photos = PHPickerViewController(configuration: configuration)
+      let delegate = AppleQrPhotoDelegate { [weak self] provider in
+        guard let self, self.generation == request else { return }
+        self.selected(provider, request: request)
+      }
+      photos.delegate = delegate
+      photoDelegate = delegate
+      view = photos
+    } else {
+      let documents = UIDocumentPickerViewController(documentTypes: ["public.image"], in: .import)
+      documents.delegate = self
+      documents.allowsMultipleSelection = false
+      view = documents
+    }
+    picker = view
+    parent.present(view, animated: true)
+    view.presentationController?.delegate = self
+  }
+
+  private func selected(_ provider: NSItemProvider?, request: UUID) {
+    guard let provider else { complete(nil); return }
+    guard provider.hasItemConformingToTypeIdentifier("public.image") else {
+      complete(FlutterError(code: "qr_image", message: "请选择二维码图片", details: nil)); return
+    }
+    // Provider files are temporary and must be read inside its completion handler.
+    provider.loadFileRepresentation(forTypeIdentifier: "public.image") { [weak self] url, error in
+      guard let self else { return }
+      let response: Any?
+      do {
+        guard error == nil, let url else { throw ImageReadError.unavailable }
+        response = try self.readImage(url)
+      } catch ImageReadError.tooLarge {
+        response = FlutterError(code: "qr_image", message: "请选择不超过 24 MB 的二维码图片", details: nil)
+      } catch {
+        response = FlutterError(code: "qr_image", message: "无法读取图片，请检查图片是否已下载到本机后重试", details: nil)
+      }
+      DispatchQueue.main.async {
+        if self.generation == request { self.complete(response) }
+      }
+    }
+  }
+
+  private func readImage(_ url: URL) throws -> FlutterStandardTypedData {
+    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+    guard size <= Self.maxBytes else { throw ImageReadError.tooLarge }
+    let bytes = try Data(contentsOf: url, options: .mappedIfSafe)
+    guard bytes.count <= Self.maxBytes else { throw ImageReadError.tooLarge }
+    guard !bytes.isEmpty else { throw ImageReadError.unavailable }
+    return FlutterStandardTypedData(bytes: bytes)
+  }
+
+  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+    guard picker === controller, let url = urls.first else { complete(nil); return }
+    do { complete(try readImage(url)) }
+    catch ImageReadError.tooLarge {
+      complete(FlutterError(code: "qr_image", message: "请选择不超过 24 MB 的二维码图片", details: nil))
+    } catch {
+      complete(FlutterError(code: "qr_image", message: "无法读取这张图片，请重新选择", details: nil))
+    }
+  }
+
+  func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    if picker === controller { complete(nil) }
+  }
+
+  func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    if picker === presentationController.presentedViewController { complete(nil) }
+  }
+
+  private func complete(_ value: Any?) {
+    guard let callback = pending else { return }
+    pending = nil
+    generation = UUID()
+    photoDelegate = nil
+    let view = picker
+    picker = nil
+    if let view, view.presentingViewController != nil {
+      view.dismiss(animated: true) { callback(value) }
+    } else { callback(value) }
+  }
+
+  private enum ImageReadError: Error { case unavailable, tooLarge }
+}
+
+@available(iOS 14.0, *)
+private final class AppleQrPhotoDelegate: NSObject, PHPickerViewControllerDelegate {
+  private let completion: (NSItemProvider?) -> Void
+  init(completion: @escaping (NSItemProvider?) -> Void) { self.completion = completion }
+  func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+    completion(results.first?.itemProvider)
   }
 }

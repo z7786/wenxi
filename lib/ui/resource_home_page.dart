@@ -460,7 +460,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                                 ),
                                 IconButton(
                                   key: const Key('resource-priority-settings'),
-                                  tooltip: '网盘展示优先级',
+                                  tooltip: '搜索设置',
                                   onPressed: () => showResourcePrioritySheet(
                                     context,
                                     widget.services.resourceSearch,
@@ -690,10 +690,14 @@ class _ResourceCoverTile extends StatelessWidget {
                     if (hit.coverUrl.isEmpty)
                       fallback
                     else
-                      Image.network(
-                        hit.coverUrl,
+                      Image(
+                        image: ResizeImage(
+                          NetworkImage(hit.coverUrl),
+                          width: popular ? 640 : 400,
+                          height: popular ? 640 : 400,
+                          policy: ResizeImagePolicy.fit,
+                        ),
                         fit: BoxFit.cover,
-                        cacheWidth: popular ? 640 : 400,
                         errorBuilder: (_, _, _) => fallback,
                         loadingBuilder: (_, child, progress) =>
                             progress == null ? child : fallback,

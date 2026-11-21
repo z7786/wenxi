@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/data/cloud_browser_ua.dart';
 import 'package:asterlink/data/providers/guangya_login.dart';
 import 'package:asterlink/data/providers/ctfile.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
@@ -92,14 +93,16 @@ class _Cookies extends PlatformCookieManager {
   final pending = <PlatformInAppWebViewController, Completer<List<Cookie>>>{};
   final reads = <PlatformInAppWebViewController, int>{};
   final values = <String, List<Cookie>>{};
+  final pendingUrls = <String, Completer<List<Cookie>>>{};
   int deleteAllCalls = 0;
+  Completer<bool>? pendingCleanup;
   bool failRead = false;
   bool failClear = false;
   @override
   Future<bool> deleteAllCookies() async {
     deleteAllCalls++;
     if (failClear) throw StateError('Fixture cookie cleanup failed');
-    return true;
+    return pendingCleanup?.future ?? true;
   }
 
   @override
@@ -111,7 +114,8 @@ class _Cookies extends PlatformCookieManager {
     if (webViewController == null) return [];
     reads.update(webViewController, (count) => count + 1, ifAbsent: () => 1);
     if (failRead) throw StateError('Cookie: private-read-secret');
-    return await pending[webViewController]?.future ??
+    return await pendingUrls[url.toString()]?.future ??
+        await pending[webViewController]?.future ??
         values[url.toString()] ??
         [];
   }
@@ -223,6 +227,7 @@ class _TianyiController extends _Controller {
   WebUri url = WebUri('https://cloud.189.cn/web/login.html');
   String browserId = 'private-bound-browser-id';
   final scripts = <String>[];
+  Completer<dynamic>? pendingBootstrap;
   @override
   Future<WebUri?> getUrl() async => url;
   @override
@@ -231,6 +236,9 @@ class _TianyiController extends _Controller {
     ContentWorld? contentWorld,
   }) async {
     scripts.add(source);
+    if (source == TianyiWebLogin.bootstrapScript && pendingBootstrap != null) {
+      return pendingBootstrap!.future;
+    }
     if (source == TianyiWebLogin.readScript) {
       if (navigateDuringRead) url = WebUri('https://untrusted.invalid/');
       return jsonEncode({'browserId': browserId});
@@ -347,7 +355,9 @@ void main() {
     platform.cookies.pending.clear();
     platform.cookies.reads.clear();
     platform.cookies.values.clear();
+    platform.cookies.pendingUrls.clear();
     platform.cookies.deleteAllCalls = 0;
+    platform.cookies.pendingCleanup = null;
     platform.cookies.failRead = false;
     platform.cookies.failClear = false;
     directory = Directory.systemTemp.createTempSync('asterlink-web-log-test-');
@@ -935,6 +945,143 @@ void main() {
     },
   );
 
+  testWidgets('Tianyi finishes login when the cookie cleanup callback hangs', (
+    tester,
+  ) async {
+    services.login.webAuthenticators[CloudPlatform.tianyi] =
+        (credential) async =>
+            LoginResult(credential, const CloudAccount('天翼测试'));
+    await openLogin(tester, CloudPlatform.tianyi);
+    attach(337, instance: _TianyiController(337));
+    final cleanup = Completer<bool>();
+    platform.cookies.pendingCleanup = cleanup;
+    platform
+        .cookies
+        .values['https://cloud.189.cn/api/open/user/getUserInfoForPortal.action'] = [
+      Cookie(name: 'COOKIE_LOGIN_USER', value: 'private-cleanup-session'),
+    ];
+    await tester.runAsync(() async {
+      await tester.tap(find.text('检测登录'));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump();
+    expect(services.vault.credential(CloudPlatform.tianyi), isNotNull);
+    expect(find.byType(WebLoginPage), findsOneWidget);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(seconds: 3)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(WebLoginPage), findsNothing);
+    expect(
+      log.entries().any(
+        (entry) => entry.event == 'web_login.cookie_cleanup_failed',
+      ),
+      isTrue,
+    );
+    cleanup.complete(true);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'Tianyi reports stalled verification and enables another detection',
+    (tester) async {
+      final answer = Completer<LoginResult>();
+      var calls = 0;
+      services.login.webAuthenticators[CloudPlatform.tianyi] = (credential) {
+        calls++;
+        return calls == 1
+            ? answer.future
+            : Future.value(LoginResult(credential, const CloudAccount('天翼重试')));
+      };
+      await openLogin(tester, CloudPlatform.tianyi);
+      attach(338, instance: _TianyiController(338));
+      platform
+          .cookies
+          .values['https://cloud.189.cn/api/open/user/getUserInfoForPortal.action'] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-verification-session',
+        ),
+      ];
+      await tester.runAsync(() async {
+        await tester.tap(find.text('检测登录'));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      });
+      await tester.pump();
+      expect(calls, 1);
+      expect(find.text('正在验证登录信息…'), findsOneWidget);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(seconds: 15)),
+      );
+      await tester.pump();
+      expect(find.text('登录验证超时，请检查网络后点击“检测登录”重试'), findsOneWidget);
+      expect(services.vault.credential(CloudPlatform.tianyi), isNull);
+      final button = tester.widget<TextButton>(
+        find.widgetWithText(TextButton, '检测登录'),
+      );
+      expect(button.onPressed, isNotNull);
+      await detect(tester);
+      expect(calls, 2);
+      expect(find.byType(WebLoginPage), findsNothing);
+      await tester.runAsync(() async {
+        answer.complete(
+          LoginResult(
+            Credential('late', {'primary': 'COOKIE_LOGIN_USER=late'}),
+            const CloudAccount('late'),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      await tester.pump();
+      expect(
+        services.vault.credential(CloudPlatform.tianyi)!.primary,
+        'COOKIE_LOGIN_USER=private-verification-session',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'Tianyi can log in when a page script and an unrelated cookie read hang',
+    (tester) async {
+      services.login.webAuthenticators[CloudPlatform.tianyi] =
+          (credential) async =>
+              LoginResult(credential, const CloudAccount('天翼测试'));
+      await openLogin(tester, CloudPlatform.tianyi);
+      final native = _TianyiController(339);
+      final (_, web) = attach(339, instance: native);
+      final cookies = Completer<List<Cookie>>();
+      final script = Completer<dynamic>();
+      native.pendingBootstrap = script;
+      platform.cookies.pendingUrls['https://h5.cloud.189.cn/'] = cookies;
+      platform
+          .cookies
+          .values['https://cloud.189.cn/api/open/user/getUserInfoForPortal.action'] = [
+        Cookie(name: 'COOKIE_LOGIN_USER', value: 'private-parallel-cookie'),
+      ];
+      await tester.runAsync(() async {
+        await tester.tap(find.text('检测登录'));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      expect(platform.cookies.reads[web.platform], greaterThan(1));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(seconds: 3)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(WebLoginPage), findsNothing);
+      await tester.runAsync(() async {
+        script.complete(null);
+        cookies.complete([]);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   for (final landing in [
     'https://cloud.189.cn/web/redirect.html',
     'https://h5.cloud.189.cn/home.html',
@@ -1418,7 +1565,7 @@ void main() {
       expect(view.params.initialSettings!.saveFormData, isFalse);
       expect(
         view.params.initialSettings!.userAgent,
-        WebLoginTarget.desktopUserAgent,
+        services.cloud.browserUa.selected(CloudPlatform.ctfile),
       );
       expect(view.params.initialUserScripts!.single.forMainFrameOnly, isTrue);
       final native = _CtfileController(301, challenge);
@@ -1546,7 +1693,7 @@ void main() {
       final view = platform.views.last;
       expect(
         view.params.initialSettings!.userAgent,
-        WebLoginTarget.desktopUserAgent,
+        services.cloud.browserUa.selected(CloudPlatform.guangya),
       );
       expect(
         view.params.initialSettings!.preferredContentMode,
@@ -1649,7 +1796,8 @@ void main() {
           final (main, controller) = attach(401);
           final expectedAgent = mobile
               ? WebLoginTarget.mobileUserAgent
-              : WebLoginTarget.desktopUserAgent;
+              : services.cloud.browserUa.selected(CloudPlatform.aliyun);
+          if (!mobile) expect(CloudBrowserUa.pooled(expectedAgent), isTrue);
           final expectedMode = mobile
               ? UserPreferredContentMode.MOBILE
               : UserPreferredContentMode.DESKTOP;

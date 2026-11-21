@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
+import 'package:asterlink/data/desktop_browser_ua.dart';
 import 'package:asterlink/data/providers/feijipan.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/auth.dart';
@@ -59,6 +62,265 @@ BrowseSession _share() => BrowseSession(
 );
 
 void main() {
+  test(
+    'Share parse, lists and download keep one matching desktop identity',
+    () async {
+      final http = FakeHttp((r) {
+        final ua = DesktopBrowserUa.builtIn.singleWhere(
+          (ua) => ua.value == r.headers['User-Agent'],
+        );
+        expect(r.uri.queryParameters['devModel'], ua.model);
+        expect(r.uri.queryParameters['devVersion'], ua.version);
+        if (r.uri.path == '/ws/getUuid') return _ok({'uuid': _uuid});
+        if (r.uri.path == '/ws/file/download') {
+          return _ok({
+            'downloadUrl': FeijipanConnector.encrypt(
+              'https://cdn.example.test/sample.bin',
+            ),
+          });
+        }
+        return _ok({
+          'status': 0,
+          'totalPage': 1,
+          'list': [_row(12)],
+        });
+      });
+      final connector = FeijipanConnector(
+        http,
+        Vault(StateStore.memory()),
+        random: Random(5),
+      );
+      final seen = <String>{};
+      for (var i = 0; i < 12; i++) {
+        http.calls.clear();
+        final browse = await connector.openShare(
+          LinkParser.parse(
+            'https://share.feijipan.com/s/Share123?code=a123',
+          ).single,
+          null,
+        );
+        final files = await connector.list(browse, browse.rootId, null);
+        final spec = await connector.download(browse, files.single, null);
+        final ua = http.calls.first.headers['User-Agent']!;
+        seen.add(ua);
+        expect(http.calls.map((r) => r.headers['User-Agent']).toSet(), {ua});
+        expect(spec.headers['User-Agent'], ua);
+      }
+      expect(seen, hasLength(12));
+    },
+  );
+
+  test(
+    '403 changes UA and browser metadata without changing token or signature',
+    () async {
+      final v = await _vault();
+      var attempts = 0;
+      final http = FakeHttp((r) {
+        if (attempts++ == 0) {
+          return const HttpResult(403, '<html>Blocked</html>', {
+            'content-type': ['text/html'],
+            'set-cookie': ['old_identity=old; Path=/; Secure'],
+          });
+        }
+        return const HttpResult(302, '', {
+          'location': ['https://cdn.example.test/sample.bin'],
+        });
+      });
+      final spec = await FeijipanConnector(
+        http,
+        v,
+        now: () => _stamp,
+        random: Random(2),
+      ).download(_personal(), _file, v.credential(_platform));
+      expect(http.calls, hasLength(2));
+      final first = http.calls.first, last = http.calls.last;
+      expect(last.headers['User-Agent'], isNot(first.headers['User-Agent']));
+      expect(last.headers['Cookie'], isNull);
+      final identity = DesktopBrowserUa.builtIn.singleWhere(
+        (ua) => ua.value == last.headers['User-Agent'],
+      );
+      expect(last.uri.queryParameters['devModel'], identity.model);
+      expect(last.uri.queryParameters['devVersion'], identity.version);
+      for (final field in [
+        'uuid',
+        'timestamp',
+        'auth',
+        'downloadId',
+        'appToken',
+      ]) {
+        expect(
+          last.uri.queryParameters[field],
+          first.uri.queryParameters[field],
+        );
+      }
+      expect(spec.headers['User-Agent'], last.headers['User-Agent']);
+      expect(http.calls.any((r) => r.uri.path == '/ws/login'), isFalse);
+    },
+  );
+
+  test(
+    'Blocked small-plane downloads stop after three different UAs',
+    () async {
+      final v = await _vault();
+      final http = FakeHttp(
+        (_) => const HttpResult(403, '<html>Blocked</html>'),
+      );
+      await expectLater(
+        FeijipanConnector(
+          http,
+          v,
+        ).download(_personal(), _file, v.credential(_platform)),
+        throwsA(
+          isA<AppException>().having(
+            (e) => e.message,
+            'message',
+            contains('HTTP 403'),
+          ),
+        ),
+      );
+      expect(http.calls, hasLength(3));
+      expect(
+        http.calls.map((r) => r.headers['User-Agent']).toSet(),
+        hasLength(3),
+      );
+      expect(http.calls.any((r) => r.uri.path == '/ws/login'), isFalse);
+    },
+  );
+
+  test(
+    '403 JSON account expiry follows auth handling without UA retries',
+    () async {
+      final v = await _vault();
+      final http = FakeHttp((_) => jsonResponse({'code': -2}, 403));
+      await expectLater(
+        FeijipanConnector(
+          http,
+          v,
+        ).list(_personal(), '0', v.credential(_platform)),
+        throwsA(isA<AccountLoginRequired>()),
+      );
+      expect(http.calls, hasLength(1));
+    },
+  );
+
+  test('Rate limiting stops immediately without switching UA', () async {
+    final http = FakeHttp(
+      (_) => const HttpResult(429, '<html>Rate limited</html>'),
+    );
+    final connector = FeijipanConnector(http, Vault(StateStore.memory()));
+    await expectLater(
+      connector.list(_share(), 'share-root', null),
+      throwsA(isA<AppException>()),
+    );
+    expect(http.calls, hasLength(1));
+  });
+
+  test('403 on a mutation never replays it with another UA', () async {
+    final v = await _vault();
+    final http = FakeHttp((_) => const HttpResult(403, '<html>Blocked</html>'));
+    await expectLater(
+      FeijipanConnector(
+        http,
+        v,
+      ).rename(_personal(), _file, 'next.bin', v.credential(_platform)!),
+      throwsA(isA<AppException>()),
+    );
+    expect(http.calls, hasLength(1));
+  });
+
+  test('Cancellation stops before trying a second UA', () async {
+    final v = await _vault();
+    final scope = RequestScope();
+    final http = FakeHttp((_) {
+      scope.cancel();
+      return const HttpResult(403, '<html>Blocked</html>');
+    });
+    await expectLater(
+      scope.run(
+        () => FeijipanConnector(
+          http,
+          v,
+        ).list(_personal(), '0', v.credential(_platform)),
+      ),
+      throwsA(isA<AppException>()),
+    );
+    expect(http.calls, hasLength(1));
+  });
+
+  test('Concurrent share sessions keep independent identities', () async {
+    final http = FakeHttp((_) async {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      return _ok({
+        'status': 0,
+        'totalPage': 1,
+        'list': [_row(12)],
+      });
+    });
+    final connector = FeijipanConnector(
+      http,
+      Vault(StateStore.memory()),
+      random: Random(9),
+    );
+    final one = _share(), two = _share();
+    await Future.wait([
+      connector.list(one, 'share-root', null),
+      connector.list(two, 'share-root', null),
+    ]);
+    final uas = http.calls.map((r) => r.headers['User-Agent']).toList();
+    expect(uas.toSet(), hasLength(2));
+    await Future.wait([
+      connector.list(one, 'share-root', null),
+      connector.list(two, 'share-root', null),
+    ]);
+    expect(http.calls[2].headers['User-Agent'], uas[0]);
+    expect(http.calls[3].headers['User-Agent'], uas[1]);
+  });
+
+  test(
+    'Parallel downloads retain the UA used for their own link response',
+    () async {
+      final v = await _vault();
+      final firstSent = Completer<void>();
+      final delayedResponse = Completer<HttpResult>();
+      var calls = 0;
+      const ready = HttpResult(302, '', {
+        'location': ['https://cdn.example.test/sample.bin'],
+      });
+      final http = FakeHttp((r) {
+        if (calls++ == 0) {
+          firstSent.complete();
+          return delayedResponse.future;
+        }
+        if (calls == 2) return const HttpResult(403, '<html>Blocked</html>');
+        return ready;
+      });
+      final connector = FeijipanConnector(http, v, random: Random(2));
+      final browse = _personal();
+      final pending = connector.download(
+        browse,
+        _file,
+        v.credential(_platform),
+      );
+      await firstSent.future;
+      final second = await connector.download(
+        browse,
+        _file,
+        v.credential(_platform),
+      );
+      delayedResponse.complete(ready);
+      final first = await pending;
+      expect(
+        first.headers['User-Agent'],
+        http.calls.first.headers['User-Agent'],
+      );
+      expect(
+        second.headers['User-Agent'],
+        http.calls.last.headers['User-Agent'],
+      );
+      expect(second.headers['User-Agent'], isNot(first.headers['User-Agent']));
+    },
+  );
+
   test('Share domains, paths and extraction codes stay distinct', () {
     for (final host in [
       'share.feijipan.com',

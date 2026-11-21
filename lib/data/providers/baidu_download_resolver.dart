@@ -1,11 +1,12 @@
 import '../../core/json.dart';
 import '../../diagnostics/app_log.dart';
+import '../../domain/auth.dart';
 import '../http.dart';
 import '../http_retry.dart';
 import 'baidu_link_service.dart';
 import 'baidu_local_preview.dart';
 
-/// New clients prefer the relay; preview fallback does not depend on a server.
+/// Small ordinary files prefer local preview; other files try the relay first.
 class BaiduDownloadResolver {
   BaiduDownloadResolver(
     this.http, {
@@ -19,10 +20,14 @@ class BaiduDownloadResolver {
                'ASTERLINK_BAIDU_RELAY_API_URL',
              ),
            ).resolve,
-       preview = preview ?? BaiduLocalPreview(http).resolve;
+       preview = preview ?? BaiduLocalPreview(http).resolve,
+       _previewOnly = preview ?? BaiduLocalPreview(http).resolvePreview;
 
   final JsonHttp http;
   final BaiduLinkLookup relay, preview;
+  final BaiduLinkLookup _previewOnly;
+  // File sizes use the same binary units as the app's file lists.
+  static const _previewLimit = 300 * 1024 * 1024;
 
   Future<BaiduResolvedLink> resolve({
     required String cookie,
@@ -30,8 +35,45 @@ class BaiduDownloadResolver {
     required String fileId,
     required String appId,
     required Json device,
+    int fileSize = 0,
   }) async {
     RequestScope.checkpoint();
+    if (fileSize > 0 && fileSize < _previewLimit) {
+      try {
+        return await ReadRetryScope.withoutRetries(() async {
+          final result = await _previewOnly(
+            cookie: cookie,
+            path: path,
+            fileId: fileId,
+            appId: appId,
+            device: device,
+          );
+          RequestScope.checkpoint();
+          require(
+            result.profile == 'baidu_preview' && result.url.isNotEmpty,
+            '百度本地预览暂不可用',
+          );
+          DiagnosticLog.event(
+            'baidu.download_route',
+            fields: {'profile': result.profile, 'fileSize': fileSize},
+          );
+          return result;
+        });
+      } on AccountLoginRequired {
+        RequestScope.checkpoint();
+        rethrow;
+      } catch (error) {
+        RequestScope.checkpoint();
+        DiagnosticLog.event(
+          'baidu.preview_relay_fallback',
+          fields: {
+            'reason': error is HttpRequestFailure
+                ? error.kind
+                : error.runtimeType.toString(),
+          },
+        );
+      }
+    }
     try {
       // Do not spend the preparation retry budget on a failed first route.
       return await ReadRetryScope.withoutRetries(() async {

@@ -423,6 +423,8 @@ class _CloudFavoritesPageState extends State<CloudFavoritesPage> {
                                           enabled: !_saving,
                                           child: Tooltip(
                                             message: '拖动排序',
+                                            triggerMode:
+                                                TooltipTriggerMode.manual,
                                             child: MouseRegion(
                                               cursor: _saving
                                                   ? SystemMouseCursors.basic

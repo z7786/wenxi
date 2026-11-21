@@ -53,6 +53,29 @@ class FakePlaybackBackend extends PlaybackBackend {
   @override
   void setScreenDisplayMonitoringEnabled(bool enabled) =>
       screenMonitoring = enabled;
+  bool videoMonitoring = true;
+  @override
+  void setVideoMonitoringEnabled(bool enabled) => videoMonitoring = enabled;
+
+  void describeVideo({int width = 1920, int height = 1080, double? fps = 24}) {
+    emit(
+      state.copyWith(
+        tracks: Tracks(
+          video: [VideoTrack('1', null, null, w: width, h: height, fps: fps)],
+          audio: state.tracks.audio,
+          subtitle: state.tracks.subtitle,
+        ),
+        track: Track(
+          video: const VideoTrack('1', null, null),
+          audio: state.track.audio,
+          subtitle: state.track.subtitle,
+        ),
+        width: width,
+        height: height,
+      ),
+    );
+  }
+
   @override
   int errorRevision = 0;
   @override
@@ -68,6 +91,26 @@ class FakePlaybackBackend extends PlaybackBackend {
   bool videoSurface = false;
   BoxFit? lastFit;
   double? lastAspectRatio;
+  Size? lastRenderViewport;
+  double? lastRenderScale;
+  bool stableRenderOrientation = false;
+  bool automaticRenderQuality = true;
+  @override
+  void setAutomaticRenderQuality(bool enabled) =>
+      automaticRenderQuality = enabled;
+  @override
+  void setRenderViewport(
+    Size viewport,
+    double pixelRatio,
+    BoxFit fit,
+    double scale, {
+    bool stableOrientation = false,
+  }) {
+    lastRenderViewport = viewport;
+    lastRenderScale = scale;
+    stableRenderOrientation = stableOrientation;
+  }
+
   @override
   Widget? buildVideo({required BoxFit fit, double? aspectRatio}) {
     lastFit = fit;
@@ -129,6 +172,12 @@ class FakePlaybackBackend extends PlaybackBackend {
   @override
   Future<void> setSegmentSizeMiB(int value) async {
     segmentSizeMiB = value;
+  }
+
+  bool decoderCompatibility = false;
+  @override
+  Future<void> setDecoderCompatibility(bool enabled) async {
+    decoderCompatibility = enabled;
   }
 
   final rates = <double>[], volumes = <double>[], seeks = <Duration>[];
@@ -267,6 +316,7 @@ class PlaybackFixture {
     Future<File> Function(PlaybackEntry, PlaybackSubtitle, RequestScope)?
     readSubtitle,
     PlaybackStore Function(StateStore)? historyFactory,
+    Future<void> Function()? initializePlayback,
   }) : store = sharedStore ?? StateStore.memory(data) {
     history = historyFactory?.call(store) ?? PlaybackStore(store);
     entries =
@@ -316,6 +366,7 @@ class PlaybackFixture {
       initialIndex: initialIndex,
       now: now,
       history: history,
+      initializePlayback: initializePlayback,
       checkSource: () {
         require(accountValid, '账号已变化，请重新打开文件列表');
       },

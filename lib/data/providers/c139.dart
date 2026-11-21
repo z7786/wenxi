@@ -849,12 +849,18 @@ class C139Connector extends CloudConnector {
           c,
           linkId: resolved.meta('linkId'),
         );
+        final folders = C139PasscodeProtocol.items(
+          page,
+          'caLst',
+          'outLinkCaInfo',
+        );
+        final contents = C139PasscodeProtocol.items(
+          page,
+          'coLst',
+          'outLinkCoInfo',
+        );
         final batch = [
-          for (final item in C139PasscodeProtocol.items(
-            page,
-            'caLst',
-            'outLinkCaInfo',
-          ))
+          for (final item in folders)
             CloudFile(
               id: item.str('caID'),
               name: item.str('caName'),
@@ -862,11 +868,7 @@ class C139Connector extends CloudConnector {
               parentId: dir,
               modifiedAt: item.str('udTime').ifEmpty(item.str('ctTime')),
             ),
-          for (final item in C139PasscodeProtocol.items(
-            page,
-            'coLst',
-            'outLinkCoInfo',
-          ))
+          for (final item in contents)
             CloudFile(
               id: item.str('coID'),
               name: item.str('coName'),
@@ -888,6 +890,31 @@ class C139Connector extends CloudConnector {
           '移动口令目录数量无效，请刷新重试',
         );
         require(fresh.length == batch.length, '移动口令目录分页重复，请刷新重试');
+        if (page.containsKey('nextPageCursor')) {
+          // Web shares may count descendants in nodNum. Like the official web
+          // player, use the cursor as a continuation flag with numeric ranges.
+          require(
+            page.containsKey('caLst') && page.containsKey('coLst'),
+            '移动口令文件列表不完整，请刷新重试',
+          );
+          for (final entry in {
+            'caLength': folders.length,
+            'coLength': contents.length,
+          }.entries) {
+            final countText = page.str(entry.key);
+            if (countText.isEmpty) continue;
+            require(
+              int.tryParse(countText) == entry.value,
+              '移动口令目录数量不一致，请刷新重试',
+            );
+          }
+          final rawNext = page['nextPageCursor'];
+          require(rawNext == null || rawNext is String, '移动口令分页信息无效，请刷新重试');
+          final next = page.str('nextPageCursor').trim();
+          if (next.isEmpty || next.toLowerCase() == 'null') return files;
+          require(batch.isNotEmpty && begin < 19801, '移动口令目录分页不完整，请刷新重试');
+          continue;
+        }
         if (total != null) {
           require(files.length <= total, '移动口令目录数量不一致，请刷新重试');
         }
@@ -1131,15 +1158,18 @@ class C139Connector extends CloudConnector {
     final id = pre.str('fileId'), uploadId = pre.str('uploadId');
     require(id.isNotEmpty, '移动云盘未创建上传任务');
     if (!pre.boolean('rapidUpload')) {
+      io.notSavedYet();
       require(uploadId.isNotEmpty, '移动云盘未返回上传标识');
       for (var first = 0; first < count; first += 100) {
         final batch = first == 0
             ? pre
-            : await post('getUploadUrl', {
-                'fileId': id,
-                'uploadId': uploadId,
-                'partInfos': parts.skip(first).take(100).toList(),
-              });
+            : await io.temporary(
+                () => post('getUploadUrl', {
+                  'fileId': id,
+                  'uploadId': uploadId,
+                  'partInfos': parts.skip(first).take(100).toList(),
+                }),
+              );
         final addresses = batch.list('partInfos')
           ..sort(
             (a, b) =>
@@ -1153,6 +1183,7 @@ class C139Connector extends CloudConnector {
             part.str('uploadUrl'),
             start: index * partSize,
             end: min(source.size, (index + 1) * partSize),
+            commitsFile: false,
             headers: {
               'Content-Type': 'application/octet-stream',
               'Origin': 'https://yun.139.com',
@@ -1161,6 +1192,7 @@ class C139Connector extends CloudConnector {
           );
         }
       }
+      io.notSavedYet();
       io.progress(UploadPhase.finishing, source.size);
       await post('complete', {
         'contentHash': hash,

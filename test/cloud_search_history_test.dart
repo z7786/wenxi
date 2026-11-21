@@ -67,6 +67,38 @@ void main() {
     },
   );
 
+  test(
+    'incognito blocks cloud history across accounts and resumes when disabled',
+    () async {
+      final store = StateStore.memory(), first = _session('first');
+      addTearDown(store.dispose);
+      final history = CloudSearchHistory(store);
+      await history.remember(first, '原记录');
+      final enabling = store.change((draft) {
+        draft['resourceSearch'] = {'incognito': true};
+      });
+      await history.remember(first, '正在开启');
+      await enabling;
+      await history.remember(first, '不留记录');
+      await history.remember(_session('second', CloudPlatform.uc), '其它网盘');
+      final reopened = CloudSearchHistory(store);
+      expect(reopened.read(first), ['原记录']);
+      expect(reopened.read(_session('second', CloudPlatform.uc)), isEmpty);
+      await reopened.clear(first);
+      expect(reopened.read(first), isEmpty);
+      await reopened.remember(first, '清空后搜索');
+      expect(reopened.read(first), isEmpty);
+      final disabling = store.change((draft) {
+        draft['resourceSearch'] = {'incognito': false};
+      });
+      await reopened.remember(first, '正在关闭');
+      await disabling;
+      expect(reopened.read(first), isEmpty);
+      await reopened.remember(first, '恢复记录');
+      expect(reopened.read(first), ['恢复记录']);
+    },
+  );
+
   test('Malformed restored history does not prevent opening search', () async {
     final store = StateStore.memory(), session = _session('first');
     addTearDown(store.dispose);

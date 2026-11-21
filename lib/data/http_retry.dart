@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import '../domain/download_retries.dart';
 import 'http.dart';
+import 'uploads/upload_concurrency.dart';
 
 class ReadRetryAttempt {
   const ReadRetryAttempt(this.number, this.delay, this.failure);
@@ -115,10 +116,17 @@ class RetryingJsonHttp extends JsonHttp {
       followRedirects: followRedirects,
       contentType: contentType,
     );
-    final scope = ReadRetryScope.current;
-    return scope != null && JsonHttp.isReadRequest(method, url)
-        ? scope.execute(send)
-        : send();
+    Future<HttpResult> execute() {
+      final scope = ReadRetryScope.current;
+      if (JsonHttp.isReadRequest(method, url)) {
+        return scope?.execute(send) ?? send();
+      }
+      return WriteRequestScope.current?.track(send) ?? send();
+    }
+
+    // Providers with direct/form payloads share the same budget as multipart
+    // uploads. An UploadIO worker already holding a lease reuses that lease.
+    return body is HttpUpload ? uploadConnections.run(execute) : execute();
   }
 
   @override

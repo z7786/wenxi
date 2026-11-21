@@ -103,7 +103,7 @@ void main() {
     cloud = CloudRepository(http, vault, CleanupOutbox(store, http));
     provider = QueueConnector();
     cloud.connectors[CloudPlatform.quark] = provider;
-    manager = UploadManager(store: store, cloud: cloud);
+    manager = UploadManager(store: store, cloud: cloud, concurrent: 1);
     await manager.initialize();
     session = cloud.bindSession(uploadSession);
   });
@@ -151,6 +151,54 @@ void main() {
       expect(provider.maxInFlight, 1);
       expect(provider.owners, ['original', 'original']);
       expect(provider.parents, ['folder', 'folder']);
+    },
+  );
+
+  test(
+    'default queue starts two files and a queued third uses a freed slot',
+    () async {
+      await manager.close();
+      manager.dispose();
+      manager = UploadManager(store: store, cloud: cloud);
+      provider.hold = Completer<void>();
+      final ids = await manager.enqueue(session, '0', 'Root', [
+        await file('a.txt'),
+        await file('b.txt'),
+        await file('c.txt'),
+      ]);
+      await until(() => provider.started.length == 2);
+      expect(provider.maxInFlight, 2);
+      expect(manager.task(ids.last)!.status, UploadStatus.pending);
+      await manager.cancel(ids.first);
+      await until(() => provider.started.length == 3);
+      expect(manager.task(ids[1])!.status, UploadStatus.running);
+      provider.hold!.complete();
+      await until(
+        () => ids
+            .skip(1)
+            .every((id) => manager.task(id)!.status == UploadStatus.completed),
+      );
+      // Parallel uploads may finish in either order after both are released.
+      expect(
+        provider.files.map((file) => file.name),
+        unorderedEquals(['b.txt', 'c.txt']),
+      );
+      expect(provider.maxInFlight, 2);
+    },
+  );
+
+  test(
+    'a new batch wakes an idle slot while another file is uploading',
+    () async {
+      await manager.close();
+      manager.dispose();
+      manager = UploadManager(store: store, cloud: cloud);
+      provider.hold = Completer<void>();
+      await manager.enqueue(session, '0', 'Root', [await file('a.txt')]);
+      await until(() => provider.started.length == 1);
+      await manager.enqueue(session, '0', 'Root', [await file('b.txt')]);
+      await until(() => provider.started.length == 2);
+      expect(provider.maxInFlight, 2);
     },
   );
 

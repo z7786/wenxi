@@ -45,7 +45,8 @@ class InitializerIsolate {
     final receiver = ReceivePort();
     late SendPort port;
     late Pointer<generated.mpv_handle> handle;
-    final isolate = await Isolate.spawn(
+    final stopped = Completer<void>();
+    await Isolate.spawn(
       _mainloop,
       receiver.sendPort,
     );
@@ -72,6 +73,7 @@ class InitializerIsolate {
           port.send(true);
         } else {
           receiver.close();
+          stopped.complete();
         }
       },
     );
@@ -80,26 +82,24 @@ class InitializerIsolate {
 
     // Save the references.
     _ports[handle.address] = port;
-    _isolates[handle.address] = isolate;
+    _stopped[handle.address] = stopped;
 
     return handle;
   }
 
   /// Disposes [Pointer<mpv_handle>].
-  void dispose(generated.MPV mpv, Pointer<generated.mpv_handle> handle) {
+  Future<void> dispose(
+      generated.MPV mpv, Pointer<generated.mpv_handle> handle) async {
     final port = _ports[handle.address];
-    final isolate = _isolates[handle.address];
-    if (port != null && isolate != null) {
+    final stopped = _stopped[handle.address];
+    if (port != null && stopped != null) {
       port.send(null);
-
-      _ports.remove(handle.address);
-      _isolates.remove(handle.address);
-
       mpv.mpv_wakeup(handle);
-
-      Future.delayed(const Duration(seconds: 2), () {
-        isolate.kill(priority: Isolate.immediate);
-      });
+      // A timer/kill is not proof that a FFI wait or a Dart event callback has
+      // stopped using the handle. Wait for the explicit final acknowledgement.
+      await stopped.future;
+      _ports.remove(handle.address);
+      _stopped.remove(handle.address);
     }
   }
 
@@ -113,6 +113,7 @@ class InitializerIsolate {
     late generated.MPV mpv;
 
     bool disposed = false;
+    bool waitingForCallback = false;
 
     Pointer<generated.mpv_handle>? handle;
 
@@ -124,11 +125,14 @@ class InitializerIsolate {
           mpv = generated.MPV(DynamicLibrary.open(message));
           completer.complete();
         } else if (message is bool) {
-          completer.complete();
+          waitingForCallback = false;
+          if (!completer.isCompleted) completer.complete();
         } else if (message == null) {
           if (handle != null) {
             disposed = true;
-            completer.complete();
+            if (!waitingForCallback && !completer.isCompleted) {
+              completer.complete();
+            }
           }
         }
       },
@@ -156,6 +160,7 @@ class InitializerIsolate {
         break;
       }
       if (event.ref.event_id != generated.mpv_event_id.MPV_EVENT_NONE) {
+        waitingForCallback = true;
         port.send(event.address);
         await completer.future;
       } else {
@@ -168,5 +173,5 @@ class InitializerIsolate {
   }
 
   final _ports = HashMap<int, SendPort>();
-  final _isolates = HashMap<int, Isolate>();
+  final _stopped = HashMap<int, Completer<void>>();
 }

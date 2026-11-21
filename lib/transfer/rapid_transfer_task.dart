@@ -2,6 +2,7 @@ import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/baidu_share_route.dart';
 import '../domain/public_share_route.dart';
+import '../domain/uploads.dart';
 
 enum RapidTaskStatus {
   pending,
@@ -53,20 +54,28 @@ class RapidTransferEntry {
     this.message = '',
     this.fileId = '',
     this.md5 = '',
+    this.sha1 = '',
     this.submitted = false,
+    this.confirmationPending = false,
+    this.submittedParent = '',
     this.method = CrossTransferMethod.automatic,
     this.transferSize = 0,
     this.downloaded = 0,
     this.sent = 0,
     this.payloadReady = false,
+    this.uploadPhase = UploadPhase.preparing,
   });
   final CloudFile file;
   final List<String> path;
   RapidEntryStatus status;
-  String message, fileId, md5;
-  bool submitted, payloadReady;
+  String message, fileId, md5, sha1, submittedParent;
+  bool submitted, confirmationPending, payloadReady;
   CrossTransferMethod method;
+  UploadPhase uploadPhase;
   int transferSize, downloaded, sent;
+  int downloadSpeed = 0, uploadSpeed = 0;
+  bool downloadVerifying = false;
+  bool checkingTarget = false;
   bool get finished =>
       status != RapidEntryStatus.pending &&
       status != RapidEntryStatus.processing &&
@@ -74,16 +83,19 @@ class RapidTransferEntry {
       status != RapidEntryStatus.uploading;
   bool get succeeded =>
       status == RapidEntryStatus.reused || status == RapidEntryStatus.uploaded;
-  int get size => transferSize > 0 ? transferSize : file.size;
-  double get progress => finished
+  int get size =>
+      (transferSize > 0 ? transferSize : file.size).clamp(0, 1 << 62);
+  int get downloadBytes => status == RapidEntryStatus.uploaded || payloadReady
+      ? size
+      : downloaded.clamp(0, size);
+  int get uploadBytes =>
+      status == RapidEntryStatus.uploaded ? size : sent.clamp(0, size);
+  double get progress => succeeded
       ? 1
-      : size <= 0
+      : method != CrossTransferMethod.relay || size <= 0
       ? 0
-      : status == RapidEntryStatus.downloading
-      ? .5 * (downloaded / size).clamp(0, 1)
-      : status == RapidEntryStatus.uploading
-      ? .5 + .5 * (sent / size).clamp(0, 1)
-      : 0;
+      // Byte counts survive failure and pause; only confirmed saves reach 100%.
+      : ((downloadBytes + uploadBytes) / (2 * size)).clamp(0, .99);
   Json toJson() => {
     'file': file.toJson(),
     'path': path,
@@ -91,12 +103,16 @@ class RapidTransferEntry {
     'message': message,
     'fileId': fileId,
     'md5': md5,
+    'sha1': sha1,
     'submitted': submitted,
+    'confirmationPending': confirmationPending,
+    'submittedParent': submittedParent,
     'method': method.name,
     'transferSize': transferSize,
     'downloaded': downloaded,
     'sent': sent,
     'payloadReady': payloadReady,
+    'uploadPhase': uploadPhase.name,
   };
   factory RapidTransferEntry.fromJson(Json j) => RapidTransferEntry(
     CloudFile.fromJson(j.obj('file')),
@@ -108,7 +124,14 @@ class RapidTransferEntry {
     message: j.str('message'),
     fileId: j.str('fileId'),
     md5: j.str('md5'),
+    sha1: j.str('sha1'),
     submitted: j.boolean('submitted'),
+    confirmationPending: j.boolean(
+      'confirmationPending',
+      j.boolean('submitted') &&
+          !const {'uploaded', 'reused', 'duplicate'}.contains(j.str('status')),
+    ),
+    submittedParent: j.str('submittedParent'),
     method: CrossTransferMethod.values.firstWhere(
       (m) => m.name == j.str('method'),
       orElse: () => j.str('status') == 'reused'
@@ -119,6 +142,12 @@ class RapidTransferEntry {
     downloaded: j.integer('downloaded').clamp(0, 1 << 62),
     sent: j.integer('sent').clamp(0, 1 << 62),
     payloadReady: j.boolean('payloadReady'),
+    uploadPhase: UploadPhase.values.firstWhere(
+      (phase) => phase.name == j.str('uploadPhase'),
+      orElse: () => j.str('status') == 'uploading' && j.integer('sent') > 0
+          ? UploadPhase.uploading
+          : UploadPhase.preparing,
+    ),
   );
 }
 
@@ -148,7 +177,7 @@ class RapidTransferTask {
   bool scanned;
   int scannedFiles = 0, scannedFolders = 0;
   String error;
-  int speed = 0;
+  int speed = 0, downloadSpeed = 0, uploadSpeed = 0;
   final List<RapidTransferEntry> entries;
   final List<List<String>> folders;
   final Map<String, String> directories;
@@ -158,9 +187,21 @@ class RapidTransferTask {
       entries.where((e) => e.status == status).length;
   int get done => entries.where((e) => e.finished).length;
   int get succeeded => entries.where((e) => e.succeeded).length;
-  double? get progress => !scanned || entries.isEmpty
-      ? null
-      : entries.fold<double>(0, (n, e) => n + e.progress) / entries.length;
+  double? get progress {
+    if (!scanned || entries.isEmpty) return null;
+    // Skipped names are not successful transfers. Remove their workload once
+    // known, and weight the remaining files by size instead of by file count.
+    final files = entries.where((e) => e.status != RapidEntryStatus.duplicate);
+    var weight = 0, processed = 0.0;
+    for (final entry in files) {
+      if (entry.size <= 0 && !entry.succeeded) return null;
+      final size = entry.size > 0 ? entry.size : 1;
+      weight += size;
+      processed += entry.progress * size;
+    }
+    return weight > 0 ? (processed / weight).clamp(0, 1) : 0;
+  }
+
   String get methodLabel {
     final rapid = entries.any((e) => e.status == RapidEntryStatus.reused);
     final relay = entries.any((e) => e.method == CrossTransferMethod.relay);
@@ -183,17 +224,55 @@ class RapidTransferTask {
                   count(RapidEntryStatus.missed) +
                   count(RapidEntryStatus.noHash) >
               0);
+  String get _runningStage {
+    if (!scanned) return '正在扫描文件夹';
+    final downloading = entries
+        .where(
+          (e) =>
+              e.status == RapidEntryStatus.downloading && !e.downloadVerifying,
+        )
+        .length;
+    final verifying = entries
+        .where(
+          (e) =>
+              e.status == RapidEntryStatus.downloading && e.downloadVerifying,
+        )
+        .length;
+    int uploads(UploadPhase phase) => entries
+        .where(
+          (e) =>
+              e.status == RapidEntryStatus.uploading && e.uploadPhase == phase,
+        )
+        .length;
+    final uploading = uploads(UploadPhase.uploading);
+    final preparing = uploads(UploadPhase.preparing);
+    final confirming =
+        uploads(UploadPhase.finishing) +
+        entries
+            .where(
+              (e) => e.checkingTarget && e.status != RapidEntryStatus.uploading,
+            )
+            .length;
+    final stages = [
+      if (downloading > 0) '正在下载 $downloading 个',
+      if (verifying > 0) '正在校验 $verifying 个',
+      if (preparing > 0) '正在准备上传 $preparing 个',
+      if (uploading > 0) '正在上传 $uploading 个',
+      if (confirming > 0) '正在确认 $confirming 个',
+    ];
+    return stages.isEmpty ? '正在判断秒传' : stages.join(' · ');
+  }
+
   String get stage => switch (status) {
     RapidTaskStatus.pending => '等待传输',
-    RapidTaskStatus.running =>
-      !scanned
-          ? '正在扫描文件夹'
-          : entries.any((e) => e.status == RapidEntryStatus.downloading)
-          ? '正在下载'
-          : entries.any((e) => e.status == RapidEntryStatus.uploading)
-          ? '正在上传'
-          : '正在判断秒传',
-    RapidTaskStatus.completed => canRetry ? '部分文件待重试' : '传输完成',
+    RapidTaskStatus.running => _runningStage,
+    RapidTaskStatus.completed =>
+      canRetry
+          ? '部分文件待重试'
+          : entries.isNotEmpty &&
+                count(RapidEntryStatus.duplicate) == entries.length
+          ? '全部已跳过'
+          : '传输完成',
     RapidTaskStatus.failed => '传输中断',
     RapidTaskStatus.cancelled => '已取消',
     RapidTaskStatus.interrupted => '等待继续',

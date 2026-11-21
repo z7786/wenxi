@@ -19,6 +19,7 @@ import 'package:asterlink/ui/experimental_features_page.dart';
 import 'package:asterlink/ui/browser_page.dart';
 import 'package:asterlink/ui/player_page.dart';
 import 'package:asterlink/ui/preview_page.dart';
+import 'package:asterlink/ui/parse_page.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/windows_actions.dart';
 import 'support.dart';
@@ -428,6 +429,10 @@ void main() {
         ('phone-parse-dark', const Size(393, 864), 0, true, 1),
         ('phone-parse-favorites', const Size(393, 864), 0, false, 1),
         ('phone-parse-large-text', const Size(320, 700), 0, false, 1.8),
+        ('tablet-parse-portrait', const Size(768, 1024), 0, false, 1),
+        ('tablet-parse-landscape', const Size(1280, 800), 0, false, 1),
+        ('tablet-parse-large-text', const Size(1280, 800), 0, false, 1.8),
+        ('ipad-parse-landscape', const Size(1366, 1024), 0, true, 1),
         ('desktop-parse', const Size(1100, 780), 0, false, 1),
         ('desktop-parse-favorites', const Size(1100, 780), 0, false, 1),
         ('phone-mine', const Size(393, 864), 3, false, 1),
@@ -438,6 +443,10 @@ void main() {
     testWidgets('$name layout and reference snapshot', (tester) async {
       if (name.startsWith('desktop-parse') || name == 'desktop-mine') {
         debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      } else if (name.startsWith('tablet-parse')) {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      } else if (name.startsWith('ipad-parse')) {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       }
       try {
         final services = await render(
@@ -517,6 +526,22 @@ void main() {
           FocusManager.instance.primaryFocus?.unfocus();
           await tester.pumpAndSettle();
         }
+        if (name.startsWith('tablet-parse') || name.startsWith('ipad-parse')) {
+          final viewport = tester.getRect(find.byType(ParsePage));
+          expect(
+            viewport.right,
+            closeTo(size.width, 1),
+            reason: 'The tablet body must use the width beside navigation',
+          );
+          expect(viewport.width, greaterThan(size.width - 150));
+          final form = tester.getRect(find.byKey(const Key('parse-tools')));
+          expect(form.left, closeTo(viewport.left + 28, 1));
+          if (name.endsWith('landscape')) {
+            expect(form.width, greaterThan(680));
+          } else {
+            expect(form.right, closeTo(viewport.right - 28, 1));
+          }
+        }
         expect(tester.takeException(), isNull);
         // Reference images use the Windows Microsoft YaHei font.
         // Other hosts still run all layout and interaction assertions.
@@ -538,6 +563,18 @@ void main() {
       final services = await render(tester, const Size(393, 864), 3);
       expect(find.byType(ExperimentalFeaturesPage), findsNothing);
       expect(find.text('突破文件大小限制'), findsNothing);
+      expect(find.text('实验性功能'), findsNothing);
+      await tester.scrollUntilVisible(
+        find.text('播放器与实验功能'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.ensureVisible(find.text('播放器与实验功能'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('播放器与实验功能'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('实验性功能'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('实验性功能'));
       await tester.pumpAndSettle();
       expect(find.byType(ExperimentalFeaturesPage), findsOneWidget);
@@ -622,6 +659,22 @@ void main() {
       await changeTextScale(tester, 1.8);
       expect(tester.takeException(), isNull);
       for (final title in ['下载保存目录', '导出备份', '日志与故障排查']) {
+        final group = switch (title) {
+          '导出备份' => '备份与数据',
+          '日志与故障排查' => '帮助与诊断',
+          _ => null,
+        };
+        if (group != null) {
+          await tester.scrollUntilVisible(
+            find.text(group),
+            240,
+            scrollable: find.byType(Scrollable).first,
+          );
+          await tester.ensureVisible(find.text(group));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(group));
+          await tester.pumpAndSettle();
+        }
         await tester.scrollUntilVisible(
           find.text(title),
           240,
@@ -700,6 +753,8 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       try {
         final services = await render(tester, const Size(1100, 780), 3);
+        await tester.tap(find.text('高级下载设置'));
+        await tester.pumpAndSettle();
         await tester.tap(find.text('各网盘连接数'));
         await tester.pumpAndSettle();
         final settingsList = find.byKey(const PageStorageKey('mine'));
@@ -717,6 +772,7 @@ void main() {
               .first,
         );
         expect(find.text('夸克 · 直链'), findsOneWidget);
+        expect(find.text('HTTP 下载连接数'), findsOneWidget);
 
         await tester.runAsync(() => services.updateSettings({'theme': 'Dark'}));
         await tester.pumpAndSettle();
@@ -724,6 +780,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
         expect(find.text('夸克 · 直链'), findsOneWidget);
+        expect(find.text('HTTP 下载连接数'), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
@@ -1340,7 +1397,8 @@ void main() {
     expect(find.text('传输管理'), findsOneWidget);
     await tester.tap(find.text('我的').last);
     await tester.pumpAndSettle();
-    expect(find.text('HTTP 下载连接数'), findsOneWidget);
+    expect(find.text('下载保存目录'), findsOneWidget);
+    expect(find.text('HTTP 下载连接数'), findsNothing);
     await tester.tap(find.byTooltip('更多操作'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('打赏作者'));

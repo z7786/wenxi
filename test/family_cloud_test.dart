@@ -429,7 +429,11 @@ void main() {
     'Family account changes stop opening and cancellation stops pagination',
     () async {
       final result = Completer<HttpResult>();
-      final http = FakeHttp((_) => result.future);
+      final started = Completer<void>();
+      final http = FakeHttp((_) {
+        started.complete();
+        return result.future;
+      });
       final store = StateStore.memory({
         'credentials': {'C139': mobileCredential().toJson()},
       });
@@ -440,6 +444,7 @@ void main() {
       );
       final opening = repository.family(CloudPlatform.c139, 'family-a');
       final failed = expectLater(opening, throwsA(isA<AppException>()));
+      await started.future;
       await store.put('credentials', {'C139': mobileCredential(2).toJson()});
       result.complete(
         mobileResponse({

@@ -11,6 +11,7 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/baidu_share_route.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/settings.dart';
 import 'package:asterlink/download/download_manager.dart';
 import 'package:asterlink/download/download_request.dart';
 import 'package:asterlink/download/transfer_http.dart';
@@ -101,6 +102,8 @@ class _Fixture {
               'threads': 8,
               'retries': 1,
               'speedLimit': 4096,
+              'quarkDirectConnectionPolicy':
+                  AppSettings.quarkDirectConnectionPolicyVersion,
               'downloadThreadOverrides': {
                 'quark_route_1': 16,
                 'quark_route_2': 9,

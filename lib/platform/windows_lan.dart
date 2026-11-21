@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:ffi/ffi.dart';
 
 import '../core/json.dart';
+import 'executable_path.dart';
 
 Future<int?> windowsLanInterface() async {
   if (!Platform.isWindows) return null;
@@ -45,7 +46,7 @@ Future<void> allowWindowsLanConnections(int httpPort, int discoveryPort) async {
         discoveryPort <= 65535,
     '请先开启设备互联',
   );
-  final executable = Platform.resolvedExecutable;
+  final executable = applicationExecutablePath();
   final identity = sha256
       .convert(utf8.encode(executable.toLowerCase()))
       .toString()

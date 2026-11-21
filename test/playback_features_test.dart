@@ -161,6 +161,7 @@ void main() {
       final history = PlaybackStore(state);
       final old = history.preferencesFor('show-a');
       expect(old.videoScale, 1);
+      expect(old.videoRotation, 0);
       expect(old.controlsScale, 1);
       expect(old.showSpeedButton && old.showPlaylistButton, isTrue);
       await history.saveEffectivePreferences(
@@ -169,6 +170,7 @@ void main() {
           videoScale: 1.75,
           videoOffsetX: -.2,
           videoOffsetY: .4,
+          videoRotation: 35,
           controlsScale: 1.4,
           showResolution: false,
           showCastButton: false,
@@ -188,9 +190,11 @@ void main() {
       expect(sameFolder.videoScale, 1.75);
       expect(sameFolder.videoOffsetX, -.2);
       expect(sameFolder.videoOffsetY, .4);
+      expect(sameFolder.videoRotation, 35);
       expect(otherFolder.videoScale, 1);
       expect(otherFolder.videoOffsetX, 0);
       expect(otherFolder.videoOffsetY, 0);
+      expect(otherFolder.videoRotation, 0);
       for (final value in [sameFolder, otherFolder]) {
         expect(value.rate, 1.25);
         expect(value.controlsScale, 1.4);

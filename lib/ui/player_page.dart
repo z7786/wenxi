@@ -9,6 +9,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:asterlink/playback/playback_state.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
@@ -24,6 +25,7 @@ import '../playback/playback_ui_diagnostics.dart';
 import '../playback/floating_playback.dart';
 import '../playback/playback_sleep_timer.dart';
 import '../playback/subtitle_files.dart';
+import '../playback/online_subtitles.dart';
 import '../diagnostics/app_log.dart';
 import 'player_theme.dart';
 import 'windows_gpu_preference_tile.dart';
@@ -38,6 +40,7 @@ import 'player_skip_time_dialog.dart';
 import 'player_sleep_panel.dart';
 import 'player_screenshot_panel.dart';
 import 'player_cast_panel.dart';
+import 'player_online_subtitle_panel.dart';
 import 'player_tv_controls.dart';
 import '../playback/cast/cast_discovery.dart';
 import 'desktop_pip_surface.dart';
@@ -52,6 +55,7 @@ class PlayerPage extends StatefulWidget {
     this.onDownload,
     this.confirmDownload,
     this.chooseSubtitle,
+    this.onlineSubtitles,
     this.chooseExternalPlayer,
     this.onAuthorizeUcTv,
     this.screenshotActions = const PlayerScreenshotActions(),
@@ -64,6 +68,7 @@ class PlayerPage extends StatefulWidget {
   final Future<void> Function(DownloadSpec source)? onDownload;
   final Future<bool> Function(BuildContext)? confirmDownload;
   final Future<XFile?> Function()? chooseSubtitle;
+  final OnlineSubtitleService? onlineSubtitles;
   final Future<XFile?> Function()? chooseExternalPlayer;
   final Future<bool> Function(BuildContext)? onAuthorizeUcTv;
   final PlayerScreenshotActions screenshotActions;
@@ -94,7 +99,8 @@ class _PlayerPageState extends State<PlayerPage>
   late final PlaybackUiDiagnostics _uiDiagnostics;
   bool _disableAnimations = false;
   Object? _presentationState, _deviceState;
-  final _safeInsets = <Orientation, EdgeInsets>{};
+  Size? _safeInsetsSize;
+  EdgeInsets _safeInsets = EdgeInsets.zero;
   Completer<void>? _layoutReady;
   Future<void> _layoutWork = Future.value();
   Future<void> _deviceWork = Future.value();
@@ -130,6 +136,21 @@ class _PlayerPageState extends State<PlayerPage>
   double _dragX = 0, _dragY = 0, _viewportWidth = 1, _viewportHeight = 1;
   double _verticalInitial = 0, _verticalTarget = 0;
   bool _brightnessDrag = false, _verticalActive = false;
+  final _surfaceTouches = <int, Offset>{};
+  bool _multiTouch = false, _pinching = false, _pinchChanged = false;
+  double _pinchInitialSpan = 0, _pinchInitialScale = 1, _pinchRenderScale = 1;
+  double _pinchInitialRotation = 0,
+      _pinchLastAngle = 0,
+      _pinchRotationDelta = 0;
+  Offset _pinchInitialFocal = Offset.zero, _pinchInitialOffset = Offset.zero;
+  Size _pinchViewport = Size.zero;
+  PlaybackPreferences? _pinchPreview;
+  int? _pinchPreviewFrame;
+  Timer? _pinchResetTimer;
+  bool _pinchResetVisible = false, _pinchResetShown = false;
+  int _pinchGeneration = -1, _touchSequence = 0, _multiTouchSequence = -1;
+  DoubleTapGestureRecognizer? _doubleTapGesture;
+  int? _lastSingleTapPointer;
   double? _initialBrightness;
   String? _brightnessFolder;
   bool _brightnessChanged = false;
@@ -261,16 +282,35 @@ class _PlayerPageState extends State<PlayerPage>
       }
     }
     if (_seenGeneration != controller.generation) {
+      _discardPinchPreview();
+      _hidePinchReset(refresh: false);
       _saveBrightnessGesture();
       _volumeTimer?.cancel();
       _volumeTimer = null;
       _verticalActive = false;
+      if (_surfaceTouches.isNotEmpty) {
+        _multiTouch = true;
+        _multiTouchSequence = _touchSequence;
+      }
+      if (_pinching) {
+        _pinching = _pinchChanged = false;
+        _hudTimer?.cancel();
+        hud = '';
+      }
       _seenGeneration = controller.generation;
       _seekPreview = null;
       _hoverSeekPreview = null;
       _pauseWithoutControls = false;
       locked = false;
       visible = true;
+    }
+    if (controller.casting ||
+        controller.playingExternally ||
+        controller.openingExternalPlayer ||
+        controller.usingSystemPip ||
+        controller.preparingSystemPip) {
+      _finishPinch(refresh: false);
+      _hidePinchReset(refresh: false);
     }
     if (controller.notice.isNotEmpty && controller.notice != _seenNotice) {
       _seenNotice = controller.notice;
@@ -525,6 +565,10 @@ class _PlayerPageState extends State<PlayerPage>
       if (!mounted || revision != _layoutRevision || !_rotationPending) return;
       _layoutQuiet?.cancel();
       if (!_layoutMatches(_layoutTarget!)) return;
+      if (!controller.loading) {
+        _finishLayout(revision);
+        return;
+      }
       _layoutQuiet = Timer(const Duration(milliseconds: 100), () {
         if (!mounted || revision != _layoutRevision) return;
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -558,6 +602,10 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _onDevice() {
     if (mounted) {
+      if (device.inPip) {
+        _finishPinch();
+        _hidePinchReset(refresh: false);
+      }
       if (device.inPip && _editingLayout) _cancelLayout();
       if (device.supportsSystemVolume) {
         _run(
@@ -580,6 +628,13 @@ class _PlayerPageState extends State<PlayerPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final revision = ++_lifecycleRevision;
+    if (state != AppLifecycleState.resumed) _hidePinchReset();
+    if (state != AppLifecycleState.resumed && _pinching) {
+      _finishPinch();
+      _surfaceTouches.clear();
+      _multiTouch = true;
+      _multiTouchSequence = ++_touchSequence;
+    }
     if (state == AppLifecycleState.resumed) {
       controller.foreground();
       if (!_pipBusy) {
@@ -613,6 +668,7 @@ class _PlayerPageState extends State<PlayerPage>
     _hudTimer?.cancel();
     _volumeTimer?.cancel();
     _boostIndicatorTimer?.cancel();
+    _hidePinchReset(refresh: false);
     _chrome.dispose();
     _nativeSubtitleTimer?.cancel();
     _lockTimer?.cancel();
@@ -625,6 +681,7 @@ class _PlayerPageState extends State<PlayerPage>
     }
     unawaited(_actions?.cancel());
     controller.removeListener(_onController);
+    _finishPinch(refresh: false);
     device.removeListener(_onDevice);
     focus.dispose();
     _tvPlayFocus.dispose();
@@ -673,6 +730,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (show) _setControlsVisible(true);
     _hideTimer?.cancel();
     if (_modalDepth == 0 &&
+        !_multiTouch &&
         controller.state.playing &&
         _seekPreview == null &&
         _hoverSeekPreview == null) {
@@ -729,7 +787,18 @@ class _PlayerPageState extends State<PlayerPage>
     });
   }
 
-  void _clearTapSequence() {}
+  void _clearTapSequence() {
+    final gesture = _doubleTapGesture;
+    if (gesture == null) return;
+    // Release the held first tap as well as active pointers, so the next single
+    // tap cannot complete a double tap that began during a pinch.
+    final previous = _lastSingleTapPointer;
+    _lastSingleTapPointer = null;
+    if (previous != null) gesture.rejectGesture(previous);
+    for (final pointer in _surfaceTouches.keys.toList()) {
+      gesture.rejectGesture(pointer);
+    }
+  }
 
   void _updateSeekHover(PointerEvent event, double width) {
     final duration = controller.state.duration;
@@ -755,6 +824,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _surfaceTap(TapUpDetails details) {
+    if (_multiTouch || _multiTouchSequence == _touchSequence) return;
     if (locked) {
       _clearTapSequence();
       _showLock();
@@ -764,7 +834,12 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _surfaceDoubleTap() {
-    if (locked || !controller.ready) return;
+    if (_multiTouch ||
+        _multiTouchSequence == _touchSequence ||
+        locked ||
+        !controller.ready) {
+      return;
+    }
     _pauseWithoutControls = true;
     _hideTimer?.cancel();
     _setControlsVisible(false);
@@ -790,6 +865,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _startBoostGesture(LongPressStartDetails details) {
     _clearTapSequence();
+    if (_multiTouch) return;
     if (locked) {
       _showLock();
       return;
@@ -810,7 +886,9 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _moveBoostGesture(LongPressMoveUpdateDetails details) {
-    if (!_boostGestureActive || !controller.boosting || locked) return;
+    if (_multiTouch || !_boostGestureActive || !controller.boosting || locked) {
+      return;
+    }
     final offset = details.offsetFromOrigin;
     final movement = offset - _boostLastOffset;
     _boostLastOffset = offset;
@@ -932,6 +1010,8 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _toggleLock() {
+    _finishPinch();
+    _hidePinchReset(refresh: false);
     _hideTimer?.cancel();
     _hudTimer?.cancel();
     _lockTimer?.cancel();
@@ -972,6 +1052,8 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
     if (_pipBusy) return;
+    _finishPinch(refresh: false);
+    _hidePinchReset(refresh: false);
     if (controller.usingSystemPip) {
       await controller.restoreSystemPip(resume: true);
       return;
@@ -1016,6 +1098,8 @@ class _PlayerPageState extends State<PlayerPage>
       _showHud('请先断开电视投屏');
       return;
     }
+    _finishPinch(refresh: false);
+    _hidePinchReset(refresh: false);
     _pipBusy = true;
     final route = ModalRoute.of(context);
     final navigator = Navigator.of(context);
@@ -1073,9 +1157,297 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  bool get _canPinch =>
+      mounted &&
+      !_leaving &&
+      !locked &&
+      !_editingLayout &&
+      _modalDepth == 0 &&
+      controller.ready &&
+      controller.hasVideo &&
+      !controller.casting &&
+      !controller.playingExternally &&
+      !controller.openingExternalPlayer &&
+      !controller.usingSystemPip &&
+      !controller.preparingSystemPip &&
+      !device.inPip &&
+      !_pipBusy;
+
+  Offset get _touchVector => _surfaceTouches.length == 2
+      ? _surfaceTouches.values.last - _surfaceTouches.values.first
+      : Offset.zero;
+
+  Offset get _touchFocal =>
+      (_surfaceTouches.values.first + _surfaceTouches.values.last) / 2;
+
+  void _surfacePointerDown(PointerDownEvent event) {
+    if (Platform.isWindows &&
+        !locked &&
+        !_leaving &&
+        _modalDepth == 0 &&
+        event.kind == PointerDeviceKind.mouse &&
+        event.buttons == kMiddleMouseButton) {
+      _run(_toggleFullscreen);
+    }
+    if (event.kind != PointerDeviceKind.touch) {
+      _touchSequence++;
+      return;
+    }
+    if (_surfaceTouches.isEmpty) {
+      _touchSequence++;
+      _multiTouch = false;
+    }
+    _surfaceTouches[event.pointer] = event.localPosition;
+    if (_surfaceTouches.length < 2) return;
+    if (!_multiTouch) {
+      // Finish any adjustment made before the second finger arrived, but never
+      // commit its seek preview. The remainder of this touch sequence is zoom.
+      _verticalEnd();
+      _hideTimer?.cancel();
+      _volumeTimer?.cancel();
+      _volumeTimer = null;
+      _volumeRevision++;
+      _endBoostGesture(cancelled: true);
+      setState(() {
+        _multiTouch = true;
+        _multiTouchSequence = _touchSequence;
+        _seekPreview = _hoverSeekPreview = null;
+      });
+      _clearTapSequence();
+      if (_canPinch) {
+        _pinching = true;
+        _pinchChanged = false;
+        _pinchResetShown = false;
+        _pinchGeneration = controller.generation;
+        _pinchRenderScale = controller.preferences.videoScale;
+        _rebasePinch();
+        _hudTimer?.cancel();
+        setState(() {
+          hud = '缩放  ${(_pinchInitialScale * 100).round()}%';
+        });
+      } else if (locked) {
+        _showLock();
+      }
+    } else if (_pinching) {
+      // Keep the last preview, then suspend all transforms while three fingers
+      // are down. Rebase the focal point and angle when two remain.
+      _flushPinchPreview();
+      _pinchInitialSpan = 0;
+    }
+    if (_multiTouch) _clearTapSequence();
+  }
+
+  void _rebasePinch() {
+    _flushPinchPreview();
+    final value = controller.preferences;
+    _pinchViewport = Size(_viewportWidth, _viewportHeight);
+    _pinchInitialSpan = _touchVector.distance;
+    _pinchLastAngle = _touchVector.direction;
+    _pinchRotationDelta = 0;
+    _pinchInitialScale = value.videoScale;
+    _pinchInitialRotation = value.videoRotation;
+    _pinchInitialFocal = _touchFocal;
+    _pinchInitialOffset = Offset(
+      value.videoOffsetX * _viewportWidth / 2,
+      value.videoOffsetY * _viewportHeight / 2,
+    );
+  }
+
+  void _surfacePointerMove(PointerMoveEvent event) {
+    if (!_surfaceTouches.containsKey(event.pointer)) return;
+    _surfaceTouches[event.pointer] = event.localPosition;
+    if (!_pinching || _surfaceTouches.length != 2) return;
+    if (!_canPinch || _pinchGeneration != controller.generation) {
+      _finishPinch();
+      return;
+    }
+    final vector = _touchVector, span = vector.distance;
+    if (span < 1) {
+      // Overlapping fingers have no reliable angle. Rebase once separated.
+      _pinchInitialSpan = 0;
+      return;
+    }
+    if (_pinchInitialSpan < 1 ||
+        _pinchViewport != Size(_viewportWidth, _viewportHeight)) {
+      _rebasePinch();
+      return;
+    }
+    final angle = vector.direction, delta = angle - _pinchLastAngle;
+    // Accumulate the shortest change, including crossings of +/-180 degrees.
+    _pinchRotationDelta += math.atan2(math.sin(delta), math.cos(delta));
+    _pinchLastAngle = angle;
+    final scale = (_pinchInitialScale * span / _pinchInitialSpan)
+        .clamp(.5, 3.0)
+        .toDouble();
+    final center = _pinchViewport.center(Offset.zero);
+    final anchor = _pinchInitialFocal - center - _pinchInitialOffset;
+    final cosine = math.cos(_pinchRotationDelta);
+    final sine = math.sin(_pinchRotationDelta);
+    final rotated = Offset(
+      anchor.dx * cosine - anchor.dy * sine,
+      anchor.dx * sine + anchor.dy * cosine,
+    );
+    // Keep the selected video point under the moving midpoint, including when
+    // the scale reaches its limits or the video was already transformed.
+    final offset =
+        _touchFocal - center - rotated * (scale / _pinchInitialScale);
+    final value = controller.preferences.copyWith(
+      videoScale: scale,
+      videoOffsetX: offset.dx * 2 / _pinchViewport.width,
+      videoOffsetY: offset.dy * 2 / _pinchViewport.height,
+      videoRotation:
+          _pinchInitialRotation + _pinchRotationDelta * 180 / math.pi,
+    );
+    final previous = _pinchPreview ?? controller.preferences;
+    if ((value.videoScale - previous.videoScale).abs() < .0001 &&
+        (value.videoRotation - previous.videoRotation).abs() < .01 &&
+        (value.videoOffsetX - previous.videoOffsetX).abs() *
+                _pinchViewport.width <
+            .1 &&
+        (value.videoOffsetY - previous.videoOffsetY).abs() *
+                _pinchViewport.height <
+            .1) {
+      return;
+    }
+    _pinchChanged = true;
+    _showPinchReset();
+    _pinchPreview = value;
+    // Both fingers can report several events per display frame. Apply only the
+    // latest combined transform, with no preference writes during movement.
+    _pinchPreviewFrame ??= SchedulerBinding.instance.scheduleFrameCallback((_) {
+      _pinchPreviewFrame = null;
+      _flushPinchPreview();
+    });
+  }
+
+  String _pinchHud(PlaybackPreferences value) =>
+      '缩放  ${(value.videoScale * 100).round()}%'
+      '${value.videoRotation.abs() < .5 ? '' : ' · 旋转 ${value.videoRotation.round()}°'}';
+
+  void _discardPinchPreview() {
+    final frame = _pinchPreviewFrame;
+    if (frame != null) {
+      SchedulerBinding.instance.cancelFrameCallbackWithId(frame);
+    }
+    _pinchPreviewFrame = null;
+    _pinchPreview = null;
+  }
+
+  void _flushPinchPreview() {
+    final preview = _pinchPreview;
+    _discardPinchPreview();
+    if (preview == null ||
+        _pinchGeneration != controller.generation ||
+        controller.closed) {
+      return;
+    }
+    final value = controller.preferences.copyWith(
+      videoScale: preview.videoScale,
+      videoOffsetX: preview.videoOffsetX,
+      videoOffsetY: preview.videoOffsetY,
+      videoRotation: preview.videoRotation,
+    );
+    _run(() => controller.updatePreferences(value, save: false));
+    final text = _pinchHud(value);
+    if (mounted && _pinching && hud != text) setState(() => hud = text);
+  }
+
+  void _showPinchReset() {
+    if (_pinchResetShown) return;
+    _pinchResetShown = true;
+    _pinchResetTimer?.cancel();
+    setState(() => _pinchResetVisible = true);
+    // Moves and finger replacement do not extend this three-second prompt.
+    _pinchResetTimer = Timer(const Duration(seconds: 3), _hidePinchReset);
+  }
+
+  void _hidePinchReset({bool refresh = true}) {
+    _pinchResetTimer?.cancel();
+    _pinchResetTimer = null;
+    final changed = _pinchResetVisible;
+    _pinchResetVisible = false;
+    if (refresh && changed && mounted) setState(() {});
+  }
+
+  void _resetVideoTransform() {
+    if (!_canPinch) return;
+    _discardPinchPreview();
+    _hidePinchReset(refresh: false);
+    _hudTimer?.cancel();
+    _clearTapSequence();
+    _pinchChanged = false;
+    _run(
+      () => controller.updatePreferences(
+        controller.preferences.copyWith(
+          videoScale: 1,
+          videoOffsetX: 0,
+          videoOffsetY: 0,
+          videoRotation: 0,
+        ),
+      ),
+    );
+    if (_pinching) {
+      _pinchRenderScale = 1;
+      if (_surfaceTouches.length == 2) {
+        _rebasePinch();
+      } else {
+        _pinchInitialSpan = 0;
+      }
+    }
+    setState(() => hud = '');
+  }
+
+  void _surfacePointerEnd(PointerEvent event) {
+    if (_surfaceTouches.remove(event.pointer) == null) return;
+    if (!_multiTouch && event is PointerUpEvent) {
+      _lastSingleTapPointer = event.pointer;
+    }
+    if (_pinching) {
+      if (_surfaceTouches.length < 2) {
+        _finishPinch();
+      } else if (_surfaceTouches.length == 2) {
+        _rebasePinch();
+      }
+    }
+    if (_surfaceTouches.isNotEmpty || !_multiTouch) return;
+    final sequence = _touchSequence;
+    // Listener sees pointer-up before the gesture arena routes it. Keep single
+    // finger callbacks suppressed until that final event has been dispatched.
+    scheduleMicrotask(() {
+      if (!mounted ||
+          sequence != _touchSequence ||
+          _surfaceTouches.isNotEmpty) {
+        return;
+      }
+      setState(() => _multiTouch = false);
+      _touch(show: false);
+    });
+  }
+
+  void _finishPinch({bool refresh = true}) {
+    if (!_pinching) return;
+    _pinching = false;
+    _flushPinchPreview();
+    final save =
+        _pinchChanged &&
+        _pinchGeneration == controller.generation &&
+        !controller.closed;
+    _pinchChanged = false;
+    if (save) {
+      _run(() => controller.updatePreferences(controller.preferences));
+    }
+    if (refresh && mounted) {
+      _showHud(_pinchHud(controller.preferences));
+    } else {
+      _hudTimer?.cancel();
+      hud = '';
+    }
+  }
+
   void _horizontalStart(DragStartDetails details) {
     _clearTapSequence();
-    if (locked ||
+    if (_multiTouch ||
+        locked ||
         !controller.ready ||
         controller.casting && !controller.castSession!.seekSupported ||
         controller.state.duration <= Duration.zero) {
@@ -1088,7 +1460,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _horizontalUpdate(DragUpdateDetails details) {
-    if (locked || _seekPreview == null) return;
+    if (_multiTouch || locked || _seekPreview == null) return;
     _dragX += details.primaryDelta ?? 0;
     final window = (controller.state.duration.inSeconds * .1).clamp(30, 300);
     final target = clampPlaybackPosition(
@@ -1104,6 +1476,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _horizontalEnd() {
+    if (_multiTouch) return;
     final target = _seekPreview;
     if (target == null) return;
     setState(() => _seekPreview = null);
@@ -1113,7 +1486,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _verticalStart(DragStartDetails details) {
     _clearTapSequence();
-    if (locked || !controller.ready) return;
+    if (_multiTouch || locked || !controller.ready) return;
     _verticalActive = true;
     _brightnessDrag = details.localPosition.dx < _viewportWidth / 2;
     _brightnessFolder = controller.folderKey;
@@ -1126,7 +1499,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _verticalUpdate(DragUpdateDetails details) {
-    if (locked || !controller.ready || !_verticalActive) return;
+    if (_multiTouch || locked || !controller.ready || !_verticalActive) return;
     if (_brightnessDrag && !device.supportsBrightness) {
       _showHud('请在系统中调整屏幕亮度');
       return;
@@ -1150,7 +1523,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _applyVertical({bool save = false}) {
-    if (!mounted || locked) return;
+    if (!mounted || locked || _multiTouch) return;
     final brightness = _brightnessDrag, value = _verticalTarget;
     final revision = ++_volumeRevision;
     _run(() async {
@@ -1171,6 +1544,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _verticalEnd() {
+    if (_multiTouch) return;
     _volumeTimer?.cancel();
     _volumeTimer = null;
     _saveBrightnessGesture();
@@ -1338,6 +1712,8 @@ class _PlayerPageState extends State<PlayerPage>
     bool previewSubtitles = false,
   }) async {
     if (_activePanel != null || device.inPip) return;
+    _finishPinch(refresh: false);
+    _hidePinchReset();
     _modalDepth++;
     _hideTimer?.cancel();
     // Show the selected subtitle position while the side panel is open, rather
@@ -1678,116 +2054,150 @@ class _PlayerPageState extends State<PlayerPage>
       ],
     ),
   );
-  Future<void> _subtitles() => _panel('字幕', (context) {
-    final current = controller.state.track.subtitle;
-    final tracks = <String, SubtitleTrack>{
-      for (final track in controller.state.tracks.subtitle) track.id: track,
-      if (current.uri || current.data) current.id: current,
-    };
-    return ListView(
-      shrinkWrap: true,
-      children: [
-        for (final track in tracks.values)
-          _choice(
-            _trackName(track.id, track.title, track.language, '字幕'),
-            track.uri || track.data
-                ? '外挂字幕'
-                : track.id == 'auto' || track.id == 'no'
-                ? null
-                : '内嵌字幕',
-            current.id == track.id,
-            () => _run(() => controller.setSubtitleTrack(track)),
-          ),
-        for (final subtitle in controller.availableSubtitles)
-          _choice(
-            subtitle.name,
-            '同目录字幕',
-            controller.cloudSubtitleId == subtitle.id,
-            () => _run(() => controller.loadCloudSubtitle(subtitle)),
-          ),
-        if (controller.subtitleLoading) const ListTile(title: Text('正在加载字幕…')),
-        if (controller.backend?.subtitleFontMessage.isNotEmpty == true)
+  Future<void> _subtitles() async {
+    Future<void> Function()? next;
+    await _panel('字幕', (context) {
+      final current = controller.state.track.subtitle;
+      final tracks = <String, SubtitleTrack>{
+        for (final track in controller.state.tracks.subtitle) track.id: track,
+        if (current.uri || current.data) current.id: current,
+      };
+      return ListView(
+        shrinkWrap: true,
+        children: [
+          for (final track in tracks.values)
+            _choice(
+              _trackName(track.id, track.title, track.language, '字幕'),
+              track.uri || track.data
+                  ? '外挂字幕'
+                  : track.id == 'auto' || track.id == 'no'
+                  ? null
+                  : '内嵌字幕',
+              current.id == track.id,
+              () => _run(() => controller.setSubtitleTrack(track)),
+            ),
+          for (final subtitle in controller.availableSubtitles)
+            _choice(
+              subtitle.name,
+              '同目录字幕',
+              controller.cloudSubtitleId == subtitle.id,
+              () => _run(() => controller.loadCloudSubtitle(subtitle)),
+            ),
+          if (controller.subtitleLoading)
+            const ListTile(title: Text('正在加载字幕…')),
+          if (controller.backend?.subtitleFontMessage.isNotEmpty == true)
+            ListTile(
+              title: Text(controller.backend!.subtitleFontMessage),
+              subtitle: controller.backend!.subtitleFontLoading
+                  ? null
+                  : const Text('点此重试下载中文字幕字体'),
+              onTap: controller.backend!.subtitleFontLoading
+                  ? null
+                  : () => _run(controller.backend!.retrySubtitleFont),
+            ),
           ListTile(
-            title: Text(controller.backend!.subtitleFontMessage),
-            subtitle: controller.backend!.subtitleFontLoading
-                ? null
-                : const Text('点此重试下载中文字幕字体'),
-            onTap: controller.backend!.subtitleFontLoading
-                ? null
-                : () => _run(controller.backend!.retrySubtitleFont),
+            key: const Key('player-online-subtitles'),
+            leading: const Icon(CupertinoIcons.globe),
+            title: const Text('在线字幕'),
+            subtitle: const Text('按视频名称搜索，可修改关键词'),
+            onTap: controller.ready && !_subtitleBusy
+                ? () {
+                    next = _onlineSubtitles;
+                    Navigator.pop(context);
+                  }
+                : null,
           ),
-        ListTile(
-          leading: const Icon(CupertinoIcons.folder),
-          title: const Text('加载字幕文件'),
-          subtitle: const Text('SRT / VTT / ASS / SSA，最大 8 MB'),
-          onTap: () {
-            Navigator.pop(context);
-            _run(_importSubtitle);
-          },
-        ),
-        _delaySlider(
-          '字幕时间校正',
-          controller.subtitleDelay,
-          -10,
-          10,
-          controller.setSubtitleDelay,
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('字幕字号  ${controller.preferences.subtitleSize.round()}'),
-              Slider(
-                key: const Key('player-subtitle-size'),
-                value: controller.preferences.subtitleSize,
-                min: PlaybackPreferences.minSubtitleSize,
-                max: PlaybackPreferences.maxSubtitleSize,
-                divisions:
-                    (PlaybackPreferences.maxSubtitleSize -
-                            PlaybackPreferences.minSubtitleSize)
-                        .round(),
-                label: '${controller.preferences.subtitleSize.round()}',
-                onChanged: (value) => _run(
-                  () => controller.updatePreferences(
-                    controller.preferences.copyWith(subtitleSize: value),
-                    save: false,
+          ListTile(
+            leading: const Icon(CupertinoIcons.folder),
+            title: const Text('加载字幕文件'),
+            subtitle: const Text('SRT / VTT / ASS / SSA，最大 8 MB'),
+            onTap: () {
+              next = _importSubtitle;
+              Navigator.pop(context);
+            },
+          ),
+          _delaySlider(
+            '字幕时间校正',
+            controller.subtitleDelay,
+            -10,
+            10,
+            controller.setSubtitleDelay,
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('字幕字号  ${controller.preferences.subtitleSize.round()}'),
+                Slider(
+                  key: const Key('player-subtitle-size'),
+                  value: controller.preferences.subtitleSize,
+                  min: PlaybackPreferences.minSubtitleSize,
+                  max: PlaybackPreferences.maxSubtitleSize,
+                  divisions:
+                      (PlaybackPreferences.maxSubtitleSize -
+                              PlaybackPreferences.minSubtitleSize)
+                          .round(),
+                  label: '${controller.preferences.subtitleSize.round()}',
+                  onChanged: (value) => _run(
+                    () => controller.updatePreferences(
+                      controller.preferences.copyWith(subtitleSize: value),
+                      save: false,
+                    ),
+                  ),
+                  onChangeEnd: (_) => _run(
+                    () => controller.updatePreferences(controller.preferences),
                   ),
                 ),
-                onChangeEnd: (_) => _run(
-                  () => controller.updatePreferences(controller.preferences),
+                Text(
+                  '字幕位置  距底部 ${(controller.preferences.subtitleBottom * 100).round()}%',
                 ),
-              ),
-              Text(
-                '字幕位置  距底部 ${(controller.preferences.subtitleBottom * 100).round()}%',
-              ),
-              Slider(
-                key: const Key('player-subtitle-position'),
-                value: controller.preferences.subtitleBottom,
-                min: 0,
-                max: .4,
-                divisions: 40,
-                onChanged: (value) => _run(
-                  () => controller.updatePreferences(
-                    controller.preferences.copyWith(subtitleBottom: value),
-                    save: false,
+                Slider(
+                  key: const Key('player-subtitle-position'),
+                  value: controller.preferences.subtitleBottom,
+                  min: 0,
+                  max: .4,
+                  divisions: 40,
+                  onChanged: (value) => _run(
+                    () => controller.updatePreferences(
+                      controller.preferences.copyWith(subtitleBottom: value),
+                      save: false,
+                    ),
+                  ),
+                  onChangeEnd: (_) => _run(
+                    () => controller.updatePreferences(controller.preferences),
                   ),
                 ),
-                onChangeEnd: (_) => _run(
-                  () => controller.updatePreferences(controller.preferences),
+                SubtitleAppearanceSettings(
+                  preferences: controller.preferences,
+                  onChanged: (value, save) => _run(
+                    () => controller.updatePreferences(value, save: save),
+                  ),
                 ),
-              ),
-              SubtitleAppearanceSettings(
-                preferences: controller.preferences,
-                onChanged: (value, save) =>
-                    _run(() => controller.updatePreferences(value, save: save)),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ],
-    );
-  }, previewSubtitles: true);
+        ],
+      );
+    }, previewSubtitles: true);
+    if (mounted && !_leaving && !controller.closed && next != null) {
+      await next!();
+    }
+  }
+
+  Future<void> _onlineSubtitles() => _panel(
+    '在线字幕',
+    (context) => PlayerOnlineSubtitlePanel(
+      controller: controller,
+      subtitleDirectory: widget.subtitleDirectory,
+      service: widget.onlineSubtitles,
+      onLoaded: (subtitle) {
+        Navigator.pop(context);
+        _showHud('已加载字幕：${subtitle.title}');
+      },
+    ),
+    previewSubtitles: true,
+  );
   Future<void> _importSubtitle() async {
     if (_subtitleBusy) return;
     _subtitleBusy = true;
@@ -1859,6 +2269,8 @@ class _PlayerPageState extends State<PlayerPage>
 
   Future<void> _layout() async {
     if (_editingLayout || device.inPip || !mounted) return;
+    _finishPinch(refresh: false);
+    _hidePinchReset(refresh: false);
     _hideTimer?.cancel();
     _clearTapSequence();
     _modalDepth++;
@@ -2271,11 +2683,11 @@ class _PlayerPageState extends State<PlayerPage>
             ),
           if (controller.hasVideo && Platform.isWindows)
             const WindowsGpuPreferenceTile(),
-          if (controller.hasVideo && Platform.isAndroid)
+          if (controller.hasVideo && (Platform.isAndroid || Platform.isWindows))
             AppSwitchListTile(
               key: const Key('player-decoder-compatibility'),
               title: const Text('兼容硬解模式'),
-              subtitle: const Text('出现绿屏、黑屏时开启，仍使用硬件解码'),
+              subtitle: const Text('出现底部绿线、绿屏或黑屏时开启，优先使用拷贝硬解'),
               value: controller.preferences.decoderCompatibility,
               onChanged:
                   controller.loading ||
@@ -2286,6 +2698,20 @@ class _PlayerPageState extends State<PlayerPage>
                         _run(() => controller.setDecoderCompatibility(value)),
             ),
           if (Platform.isWindows) const PlayerComponentsTile(),
+          if (controller.hasVideo)
+            AppSwitchListTile(
+              key: const Key('player-automatic-render-quality'),
+              title: const Text('自动平衡画质与流畅度'),
+              subtitle: const Text('持续丢帧时暂时降低输出画质，稳定后恢复；关闭则保持画质'),
+              value: controller.preferences.automaticRenderQuality,
+              onChanged: (value) => _run(
+                () => controller.updatePreferences(
+                  controller.preferences.copyWith(
+                    automaticRenderQuality: value,
+                  ),
+                ),
+              ),
+            ),
           if (controller.hasVideo && !device.isTelevision)
             AppSwitchListTile(
               title: const Text('自动适配视频方向'),
@@ -2659,6 +3085,28 @@ class _PlayerPageState extends State<PlayerPage>
     return math.max(safeTop + 12, videoTop + gap);
   }
 
+  double _pinchResetTop(
+    Size viewport,
+    EdgeInsets insets,
+    TextScaler textScaler,
+  ) {
+    var top = _boostIndicatorTop(viewport, insets.top);
+    if (visible) {
+      final titleHeight = math.max(44.0, textScaler.scale(15) * 1.4);
+      final resolutionHeight =
+          _chromePreferences.showResolution && _resolutionLabel != null
+          ? textScaler.scale(11) * 1.4 + 8
+          : 0.0;
+      top = math.max(
+        top,
+        insets.top +
+            (titleHeight + resolutionHeight + 30) *
+                _chromePreferences.controlsScale,
+      );
+    }
+    return math.min(top, math.max(0, viewport.height - insets.bottom - 48));
+  }
+
   Widget _boostSetting() => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
@@ -2781,6 +3229,8 @@ class _PlayerPageState extends State<PlayerPage>
     if (_leaving || controller.openingExternalPlayer || controller.loading) {
       return;
     }
+    _finishPinch(refresh: false);
+    _hidePinchReset();
     _modalDepth++;
     _hideTimer?.cancel();
     try {
@@ -2942,11 +3392,12 @@ class _PlayerPageState extends State<PlayerPage>
     final state = controller.state, pip = device.inPip;
     final desktopPip = pip && device.supportsDesktopPip;
     final media = MediaQuery.of(context);
-    final orientation = media.orientation;
-    final previousInsets = _safeInsets[orientation] ?? EdgeInsets.zero;
+    final previousInsets = _safeInsetsSize == media.size
+        ? _safeInsets
+        : EdgeInsets.zero;
     // Prefer Android's bounds with hidden bars included. The cached fallback
     // keeps other platforms and older native bridges stable during bar fades.
-    final insets =
+    final safeInsets =
         device.systemInsetsFor(media) ??
         EdgeInsets.fromLTRB(
           math.max(
@@ -2966,7 +3417,12 @@ class _PlayerPageState extends State<PlayerPage>
             math.max(media.viewPadding.bottom, media.padding.bottom),
           ),
         );
-    _safeInsets[orientation] = insets;
+    _safeInsetsSize = media.size;
+    _safeInsets = safeInsets;
+    final insets = _centerPlayerInsets(safeInsets);
+    final screenInsets = device.screenDisplayInsetsFor(media);
+    final screenCutouts =
+        device.screenDisplayCutoutsFor(media) ?? const <Rect>[];
     final chromeMedia = media.copyWith(
       padding: insets,
       viewPadding: insets,
@@ -3059,7 +3515,15 @@ class _PlayerPageState extends State<PlayerPage>
                             controller.preferences.fit == PlaybackFit.contain
                         ? BoxFit.contain
                         : BoxFit.cover,
-                    desktopPip ? 1 : controller.preferences.videoScale,
+                    desktopPip
+                        ? 1
+                        : _pinching
+                        ? _pinchRenderScale
+                        : controller.preferences.videoScale,
+                    stableOrientation:
+                        device.supportsOrientation &&
+                        !device.isTelevision &&
+                        !pip,
                   );
                   final systemPipVideo = controller.systemPipPlayback
                       ?.buildVideo(fit: BoxFit.contain);
@@ -3106,7 +3570,15 @@ class _PlayerPageState extends State<PlayerPage>
                                   scale: desktopPip
                                       ? 1
                                       : controller.preferences.videoScale,
-                                  child: video,
+                                  child: Transform.rotate(
+                                    key: const Key('player-video-rotation'),
+                                    angle: desktopPip
+                                        ? 0
+                                        : controller.preferences.videoRotation *
+                                              math.pi /
+                                              180,
+                                    child: video,
+                                  ),
                                 ),
                               ),
                             ),
@@ -3146,8 +3618,9 @@ class _PlayerPageState extends State<PlayerPage>
                             child: systemPipVideo,
                           ),
                         ),
-                      if (controller.hasVideo &&
-                          (controller.loading || _rotationPending))
+                      // A running video keeps its frame during rotation. Only
+                      // opening a source needs the initial presentation cover.
+                      if (controller.hasVideo && controller.loading)
                         const Positioned.fill(
                           child: IgnorePointer(
                             child: ColoredBox(
@@ -3159,8 +3632,7 @@ class _PlayerPageState extends State<PlayerPage>
                       if (!controller.casting &&
                           nativeSubtitles != null &&
                           controller.preferences.subtitles &&
-                          !controller.loading &&
-                          !_rotationPending)
+                          !controller.loading)
                         Positioned.fill(child: nativeSubtitles),
                       if (!controller.casting &&
                           (backend?.rendersSubtitlesNatively != true ||
@@ -3168,8 +3640,7 @@ class _PlayerPageState extends State<PlayerPage>
                                   nativeSubtitles == null) &&
                           captions.isNotEmpty &&
                           controller.preferences.subtitles &&
-                          !controller.loading &&
-                          !_rotationPending)
+                          !controller.loading)
                         Positioned(
                           left: 16,
                           right: 16,
@@ -3197,46 +3668,51 @@ class _PlayerPageState extends State<PlayerPage>
                       if (!pip && !_editingLayout)
                         Positioned.fill(
                           child: Listener(
-                            onPointerDown: (event) {
-                              if (Platform.isWindows &&
-                                  !locked &&
-                                  !_leaving &&
-                                  _modalDepth == 0 &&
-                                  event.kind == PointerDeviceKind.mouse &&
-                                  event.buttons == kMiddleMouseButton) {
-                                _run(_toggleFullscreen);
-                              }
-                            },
-                            child: GestureDetector(
-                              key: const Key('player-gesture-surface'),
-                              behavior: HitTestBehavior.opaque,
-                              onTapUp: _surfaceTap,
-                              onDoubleTap: locked ? null : _surfaceDoubleTap,
-                              onHorizontalDragStart: _horizontalStart,
-                              onHorizontalDragUpdate: _horizontalUpdate,
-                              onHorizontalDragEnd: (_) => _horizontalEnd(),
-                              onHorizontalDragCancel: () {
-                                if (mounted) {
-                                  setState(() => _seekPreview = null);
-                                }
+                            onPointerDown: _surfacePointerDown,
+                            onPointerMove: _surfacePointerMove,
+                            onPointerUp: _surfacePointerEnd,
+                            onPointerCancel: _surfacePointerEnd,
+                            child: RawGestureDetector(
+                              gestures: {
+                                if (!locked)
+                                  DoubleTapGestureRecognizer:
+                                      GestureRecognizerFactoryWithHandlers<
+                                        DoubleTapGestureRecognizer
+                                      >(DoubleTapGestureRecognizer.new, (
+                                        gesture,
+                                      ) {
+                                        _doubleTapGesture = gesture;
+                                        gesture.onDoubleTap = _surfaceDoubleTap;
+                                      }),
                               },
-                              onVerticalDragStart: _verticalStart,
-                              onVerticalDragUpdate: _verticalUpdate,
-                              onVerticalDragEnd: (_) => _verticalEnd(),
-                              onVerticalDragCancel: _verticalEnd,
-                              onLongPressStart: _startBoostGesture,
-                              onLongPressMoveUpdate: _moveBoostGesture,
-                              onLongPressEnd: (_) => _endBoostGesture(),
-                              onLongPressCancel: () =>
-                                  _endBoostGesture(cancelled: true),
+                              child: GestureDetector(
+                                key: const Key('player-gesture-surface'),
+                                behavior: HitTestBehavior.opaque,
+                                onTapUp: _surfaceTap,
+                                onHorizontalDragStart: _horizontalStart,
+                                onHorizontalDragUpdate: _horizontalUpdate,
+                                onHorizontalDragEnd: (_) => _horizontalEnd(),
+                                onHorizontalDragCancel: () {
+                                  if (mounted) {
+                                    setState(() => _seekPreview = null);
+                                  }
+                                },
+                                onVerticalDragStart: _verticalStart,
+                                onVerticalDragUpdate: _verticalUpdate,
+                                onVerticalDragEnd: (_) => _verticalEnd(),
+                                onVerticalDragCancel: _verticalEnd,
+                                onLongPressStart: _startBoostGesture,
+                                onLongPressMoveUpdate: _moveBoostGesture,
+                                onLongPressEnd: (_) => _endBoostGesture(),
+                                onLongPressCancel: () =>
+                                    _endBoostGesture(cancelled: true),
+                              ),
                             ),
                           ),
                         ),
                       if (controller.casting) _castCover(),
                       if (!controller.casting &&
-                          (controller.loading ||
-                              state.buffering ||
-                              _rotationPending) &&
+                          (controller.loading || state.buffering) &&
                           controller.error.isEmpty)
                         const IgnorePointer(
                           child: Center(
@@ -3251,8 +3727,9 @@ class _PlayerPageState extends State<PlayerPage>
                           !pip)
                         _errorPanel(),
                       if (!pip &&
+                          (!visible || locked) &&
                           !_editingLayout &&
-                          !_rotationPending &&
+                          !controller.loading &&
                           controller.error.isEmpty &&
                           controller.preferences.screenDisplay.visible)
                         Positioned.fill(
@@ -3260,7 +3737,8 @@ class _PlayerPageState extends State<PlayerPage>
                           child: PlayerScreenDisplay(
                             controller: controller,
                             television: device.isTelevision,
-                            insets: insets,
+                            insets: screenInsets,
+                            cutouts: screenCutouts,
                           ),
                         ),
                       if (desktopPip) _desktopPipControls(),
@@ -3479,6 +3957,39 @@ class _PlayerPageState extends State<PlayerPage>
                             ),
                           ),
                         ),
+                      if (_pinchResetVisible && _canPinch)
+                        Positioned(
+                          top: _pinchResetTop(
+                            box.biggest,
+                            insets,
+                            media.textScaler,
+                          ),
+                          left: 16 + insets.left,
+                          right: 16 + insets.right,
+                          child: Align(
+                            child: TextButton.icon(
+                              key: const Key('player-pinch-reset'),
+                              onPressed: _resetVideoTransform,
+                              icon: const Icon(
+                                CupertinoIcons.arrow_counterclockwise,
+                                size: 16,
+                              ),
+                              label: const Text('还原屏幕'),
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.white,
+                                backgroundColor: const Color(0xb320232a),
+                                minimumSize: const Size(0, 48),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                textStyle: const TextStyle(fontSize: 13),
+                              ),
+                            ),
+                          ),
+                        ),
                     ],
                   );
                 },
@@ -3488,6 +3999,15 @@ class _PlayerPageState extends State<PlayerPage>
         ),
       ),
     );
+  }
+
+  EdgeInsets _centerPlayerInsets(EdgeInsets insets) {
+    if (!Platform.isAndroid || device.isTelevision) return insets;
+    // A camera cutout on only one side shifts the safe rectangle's center.
+    // Mirror the larger inset so controls stay centered on the
+    // player viewport, independently of video size, fit and transforms.
+    final horizontal = math.max(insets.left, insets.right);
+    return insets.copyWith(left: horizontal, right: horizontal);
   }
 
   Widget _scaleChrome(MediaQueryData media, Widget child) => LayoutBuilder(
@@ -4106,8 +4626,23 @@ class _PlayerPageState extends State<PlayerPage>
                             : () => _run(
                                 _needsUcTv ? _authorizeUcTv : controller.retry,
                               ),
-                        child: Text(_needsUcTv ? '扫码授权播放' : '刷新重试'),
+                        child: Text(
+                          _needsUcTv
+                              ? '扫码授权播放'
+                              : controller.playbackRuntimeFailed
+                              ? '重试播放器'
+                              : '刷新重试',
+                        ),
                       ),
+                      if (controller.playbackRuntimeFailed &&
+                          controller.hasVideo &&
+                          device.supportsExternalPlayer)
+                        OutlinedButton(
+                          onPressed: controller.openingExternalPlayer
+                              ? null
+                              : () => _run(_openExternalPlayer),
+                          child: const Text('外部播放器'),
+                        ),
                       if (widget.onDownload != null)
                         OutlinedButton(
                           onPressed: _adding ? null : () => _run(_download),

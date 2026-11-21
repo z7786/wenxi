@@ -72,11 +72,13 @@ class Probe {
     this.hls, {
     this.rangeSupported = false,
     this.host,
+    this.contentType = '',
   });
   final RemoteIdentity identity;
   final bool hls;
   final bool rangeSupported;
   final String? host;
+  final String contentType;
 
   factory Probe.response(
     int code,
@@ -121,6 +123,7 @@ class Probe {
           (headers['content-type']?.toLowerCase().contains('mpegurl') ?? false),
       rangeSupported: code == 206,
       host: host,
+      contentType: headers['content-type']?.toLowerCase() ?? '',
     );
   }
 }

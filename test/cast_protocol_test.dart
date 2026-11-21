@@ -9,6 +9,7 @@ import 'package:asterlink/lan/lan_models.dart' show isLanAddress;
 import 'package:asterlink/playback/cast/cast_discovery.dart';
 import 'package:asterlink/playback/cast/cast_session.dart';
 import 'package:asterlink/playback/cast/dlna.dart';
+import 'package:asterlink/playback/playback_state.dart';
 import 'cast_support.dart';
 
 class _SeekRetryClient extends DlnaClient {
@@ -28,30 +29,6 @@ class _SeekRetryClient extends DlnaClient {
 }
 
 void main() {
-  test(
-    'cast endpoints accept local IPv6 and CGNAT while rejecting public and credential URLs',
-    () {
-      for (final host in [
-        '::1',
-        'fd12::8',
-        'fe80::8',
-        '100.64.0.8',
-        '100.127.255.8',
-      ]) {
-        expect(
-          castEndpoint(Uri(scheme: 'http', host: host, path: '/device.xml')),
-          isTrue,
-        );
-      }
-      for (final host in ['2001:4860:4860::8888', '8.8.8.8', '100.128.0.8']) {
-        expect(
-          castEndpoint(Uri(scheme: 'http', host: host, path: '/device.xml')),
-          isFalse,
-        );
-      }
-      expect(castEndpoint(Uri.parse('http://secret@192.168.1.8/')), isFalse);
-    },
-  );
   Future<CastSession> sessionFor(
     TestTv tv, {
     Duration position = Duration.zero,
@@ -81,6 +58,316 @@ void main() {
     await session.refresh();
     return session;
   }
+
+  test(
+    'subtitle DIDL keeps the video first and announces the same LAN caption URL',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final client = DlnaClient();
+      addTearDown(client.close);
+      const video = 'http://192.168.1.2:52000/session/video';
+      const caption = 'http://192.168.1.2:52000/session/caption.srt';
+      await client.setMedia(
+        tv.device,
+        video,
+        '电影 & 字幕',
+        'video/x-matroska',
+        tv.duration,
+        size: 1024,
+        subtitleUrl: caption,
+        audioChannels: 2,
+        audioSampleRate: 48000,
+      );
+      final doc = XmlDocument.parse(tv.metadata);
+      final resources = doc.descendants
+          .whereType<XmlElement>()
+          .where((e) => e.name.local == 'res')
+          .toList();
+      expect(resources.map((e) => e.innerText), [video, caption]);
+      expect(resources.first.getAttribute('nrAudioChannels'), '2');
+      expect(resources.first.getAttribute('sampleFrequency'), '48000');
+      expect(
+        resources.first.getAttribute(
+          'subtitleFileUri',
+          namespaceUri: 'http://www.pv.com/pvns/',
+        ),
+        caption,
+      );
+      expect(
+        resources.last.getAttribute('protocolInfo'),
+        'http-get:*:text/srt:*',
+      );
+      for (final name in ['CaptionInfo', 'CaptionInfoEx']) {
+        final node = doc.descendants.whereType<XmlElement>().singleWhere(
+          (e) => e.name.local == name,
+        );
+        expect(node.namespaceUri, 'http://www.sec.co.kr/');
+        expect(
+          node.getAttribute('type', namespaceUri: 'http://www.sec.co.kr/'),
+          'srt',
+        );
+        expect(node.innerText, caption);
+      }
+      for (final url in [
+        'https://example.invalid/caption.srt',
+        'http://secret@192.168.1.2:52000/caption.srt',
+        'http://192.168.1.3:52000/caption.srt',
+      ]) {
+        await expectLater(
+          client.setMedia(
+            tv.device,
+            video,
+            'movie',
+            'video/mp4',
+            tv.duration,
+            subtitleUrl: url,
+          ),
+          throwsA(isA<AppException>()),
+        );
+      }
+      expect(tv.events, ['SetAVTransportURI']);
+    },
+  );
+
+  test(
+    'TV mute state is read without changing volume; intentional volume-up also unmutes',
+    () async {
+      final tv = TestTv()..muted = true;
+      await tv.start();
+      addTearDown(tv.close);
+      final session = CastSession(
+        tv.device,
+        const DownloadSpec(
+          url: 'https://example.invalid/movie.mp4',
+          fileName: 'movie.mp4',
+        ),
+        prepareSource: false,
+        platform: TestCastPlatform(),
+        pollInterval: const Duration(days: 1),
+      );
+      addTearDown(session.close);
+      await session.start(
+        title: 'movie',
+        position: Duration.zero,
+        duration: tv.duration,
+      );
+      await session.refresh();
+      expect(session.muteSupported, isTrue);
+      expect(session.muted, isTrue);
+      expect(tv.muted, isTrue);
+      expect(tv.volume, 35);
+      expect(tv.events, isNot(contains('SetMute')));
+      await session.setVolume(30);
+      expect(tv.muted, isTrue);
+      await session.setVolume(0);
+      expect(tv.muted, isTrue);
+      await session.setVolume(40);
+      expect(tv.volume, 40);
+      expect(tv.muted, isFalse);
+      expect(session.muted, isFalse);
+      final mute = tv.requests.last;
+      expect(mute.name, 'SetMute');
+      expect(mute.args, {
+        'InstanceID': '0',
+        'Channel': 'Master',
+        'DesiredMute': '0',
+      });
+      await session.setMuted(true);
+      expect(tv.muted, isTrue);
+      expect(tv.volume, 40);
+      expect(session.muted, isTrue);
+      await expectLater(
+        session.setVolume(double.nan),
+        throwsA(isA<AppException>()),
+      );
+    },
+  );
+
+  test(
+    'unsupported mute query does not interrupt playback, seeking or volume',
+    () async {
+      final tv = TestTv();
+      tv.faults['GetMute'] = 401;
+      await tv.start();
+      addTearDown(tv.close);
+      final session = await sessionFor(tv);
+      expect(session.muteSupported, isFalse);
+      expect(session.connectionLost, isFalse);
+      expect(session.error, isEmpty);
+      await session.setVolume(50);
+      await session.seek(const Duration(seconds: 20));
+      expect(tv.volume, 50);
+      expect(tv.position.inSeconds, 20);
+      for (var n = 0; n < 12; n++) {
+        await session.refresh();
+      }
+      expect(tv.events.where((e) => e == 'GetMute'), hasLength(1));
+      await expectLater(session.setMuted(false), throwsA(isA<AppException>()));
+      expect(tv.events, isNot(contains('SetMute')));
+    },
+  );
+
+  test(
+    'DIDL describes the original default audio without claiming the selected track was remuxed',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final session = CastSession(
+        tv.device,
+        const DownloadSpec(
+          url: 'https://example.invalid/movie.mkv',
+          fileName: 'movie.mkv',
+        ),
+        prepareSource: false,
+        platform: TestCastPlatform(),
+        pollInterval: const Duration(days: 1),
+      );
+      addTearDown(session.close);
+      session.configureMedia(
+        tracks: const Tracks(
+          audio: [
+            AudioTrack(
+              '1',
+              'surround',
+              'eng',
+              codec: 'dts',
+              isDefault: true,
+              channelscount: 6,
+              samplerate: 48000,
+            ),
+            AudioTrack(
+              '2',
+              'stereo',
+              'zho',
+              codec: 'aac',
+              channelscount: 2,
+              samplerate: 44100,
+            ),
+          ],
+        ),
+        track: const Track(
+          audio: AudioTrack(
+            '2',
+            'stereo',
+            'zho',
+            codec: 'aac',
+            channelscount: 2,
+            samplerate: 44100,
+          ),
+        ),
+      );
+      await session.start(
+        title: 'movie',
+        position: Duration.zero,
+        duration: tv.duration,
+      );
+      final doc = XmlDocument.parse(tv.metadata);
+      final res = doc.descendants.whereType<XmlElement>().singleWhere(
+        (e) => e.name.local == 'res',
+      );
+      expect(res.getAttribute('nrAudioChannels'), '6');
+      expect(res.getAttribute('sampleFrequency'), '48000');
+      expect(session.audioDescription, 'DTS · 6 声道');
+    },
+  );
+
+  test(
+    'an unsupported SetMute preserves the applied volume and other controls',
+    () async {
+      final tv = TestTv()..muted = true;
+      tv.faults['SetMute'] = 401;
+      await tv.start();
+      addTearDown(tv.close);
+      final session = await sessionFor(tv);
+      var changes = 0;
+      session.addListener(() => changes++);
+      await expectLater(
+        session.setVolume(50),
+        throwsA(isA<CastSoapException>()),
+      );
+      expect(tv.volume, 50);
+      expect(session.state.volume, 50);
+      expect(session.muteSupported, isFalse);
+      expect(changes, greaterThan(0));
+      await session.pause();
+      await session.seek(const Duration(seconds: 15));
+      expect(tv.transport, 'PAUSED_PLAYBACK');
+      expect(tv.position.inSeconds, 15);
+      expect(session.connectionLost, isFalse);
+    },
+  );
+
+  test(
+    'renderer ignoring GetMute is bounded and does not delay later pause or seek',
+    () async {
+      final tv = TestTv();
+      final barrier = Completer<void>();
+      tv.barriers['GetMute'] = barrier.future;
+      await tv.start();
+      addTearDown(tv.close);
+      addTearDown(() {
+        if (!barrier.isCompleted) barrier.complete();
+      });
+      final session = CastSession(
+        tv.device,
+        const DownloadSpec(
+          url: 'https://example.invalid/video.mp4',
+          fileName: 'video.mp4',
+        ),
+        prepareSource: false,
+        platform: TestCastPlatform(),
+        pollInterval: const Duration(days: 1),
+      );
+      addTearDown(session.close);
+      await session.start(
+        title: 'video',
+        position: Duration.zero,
+        duration: tv.duration,
+      );
+      final watch = Stopwatch()..start();
+      await session.refresh().timeout(const Duration(seconds: 4));
+      expect(watch.elapsed, lessThan(const Duration(seconds: 4)));
+      expect(session.muteSupported, isFalse);
+      expect(session.connectionLost, isFalse);
+      await session.pause().timeout(const Duration(seconds: 1));
+      await session
+          .seek(const Duration(seconds: 15))
+          .timeout(const Duration(seconds: 1));
+      for (var i = 0; i < 6; i++) {
+        await session.refresh();
+      }
+      expect(tv.events.where((e) => e == 'GetMute'), hasLength(1));
+      barrier.complete();
+    },
+  );
+
+  test(
+    'cast endpoints accept local IPv6 and CGNAT while rejecting public and credential URLs',
+    () {
+      for (final host in [
+        '::1',
+        'fd12::8',
+        'fe80::8',
+        '100.64.0.8',
+        '100.127.255.8',
+      ]) {
+        expect(
+          castEndpoint(Uri(scheme: 'http', host: host, path: '/device.xml')),
+          isTrue,
+        );
+      }
+      for (final host in ['2001:4860:4860::8888', '8.8.8.8', '100.128.0.8']) {
+        expect(
+          castEndpoint(Uri(scheme: 'http', host: host, path: '/device.xml')),
+          isFalse,
+        );
+      }
+      expect(castEndpoint(Uri.parse('http://secret@192.168.1.8/')), isFalse);
+    },
+  );
 
   test(
     'mid-film stopped/empty media zero does not erase progress, deliberate seek zero does',

@@ -6,6 +6,7 @@ import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/providers/baidu.dart';
+import 'package:asterlink/data/providers/baidu_download_resolver.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/downloads.dart';
@@ -603,6 +604,72 @@ void main() {
   });
 
   group('Baidu downloads', () {
+    const previewLimit = 300 * 1024 * 1024;
+    for (final size in [
+      0,
+      1,
+      previewLimit - 1,
+      previewLimit,
+      previewLimit + 1,
+    ]) {
+      for (final shared in [false, true]) {
+        test(
+          '${shared ? 'Own share' : 'Personal'} file of $size bytes selects the correct route',
+          () async {
+            final fixture = _DownloadFixture()..accountUk = '456';
+            final routes = <String>[];
+            final connector = BaiduConnector(
+              fixture.http,
+              downloadResolver: _downloadResolver(fixture.http, routes),
+            );
+            final file = CloudFile.fromJson({..._file.toJson(), 'size': size});
+            final small = size > 0 && size < previewLimit;
+            final result = await connector.download(
+              shared ? _share : _personal,
+              file,
+              _credential(),
+            );
+            expect(routes, [small ? 'preview' : 'relay']);
+            expect(result.profile, small ? 'baidu_preview' : 'baidu_direct');
+            expect(result.expectedSize, size);
+            expect(result.fileName, _file.name);
+            expect(result.cleanup, isNull);
+            expect(fixture.transfers, 0);
+            expect(fixture.created, isEmpty);
+            if (small) {
+              expect(result.headers['Cookie'], contains('BDUSS=fixture'));
+            } else {
+              expect(result.headers.containsKey('Cookie'), isFalse);
+            }
+          },
+        );
+      }
+    }
+    test(
+      'Small shared file and its restored task use preview without another transfer',
+      () async {
+        final fixture = _DownloadFixture();
+        final routes = <String>[];
+        final repo = await fixture.repository();
+        final previousConnector =
+            repo.connectors[CloudPlatform.baidu] as BaiduConnector;
+        repo.connectors[CloudPlatform.baidu] = BaiduConnector(
+          repo.http,
+          downloadResolver: _downloadResolver(repo.http, routes),
+          stageCleanup: previousConnector.stageCleanup,
+        );
+        final original = await repo.prepare(fixture.boundShare, _file);
+        final saved = original.source!.obj('baiduTransfer').obj('file');
+        final refreshed = await repo.refresh(original);
+        expect(routes, ['preview', 'preview']);
+        expect(original.profile, 'baidu_preview');
+        expect(refreshed.profile, 'baidu_preview');
+        expect(refreshed.cleanup!.body, original.cleanup!.body);
+        expect(refreshed.source!.obj('baiduTransfer').obj('file'), saved);
+        expect(fixture.transfers, 1);
+        expect(fixture.deleted, isEmpty);
+      },
+    );
     test(
       'Web-only list session can confirm and reuse a transferred download',
       () async {
@@ -1318,8 +1385,48 @@ class _DownloadFixture {
           'errno': 0,
           'shorturl': 'https://pan.baidu.com/s/1fixture',
         });
+      case '/relay':
+        expect(r.headers['Cookie'], isNull);
+        return const HttpResult(206, 'x', {
+          'content-range': ['bytes 0-0/123'],
+        });
       default:
         throw StateError('Unexpected fixture endpoint: ${r.uri.path}');
     }
   }
+}
+
+BaiduDownloadResolver _downloadResolver(JsonHttp http, List<String> routes) {
+  BaiduLinkLookup lookup(String route) =>
+      ({
+        required String cookie,
+        required String path,
+        required String fileId,
+        required String appId,
+        required Json device,
+      }) async {
+        routes.add(route);
+        expect(cookie, contains('BDUSS=fixture'));
+        expect(path, startsWith('/'));
+        expect(fileId, isNotEmpty);
+        expect(appId, '250528');
+        expect(device.str('id'), isNotEmpty);
+        return BaiduResolvedLink(
+          url: 'https://fixture.baidupcs.com/$route',
+          preview: route == 'preview',
+          profile: route == 'preview' ? 'baidu_preview' : 'baidu_direct',
+          headers: route == 'preview'
+              ? const {}
+              : const {
+                  'Host': 'fixture.baidu-int.com',
+                  'User-Agent': 'netdisk',
+                  'Accept-Encoding': 'identity',
+                },
+        );
+      };
+  return BaiduDownloadResolver(
+    http,
+    relay: lookup('relay'),
+    preview: lookup('preview'),
+  );
 }

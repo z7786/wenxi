@@ -11,6 +11,7 @@ import '../playback/torrent_playback.dart';
 import 'common.dart';
 import 'loading_indicator.dart';
 import 'player_page.dart';
+import 'torrent_file_tree.dart';
 
 class TorrentPage extends StatefulWidget {
   const TorrentPage(this.services, this.source, {super.key});
@@ -23,7 +24,10 @@ class TorrentPage extends StatefulWidget {
 class _TorrentPageState extends State<TorrentPage> {
   late TorrentSession session;
   final selected = <int>{};
-  final _filesScroll = ScrollController();
+  final _filesScroll = ScrollController(keepScrollOffset: false);
+  final _directoryTrail = <TorrentFileNode>[];
+  final _directoryOffsets = <String, double>{};
+  TorrentFileTree? _tree;
   bool _initialized = false, _adding = false, _playing = false;
   String _error = '';
   @override
@@ -42,6 +46,7 @@ class _TorrentPageState extends State<TorrentPage> {
     if (!mounted) return;
     if (!_initialized && session.info != null) {
       _initialized = true;
+      _tree = TorrentFileTree(session.info!.files);
       selected.addAll(session.info!.files.map((f) => f.index));
     }
     setState(() {});
@@ -123,11 +128,51 @@ class _TorrentPageState extends State<TorrentPage> {
     }
   }
 
+  TorrentFileNode? get _directory => _directoryTrail.lastOrNull ?? _tree?.root;
+
+  void _navigate(List<TorrentFileNode> trail) {
+    if (_adding) return;
+    if (_filesScroll.hasClients) {
+      _directoryOffsets[_directory!.path] = _filesScroll.offset;
+      _filesScroll.jumpTo(0);
+    }
+    setState(() {
+      _directoryTrail
+        ..clear()
+        ..addAll(trail);
+    });
+    final path = _directory!.path;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _directory?.path != path || !_filesScroll.hasClients) {
+        return;
+      }
+      _filesScroll.jumpTo(
+        (_directoryOffsets[path] ?? 0).clamp(
+          0,
+          _filesScroll.position.maxScrollExtent,
+        ),
+      );
+    });
+  }
+
+  void _up() {
+    if (_directoryTrail.isNotEmpty) {
+      _navigate(_directoryTrail.take(_directoryTrail.length - 1).toList());
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final info = session.info;
+    final rows = _directory?.children ?? <TorrentFileNode>[];
+    final rowIndices = {
+      for (var i = 0; i < rows.length; i++) _nodeKey(rows[i]): i,
+    };
     return PopScope(
-      canPop: !_adding,
+      canPop: !_adding && _directoryTrail.isEmpty,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && !_adding) _up();
+      },
       child: PageFrame(
         title: 'BT 文件解析',
         child: info == null
@@ -152,6 +197,9 @@ class _TorrentPageState extends State<TorrentPage> {
                             session.dispose();
                             setState(() {
                               _initialized = false;
+                              _tree = null;
+                              _directoryTrail.clear();
+                              _directoryOffsets.clear();
                               selected.clear();
                               _start();
                             });
@@ -196,7 +244,8 @@ class _TorrentPageState extends State<TorrentPage> {
                       style: const TextStyle(fontSize: 12),
                     ),
                   ),
-                  Row(
+                  Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       TextButton(
                         style: _selectionButtonStyle,
@@ -216,12 +265,38 @@ class _TorrentPageState extends State<TorrentPage> {
                             : () => setState(selected.clear),
                         child: const Text('清空选择'),
                       ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Text(
+                          '已选 ${selected.length} 个',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: secondary(context),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      IconButton(
+                        key: const Key('torrent-up'),
+                        tooltip: '返回上一级',
+                        onPressed: _adding || _directoryTrail.isEmpty
+                            ? null
+                            : _up,
+                        icon: const Icon(
+                          CupertinoIcons.arrow_turn_up_left,
+                          size: 20,
+                        ),
+                      ),
                       Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.only(left: 8),
+                        child: Tooltip(
+                          message: _directory?.path ?? '',
                           child: Text(
-                            '已选 ${selected.length} 个',
-                            textAlign: TextAlign.end,
+                            _directoryTrail.isEmpty
+                                ? '根目录'
+                                : '根目录 / ${_directory!.path}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -231,7 +306,13 @@ class _TorrentPageState extends State<TorrentPage> {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 20),
+                      if (_directoryTrail.length > 1)
+                        IconButton(
+                          tooltip: '返回根目录',
+                          onPressed: _adding ? null : () => _navigate([]),
+                          icon: const Icon(CupertinoIcons.house, size: 18),
+                        ),
+                      const SizedBox(width: 12),
                     ],
                   ),
                   Expanded(
@@ -245,9 +326,14 @@ class _TorrentPageState extends State<TorrentPage> {
                           key: const PageStorageKey('torrent-files'),
                           controller: _filesScroll,
                           padding: const EdgeInsets.only(bottom: 4),
-                          itemCount: info.files.length,
-                          itemBuilder: (context, index) =>
-                              _fileRow(info.files[index], index),
+                          itemCount: rows.length,
+                          findChildIndexCallback: (key) => rowIndices[key],
+                          itemBuilder: (context, index) {
+                            final node = rows[index];
+                            return node.directory
+                                ? _folderRow(node)
+                                : _fileRow(node.file!);
+                          },
                         ),
                       ),
                     ),
@@ -299,8 +385,75 @@ class _TorrentPageState extends State<TorrentPage> {
     minimumSize: const Size(48, 48),
   );
 
-  Widget _fileRow(TorrentFile file, int index) => CheckboxListTile(
-    key: ValueKey('torrent-file-$index'),
+  Key _nodeKey(TorrentFileNode node) => node.directory
+      ? ValueKey('torrent-folder-${node.path}')
+      : ValueKey('torrent-file-${node.file!.index}');
+
+  Widget _folderRow(TorrentFileNode node) {
+    final count = node.indices.where(selected.contains).length;
+    final checked = count == node.indices.length
+        ? true
+        : count == 0
+        ? false
+        : null;
+    return ListTile(
+      key: _nodeKey(node),
+      dense: true,
+      minTileHeight: 60,
+      minVerticalPadding: 6,
+      horizontalTitleGap: 8,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+      leading: Checkbox(
+        tristate: true,
+        value: checked,
+        semanticLabel: '选择文件夹 ${node.name}',
+        onChanged: _adding
+            ? null
+            : (_) => setState(() {
+                if (checked == true) {
+                  selected.removeAll(node.indices);
+                } else {
+                  selected.addAll(node.indices);
+                }
+              }),
+      ),
+      title: Row(
+        children: [
+          Icon(CupertinoIcons.folder, size: 20, color: themeAccent(context)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Tooltip(
+              message: node.path,
+              child: Text(
+                node.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      subtitle: Text(
+        '${node.indices.length} 个文件 · ${formatBytes(node.size)} · 已选 $count',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 12, color: secondary(context)),
+      ),
+      trailing: Icon(
+        CupertinoIcons.chevron_right,
+        size: 14,
+        color: secondary(context),
+      ),
+      onTap: _adding ? null : () => _navigate([..._directoryTrail, node]),
+    );
+  }
+
+  Widget _fileRow(TorrentFile file) => CheckboxListTile(
+    key: ValueKey('torrent-file-${file.index}'),
     dense: true,
     minTileHeight: 60,
     minVerticalPadding: 6,
@@ -327,30 +480,9 @@ class _TorrentPageState extends State<TorrentPage> {
         style: const TextStyle(fontSize: 14, height: 1.3),
       ),
     ),
-    subtitle: Padding(
-      padding: const EdgeInsets.only(top: 3),
-      child: Row(
-        children: [
-          Text(
-            formatBytes(file.size),
-            style: TextStyle(fontSize: 12, color: secondary(context)),
-          ),
-          if (file.directory.isNotEmpty) ...[
-            Text(
-              ' · ',
-              style: TextStyle(fontSize: 12, color: secondary(context)),
-            ),
-            Expanded(
-              child: Text(
-                file.directory,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: secondary(context)),
-              ),
-            ),
-          ],
-        ],
-      ),
+    subtitle: Text(
+      formatBytes(file.size),
+      style: TextStyle(fontSize: 12, color: secondary(context)),
     ),
     controlAffinity: ListTileControlAffinity.leading,
     secondary: file.playable

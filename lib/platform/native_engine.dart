@@ -71,8 +71,16 @@ class IOSGopeedTransport extends AndroidGopeedTransport {
 }
 
 class DesktopGopeedTransport extends NativeTransport {
-  DesktopGopeedTransport({required this.executable, this.launchProcess});
-  final String executable;
+  DesktopGopeedTransport({required String executable, this.launchProcess})
+    : _executable = executable,
+      _resolveExecutable = null;
+  DesktopGopeedTransport.lazy({
+    required String Function() executable,
+    this.launchProcess,
+  }) : _resolveExecutable = executable;
+  String? _executable;
+  final String Function()? _resolveExecutable;
+  String get executable => _executable ??= _resolveExecutable!();
   final Future<Process> Function(String executable)? launchProcess;
   Process? _process;
   final _starting = AsyncGate(), _writer = AsyncGate();
@@ -86,12 +94,13 @@ class DesktopGopeedTransport extends NativeTransport {
     require(!_disposed, '下载组件已经关闭');
     if (_process != null) return _process!;
     final system = Platform.isMacOS ? 'macOS' : 'Windows';
-    require(await File(executable).exists(), '缺少 $system 下载组件，请安装完整版本');
+    final path = executable;
+    require(await File(path).exists(), '缺少 $system 下载组件，请安装完整版本');
     final Process process;
     try {
       process =
-          await (launchProcess?.call(executable) ??
-              Process.start(executable, const [], runInShell: false));
+          await (launchProcess?.call(path) ??
+              Process.start(path, const [], runInShell: false));
     } on ProcessException catch (error) {
       // Keep launch failures distinct from network errors. Changing download
       // URLs or retrying transfers cannot fix Windows application control.

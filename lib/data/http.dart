@@ -81,6 +81,73 @@ bool isInterruptedHttpConnection(Object? error) =>
       'Connection closed before full header was received',
     }.contains(error.message);
 
+/// Records potentially accepted mutations within one file write. A local
+/// preflight failure or an unestablished connection leaves the write retryable.
+class WriteRequestScope {
+  WriteRequestScope({this.onAcceptedId});
+  static final _key = Object();
+  static WriteRequestScope? get current =>
+      Zone.current[_key] as WriteRequestScope?;
+  final Future<void> Function(String)? onAcceptedId;
+  int _potentialWrites = 0;
+  static final _payloadKey = Object();
+  bool get mayHaveWritten => _potentialWrites > 0;
+
+  Future<T> run<T>(Future<T> Function() action) =>
+      runZoned(action, zoneValues: {_key: this});
+
+  /// Non-HTTP connectors use this immediately before handing off a write.
+  void markSent() {
+    RequestScope.checkpoint();
+    _potentialWrites++;
+  }
+
+  /// A successful multipart preflight or uncommitted storage upload cannot yet
+  /// be a saved user file. Clear those temporary writes before the final step.
+  void notSavedYet() {
+    RequestScope.checkpoint();
+    _potentialWrites = 0;
+  }
+
+  Future<T> payload<T>(bool maySaveFile, Future<T> Function() action) {
+    return runZoned(action, zoneValues: {_payloadKey: maySaveFile});
+  }
+
+  /// Retain the provider's accepted ID before directory confirmation can fail.
+  Future<void> acceptedId(String id) async {
+    if (id.isNotEmpty) {
+      _potentialWrites++;
+      await onAcceptedId?.call(id);
+    }
+  }
+
+  Future<HttpResult> track(Future<HttpResult> Function() send) async {
+    RequestScope.checkpoint();
+    if (Zone.current[_payloadKey] == false) return send();
+    _potentialWrites++;
+    try {
+      final result = await send();
+      if (const {
+        400,
+        401,
+        403,
+        404,
+        405,
+        413,
+        415,
+        422,
+        429,
+      }.contains(result.status)) {
+        _potentialWrites--;
+      }
+      return result;
+    } on HttpRequestFailure catch (error) {
+      if (error.requestNotSent) _potentialWrites--;
+      rethrow;
+    }
+  }
+}
+
 class HttpRequestFailure extends AppException {
   const HttpRequestFailure(
     super.message, {

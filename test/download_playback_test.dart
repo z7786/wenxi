@@ -439,6 +439,7 @@ void main() {
         backendFactory: (entry, hardware) {
           final backend = FakePlaybackBackend(entry.id, [])
             ..hardwareAcceleration = hardware
+            ..describeVideo()
             ..failHardwareOpen = true;
           backends.add(backend);
           return backend;
@@ -448,6 +449,11 @@ void main() {
       expect(controller.error, isEmpty);
       expect(backends, hasLength(2));
       expect(controller.usingSoftwareDecoder, isTrue);
+      await controller.background(pictureInPicture: false);
+      expect(backends.last.videoMonitoring, isFalse);
+      controller.foreground();
+      expect(backends.last.videoMonitoring, isTrue);
+
       await controller.seek(const Duration(seconds: 40));
       await controller.saveProgress();
       final history = services.store.data.toString();
