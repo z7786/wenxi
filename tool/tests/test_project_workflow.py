@@ -78,6 +78,14 @@ class WorkflowTest(unittest.TestCase):
             with self.subTest(targets=targets), self.assertRaises(ValueError):
                 verify.test_targets(self.root, targets)
 
+    def test_noncanonical_root_still_accepts_its_own_tests(self):
+        self.write('test/one_test.dart')
+        alias = self.root / 'test' / '..'
+        self.assertEqual(verify.test_targets(alias, ['test/one_test.dart']),
+                         ['test/one_test.dart'])
+        with self.assertRaises(ValueError):
+            verify.test_targets(alias, ['../outside_test.dart'])
+
     def test_private_diagnostics_require_the_separate_scope(self):
         self.write('tool/diagnostics/replay_test.dart')
         self.write('test/offline_test.dart')

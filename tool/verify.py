@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def test_targets(root, targets, *, diagnostic=False):
     """Validate every explicit target before starting any processes."""
+    # Windows TEMP may use an 8.3 alias; compare both sides after resolving it.
+    root = Path(root).resolve()
     selected = []
     for value in targets:
         path = (root / value).resolve()
