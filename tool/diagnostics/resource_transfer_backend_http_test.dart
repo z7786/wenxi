@@ -1,3 +1,4 @@
+import 'diagnostic_environment.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,11 +9,13 @@ import 'package:asterlink/data/resource_search_api.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/resource_search.dart';
-import 'support.dart';
+import '../../test/support.dart';
 
 // Opt-in: pairs the actual Flutter HTTP client and preview mapping with the
 // isolated Python backend. The external cloud transfer/provider are fixtures.
-const endpoint = String.fromEnvironment('TRANSFER_AUDIT_URL');
+final endpoint =
+    Platform.environment['ASTERLINK_TRANSFER_AUDIT_URL'] ??
+    const String.fromEnvironment('TRANSFER_AUDIT_URL');
 const sourceFile = CloudFile(
   id: 'picked-file',
   parentId: 'source-folder',
@@ -62,6 +65,12 @@ class _Connector extends CloudConnector {
 }
 
 void main() {
+  requireLiveDiagnostic('ASTERLINK_TRANSFER_AUDIT');
+  if (endpoint.isEmpty) {
+    throw StateError(
+      'Set ASTERLINK_TRANSFER_AUDIT_URL to the isolated audit server.',
+    );
+  }
   for (final scenario in [
     'signed',
     'native',
@@ -156,9 +165,6 @@ void main() {
           directory.deleteSync(recursive: true);
         }
       },
-      skip: endpoint.isEmpty
-          ? 'Set TRANSFER_AUDIT_URL to the isolated Python audit server.'
-          : false,
     );
   }
 }

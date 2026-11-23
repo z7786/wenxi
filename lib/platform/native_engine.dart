@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import '../data/state_store.dart';
 import 'apple_storage.dart';
+import 'storage_path.dart';
 
 const nativeChannel = MethodChannel('com.asterlink.app/native');
 
@@ -488,8 +489,8 @@ class GopeedEngine {
       }
       require(type == FileSystemEntityType.directory, '下载缓存路径发生变化，已停止操作');
     }
-    final resolvedRoot = await root.resolveSymbolicLinks();
-    final resolvedTask = await directory.resolveSymbolicLinks();
+    final resolvedRoot = await resolveStoragePath(root);
+    final resolvedTask = await resolveStoragePath(directory);
     require(
       p.equals(resolvedTask, p.join(resolvedRoot, id)),
       '下载缓存路径发生变化，已停止操作',

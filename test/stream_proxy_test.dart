@@ -1696,47 +1696,64 @@ void main() {
     },
   );
 
-  test(
-    'An unaligned seek starts at the requested byte on a slow capped source',
-    () async {
-      await proxy.close();
-      proxy = PlaybackStreamProxy(
-        DownloadSpec(
-          url: origin.uri.toString(),
-          fileName: 'movie.mkv',
-          maxPlaybackConnections: 2,
-        ),
-        connections: 8,
-        chunkBytes: 8192,
-        maxCacheBytes: 65536,
-        onFailure: failures.add,
-      );
-      expect(await proxy.start(), isTrue);
-      const start = 139000, end = 450559;
-      final gate = Completer<void>();
-      origin.rangeBarrier = (first, _) async {
-        if (first < start) await gate.future;
-      };
-      proxy.prepareSeek();
-      final transfer = read(start, end);
-      try {
-        expect(
-          await transfer.timeout(const Duration(seconds: 3)),
-          origin.bytes.sublist(start, end + 1),
+  for (final prefetchArrivesFirst in [false, true]) {
+    test(
+      'An unaligned seek starts at the requested byte on a slow capped source (prefetch first: $prefetchArrivesFirst)',
+      () async {
+        await proxy.close();
+        const start = 139000, end = 450559;
+        proxy = PlaybackStreamProxy(
+          DownloadSpec(
+            url: origin.uri.toString(),
+            fileName: 'movie.mkv',
+            maxPlaybackConnections: 2,
+          ),
+          connections: 8,
+          chunkBytes: 8192,
+          maxCacheBytes: 65536,
+          readCache: prefetchArrivesFirst
+              ? (first, last, identity) async {
+                  if (first == start) {
+                    // Concurrent HTTP connections need not arrive in scheduling
+                    // order. Force prefetch to arrive before the demanded range.
+                    await until(
+                      () => origin.calls.any((range) => range.$1 > start),
+                    );
+                  }
+                  return null;
+                }
+              : null,
+          onFailure: failures.add,
         );
-        expect(origin.calls[1], (start, 139263));
-        expect(
-          origin.calls.skip(1).every((range) => range.$1 >= start),
-          isTrue,
-        );
-        expect(origin.peak, lessThanOrEqualTo(2));
-        expect(failures, isEmpty);
-      } finally {
-        if (!gate.isCompleted) gate.complete();
-        await transfer;
-      }
-    },
-  );
+        expect(await proxy.start(), isTrue);
+        final gate = Completer<void>();
+        origin.rangeBarrier = (first, _) async {
+          if (first < start) await gate.future;
+        };
+        proxy.prepareSeek();
+        final transfer = read(start, end);
+        try {
+          expect(
+            await transfer.timeout(const Duration(seconds: 3)),
+            origin.bytes.sublist(start, end + 1),
+          );
+          expect(origin.calls.skip(1), contains((start, 139263)));
+          if (prefetchArrivesFirst) {
+            expect(origin.calls[1].$1, greaterThan(start));
+          }
+          expect(
+            origin.calls.skip(1).every((range) => range.$1 >= start),
+            isTrue,
+          );
+          expect(origin.peak, lessThanOrEqualTo(2));
+          expect(failures, isEmpty);
+        } finally {
+          if (!gate.isCompleted) gate.complete();
+          await transfer;
+        }
+      },
+    );
+  }
 
   test(
     'Reducing concurrency keeps partially downloaded ranges for later consumption',

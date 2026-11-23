@@ -5,6 +5,7 @@ import '../core/operation_progress.dart';
 import '../data/cloud_repository.dart';
 import '../data/http.dart';
 import '../data/state_store.dart';
+import '../data/uploads/upload_concurrency.dart';
 import '../diagnostics/app_log.dart';
 import '../domain/models.dart';
 import '../domain/auth.dart';
@@ -56,6 +57,7 @@ class RapidTransferManager extends ChangeNotifier {
     this.confirmDownload,
     this.foreground,
     this.concurrent,
+    this.fileSlots,
     this.confirmationWait = RequestScope.wait,
   });
   final CloudRepository cloud;
@@ -64,6 +66,7 @@ class RapidTransferManager extends ChangeNotifier {
   final Future<void> Function()? confirmDownload;
   final Future<void> Function()? foreground;
   final int Function()? concurrent;
+  final UploadWorkLimiter? fileSlots;
   final Future<void> Function(Duration) confirmationWait;
   final _zone = Zone.current, _commands = AsyncGate(), _writes = AsyncGate();
   final _tasks = <RapidTransferTask>[];
@@ -281,7 +284,11 @@ class RapidTransferManager extends ChangeNotifier {
           'concurrent': maxConcurrent,
         },
       );
-      await action();
+      if (fileSlots case final slots?) {
+        await slots.run(action);
+      } else {
+        await action();
+      }
     } finally {
       if (slot.acquired) {
         _entryRunning--;

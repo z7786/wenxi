@@ -1052,6 +1052,11 @@ class BaiduConnector extends CloudConnector {
             // node; switching nodes never commits a second user file.
             if (!error.retryable || serverIndex + 1 >= servers.length) rethrow;
             serverIndex++;
+          } on UploadResponseFailure catch (error) {
+            RequestScope.checkpoint();
+            if (!error.transient || serverIndex + 1 >= servers.length) rethrow;
+            await RequestScope.wait(Duration(seconds: serverIndex + 1));
+            serverIndex++;
           }
         }
         require(result.str('md5').toLowerCase() == blocks[index], '百度上传分段校验失败');

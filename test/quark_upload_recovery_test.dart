@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -29,6 +30,7 @@ class _UploadFixture {
   final attempts = <int, int>{};
   final ranges = <(int, int)>[];
   final signatures = <String, String>{};
+  Future<HttpResult> Function(RecordedRequest)? authResponse;
   Future<HttpResult> Function(RecordedRequest, int, int)? partResponse;
   Future<HttpResult> Function(RecordedRequest)? mergeResponse;
   late final http = FakeHttp((request) async {
@@ -63,6 +65,7 @@ class _UploadFixture {
     if (request.uri.path.endsWith('file/upload/auth')) {
       final key = 'fixture-${++authorizationCount}';
       signatures[key] = request.json.str('auth_meta');
+      if (authResponse != null) return authResponse!(request);
       return jsonResponse({
         'status': 200,
         'data': {'auth_key': key},
@@ -115,7 +118,10 @@ class _UploadFixture {
     });
   });
 
-  Future<CloudFile> upload({List<UploadProgress>? progress}) {
+  Future<CloudFile> upload({
+    List<UploadProgress>? progress,
+    UploadFile? source,
+  }) {
     final block = Uint8List(65536);
     final file = UploadFile(
       name: 'file.bin',
@@ -146,7 +152,7 @@ class _UploadFixture {
         rootId: '0',
       ),
       '0',
-      file,
+      source ?? file,
       Credential('fixture', {'primary': 'fixture-cookie'}),
       onProgress: progress?.add,
     );
@@ -154,6 +160,66 @@ class _UploadFixture {
 }
 
 void main() {
+  for (final platform in [CloudPlatform.quark, CloudPlatform.uc]) {
+    test(
+      '$platform creates its upload session only after hashing finishes',
+      () async {
+        final fixture = _UploadFixture(platform: platform);
+        final reading = Completer<void>(), release = Completer<void>();
+        addTearDown(() {
+          if (!release.isCompleted) release.complete();
+        });
+        final bytes = Uint8List.fromList(List.generate(12, (i) => i));
+        final source = UploadFile(
+          name: 'file.bin',
+          size: bytes.length,
+          read: (start, end) async* {
+            if (!reading.isCompleted) {
+              reading.complete();
+              await release.future;
+            }
+            yield bytes.sublist(start, end);
+          },
+        );
+        final pending = fixture.upload(source: source);
+        await reading.future;
+        final callsWhileReading = fixture.http.calls.length;
+        release.complete();
+        expect((await pending).id, 'saved');
+        expect(callsWhileReading, 0);
+        final hashes = fixture.http.calls
+            .singleWhere((r) => r.uri.path.endsWith('file/update/hash'))
+            .json;
+        expect(hashes['md5'], md5.convert(bytes).toString());
+        expect(hashes['sha1'], sha1.convert(bytes).toString());
+      },
+    );
+  }
+
+  for (final failure in ['unreadable', 'cancelled']) {
+    test('$failure local hash does not create an upload session', () async {
+      final fixture = _UploadFixture();
+      final scope = RequestScope();
+      final source = UploadFile(
+        name: 'file.bin',
+        size: 12,
+        read: (start, end) async* {
+          if (failure == 'cancelled') {
+            scope.cancel();
+            yield Uint8List(end - start);
+          } else {
+            throw const AppException('本地文件不可读');
+          }
+        },
+      );
+      await expectLater(
+        scope.run(() => fixture.upload(source: source)),
+        throwsA(isA<AppException>()),
+      );
+      expect(fixture.http.calls, isEmpty);
+    });
+  }
+
   test(
     '430 MiB upload keeps exact ranges, valid part numbers and ETag order',
     () async {
@@ -276,6 +342,48 @@ void main() {
     expect(fixture.merges, 0);
     expect(fixture.finishes, 0);
   });
+
+  for (final persistent in [false, true]) {
+    test(
+      'part authorization network failures are bounded: $persistent',
+      () async {
+        final fixture = _UploadFixture(size: 4);
+        fixture.authResponse = (_) async {
+          if (persistent || fixture.authorizationCount == 1) {
+            throw const HttpRequestFailure(
+              'temporary connection failure',
+              kind: 'connectionError',
+              retryable: true,
+            );
+          }
+          return jsonResponse({
+            'status': 200,
+            'data': {'auth_key': 'fixture-${fixture.authorizationCount}'},
+          });
+        };
+        if (persistent) {
+          await expectLater(
+            fixture.upload(),
+            throwsA(isA<HttpRequestFailure>()),
+          );
+          expect(fixture.authorizationCount, 3);
+          expect(fixture.attempts, isEmpty);
+          expect(fixture.merges, 0);
+          expect(fixture.finishes, 0);
+        } else {
+          expect((await fixture.upload()).id, 'saved');
+          expect(fixture.attempts, {1: 1});
+          expect(fixture.merges, 1);
+        }
+        expect(
+          fixture.http.calls.where(
+            (r) => r.uri.path.endsWith('file/upload/pre'),
+          ),
+          hasLength(1),
+        );
+      },
+    );
+  }
 
   test(
     'unknown HTTP 400 stops without retries and records safe context',

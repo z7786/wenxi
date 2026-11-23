@@ -34,8 +34,9 @@ class CloudFavorite {
     this.pinned = false,
     this.sortOrder,
     this.lastOpenedAt = 0,
+    this.folderId = '',
   });
-  final String id, directoryId;
+  final String id, directoryId, folderId;
   final BrowseSession session;
   final CloudFile file;
   final List<(String, String)> trail;
@@ -80,6 +81,7 @@ class CloudFavorite {
     'pinned': pinned,
     if (sortOrder != null) 'sortOrder': sortOrder,
     'lastOpenedAt': lastOpenedAt,
+    if (folderId.isNotEmpty) 'folderId': folderId,
   };
   factory CloudFavorite.fromJson(Json j) => CloudFavorite(
     id: j.str('id'),
@@ -95,13 +97,119 @@ class CloudFavorite {
         ? j.integer('sortOrder')
         : null,
     lastOpenedAt: j.integer('lastOpenedAt') > 0 ? j.integer('lastOpenedAt') : 0,
+    folderId: j.str('folderId'),
   );
+}
+
+class CloudFavoriteFolder {
+  const CloudFavoriteFolder(this.id, this.name);
+  final String id, name;
+  Json toJson() => {'id': id, 'name': name};
+  factory CloudFavoriteFolder.fromJson(Json json) =>
+      CloudFavoriteFolder(json.str('id'), json.str('name').trim());
 }
 
 class CloudFavorites {
   CloudFavorites(this.store, this.cloud);
   final StateStore store;
   final CloudRepository cloud;
+  List<CloudFavoriteFolder> get folders => store.data
+      .list('cloudFavoriteFolders')
+      .map(CloudFavoriteFolder.fromJson)
+      .where((f) => f.id.isNotEmpty && f.name.isNotEmpty)
+      .toList();
+  String folderOf(CloudFavorite favorite) =>
+      folders.any((f) => f.id == favorite.folderId) ? favorite.folderId : '';
+
+  static void mergeFolders(Json draft, Json incoming) {
+    final merged = {
+      for (final folder in draft.list('cloudFavoriteFolders'))
+        folder.str('id'): folder,
+    };
+    for (final raw in incoming.list('cloudFavoriteFolders')) {
+      final folder = CloudFavoriteFolder.fromJson(raw);
+      require(
+        folder.id.isNotEmpty &&
+            folder.id.length <= 100 &&
+            folder.name.isNotEmpty &&
+            folder.name.length <= 80,
+        '收藏文件夹格式无效',
+      );
+      merged.putIfAbsent(folder.id, folder.toJson);
+    }
+    require(merged.length <= 200, '收藏文件夹最多 200 个');
+    draft['cloudFavoriteFolders'] = merged.values.toList();
+  }
+
+  Future<String> createFolder(String name) async {
+    final id = newId();
+    await store.change((draft) {
+      final value = _folderName(draft, name);
+      final folders = draft.list('cloudFavoriteFolders');
+      require(folders.length < 200, '收藏文件夹最多 200 个');
+      draft['cloudFavoriteFolders'] = [
+        ...folders,
+        CloudFavoriteFolder(id, value).toJson(),
+      ];
+    });
+    return id;
+  }
+
+  static String _folderName(Json draft, String name, [String? id]) {
+    final value = name.trim();
+    require(value.isNotEmpty && value.length <= 80, '文件夹名称请输入 1–80 字');
+    require(
+      !draft
+          .list('cloudFavoriteFolders')
+          .any(
+            (f) =>
+                f.str('id') != id &&
+                f.str('name').toLowerCase() == value.toLowerCase(),
+          ),
+      '已存在同名文件夹',
+    );
+    return value;
+  }
+
+  Future<void> renameFolder(String id, String name) => store.change((draft) {
+    final value = _folderName(draft, name, id);
+    require(
+      draft.list('cloudFavoriteFolders').any((f) => f.str('id') == id),
+      '文件夹已删除',
+    );
+    draft['cloudFavoriteFolders'] = [
+      for (final f in draft.list('cloudFavoriteFolders'))
+        if (f.str('id') == id) {...f, 'name': value} else f,
+    ];
+  });
+  Future<void> deleteFolder(String id) => store.change((draft) {
+    draft['cloudFavoriteFolders'] = [
+      for (final f in draft.list('cloudFavoriteFolders'))
+        if (f.str('id') != id) f,
+    ];
+    draft['cloudFavorites'] = [
+      for (final f in draft.list('cloudFavorites'))
+        if (f.str('folderId') == id) {...f, 'folderId': ''} else f,
+    ];
+  });
+  Future<void> moveToFolder(String id, String folderId) =>
+      store.change((draft) {
+        require(
+          folderId.isEmpty ||
+              draft
+                  .list('cloudFavoriteFolders')
+                  .any((f) => f.str('id') == folderId),
+          '文件夹已删除',
+        );
+        require(
+          draft.list('cloudFavorites').any((f) => f.str('id') == id),
+          '收藏已移除',
+        );
+        draft['cloudFavorites'] = [
+          for (final f in draft.list('cloudFavorites'))
+            if (f.str('id') == id) {...f, 'folderId': folderId} else f,
+        ];
+      });
   Object? _orderedSource, _idsSource;
   CloudFavoriteSort? _orderedSort;
   List<CloudFavorite> _orderedSnapshot = const [];

@@ -1,3 +1,4 @@
+import 'diagnostic_environment.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,11 +11,10 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/resource_search.dart';
 
 void main() {
+  requireDiagnosticRuntime();
   TestWidgetsFlutterBinding.ensureInitialized();
   final library = Platform.environment['ASTERLINK_JS_LIBRARY'];
-  final root = Directory(
-    Platform.environment['ASTERLINK_BACKEND_ROOT'] ?? 'D:/.ls/pan-relay-main',
-  );
+  final root = requireDiagnosticBackend();
   final native = library != null && File(library).existsSync();
   final out = Directory('${root.path}/reports/gugeso-20261106');
   final modules = <String, dynamic>{

@@ -666,22 +666,15 @@ class _MainShellState extends State<MainShell>
         );
         trayReady = true;
       });
-      // Also handles a minimize that happened while the tray was starting.
-      onWindowMinimize();
     } catch (error, stack) {
       DiagnosticLog.error('app.tray_init_failed', error, stack);
     }
   }
 
-  Future<void> _hideToTray({bool minimizedOnly = false}) =>
-      _windowVisibility.run(() async {
-        if (!mounted || !trayReady || _exiting) return;
-        if (minimizedOnly) {
-          if (closing || !await windowManager.isMinimized()) return;
-          if (!mounted || closing || _exiting) return;
-        }
-        await windowManager.hide();
-      });
+  Future<void> _hideToTray() => _windowVisibility.run(() async {
+    if (!mounted || !trayReady || _exiting) return;
+    await windowManager.hide();
+  });
 
   Future<void> _showWindow() => _windowVisibility.run(() async {
     if (!mounted || _exiting) return;
@@ -690,18 +683,6 @@ class _MainShellState extends State<MainShell>
     if (!mounted || _exiting) return;
     await windowManager.focus();
   });
-
-  @override
-  void onWindowMinimize() {
-    unawaited(
-      _hideToTray(minimizedOnly: true).catchError((
-        Object error,
-        StackTrace stack,
-      ) {
-        DiagnosticLog.error('app.tray_hide_failed', error, stack);
-      }),
-    );
-  }
 
   @override
   void onTrayIconMouseDown() {

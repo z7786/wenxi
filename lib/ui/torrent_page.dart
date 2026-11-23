@@ -9,6 +9,7 @@ import '../domain/torrent.dart';
 import '../playback/playback_controller.dart';
 import '../playback/torrent_playback.dart';
 import 'common.dart';
+import 'download_location_picker.dart';
 import 'loading_indicator.dart';
 import 'player_page.dart';
 import 'torrent_file_tree.dart';
@@ -29,7 +30,11 @@ class _TorrentPageState extends State<TorrentPage> {
   final _directoryOffsets = <String, double>{};
   TorrentFileTree? _tree;
   bool _initialized = false, _adding = false, _playing = false;
+  bool _choosingLocation = false;
   String _error = '';
+  late var _location = DownloadDestinationSelection(
+    widget.services.settings.destination,
+  );
   @override
   void initState() {
     super.initState();
@@ -70,6 +75,7 @@ class _TorrentPageState extends State<TorrentPage> {
       final ids = await widget.services.downloads.enqueueTorrent(
         session.info!,
         selected.toList()..sort(),
+        location: _location,
       );
       if (!mounted) return;
       message(
@@ -109,9 +115,14 @@ class _TorrentPageState extends State<TorrentPage> {
               '${widget.services.cacheDirectory.path}/playback-subtitles',
             ),
             onDownload: (source) async {
+              final location = await chooseDownloadLocation(
+                context,
+                widget.services,
+              );
+              if (location == null) throw const DownloadConfirmationCancelled();
               await widget.services.downloads.enqueueTorrent(info, [
                 source.torrent!.integer('index'),
-              ]);
+              ], location: location);
             },
           ),
         ),
@@ -352,24 +363,45 @@ class _TorrentPageState extends State<TorrentPage> {
                     top: false,
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: FilledButton.icon(
-                          key: const Key('torrent-download'),
-                          onPressed: selected.isEmpty || _adding ? null : _add,
-                          icon: const Icon(CupertinoIcons.arrow_down),
-                          label: Text(
-                            _adding
-                                ? '正在加入队列…'
-                                : MediaQuery.sizeOf(context).width < 400 &&
-                                      MediaQuery.textScalerOf(
-                                            context,
-                                          ).scale(14) >
-                                          20
-                                ? '下载 ${selected.length} 个文件'
-                                : '下载选中 ${selected.length} 个文件',
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (supportsDownloadLocationChoice)
+                            DownloadLocationField(
+                              services: widget.services,
+                              selection: _location,
+                              enabled: !_adding,
+                              compact: true,
+                              onChanged: (value) =>
+                                  setState(() => _location = value),
+                              onChoosing: (value) =>
+                                  setState(() => _choosingLocation = value),
+                            ),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              key: const Key('torrent-download'),
+                              onPressed:
+                                  selected.isEmpty ||
+                                      _adding ||
+                                      _choosingLocation
+                                  ? null
+                                  : _add,
+                              icon: const Icon(CupertinoIcons.arrow_down),
+                              label: Text(
+                                _adding
+                                    ? '正在加入队列…'
+                                    : MediaQuery.sizeOf(context).width < 400 &&
+                                          MediaQuery.textScalerOf(
+                                                context,
+                                              ).scale(14) >
+                                              20
+                                    ? '下载 ${selected.length} 个文件'
+                                    : '下载选中 ${selected.length} 个文件',
+                              ),
+                            ),
                           ),
-                        ),
+                        ],
                       ),
                     ),
                   ),

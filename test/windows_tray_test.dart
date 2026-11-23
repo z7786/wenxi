@@ -168,7 +168,9 @@ void main() {
           desktop.minimize();
           window.onWindowMinimize();
           await tester.pumpAndSettle();
-          expect(desktop.visible, isFalse);
+          expect(desktop.visible, isTrue);
+          expect(desktop.minimized, isTrue);
+          expect(desktop.calls, isNot(contains('hide')));
           expect(desktop.trayVisible, isTrue);
           expect(services.closeCalls, 0);
           if (i.isEven) {
@@ -190,7 +192,7 @@ void main() {
       });
     }
 
-    testWidgets('a restore cannot be overtaken by a pending hide', (
+    testWidgets('minimize never queues a hide ahead of tray restore', (
       tester,
     ) async {
       final (window, tray) = await open(tester);
@@ -200,7 +202,8 @@ void main() {
       await tester.pump();
       tray.onTrayIconMouseDown();
       await tester.pump();
-      expect(desktop.calls, isNot(contains('show')));
+      expect(desktop.calls, contains('show'));
+      expect(desktop.calls, isNot(contains('hide')));
       desktop.holdHide!.complete();
       await tester.pumpAndSettle();
       expect(desktop.visible, isTrue);
@@ -227,7 +230,7 @@ void main() {
       await tester.runAsync(services.cleanup);
     });
 
-    testWidgets('minimizing during tray initialization waits for its menu', (
+    testWidgets('tray initialization preserves an already minimized window', (
       tester,
     ) async {
       desktop.holdTray = Completer<void>();
@@ -238,7 +241,9 @@ void main() {
       expect(desktop.visible, isTrue);
       desktop.holdTray!.complete();
       await tester.pumpAndSettle();
-      expect(desktop.visible, isFalse);
+      expect(desktop.visible, isTrue);
+      expect(desktop.minimized, isTrue);
+      expect(desktop.calls, isNot(contains('hide')));
       expect(desktop.trayVisible, isTrue);
       await tester.pumpWidget(const SizedBox());
       await tester.runAsync(services.cleanup);
@@ -268,11 +273,11 @@ void main() {
       desktop.failHide = false;
       window.onWindowMinimize();
       await tester.pumpAndSettle();
-      expect(desktop.visible, isFalse);
+      expect(desktop.visible, isTrue);
       desktop.failShow = true;
       tray.onTrayIconMouseDown();
       await tester.pumpAndSettle();
-      expect(desktop.visible, isFalse);
+      expect(desktop.visible, isTrue);
       desktop.failShow = false;
       tray.onTrayIconMouseDown();
       await tester.pumpAndSettle();
@@ -332,7 +337,8 @@ void main() {
         desktop.minimize();
         window.onWindowMinimize();
         await tester.pumpAndSettle();
-        expect(desktop.visible, isFalse);
+        expect(desktop.visible, isTrue);
+        expect(desktop.minimized, isTrue);
         expect(services.downloads.task(id)!.active, isTrue);
         expect(native.calls, isNot(contains('pause')));
         tray.onTrayMenuItemClick(MenuItem(key: 'exit', label: '退出'));

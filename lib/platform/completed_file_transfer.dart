@@ -3,6 +3,7 @@ import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import 'file_access.dart';
 import 'windows_storage.dart';
+import 'storage_path.dart';
 
 /// Publishes a new name without replacing any existing destination. The caller
 /// commits the download record before deleting the old name for a move.
@@ -22,8 +23,8 @@ class CompletedFileTransfer {
     );
     final directory = Directory(destination);
     require(await directory.exists(), '目标目录不存在');
-    final resolved = await directory.resolveSymbolicLinks();
-    final sourcePath = await source.resolveSymbolicLinks();
+    final resolved = await resolveStoragePath(directory);
+    final sourcePath = await resolveStoragePath(source);
     require(!move || !p.equals(p.dirname(sourcePath), resolved), '文件已在目标目录');
     final name = safeFileName(p.basename(source.path));
     final ext = p.extension(name), base = p.basenameWithoutExtension(name);

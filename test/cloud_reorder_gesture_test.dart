@@ -61,6 +61,47 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  reorderTest(
+    'organize creates a folder and moves an existing favorite into it',
+    (tester) async {
+      final f = await fixture(tester);
+      await f.services.store.put('cloudFavorites', [
+        CloudFavorite(
+          id: 'favorite',
+          session: f.connector.personalSession(),
+          file: const CloudFile(id: 'a', name: '影片.mp4'),
+          directoryId: '0',
+          trail: [('0', '全部文件')],
+          createdAt: 1,
+        ).toJson(),
+      ]);
+      await tester.pumpWidget(
+        MaterialApp(home: CloudFavoritesPage(f.services, organize: true)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('favorite-folder-create')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).last, '电影');
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+      expect(f.services.favorites.folders.single.name, '电影');
+      await tester.tap(find.text('全部'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('favorite-move-favorite')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(SimpleDialogOption, '电影'));
+      await tester.pumpAndSettle();
+      final id = f.services.favorites.folders.single.id;
+      expect(f.services.favorites.all.single.folderId, id);
+      await tester.tap(find.text('未分类'));
+      await tester.pumpAndSettle();
+      expect(find.text('影片.mp4'), findsNothing);
+      await tester.tap(find.text('电影'));
+      await tester.pumpAndSettle();
+      expect(find.text('影片.mp4'), findsOneWidget);
+    },
+  );
+
   for (final (label, hold, kind, edge) in [
     ('immediate touch', Duration.zero, PointerDeviceKind.touch, false),
     (

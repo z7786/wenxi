@@ -148,7 +148,7 @@ void main() {
       final matrix = tester.widget<Transform>(find.byKey(_transform)).transform;
       expect(matrix.storage[0], 2.5);
       expect(matrix.storage[5], 2.5);
-      expect(fixture.current.lastRenderScale, 1.25);
+      expect(fixture.current.lastRenderScale, 1);
       expect(
         tester.element(find.byKey(const Key('player-video-surface'))),
         same(video),
@@ -187,7 +187,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(fixture.history.preferences.videoScale, 2.5);
       expect(controller.preferences.videoOffsetX, closeTo(.4, .001));
-      expect(fixture.current.lastRenderScale, 2.5);
+      expect(fixture.current.lastRenderScale, 1);
       expect(fixture.preparations, 1);
       expect(tester.takeException(), isNull);
     });
@@ -252,12 +252,12 @@ void main() {
     _expectAnchor(tester, selected, moved);
     expect(controller.preferences.videoScale, closeTo(1.82, .001));
     expect(controller.preferences.videoRotation, closeTo(60, .001));
-    expect(page.fixture.current.lastRenderScale, 1.3);
+    expect(page.fixture.current.lastRenderScale, 1);
     expect(page.fixture.history.preferences.videoRotation, 25);
     await pinch.first.up();
     await pinch.second.up();
     await tester.pumpAndSettle();
-    expect(page.fixture.current.lastRenderScale, closeTo(1.82, .001));
+    expect(page.fixture.current.lastRenderScale, 1);
     expect(page.fixture.history.preferences.videoRotation, closeTo(60, .001));
 
     final secondFocal = focal + const Offset(-25, 60);
@@ -544,7 +544,7 @@ void main() {
       page.fixture.history.preferences.videoOffsetY,
       closeTo(-60 / 864, .001),
     );
-    expect(page.fixture.current.lastRenderScale, closeTo(1.8, .001));
+    expect(page.fixture.current.lastRenderScale, 1);
     page.fixture.controller.removeListener(changed);
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
@@ -740,7 +740,7 @@ void main() {
         closeTo(.819152, .000001),
       );
       expect(controller.preferences.videoOffsetX, 1.4);
-      expect(page.fixture.current.lastRenderScale, 1.8);
+      expect(page.fixture.current.lastRenderScale, 1);
       expect(page.fixture.preparations, 1);
       expect(tester.takeException(), isNull);
     },

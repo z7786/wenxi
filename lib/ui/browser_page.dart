@@ -23,6 +23,7 @@ import '../domain/public_share_route.dart';
 import '../domain/github.dart';
 import '../domain/settings.dart';
 import '../domain/cloud_file_time.dart';
+import '../data/cloud_folder_dates.dart';
 import '../diagnostics/app_log.dart';
 import 'app_popup_menu.dart';
 import 'app_context_menu.dart';
@@ -31,6 +32,7 @@ import 'account_info_page.dart';
 import 'cloud_accounts_page.dart';
 import 'common.dart';
 import 'batch_share_dialog.dart';
+import 'share_options_dialog.dart';
 import 'baidu_download_prompt.dart';
 import 'baidu_share_route_picker.dart';
 import 'parser_site_picker.dart';
@@ -48,6 +50,7 @@ import 'cloud_upload_drop_target.dart';
 import '../data/state_store.dart' show CloudAccountProfile;
 import '../transfer/rapid_transfer_task.dart';
 import 'uc_video_download.dart';
+import 'download_location_picker.dart';
 
 class BrowserPage extends StatefulWidget {
   const BrowserPage(
@@ -128,6 +131,34 @@ class _BrowserPageState extends State<BrowserPage> {
   late DateTime _timeReference;
   // CloudFile is immutable. Reuse pinyin keys across selection/menu rebuilds;
   // weak keys let discarded directory and search results leave memory.
+  late final _folderDates = CloudFolderDates(
+    read: (session, parent, cursor) =>
+        widget.services.cloud.listPage(session, parent, cursor: cursor),
+    directoryId: widget.services.cloud.directoryId,
+    validate: (captured) {
+      require(
+        mounted && identical(captured, session) && sort == 'date' && !loading,
+        '目录已变化',
+      );
+      _checkAccount();
+    },
+  )..addListener(_folderDatesChanged);
+  void _folderDatesChanged() {
+    if (mounted) setState(() => _displayInputs = null);
+  }
+
+  DateTime? _fileDate(CloudFile file) =>
+      (file.isDirectory
+          ? _folderDates.dates[widget.services.cloud.directoryId(session, file)]
+          : null) ??
+      cloudFileSortDate(file.modifiedAt, reference: _timeReference);
+  String _fileDateText(CloudFile file) {
+    final date = file.isDirectory
+        ? _folderDates.dates[widget.services.cloud.directoryId(session, file)]
+        : null;
+    return date == null ? file.modifiedAt : date.toIso8601String();
+  }
+
   final _nameKeys = Expando<NaturalName>();
   Object? _displayInputs;
   List<CloudFile> _displayed = const [];
@@ -302,6 +333,7 @@ class _BrowserPageState extends State<BrowserPage> {
     _rapidChanges?.cancel();
     _uploadRefresh?.cancel();
     _searchPaint?.cancel();
+    _folderDates.dispose();
     _deepSearch.dispose();
     request?.cancel();
     _pageRequest?.cancel();
@@ -410,6 +442,7 @@ class _BrowserPageState extends State<BrowserPage> {
     _pageRequest = null;
     _progress.close(cancelled: true);
     _resetSearch(clearCache: true);
+    _folderDates.stop();
     generation++;
     _replaceFileScroll(offset);
     setState(() {
@@ -497,6 +530,7 @@ class _BrowserPageState extends State<BrowserPage> {
       request?.cancel();
       _pageRequest?.cancel();
       _progress.close(cancelled: true);
+      _folderDates.stop();
       generation++;
       setState(() {
         loading = false;
@@ -511,6 +545,9 @@ class _BrowserPageState extends State<BrowserPage> {
     if (accountRevision !=
         widget.services.cloud.sessionCredential(session)?.updatedAt) {
       _directoryCheckpoints.clear();
+      _folderDates.stop();
+      _folderDates.dates.clear();
+      _displayInputs = null;
     }
     if ((_searchResults || widget.searchPage) &&
         accountRevision !=
@@ -659,6 +696,7 @@ class _BrowserPageState extends State<BrowserPage> {
     unawaited(_rememberSearch(search.text));
     request?.cancel();
     _progress.close(cancelled: true);
+    _folderDates.stop();
     generation++;
     final current = ++_searchGeneration, captured = session;
     setState(() {
@@ -751,6 +789,7 @@ class _BrowserPageState extends State<BrowserPage> {
         : <String>{};
     _resetSearch(clearCache: true);
     request?.cancel();
+    _folderDates.stop();
     final current = ++generation,
         scope = request = RequestScope(),
         captured = session,
@@ -874,6 +913,26 @@ class _BrowserPageState extends State<BrowserPage> {
         ? ''
         : search.text.trim().toLowerCase();
     final source = _sourceItems;
+    _folderDates.update(
+      (
+        session,
+        generation,
+        stack.last.$1,
+        _timeReference,
+        sort,
+        loading,
+        _available,
+      ),
+      session,
+      source,
+      _timeReference,
+      enabled:
+          sort == 'date' &&
+          !loading &&
+          !widget.searchPage &&
+          !widget.picking &&
+          _available,
+    );
     final inputs = (
       source,
       session,
@@ -918,13 +977,7 @@ class _BrowserPageState extends State<BrowserPage> {
   void _sortFiles(List<CloudFile> result) {
     final sort = _display.sort, ascending = _display.ascending;
     final dates = sort == 'date'
-        ? {
-            for (final file in result)
-              file: cloudFileSortDate(
-                file.modifiedAt,
-                reference: _timeReference,
-              ),
-          }
+        ? {for (final file in result) file: _fileDate(file)}
         : <CloudFile, DateTime?>{};
     // Valid modification dates do not need a pinyin key. Build names lazily
     // only for name sorting or the missing-date fallback.
@@ -980,7 +1033,10 @@ class _BrowserPageState extends State<BrowserPage> {
     }, label: '正在读取选集…');
   }
 
-  Future<void> _download(List<CloudFile> files) async {
+  Future<void> _download(
+    List<CloudFile> files, {
+    bool chooseLocation = false,
+  }) async {
     if (PublicShareRoute.uses(session)) {
       final ready = await withParserPassword<bool>(
         context,
@@ -1024,6 +1080,12 @@ class _BrowserPageState extends State<BrowserPage> {
         !mounted) {
       return;
     }
+    final location = await chooseDownloadLocation(
+      context,
+      widget.services,
+      alwaysAsk: chooseLocation,
+    );
+    if (location == null || !mounted) return;
     final added = await busy<int>(context, () async {
       _checkAccount();
       final collected = await widget.services.cloud.collect(session, files);
@@ -1041,7 +1103,10 @@ class _BrowserPageState extends State<BrowserPage> {
               .copyWith(relativePath: item.$2),
         );
       }
-      final ids = await widget.services.downloads.enqueueAll(specs);
+      final ids = await widget.services.downloads.enqueueAll(
+        specs,
+        location: location,
+      );
       return ids.length;
     }, label: '正在添加下载任务…');
     if (mounted && added != null && added > 0) {
@@ -1302,8 +1367,8 @@ class _BrowserPageState extends State<BrowserPage> {
       }
       return;
     }
-    if (action == 'download') {
-      await _download(files);
+    if (action == 'download' || action == 'download-to') {
+      await _download(files, chooseLocation: action == 'download-to');
       return;
     }
     if (action == 'uc-playable') {
@@ -1354,7 +1419,7 @@ class _BrowserPageState extends State<BrowserPage> {
       return;
     }
     String? target, name;
-    _ShareRequest? shareRequest;
+    ShareRequest? shareRequest;
     if (action == 'rename') {
       name = await askText(context, '重命名', initial: files.first.name);
       if (name == null || name.trim().isEmpty || !mounted) return;
@@ -1378,9 +1443,9 @@ class _BrowserPageState extends State<BrowserPage> {
       }
     }
     if (action == 'share') {
-      shareRequest = await showDialog<_ShareRequest>(
+      shareRequest = await showDialog<ShareRequest>(
         context: context,
-        builder: (_) => _ShareOptionsDialog(files, session.platform),
+        builder: (_) => ShareOptionsDialog(files, session.platform),
       );
       if (shareRequest == null || !mounted) return;
       if (shareRequest.individual) {
@@ -1546,6 +1611,13 @@ class _BrowserPageState extends State<BrowserPage> {
                   title: const Text('下载'),
                   onTap: () => Navigator.pop(context, 'download'),
                 ),
+              if (supportsDownloadLocationChoice &&
+                  _provider.canDownloadFile(session, file))
+                ListTile(
+                  leading: const Icon(CupertinoIcons.folder),
+                  title: const Text('下载到…'),
+                  onTap: () => Navigator.pop(context, 'download-to'),
+                ),
               if (file.isDirectory || _provider.canDownloadFile(session, file))
                 ListTile(
                   leading: const Icon(Icons.bolt_rounded),
@@ -1660,6 +1732,13 @@ class _BrowserPageState extends State<BrowserPage> {
           value: 'download',
           label: '下载$count',
           icon: CupertinoIcons.arrow_down_circle,
+        ),
+      if (supportsDownloadLocationChoice &&
+          files.every((f) => _provider.canDownloadFile(session, f)))
+        const AppMenuAction(
+          value: 'download-to',
+          label: '下载到…',
+          icon: CupertinoIcons.folder,
         ),
       if (files.every(
         (f) => f.isDirectory || _provider.canDownloadFile(session, f),
@@ -2284,6 +2363,7 @@ class _BrowserPageState extends State<BrowserPage> {
     _directoryCheckpoints.clear();
     request?.cancel();
     _pageRequest?.cancel();
+    _folderDates.stop();
     generation++;
     _replaceFileScroll(0);
     setState(() {
@@ -2675,7 +2755,9 @@ class _BrowserPageState extends State<BrowserPage> {
       final scaler = MediaQuery.textScalerOf(context);
       final titleHeight = scaler.scale(14) * 1.35 * 2;
       final timeHeight =
-          files.any((file) => formatCloudFileTime(file.modifiedAt).isNotEmpty)
+          files.any(
+            (file) => formatCloudFileTime(_fileDateText(file)).isNotEmpty,
+          )
           ? scaler.scale(11) * 1.3 * 2 + 4
           : 0.0;
       return GridView.builder(
@@ -2822,7 +2904,7 @@ class _BrowserPageState extends State<BrowserPage> {
     bool wide,
   ) {
     final checked = selected.contains(_fileKey(file));
-    final time = formatCloudFileTime(file.modifiedAt);
+    final time = formatCloudFileTime(_fileDateText(file));
     return Semantics(
       key: ValueKey('browser-file-${_fileKey(file)}'),
       selected: checked,
@@ -2960,7 +3042,7 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   Widget _fileMetadata(CloudFile file) {
-    final time = formatCloudFileTime(file.modifiedAt);
+    final time = formatCloudFileTime(_fileDateText(file));
     final style = TextStyle(fontSize: 11, color: secondary(context));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3825,6 +3907,23 @@ class _BrowserPageState extends State<BrowserPage> {
                         ),
                       ),
                     ),
+                  if (sort == 'date' &&
+                      (_folderDates.busy || _folderDates.failed > 0))
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 4,
+                      ),
+                      child: Text(
+                        _folderDates.busy
+                            ? '正在读取子文件夹中的最新文件时间…'
+                            : '部分文件夹读取失败，暂按文件夹自身时间排序；刷新可重试',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: secondary(context),
+                        ),
+                      ),
+                    ),
                   if (session.platform == CloudPlatform.github)
                     _githubContext(),
                   if (!widget.picking &&
@@ -4071,138 +4170,4 @@ class _BrowserPageState extends State<BrowserPage> {
       ),
     );
   }
-}
-
-class _ShareRequest {
-  const _ShareRequest(this.options, {required this.individual});
-  final ShareOptions options;
-  final bool individual;
-}
-
-class _ShareOptionsDialog extends StatefulWidget {
-  const _ShareOptionsDialog(this.files, this.platform);
-  final List<CloudFile> files;
-  final CloudPlatform platform;
-  @override
-  State<_ShareOptionsDialog> createState() => _ShareOptionsDialogState();
-}
-
-class _ShareOptionsDialogState extends State<_ShareOptionsDialog> {
-  late final title = TextEditingController(
-    text: widget.files.length == 1
-        ? widget.files.first.name
-        : '${widget.files.first.name} 等 ${widget.files.length} 项',
-  );
-  final passcode = TextEditingController();
-  bool get usesDefaultShare =>
-      {CloudPlatform.lanzou, CloudPlatform.ctfile}.contains(widget.platform);
-  late int days = usesDefaultShare ? 0 : 7;
-  late bool individual = widget.files.length > 1 && usesDefaultShare;
-  @override
-  void dispose() {
-    title.dispose();
-    passcode.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('创建分享'),
-    content: SizedBox(
-      width: 380,
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.files.length > 1) ...[
-              DropdownButtonFormField<bool>(
-                isExpanded: true,
-                initialValue: individual,
-                decoration: const InputDecoration(labelText: '分享方式'),
-                items: [
-                  if (!usesDefaultShare)
-                    const DropdownMenuItem(
-                      value: false,
-                      child: Text('合并分享（一个链接）'),
-                    ),
-                  const DropdownMenuItem(
-                    value: true,
-                    child: Text('单文件批量分享（多个链接）'),
-                  ),
-                ],
-                onChanged: usesDefaultShare
-                    ? null
-                    : (value) => setState(() => individual = value ?? false),
-              ),
-              const SizedBox(height: 16),
-            ],
-            if (individual)
-              const Text('每个文件或文件夹分别生成分享链接，标题使用各自名称。')
-            else
-              TextField(
-                controller: title,
-                decoration: const InputDecoration(labelText: '分享标题'),
-              ),
-            const SizedBox(height: 16),
-            DropdownButtonFormField<int>(
-              isExpanded: true,
-              initialValue: days,
-              decoration: const InputDecoration(labelText: '有效期'),
-              items: [
-                if (!usesDefaultShare) ...[
-                  const DropdownMenuItem(value: 1, child: Text('1 天')),
-                  const DropdownMenuItem(value: 7, child: Text('7 天')),
-                  if (widget.platform != CloudPlatform.tianyi)
-                    const DropdownMenuItem(value: 30, child: Text('30 天')),
-                ],
-                const DropdownMenuItem(value: 0, child: Text('永久')),
-              ],
-              onChanged: usesDefaultShare ? null : (v) => days = v ?? 7,
-            ),
-            const SizedBox(height: 16),
-            if (widget.platform == CloudPlatform.ctfile)
-              const Text('提取码沿用城通账号的默认设置，可在官网修改。一次可分享一个文件或文件夹。')
-            else if (widget.platform == CloudPlatform.c139)
-              const Text('提取码由移动云盘自动生成')
-            else if (widget.platform == CloudPlatform.tianyi)
-              const Text('访问码由天翼云盘自动生成')
-            else
-              TextField(
-                controller: passcode,
-                decoration: InputDecoration(
-                  labelText: widget.platform == CloudPlatform.baidu
-                      ? '提取码（留空自动生成）'
-                      : '提取码（可选）',
-                  helperText: widget.platform == CloudPlatform.baidu
-                      ? '4 位字母或数字'
-                      : null,
-                ),
-              ),
-          ],
-        ),
-      ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('取消'),
-      ),
-      TextButton(
-        onPressed: () => Navigator.pop(
-          context,
-          _ShareRequest(
-            ShareOptions(
-              title.text.trim(),
-              expiryDays: days == 0 ? null : days,
-              passcode: passcode.text.trim().isEmpty
-                  ? null
-                  : passcode.text.trim(),
-            ),
-            individual: individual,
-          ),
-        ),
-        child: const Text('创建'),
-      ),
-    ],
-  );
 }

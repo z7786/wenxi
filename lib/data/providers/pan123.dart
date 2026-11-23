@@ -1057,22 +1057,26 @@ class Pan123Connector extends CloudConnector {
     } else {
       const chunkSize = 16 * 1024 * 1024;
       final count = max(1, (source.size / chunkSize).ceil());
-      await io.parts(count, (i) async {
-        final urls = await io.temporary(
-          () => post(
-            count == 1
-                ? 's3_upload_object/auth'
-                : 's3_repare_upload_parts_batch',
-            {...body, 'partNumberStart': i + 1, 'partNumberEnd': i + 2},
-          ),
-        );
-        await io.send(
-          urls.obj('presignedUrls').str('${i + 1}'),
-          start: i * chunkSize,
-          end: min(source.size, (i + 1) * chunkSize),
-          commitsFile: false,
-        );
-      });
+      await io.parts(
+        count,
+        (i) => io.retryPart(() async {
+          final urls = await io.temporary(
+            () => post(
+              count == 1
+                  ? 's3_upload_object/auth'
+                  : 's3_repare_upload_parts_batch',
+              {...body, 'partNumberStart': i + 1, 'partNumberEnd': i + 2},
+            ),
+          );
+          await io.send(
+            urls.obj('presignedUrls').str('${i + 1}'),
+            start: i * chunkSize,
+            end: min(source.size, (i + 1) * chunkSize),
+            commitsFile: false,
+            retry: false,
+          );
+        }, renewAuthorization: true),
+      );
       completePath = 'upload_complete/v2';
       completeBody = {
         ...body,

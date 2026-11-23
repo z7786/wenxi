@@ -236,6 +236,7 @@ void main() {
     'continue all queues only retryable uploads once across filters',
     (tester) async {
       await setup(tester, size: const Size(320, 700), scale: 1.8);
+      await services.updateSettings({'crossTransferConcurrent': 2});
       try {
         expect(find.byKey(const ValueKey('upload-continue-all')), findsNothing);
         provider.fail = true;

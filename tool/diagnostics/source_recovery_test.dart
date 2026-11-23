@@ -1,3 +1,4 @@
+import 'diagnostic_environment.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,11 +10,10 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/resource_search.dart';
 
 void main() {
+  requireDiagnosticRuntime();
   TestWidgetsFlutterBinding.ensureInitialized();
   final library = Platform.environment['ASTERLINK_JS_LIBRARY'];
-  final root = Directory(
-    Platform.environment['ASTERLINK_BACKEND_ROOT'] ?? 'D:/.ls/pan-relay-main',
-  );
+  final root = requireDiagnosticBackend();
   final native =
       library != null && File(library).existsSync() && root.existsSync();
   final modules = <String, dynamic>{
@@ -38,13 +38,17 @@ void main() {
   ) async {
     final package = client.package(source, manifest);
     final host = ClientSearchHost(package, fetch: fetch);
-    final result = await SourceRuntime(libraryPath: library).run(
-      package,
-      'search',
-      {'source': source, 'keyword': keyword, 'uuid': 'audit'},
-      host.call,
-    );
-    return result.list('results');
+    try {
+      final result = await SourceRuntime(libraryPath: library).run(
+        package,
+        'search',
+        {'source': source, 'keyword': keyword, 'uuid': 'audit'},
+        host.call,
+      );
+      return result.list('results');
+    } finally {
+      await host.close();
+    }
   }
 
   test('rule rows containing several different links are rejected', () async {
@@ -85,11 +89,12 @@ void main() {
 
   final replayPath =
       '${root.path}/reports/source-recovery-20261105/private/app-replay-private.json';
-  final cases =
-      (File(replayPath).existsSync()
-              ? jsonDecode(File(replayPath).readAsStringSync()) as List
-              : <dynamic>[])
-          .map(asJson);
+  final cases = (jsonDecode(File(replayPath).readAsStringSync()) as List).map(
+    asJson,
+  );
+  if (cases.isEmpty) {
+    throw StateError('Source recovery replay captures are empty.');
+  }
   final summary = <Json>[];
   for (final testcase in cases) {
     test(

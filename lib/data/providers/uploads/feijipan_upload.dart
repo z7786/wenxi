@@ -162,6 +162,7 @@ extension _FeijipanUpload on FeijipanConnector {
               start: start,
               end: end,
               commitsFile: !params.containsKey('uploadId'),
+              retry: !params.containsKey('uploadId'),
             );
       require(
         result.successful && !UploadIO.xmlError(result.body),
@@ -186,11 +187,13 @@ extension _FeijipanUpload on FeijipanConnector {
     try {
       final etags = <String>[];
       for (var start = 0; start < io.file.size; start += size) {
-        final r = await request(
-          'PUT',
-          {'partNumber': '${etags.length + 1}', 'uploadId': uploadId},
-          start: start,
-          end: math.min(io.file.size, start + size),
+        final r = await io.retryPart(
+          () => request(
+            'PUT',
+            {'partNumber': '${etags.length + 1}', 'uploadId': uploadId},
+            start: start,
+            end: math.min(io.file.size, start + size),
+          ),
         );
         final etag = r.header('etag');
         require(etag.isNotEmpty, '小飞机未确认上传分段');

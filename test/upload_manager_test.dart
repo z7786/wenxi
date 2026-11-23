@@ -8,6 +8,7 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/http.dart';
+import 'package:asterlink/data/uploads/upload_concurrency.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/uploads.dart';
 import 'package:asterlink/upload/upload_manager.dart';
@@ -111,6 +112,49 @@ void main() {
     await manager.close();
     manager.dispose();
     await root.delete(recursive: true);
+  });
+
+  test('live file limit is shared with other upload work', () async {
+    await manager.close();
+    manager.dispose();
+    var limit = 1;
+    final slots = UploadWorkLimiter(limit);
+    manager = UploadManager(
+      store: store,
+      cloud: cloud,
+      concurrencyProvider: () => limit,
+      fileSlots: slots,
+    );
+    final otherHold = Completer<void>(), otherStarted = Completer<void>();
+    final other = slots.run(() async {
+      otherStarted.complete();
+      await otherHold.future;
+    });
+    await otherStarted.future;
+    provider.hold = Completer<void>();
+    final ids = await manager.enqueue(session, '0', 'Root', [
+      await file('a.txt'),
+      await file('b.txt'),
+      await file('c.txt'),
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    expect(provider.started, isEmpty);
+    limit = 2;
+    manager.settingsChanged();
+    await until(() => provider.started.length == 1);
+    expect(provider.inFlight, 1);
+    limit = 1;
+    manager.settingsChanged();
+    otherHold.complete();
+    await other;
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    expect(provider.started.length, 1);
+    provider.hold!.complete();
+    await until(
+      () =>
+          ids.every((id) => manager.task(id)!.status == UploadStatus.completed),
+    );
+    expect(provider.maxInFlight, 1);
   });
 
   test(

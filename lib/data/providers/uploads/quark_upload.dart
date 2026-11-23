@@ -11,6 +11,9 @@ extension _QuarkUpload on QuarkUcConnector {
     personal(s);
     final io = UploadIO(http, source, onProgress);
     io.progress(UploadPhase.preparing);
+    // Hashing a large local/SAF file can be slow. Start the remote session only
+    // after that read, so its task and credentials do not age during hashing.
+    final digests = await io.hashes(whole: ['md5', 'sha1']);
     final response = await http.postJson(url('file/upload/pre'), {
       'ccp_hash_update': true,
       'dir_name': '',
@@ -26,7 +29,6 @@ extension _QuarkUpload on QuarkUcConnector {
     final serverClock = _QuarkUploadClock()..update(response);
     final taskId = pre.str('task_id');
     require(taskId.isNotEmpty, '网盘未返回上传任务');
-    final digests = await io.hashes(whole: ['md5', 'sha1']);
     final hashes = await post('file/update/hash', {
       'md5': digests.whole['md5'],
       'sha1': digests.whole['sha1'],
@@ -84,13 +86,13 @@ extension _QuarkUpload on QuarkUcConnector {
           RequestScope.checkpoint();
           // A retry opens the same range under the same upload ID. Renew both
           // the date and authorization instead of replaying an expired pair.
-          final date = serverClock.date;
-          final key = await authorize(
-            'PUT\n\n$mime\n$date\n'
-            'x-oss-date:$date\nx-oss-user-agent:$agent\n'
-            '/$bucket/$object?partNumber=${i + 1}&uploadId=$uploadId',
-          );
           try {
+            final date = serverClock.date;
+            final key = await authorize(
+              'PUT\n\n$mime\n$date\n'
+              'x-oss-date:$date\nx-oss-user-agent:$agent\n'
+              '/$bucket/$object?partNumber=${i + 1}&uploadId=$uploadId',
+            );
             final result = await io.send(
               query(address, {'partNumber': i + 1, 'uploadId': uploadId}),
               start: start,

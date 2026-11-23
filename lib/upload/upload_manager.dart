@@ -11,6 +11,7 @@ import '../data/uploads/upload_concurrency.dart';
 import '../diagnostics/app_log.dart';
 import '../domain/models.dart';
 import '../domain/uploads.dart';
+import '../domain/settings.dart';
 import '../download/download_activity.dart';
 import 'upload_task.dart';
 import 'upload_folder.dart';
@@ -22,15 +23,32 @@ class UploadManager extends ChangeNotifier {
     required this.cloud,
     this.foreground,
     this.concurrent = 2,
+    this.concurrencyProvider,
+    UploadWorkLimiter? fileSlots,
     UploadSources? sources,
-  }) : sources = sources ?? UploadSources();
+  }) : sources = sources ?? UploadSources(),
+       _sharedFileSlots = fileSlots;
   final StateStore store;
   final CloudRepository cloud;
   final UploadSources sources;
   final Future<void> Function()? foreground;
   final int concurrent;
-  int get maxConcurrent => concurrent.clamp(1, 2);
-  late final _fileSlots = UploadWorkLimiter(maxConcurrent);
+  final int Function()? concurrencyProvider;
+  final UploadWorkLimiter? _sharedFileSlots;
+  int get maxConcurrent => (concurrencyProvider?.call() ?? concurrent).clamp(
+    1,
+    AppSettings.maxConcurrentCrossTransfers,
+  );
+  late final _fileSlots = _sharedFileSlots ?? UploadWorkLimiter(maxConcurrent);
+
+  void settingsChanged() {
+    _fileSlots.limit = maxConcurrent;
+    if (_closing) return;
+    if (_wake?.isCompleted == false) _wake!.complete();
+    _schedule();
+    notifyListeners();
+  }
+
   final _zone = Zone.current, _writes = AsyncGate(), _commands = AsyncGate();
   final _tasks = <UploadTask>[], _sources = <String, XFile>{};
   final _fresh = <String>{};
@@ -291,6 +309,7 @@ class UploadManager extends ChangeNotifier {
             break;
           }
           if (_closing || next.status != UploadStatus.pending) continue;
+          if (_runs.length >= maxConcurrent) break;
           final run = _UploadRun();
           _runs[next.id] = run;
           _background(
@@ -686,7 +705,15 @@ class UploadManager extends ChangeNotifier {
         await scope.run(
           () => RequestScope.guarded(
             () => Future.wait([
-              for (var i = 0; i < pending.length.clamp(0, maxConcurrent); i++)
+              for (
+                var i = 0;
+                i <
+                    pending.length.clamp(
+                      0,
+                      AppSettings.maxConcurrentCrossTransfers,
+                    );
+                i++
+              )
                 worker(),
             ]),
             () => require(parentScope?.isCancelled != true, '请求已取消'),

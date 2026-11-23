@@ -14,6 +14,7 @@ interface CastServiceOwner { val casting: CastBridge }
 
 /** Casting owns its locks independently of LAN file sharing and downloads. */
 class CastBridge(private val context: Context, engine: FlutterEngine? = null,
+    private val onActiveChanged: (Boolean) -> Unit = {},
     private val report: (String, Throwable) -> Unit = { _, _ -> }) {
     private val main = Handler(Looper.getMainLooper())
     private val multicast = mutableMapOf<String, WifiManager.MulticastLock>()
@@ -60,6 +61,7 @@ class CastBridge(private val context: Context, engine: FlutterEngine? = null,
                         } else {
                             stop()
                             token = owner
+                            onActiveChanged(true)
                             pending = result
                             main.postDelayed(timeout, 8000)
                             ContextCompat.startForegroundService(context, Intent(context, CastService::class.java))
@@ -89,11 +91,12 @@ class CastBridge(private val context: Context, engine: FlutterEngine? = null,
     }
 
     fun destroyed(current: CastService) {
-        if (service === current) { service = null; token = null }
+        if (service === current) { service = null; token = null; onActiveChanged(false) }
     }
 
     fun stop() {
         token = null
+        onActiveChanged(false)
         main.removeCallbacks(timeout)
         pending?.error("cast", "投屏已取消", null)
         pending = null

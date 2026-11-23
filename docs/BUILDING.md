@@ -1,5 +1,7 @@
 # 编译
 
+本项目安装包统一使用 GitHub Actions 构建，入口见下方“GitHub 自动构建”。本机默认执行 [开发指南](DEVELOPMENT.md) 中的检查与测试；下列本机命令保留为环境复现参考，不作为日常发包步骤。
+
 工具：Flutter 3.41.4 / Dart 3.11.1、Go 1.24.7。Android 需要 JDK 21、SDK 36 和 NDK 28.2.13676358；Windows 需要 Visual Studio 2022 C++ 桌面开发工具链。安装器使用 Inno Setup 6.7.3。
 
 在项目根目录执行：

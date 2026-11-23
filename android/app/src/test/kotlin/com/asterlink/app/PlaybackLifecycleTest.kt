@@ -77,6 +77,22 @@ class PlaybackLifecycleTest {
         messenger.sent.clear()
     }
 
+    @Test fun castingKeepsDisplayAwakeAcrossPlayerEndAndReleasesAfterStop() {
+        fun awake() = activity.window.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
+        bridge.setCasting(true)
+        messenger.call("state", mapOf("session" to "test-player", "playing" to false))
+        assertTrue(awake())
+        messenger.call("end", mapOf("session" to "test-player"))
+        assertTrue(awake())
+        bridge.setCasting(false)
+        assertFalse(awake())
+        messenger.call("begin", mapOf("session" to "other", "video" to true))
+        bridge.setCasting(true)
+        messenger.call("state", mapOf("session" to "other", "playing" to true))
+        bridge.setCasting(false)
+        assertTrue(awake())
+    }
+
     @After fun cleanup() { bridge.detach(activity) }
 
     private fun installFlutterSurface() {

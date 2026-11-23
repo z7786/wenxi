@@ -40,6 +40,7 @@ class PlaybackBridge internal constructor(
     private var session: String? = null
     private var video = false
     private var playing = false
+    private var casting = false
     private var frameRate = 0f
     private var hidden = false
     private var width = 16
@@ -67,6 +68,7 @@ class PlaybackBridge internal constructor(
         originalOrientation = current.requestedOrientation
         originalVolumeStream = current.volumeControlStream
         originalKeepScreen = current.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
+        updateKeepScreen()
         if (session != null) {
             current.volumeControlStream = AudioManager.STREAM_MUSIC
             volume.start(); updateWindow(); applyOrientation()
@@ -164,7 +166,7 @@ class PlaybackBridge internal constructor(
                     originalBrightness = current.window.attributes.screenBrightness
                     originalOrientation = current.requestedOrientation
                     originalVolumeStream = current.volumeControlStream
-                    originalKeepScreen = current.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
+                    if (!casting) originalKeepScreen = current.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
                     val insets = rootInsets(current.window.decorView)
                     originalStatusBar = insets?.isVisible(WindowInsetsCompat.Type.statusBars()) ?: true
                     originalNavigationBar = insets?.isVisible(WindowInsetsCompat.Type.navigationBars()) ?: true
@@ -282,12 +284,23 @@ class PlaybackBridge internal constructor(
             },
         )
     }
+    fun setCasting(active: Boolean) {
+        casting = active
+        updateKeepScreen()
+    }
+    private fun updateKeepScreen() {
+        val current = activity ?: return
+        if (originalKeepScreen || casting || (session != null && playing && video)) {
+            current.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            current.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
     private fun updateWindow() {
         val current = activity ?: return
         updateFrameRate()
         applySystemBars()
-        if (playing && video) current.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        else if (!originalKeepScreen) current.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        updateKeepScreen()
         if (supportsPip() && Build.VERSION.SDK_INT >= 26) {
             try { current.setPictureInPictureParams(parameters()) } catch (_: Exception) { /* capability can change */ }
         }
@@ -353,7 +366,7 @@ class PlaybackBridge internal constructor(
         current.window.attributes = current.window.attributes.apply { screenBrightness = originalBrightness }
         current.requestedOrientation = originalOrientation
         current.volumeControlStream = originalVolumeStream
-        if (originalKeepScreen) current.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (originalKeepScreen || casting) current.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else current.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val controller = WindowInsetsControllerCompat(current.window, current.window.decorView)
         controller.systemBarsBehavior = originalBarsBehavior

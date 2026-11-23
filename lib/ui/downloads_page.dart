@@ -7,6 +7,7 @@ import 'package:open_filex/open_filex.dart';
 import '../app_services.dart';
 import '../core/json.dart';
 import '../domain/downloads.dart';
+import '../domain/download_eta.dart';
 import '../domain/models.dart' show CloudPlatform;
 import '../download/completed_files.dart';
 import '../platform/file_access.dart';
@@ -1150,6 +1151,15 @@ class _DownloadsPageState extends State<DownloadsPage>
                             : secondary(context),
                       ),
                     ),
+                    if (downloadEta(task) case final eta?)
+                      Text(
+                        eta,
+                        key: ValueKey('download-eta-${task.id}'),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: secondary(context),
+                        ),
+                      ),
                     DownloadProgress(
                       task: task,
                       compact: true,

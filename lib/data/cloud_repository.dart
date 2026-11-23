@@ -932,7 +932,26 @@ class CloudRepository {
 
   /// Cross-cloud tasks keep the source account selected at enqueue time.
   Future<DownloadSpec> prepareTransfer(BrowseSession session, CloudFile file) =>
-      _prepare(session, file, playback: false);
+      withSession(session, () {
+        if (session.mode != BrowseMode.share ||
+            !{
+              CloudPlatform.quark,
+              CloudPlatform.uc,
+            }.contains(session.platform)) {
+          return _prepare(session, file, playback: false);
+        }
+        final bound = bindSession(session);
+        final revision = vault.credential(session.platform)?.updatedAt;
+        // A queued entry keeps its original file token, even after the batch
+        // reopens its share. Renew the session and file together just before
+        // downloading, under the queued account and the existing read budget.
+        return _prepareReads(bound, revision, () async {
+          final restored = await restoreOrigin(
+            DownloadOrigin(bound, file, revision),
+          );
+          return _prepare(restored.session, restored.file, playback: false);
+        });
+      });
 
   Future<DownloadSpec> preparePlayback(BrowseSession session, CloudFile file) =>
       _prepare(session, file, playback: true);

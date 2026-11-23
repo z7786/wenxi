@@ -52,6 +52,7 @@ class AppSettings {
     this.threadOverrides = const {},
     this.githubAcceleration = const GitHubAcceleration(),
     this.destination,
+    this.askDownloadDestination = false,
     this.browserView = 'list',
     this.browserDisplays = const {},
     this.clipboardRecognition = true,
@@ -83,6 +84,7 @@ class AppSettings {
   final Map<String, int> threadOverrides;
   final GitHubAcceleration githubAcceleration;
   final String? destination;
+  final bool askDownloadDestination;
   final String browserView;
   final Map<String, BrowserDisplaySettings> browserDisplays;
   BrowserDisplaySettings browserDisplayFor(CloudPlatform platform) =>
@@ -179,6 +181,7 @@ class AppSettings {
     'githubAcceleration': githubAcceleration.toJson(),
     'githubAccelerationPolicy': 1,
     'destination': destination,
+    'askDownloadDestination': askDownloadDestination,
     'browserView': browserView,
     'browserDisplays': {
       for (final entry in browserDisplays.entries)
@@ -238,6 +241,7 @@ class AppSettings {
       migrateLegacyDefault: j.integer('githubAccelerationPolicy') < 1,
     ),
     destination: j['destination']?.toString(),
+    askDownloadDestination: j.boolean('askDownloadDestination'),
     browserView: j.str('browserView') == 'grid' ? 'grid' : 'list',
     browserDisplays: {
       for (final entry in j.obj('browserDisplays').entries)

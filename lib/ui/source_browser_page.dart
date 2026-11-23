@@ -9,6 +9,7 @@ import '../data/sources/results.dart';
 import '../data/sources/service.dart';
 import '../domain/models.dart';
 import 'common.dart';
+import 'download_location_picker.dart';
 import 'app_context_menu.dart';
 import 'app_popup_menu.dart';
 
@@ -118,6 +119,12 @@ class _SourceBrowserPageState extends State<SourceBrowserPage> {
                   : '下载',
               icon: Icons.download_outlined,
             ),
+            if (supportsDownloadLocationChoice)
+              const AppMenuAction(
+                value: 'download-to',
+                label: '下载到…',
+                icon: Icons.folder_open,
+              ),
             if (session.release.package.operations.containsKey('detail'))
               const AppMenuAction(
                 value: 'details',
@@ -143,6 +150,7 @@ class _SourceBrowserPageState extends State<SourceBrowserPage> {
             case 'details':
               await details(item);
             case 'download':
+            case 'download-to':
               await download(
                 selected.contains(item.id) && selected.length > 1
                     ? session.items
@@ -151,6 +159,7 @@ class _SourceBrowserPageState extends State<SourceBrowserPage> {
                           )
                           .toList()
                     : [item],
+                chooseLocation: action == 'download-to',
               );
             case 'select':
               setState(
@@ -236,24 +245,39 @@ class _SourceBrowserPageState extends State<SourceBrowserPage> {
       ),
     );
   });
-  Future<void> download(List<SourceResource> resources) =>
-      run('正在准备下载…', () async {
-        final specs = <DownloadSpec>[];
-        for (final resource in resources) {
-          specs.add(await widget.services.sources.download(session, resource));
-          RequestScope.checkpoint();
-        }
-        final ids = await widget.services.downloads.enqueueAll(specs);
+  Future<void> download(
+    List<SourceResource> resources, {
+    bool chooseLocation = false,
+  }) async {
+    if (working) return;
+    final origin = session;
+    final location = await chooseDownloadLocation(
+      context,
+      widget.services,
+      alwaysAsk: chooseLocation,
+    );
+    if (location == null || !mounted || session != origin) return;
+    await run('正在准备下载…', () async {
+      final specs = <DownloadSpec>[];
+      for (final resource in resources) {
+        specs.add(await widget.services.sources.download(origin, resource));
         RequestScope.checkpoint();
-        setState(() => selected.clear());
-        if (mounted) {
-          message(
-            context,
-            '已添加 ${ids.length} 个下载任务',
-            onTap: widget.services.requestDownloadManager,
-          );
-        }
-      });
+      }
+      final ids = await widget.services.downloads.enqueueAll(
+        specs,
+        location: location,
+      );
+      RequestScope.checkpoint();
+      setState(() => selected.clear());
+      if (mounted) {
+        message(
+          context,
+          '已添加 ${ids.length} 个下载任务',
+          onTap: widget.services.requestDownloadManager,
+        );
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {

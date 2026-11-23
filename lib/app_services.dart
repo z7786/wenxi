@@ -20,6 +20,7 @@ import 'data/cloud_favorites.dart';
 import 'data/cloud_save_locations.dart';
 import 'data/cloud_command_history.dart';
 import 'data/http.dart';
+import 'data/uploads/upload_concurrency.dart';
 import 'data/remote_control_http.dart';
 import 'data/remote_control_service.dart';
 import 'data/announcement_service.dart';
@@ -312,9 +313,12 @@ class AppServices extends ChangeNotifier {
         }
       },
     );
+    final uploadFileSlots = UploadWorkLimiter(settings.crossTransferConcurrent);
     uploads = UploadManager(
       store: store,
       cloud: cloud,
+      concurrencyProvider: () => settings.crossTransferConcurrent,
+      fileSlots: uploadFileSlots,
       sources: UploadSources(
         android: platformFeatures && Platform.isAndroid,
         ios: platformFeatures && Platform.isIOS,
@@ -325,6 +329,7 @@ class AppServices extends ChangeNotifier {
       store: store,
       cloud: cloud,
       concurrent: () => settings.crossTransferConcurrent,
+      fileSlots: uploadFileSlots,
       relay: CrossTransferRelay(
         cloud: cloud,
         http: transfer,
@@ -986,6 +991,7 @@ class AppServices extends ChangeNotifier {
         draft.obj('settings'),
       ).update(changes).toJson();
     });
+    uploads.settingsChanged();
     await downloads.settingsChanged();
     rapidTransfers.settingsChanged();
   }

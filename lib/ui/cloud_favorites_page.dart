@@ -162,6 +162,144 @@ class _CloudFavoritesPageState extends State<CloudFavoritesPage> {
   final _search = TextEditingController();
   late bool _organizing = widget.organize;
   bool _saving = false;
+  String? _folder;
+
+  Future<void> _editFolder([CloudFavoriteFolder? folder]) async {
+    final name = await askText(
+      context,
+      folder == null ? '新建收藏文件夹' : '重命名文件夹',
+      initial: folder?.name ?? '',
+      hint: '1–80 字',
+    );
+    if (name == null || !mounted) return;
+    await busy(context, () async {
+      if (folder == null) {
+        final id = await widget.services.favorites.createFolder(name);
+        if (mounted) setState(() => _folder = id);
+      } else {
+        await widget.services.favorites.renameFolder(folder.id, name);
+      }
+    });
+  }
+
+  Future<void> _deleteFolder(CloudFavoriteFolder folder) async {
+    if (!await confirm(
+          context,
+          '删除收藏文件夹',
+          '“${folder.name}”中的收藏将移到未分类，收藏内容会保留。',
+        ) ||
+        !mounted) {
+      return;
+    }
+    await busy(
+      context,
+      () => widget.services.favorites.deleteFolder(folder.id),
+    );
+    if (mounted) setState(() => _folder = '');
+  }
+
+  Future<void> _move(CloudFavorite favorite) async {
+    final folder = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('移动到收藏文件夹'),
+        children: [
+          for (final folder in [
+            const CloudFavoriteFolder('', '未分类'),
+            ...widget.services.favorites.folders,
+          ])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, folder.id),
+              child: Text(folder.name),
+            ),
+        ],
+      ),
+    );
+    if (folder == null || !mounted) return;
+    await busy(
+      context,
+      () => widget.services.favorites.moveToFolder(favorite.id, folder),
+    );
+  }
+
+  Widget _folderBar() {
+    final folders = widget.services.favorites.folders;
+    final current = folders.where((f) => f.id == _folder).firstOrNull;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * .22,
+        ),
+        child: SingleChildScrollView(
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              ChoiceChip(
+                label: const Text('全部'),
+                selected: _folder == null,
+                onSelected: (_) => setState(() => _folder = null),
+              ),
+              ChoiceChip(
+                label: const Text('未分类'),
+                selected: _folder == '',
+                onSelected: (_) => setState(() => _folder = ''),
+              ),
+              for (final folder in folders)
+                ChoiceChip(
+                  key: ValueKey('favorite-folder-${folder.id}'),
+                  avatar: const Icon(CupertinoIcons.folder, size: 16),
+                  label: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 180),
+                    child: Text(
+                      folder.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  selected: _folder == folder.id,
+                  onSelected: (_) => setState(() => _folder = folder.id),
+                ),
+              if (_organizing) ...[
+                ActionChip(
+                  key: const Key('favorite-folder-create'),
+                  avatar: const Icon(
+                    CupertinoIcons.folder_badge_plus,
+                    size: 16,
+                  ),
+                  label: const Text('新建文件夹'),
+                  onPressed: _saving ? null : () => _editFolder(),
+                ),
+                if (current != null)
+                  AppPopupMenuButton<String>(
+                    tooltip: '文件夹操作',
+                    icon: CupertinoIcons.ellipsis,
+                    actions: const [
+                      AppMenuAction(
+                        value: 'rename',
+                        label: '重命名文件夹',
+                        icon: CupertinoIcons.pencil,
+                      ),
+                      AppMenuAction(
+                        value: 'delete',
+                        label: '删除文件夹',
+                        icon: CupertinoIcons.trash,
+                      ),
+                    ],
+                    onSelected: (action) => action == 'rename'
+                        ? _editFolder(current)
+                        : _deleteFolder(current),
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   bool get _desktop => const {
     TargetPlatform.windows,
     TargetPlatform.macOS,
@@ -270,6 +408,8 @@ class _CloudFavoritesPageState extends State<CloudFavoritesPage> {
           final favorites = widget.services.favorites.all
               .where(
                 (f) =>
+                    (_folder == null ||
+                        widget.services.favorites.folderOf(f) == _folder) &&
                     (widget.platform == null ||
                         widget.platform == f.session.platform) &&
                     (widget.accountId == null ||
@@ -298,6 +438,7 @@ class _CloudFavoritesPageState extends State<CloudFavoritesPage> {
                   ),
                 ),
               ),
+              _folderBar(),
               if (_organizing || _desktop)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -387,6 +528,19 @@ class _CloudFavoritesPageState extends State<CloudFavoritesPage> {
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
+                                      if (_organizing)
+                                        IconButton(
+                                          key: ValueKey(
+                                            'favorite-move-${favorite.id}',
+                                          ),
+                                          tooltip: '移动到文件夹',
+                                          icon: const Icon(
+                                            CupertinoIcons.folder,
+                                          ),
+                                          onPressed: _saving
+                                              ? null
+                                              : () => _move(favorite),
+                                        ),
                                       if (!_organizing) ...[
                                         IconButton(
                                           key: ValueKey(

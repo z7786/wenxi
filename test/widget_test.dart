@@ -1243,7 +1243,9 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
     }
-    expect(http.calls, isEmpty);
+    // Time sorting now reads both folders to inspect their descendants.
+    expect(http.calls, hasLength(2));
+    expect(http.calls.every((call) => call.method == 'GET'), isTrue);
     expect(tester.takeException(), isNull);
   });
 

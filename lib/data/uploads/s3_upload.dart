@@ -43,12 +43,12 @@ extension S3Upload on UploadIO {
       int? start,
       int? end,
     }) async {
-      final stamp =
-          '${clock().toUtc().toIso8601String().replaceAll(RegExp(r'[:-]'), '').split('.').first}Z';
-      final date = stamp.substring(0, 8);
       final contentHash = start == null
           ? sha256.convert(utf8.encode(body)).toString()
           : await digest(sha256, start: start, end: end);
+      final stamp =
+          '${clock().toUtc().toIso8601String().replaceAll(RegExp(r'[:-]'), '').split('.').first}Z';
+      final date = stamp.substring(0, 8);
       final headers = <String, String>{
         'host': base.authority,
         'x-amz-content-sha256': contentHash,
@@ -86,6 +86,7 @@ extension S3Upload on UploadIO {
           end: end,
           headers: headers,
           commitsFile: !parameters.containsKey('uploadId'),
+          retry: !parameters.containsKey('uploadId'),
         );
       }
       final result = await http.request(
@@ -120,11 +121,13 @@ extension S3Upload on UploadIO {
       final etags = List.filled(count, '');
       await parts(count, (index) async {
         final start = index * chunkSize;
-        final result = await request(
-          'PUT',
-          {'uploadId': uploadId, 'partNumber': '${index + 1}'},
-          start: start,
-          end: math.min(file.size, start + chunkSize),
+        final result = await retryPart(
+          () => request(
+            'PUT',
+            {'uploadId': uploadId, 'partNumber': '${index + 1}'},
+            start: start,
+            end: math.min(file.size, start + chunkSize),
+          ),
         );
         final etag = result.header('etag');
         require(etag.isNotEmpty, '网盘未确认上传分段');

@@ -15,6 +15,7 @@ import '../preview/text_preview_loader.dart';
 import '../playback/playback_controller.dart';
 import '../playback/playback_sources.dart';
 import 'common.dart';
+import 'download_location_picker.dart';
 import 'baidu_download_prompt.dart';
 import 'operation_progress_view.dart';
 import 'player_page.dart';
@@ -187,7 +188,7 @@ class _PreviewPageState extends State<PreviewPage> {
     }
   }
 
-  Future<void> _download() async {
+  Future<void> _download({bool chooseLocation = false}) async {
     if (adding || preparingPool || poolError) return;
     setState(() => adding = true);
     try {
@@ -200,6 +201,12 @@ class _PreviewPageState extends State<PreviewPage> {
           !mounted) {
         return;
       }
+      final location = await chooseDownloadLocation(
+        context,
+        widget.services,
+        alwaysAsk: chooseLocation,
+      );
+      if (location == null || !mounted) return;
       var value = spec;
       if (value == null) {
         value = await widget.services.cloud.prepare(session, file);
@@ -207,7 +214,7 @@ class _PreviewPageState extends State<PreviewPage> {
         widget.services.cleanups.retain(value.cleanup);
       }
       try {
-        await widget.services.downloads.enqueue(value);
+        await widget.services.downloads.enqueue(value, location: location);
       } catch (_) {
         await widget.services.cleanups.release(value.cleanup);
         await widget.services.cleanups.ready(value.cleanup);
@@ -270,7 +277,7 @@ class _PreviewPageState extends State<PreviewPage> {
           '${widget.services.cacheDirectory.path}/playback-subtitles',
         ),
         onDownload: (source) async {
-          await services.downloads.enqueue(source);
+          await enqueueDownloadFromUi(context, services, source);
         },
       );
     }
@@ -294,6 +301,19 @@ class _PreviewPageState extends State<PreviewPage> {
               : widget.services.requestDownloadManager,
           icon: const Icon(CupertinoIcons.arrow_down_circle),
         ),
+        if (supportsDownloadLocationChoice &&
+            (kind == FileKind.image ||
+                kind == FileKind.text ||
+                kind == FileKind.pdf ||
+                office))
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            enabled: !adding && !loading && !poolError,
+            onSelected: (_) => _download(chooseLocation: true),
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'download-to', child: Text('下载到…')),
+            ],
+          ),
       ],
       child: Column(
         children: [

@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +11,8 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/domain/torrent.dart';
+import 'package:asterlink/domain/settings.dart';
+import 'package:asterlink/domain/download_destination.dart';
 import 'package:asterlink/download/download_manager.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'package:asterlink/main.dart';
@@ -48,12 +51,15 @@ class _SelectionQueue extends DownloadManager {
             throw StateError('No cloud request in a BT selection test'),
       );
   List<int> selection = [];
+  DownloadDestinationSelection? destination;
   @override
   Future<List<String>> enqueueTorrent(
     TorrentInfo info,
-    List<int> selected,
-  ) async {
+    List<int> selected, {
+    DownloadDestinationSelection? location,
+  }) async {
     selection = selected;
+    destination = location;
     return [for (final index in selected) 'selected-$index'];
   }
 }
@@ -68,6 +74,8 @@ class _UiServices extends Fake implements AppServices {
   late final cacheDirectory = Directory(p.join(dataDirectory.path, 'cache'));
   @override
   final store = StateStore.memory();
+  @override
+  AppSettings get settings => AppSettings.fromJson(store.data.obj('settings'));
   @override
   late final vault = Vault(store);
   @override
@@ -110,6 +118,7 @@ void main() {
   });
   for (final (name, size, dark, scale, count) in [
     ('phone-bt', const Size(430, 960), false, 1.0, 2),
+    ('desktop-bt', const Size(1100, 780), false, 1.0, 2),
     ('phone-bt-dark', const Size(430, 960), true, 1.0, 2),
     ('landscape-bt-large-text', const Size(900, 430), false, 1.3, 2),
     ('phone-bt-many-files', const Size(430, 960), false, 1.0, 1001),
@@ -124,6 +133,10 @@ void main() {
           ? '下载 $selected 个文件'
           : '下载选中 $selected 个文件';
       tester.view.devicePixelRatio = 1;
+      final desktop = name.startsWith('desktop');
+      debugDefaultTargetPlatformOverride = desktop
+          ? TargetPlatform.windows
+          : TargetPlatform.android;
       tester.view.physicalSize = size;
       tester.platformDispatcher.textScaleFactorTestValue = scale;
       addTearDown(tester.view.resetDevicePixelRatio);
@@ -153,6 +166,11 @@ void main() {
                   ],
                 },
         );
+        await services.store.put('settings', {
+          'askDownloadDestination': true,
+          'destination': r'D:\Configured',
+        });
+        await services.store.put('recentDownloadDestinations', [r'E:\BT']);
       });
       try {
         await tester.pumpWidget(
@@ -298,7 +316,7 @@ void main() {
           expect(find.text(fullPath), findsOneWidget);
           await tester.pump(const Duration(seconds: 3));
         }
-        if (systemFont && count == 2) {
+        if (systemFont && count == 2 && !desktop) {
           await expectLater(
             find.byKey(const Key('capture')),
             matchesGoldenFile('goldens/$name.png'),
@@ -409,14 +427,44 @@ void main() {
           );
           expect(find.text(downloadLabel(count)), findsOneWidget);
         }
+        // A BT selection owns one destination even when prompting is enabled.
+        if (desktop) {
+          await tester.tap(find.byKey(const Key('download-location-recent')));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(r'E:\BT'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const Key('download-location-recent')));
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const Key('download-location-default')));
+          await tester.pumpAndSettle();
+        } else {
+          expect(
+            find.byKey(const Key('download-location-recent')),
+            findsNothing,
+          );
+          expect(
+            find.byKey(const Key('download-location-browse')),
+            findsNothing,
+          );
+        }
         await tester.tap(find.byKey(const Key('torrent-download')));
         await tester.pumpAndSettle();
+        expect(find.text('下载保存位置'), findsNothing);
+        expect(
+          (services.downloads as _SelectionQueue).destination?.path,
+          desktop ? r'E:\BT' : r'D:\Configured',
+        );
+        expect(
+          (services.downloads as _SelectionQueue).destination?.makeDefault,
+          desktop ? isTrue : isFalse,
+        );
         expect(
           (services.downloads as _SelectionQueue).selection,
           List<int>.generate(count, (i) => i),
         );
         expect(tester.takeException(), isNull);
       } finally {
+        debugDefaultTargetPlatformOverride = null;
         await tester.pumpWidget(const SizedBox());
         var closed = false;
         services.close().then((_) => closed = true);

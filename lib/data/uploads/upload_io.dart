@@ -26,6 +26,8 @@ class UploadResponseFailure extends AppException {
 
   final HttpResult response;
   final String code;
+  bool get transient =>
+      const {408, 429, 500, 502, 503, 504}.contains(response.status);
 
   static String _code(HttpResult response) {
     final body = response.body.length > 16384
@@ -83,6 +85,51 @@ class UploadIO {
 
   Future<T> temporary<T>(Future<T> Function() action) =>
       WriteRequestScope.current?.payload(false, action) ?? action();
+
+  Duration _retryDelay(int attempt, String retryAfter) {
+    final normal = Duration(seconds: attempt + 1);
+    final seconds = int.tryParse(retryAfter.trim());
+    Duration? server;
+    if (seconds != null && seconds >= 0) {
+      server = Duration(seconds: seconds);
+    } else if (retryAfter.isNotEmpty) {
+      try {
+        server = HttpDate.parse(retryAfter).difference(clock().toUtc());
+      } on HttpException {
+        // Invalid server hints fall back to the bounded attempt backoff.
+      }
+    }
+    return server != null && server > normal ? server : normal;
+  }
+
+  /// Retry only an independently addressable, uncommitted part. The callback
+  /// renews its URL/signature and sends with retry:false so the whole part has
+  /// one budget. Never use this for initialization or final commit requests.
+  Future<T> retryPart<T>(
+    Future<T> Function() action, {
+    bool renewAuthorization = false,
+  }) async {
+    for (var attempt = 0; ; attempt++) {
+      RequestScope.checkpoint();
+      var retryAfter = '';
+      try {
+        return await temporary(action);
+      } on HttpRequestFailure catch (error) {
+        RequestScope.checkpoint();
+        if (!error.retryable || attempt >= 2) rethrow;
+        retryAfter = error.retryAfter;
+      } on UploadResponseFailure catch (error) {
+        RequestScope.checkpoint();
+        final expired =
+            renewAuthorization &&
+            (error.response.status == 403 ||
+                const {'RequestExpired', 'ExpiredToken'}.contains(error.code));
+        if (attempt >= 2 || (!error.transient && !expired)) rethrow;
+        retryAfter = error.response.header('retry-after');
+      }
+      await RequestScope.wait(_retryDelay(attempt, retryAfter));
+    }
+  }
 
   void progress(UploadPhase phase, [int bytes = 0]) {
     RequestScope.checkpoint();
@@ -364,7 +411,21 @@ class UploadIO {
               !error.retryable) {
             rethrow;
           }
-          await RequestScope.wait(Duration(seconds: attempt + 1));
+          await RequestScope.wait(_retryDelay(attempt, error.retryAfter));
+        } on UploadResponseFailure catch (error) {
+          RequestScope.checkpoint();
+          // A server rejection is replayable here only for an independent PUT
+          // part. Direct uploads/callbacks and POSTs may already save a file.
+          if (!retry ||
+              commitsFile ||
+              method != 'PUT' ||
+              attempt >= 2 ||
+              !error.transient) {
+            rethrow;
+          }
+          await RequestScope.wait(
+            _retryDelay(attempt, error.response.header('retry-after')),
+          );
         }
       }
     }
@@ -406,7 +467,16 @@ class UploadIO {
     }
     for (var attempt = 0; attempt < 8; attempt++) {
       RequestScope.checkpoint();
-      final matches = (await list())
+      List<CloudFile> files;
+      try {
+        files = await list();
+      } on HttpRequestFailure catch (error) {
+        RequestScope.checkpoint();
+        if (!error.retryable || attempt == 7) rethrow;
+        await RequestScope.wait(const Duration(milliseconds: 750));
+        continue;
+      }
+      final matches = files
           .where(
             (f) =>
                 !f.isDirectory &&
@@ -513,6 +583,7 @@ class UploadIO {
           headers: headers,
           contentType: type,
           commitsFile: !parameters.containsKey('uploadId'),
+          retry: !parameters.containsKey('uploadId'),
         );
       }
       final result = await http.request(
@@ -545,11 +616,13 @@ class UploadIO {
       final etags = List.filled(count, '');
       await parts(count, (index) async {
         final start = index * size;
-        final result = await request(
-          'PUT',
-          {'partNumber': '${index + 1}', 'uploadId': uploadId},
-          start: start,
-          end: math.min(file.size, start + size),
+        final result = await retryPart(
+          () => request(
+            'PUT',
+            {'partNumber': '${index + 1}', 'uploadId': uploadId},
+            start: start,
+            end: math.min(file.size, start + size),
+          ),
         );
         final etag = result.header('etag');
         require(etag.isNotEmpty, '网盘未确认上传分段');

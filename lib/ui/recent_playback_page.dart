@@ -11,6 +11,7 @@ import '../platform/file_access.dart';
 import '../playback/playback_controller.dart';
 import '../playback/recent_playback.dart';
 import 'common.dart';
+import 'download_location_picker.dart';
 import 'app_context_menu.dart';
 import 'app_popup_menu.dart';
 import 'baidu_download_prompt.dart';
@@ -66,7 +67,7 @@ Future<void> openRecentPlayback(
               }.contains(record.source?.kind)
               ? null
               : (DownloadSpec source) async {
-                  await services.downloads.enqueue(source);
+                  await enqueueDownloadFromUi(context, services, source);
                 },
         ),
       ),

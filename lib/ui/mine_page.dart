@@ -1,16 +1,13 @@
 import 'dart:io';
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'app_switch.dart';
 import '../app_services.dart';
-import '../data/backup.dart';
+import 'backup_page.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
 import '../domain/download_retries.dart';
 import '../domain/settings.dart';
-import '../platform/document_actions.dart';
 import '../playback/windows_player_components.dart';
 import 'common.dart';
 import 'appearance_page.dart';
@@ -19,6 +16,7 @@ import 'remote_control_dialogs.dart';
 import 'diagnostics_page.dart';
 import 'download_protection_page.dart';
 import 'download_destination_dialog.dart';
+import 'download_location_picker.dart' show supportsDownloadLocationChoice;
 import 'experimental_features_page.dart';
 import 'github_acceleration_page.dart';
 import 'font_size_page.dart';
@@ -125,105 +123,15 @@ class MinePage extends StatelessWidget {
     await services.updateSettings({'downloadThreadOverrides': values});
   }
 
-  Future<bool> _saveBytes(Uint8List bytes, String name) async {
-    final location = await const DocumentActions().saveBytes(
-      bytes,
-      name,
-      mime: 'application/json',
-      acceptedTypeGroups: const [
-        XTypeGroup(label: 'JSON', extensions: ['json']),
-      ],
-    );
-    return location != null;
-  }
+  void _export(BuildContext context) => Navigator.push<void>(
+    context,
+    MaterialPageRoute(builder: (_) => BackupPage(services)),
+  );
 
-  Future<void> _export(BuildContext context) async {
-    var includeImages = false;
-    if (services.settings.background.hasImage) {
-      final choice = await showDialog<bool>(
-        context: context,
-        builder: (context) => StatefulBuilder(
-          builder: (context, update) => AlertDialog(
-            title: const Text('导出备份'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('同时备份背景图片'),
-                  value: includeImages,
-                  onChanged: (value) =>
-                      update(() => includeImages = value ?? false),
-                ),
-                const Text(
-                  '不携带图片时，恢复后使用纯色背景；主题配色和其他设置仍会保留。',
-                  style: TextStyle(fontSize: 13, height: 1.5),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(context, includeImages),
-                child: const Text('继续'),
-              ),
-            ],
-          ),
-        ),
-      );
-      if (choice == null || !context.mounted) return;
-      includeImages = choice;
-    }
-    final exported = await busy(
-      context,
-      () => services.backup.exportTo(
-        '',
-        (bytes) => context.mounted
-            ? _saveBytes(
-                bytes,
-                '文析助手-backup-${DateTime.now().millisecondsSinceEpoch}.json',
-              )
-            : Future.value(false),
-        includeBackgroundImages: includeImages,
-      ),
-      label: '正在导出备份…',
-    );
-    if (exported == true && context.mounted) {
-      message(context, '备份已导出，请妥善保管，文件包含账号登录信息');
-    }
-  }
-
-  Future<void> _restore(BuildContext context) async {
-    final file = await openFile(acceptedTypeGroups: const [backupFileType]);
-    if (file == null || !context.mounted) return;
-    if (await file.length() > 16 * 1024 * 1024) {
-      if (context.mounted) message(context, '备份文件过大');
-      return;
-    }
-    if (!context.mounted ||
-        !await confirm(context, '恢复备份', '备份中的账号和设置将覆盖本机对应项目，下载文件不会被删除。') ||
-        !context.mounted) {
-      return;
-    }
-    final bytes = await file.readAsBytes();
-    if (!context.mounted) return;
-    final password = isPlainBackup(bytes)
-        ? ''
-        : await askText(context, '输入旧备份密码', secret: true);
-    if (password == null || !context.mounted) return;
-    final count = await busy(
-      context,
-      () => services.backup.restore(bytes, password),
-      label: '正在验证并恢复备份…',
-    );
-    if (count != null && context.mounted) {
-      await services.downloads.settingsChanged();
-      if (context.mounted) message(context, '已恢复 $count 个账号及下载设置');
-    }
-  }
+  void _restore(BuildContext context) => Navigator.push<void>(
+    context,
+    MaterialPageRoute(builder: (_) => BackupPage(services, restoring: true)),
+  );
 
   Widget _settingIcon(BuildContext context, IconData icon) => Container(
     width: 34,
@@ -573,6 +481,20 @@ class MinePage extends StatelessWidget {
             child: const Text('恢复默认目录'),
           ),
         ),
+      ),
+    if (supportsDownloadLocationChoice)
+      AppSwitchListTile(
+        key: const ValueKey('ask-download-destination-setting'),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        secondary: _settingIcon(context, CupertinoIcons.folder),
+        title: const Text('下载前询问保存位置', style: TextStyle(fontSize: 14)),
+        subtitle: Text(
+          '每批下载选择一次，任务继续时沿用原目录',
+          style: TextStyle(fontSize: 12, color: secondary(context)),
+        ),
+        value: settings.askDownloadDestination,
+        onChanged: (value) =>
+            services.updateSettings({'askDownloadDestination': value}),
       ),
     if (services.mobileDataDownloads.supported)
       AppSwitchListTile(

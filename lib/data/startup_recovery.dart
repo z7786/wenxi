@@ -5,7 +5,10 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 import '../core/crypto_box.dart';
 import '../core/json.dart';
+import '../domain/settings.dart';
+import '../domain/background.dart';
 import 'backup.dart';
+import 'backgrounds.dart';
 import 'state_key.dart';
 import 'state_store.dart';
 
@@ -43,12 +46,46 @@ class StartupRecovery {
     String password,
   ) async {
     final prepared = StateStore.memory({'legacyImported': true});
+    Directory? staging;
     try {
-      // Includes password, account, settings and favorite validation before any IO.
-      final count = await BackupRepository(prepared).restore(bytes, password);
-      return await _replace(prepared.data, accounts: count, password: password);
+      // Reject invalid packages before creating a staging directory.
+      await compute(decryptBackup, (bytes, password));
+      staging = await Directory.systemTemp.createTemp(
+        'asterlink-recovery-images-',
+      );
+      final images = BackgroundRepository(
+        staging,
+        current: () =>
+            AppSettings.fromJson(prepared.data.obj('settings')).background,
+      );
+      final count = await BackupRepository(
+        prepared,
+        backgrounds: images,
+      ).restore(bytes, password);
+      final background = AppSettings.fromJson(
+        prepared.data.obj('settings'),
+      ).background;
+      final assets = await images.exportImages(background);
+      prepared.data.remove('backupUndo');
+      return await _locked(() async {
+        await _requireUnreadable();
+        // Copy validated content-addressed assets before publishing any state.
+        // Existing assets are retained until the new snapshot has committed.
+        final destination = BackgroundRepository(
+          failure.directory,
+          current: () => const BackgroundSettings(),
+        );
+        final draft = destination.beginDraft();
+        await destination.restoreImages(background, assets, draft);
+        // Preserve old assets referenced by the archived state as well. This
+        // short-lived repository has no listeners or persistent draft state.
+        return _commit(failure.directory, prepared.data, count, password);
+      });
     } finally {
       prepared.dispose();
+      if (staging != null && await staging.exists()) {
+        await staging.delete(recursive: true);
+      }
     }
   }
 

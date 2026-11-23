@@ -50,6 +50,29 @@ void main() {
   List<String> ids() => favorites.all.map((favorite) => favorite.id).toList();
 
   test(
+    'folder assignment survives rename and reopen; deletion preserves favorites',
+    () async {
+      final id = await favorites.createFolder('影视');
+      await favorites.moveToFolder('f0', id);
+      await favorites.renameFolder(id, '电视剧');
+      await expectLater(
+        favorites.createFolder('电视剧'),
+        throwsA(isA<AppException>()),
+      );
+      final reopened = CloudFavorites(StateStore.memory(store.data), cloud);
+      expect(reopened.folders.single.name, '电视剧');
+      expect(reopened.folderOf(reopened.all.first), id);
+      await favorites.deleteFolder(id);
+      expect(favorites.all, hasLength(5));
+      expect(favorites.folderOf(favorites.all.first), '');
+      await expectLater(
+        favorites.moveToFolder('f1', id),
+        throwsA(isA<AppException>()),
+      );
+    },
+  );
+
+  test(
     'Legacy order becomes persistent manual order and survives sort switches',
     () async {
       expect(favorites.sort, CloudFavoriteSort.manual);

@@ -40,7 +40,7 @@ class AsterLinkHost : Application(), DownloadServiceOwner, AppKeepAliveOwner, Ca
         analytics.attach(engine.dartExecutor.binaryMessenger)
         bridge = NativeBridge(this, engine)
         playback = PlaybackBridge(this, engine)
-        casting = CastBridge(this, engine) { event, error -> diagnostics.record(event, error) }
+        casting = CastBridge(this, engine, onActiveChanged = playback::setCasting) { event, error -> diagnostics.record(event, error) }
         engine.dartExecutor.executeDartEntrypoint(DartExecutor.DartEntrypoint.createDefault())
     }
 }

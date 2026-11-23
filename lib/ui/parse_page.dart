@@ -35,6 +35,7 @@ import 'baidu_share_route_picker.dart';
 import 'resource_preferences.dart';
 import 'parser_site_picker.dart';
 import 'common.dart';
+import 'download_location_picker.dart';
 import 'liquid_glass.dart';
 import 'app_context_menu.dart';
 import 'app_popup_menu.dart';
@@ -2059,23 +2060,32 @@ Future<bool> directDownloadDialog(
   Map<String, String> headers = const {},
   bool external = false,
 }) async {
-  final selection = await showDialog<({DownloadSpec spec, int connections})>(
-    context: context,
-    barrierDismissible: !external,
-    builder: (_) => _DirectDialog(
-      initial,
-      fileName,
-      headers,
-      services.settings.threads,
-      external: external,
-    ),
-  );
+  final selection =
+      await showDialog<
+        ({
+          DownloadSpec spec,
+          int connections,
+          DownloadDestinationSelection location,
+        })
+      >(
+        context: context,
+        barrierDismissible: !external,
+        builder: (_) => _DirectDialog(
+          initial,
+          fileName,
+          headers,
+          services.settings.threads,
+          services,
+          external: external,
+        ),
+      );
   if (selection == null || !context.mounted) return false;
   final id = await busy(
     context,
     () => services.downloads.enqueue(
       selection.spec,
       connections: selection.connections,
+      location: selection.location,
     ),
     label: '添加下载…',
   );
@@ -2090,13 +2100,15 @@ class _DirectDialog extends StatefulWidget {
     this.initial,
     this.fileName,
     this.headers,
-    this.connections, {
+    this.connections,
+    this.services, {
     this.external = false,
   });
   final String initial;
   final String fileName;
   final Map<String, String> headers;
   final int connections;
+  final AppServices services;
   final bool external;
   @override
   State<_DirectDialog> createState() => _DirectDialogState();
@@ -2121,8 +2133,12 @@ class _DirectDialogState extends State<_DirectDialog> {
   late final name = TextEditingController(text: safeFileName(initialName()));
   late final headers = TextEditingController(text: jsonEncode(widget.headers));
   late final connections = TextEditingController(text: '${widget.connections}');
+  late var location = DownloadDestinationSelection(
+    widget.services.settings.destination,
+  );
   String error = '';
   bool advanced = false;
+  bool choosingLocation = false;
   @override
   void dispose() {
     for (final c in [url, name, headers, connections]) {
@@ -2142,6 +2158,7 @@ class _DirectDialogState extends State<_DirectDialog> {
             expectedSize: link.size,
           ),
           connections: 1,
+          location: location,
         ));
         return;
       }
@@ -2170,6 +2187,7 @@ class _DirectDialogState extends State<_DirectDialog> {
           headers: parsed,
         ),
         connections: count!,
+        location: location,
       ));
     } catch (e) {
       setState(() => error = e is AppException ? e.message : '请检查链接和请求头格式');
@@ -2217,6 +2235,15 @@ class _DirectDialogState extends State<_DirectDialog> {
               decoration: const InputDecoration(labelText: '保存文件名'),
             ),
             const SizedBox(height: 16),
+            if (supportsDownloadLocationChoice) ...[
+              DownloadLocationField(
+                services: widget.services,
+                selection: location,
+                onChanged: (value) => setState(() => location = value),
+                onChoosing: (value) => setState(() => choosingLocation = value),
+              ),
+              const SizedBox(height: 8),
+            ],
             if (isEd2k)
               const Text(
                 'ED2K 自动查找来源并排队，下载速度取决于在线来源和网络。下载期间会共享已校验的分片，上传上限为 128 KiB/s；暂停会停止传输。',
@@ -2279,7 +2306,7 @@ class _DirectDialogState extends State<_DirectDialog> {
       ),
       FilledButton(
         key: const Key('direct-download-submit'),
-        onPressed: submit,
+        onPressed: choosingLocation ? null : submit,
         child: const Text('添加下载'),
       ),
     ],

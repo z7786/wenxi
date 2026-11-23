@@ -34,6 +34,106 @@ UploadFile _source(
 );
 
 void main() {
+  for (final mode in [
+    'authorization',
+    'authorization-http',
+    'expired',
+    'persistent',
+    'cancel',
+  ]) {
+    test('Tianyi renews authorization within one part budget: $mode', () async {
+      final key = LoginTestKey(), scope = RequestScope();
+      var grants = 0, sends = 0, merges = 0, sessions = 0;
+      final http = FakeHttp((r) async {
+        if (r.uri.path == '/api/portal/v2/getUserBriefInfo.action') {
+          return jsonResponse({'res_code': 0, 'sessionKey': 'session'});
+        }
+        if (r.uri.path == '/api/security/generateRsaKey.action') {
+          return jsonResponse({
+            'res_code': 0,
+            'pubKey': key.spki,
+            'pkId': 'key',
+          });
+        }
+        if (r.uri.path == '/person/initMultiUpload') {
+          sessions++;
+          return jsonResponse({
+            'code': 'SUCCESS',
+            'data': {'uploadFileId': 'upload', 'fileDataExists': 0},
+          });
+        }
+        if (r.uri.path == '/person/getMultiUploadUrls') {
+          grants++;
+          if (mode == 'authorization-http' && grants == 1) {
+            return const HttpResult(503, '<html>unavailable</html>');
+          }
+          if (mode == 'authorization' && grants == 1) {
+            throw const HttpRequestFailure(
+              'offline',
+              kind: 'connectionError',
+              retryable: true,
+            );
+          }
+          return jsonResponse({
+            'code': 'SUCCESS',
+            'uploadUrls': {
+              'partNumber_1': {
+                'requestURL': 'https://payload.example/1?grant=$grants',
+                'requestHeader': '',
+              },
+            },
+          });
+        }
+        if (r.uri.host == 'payload.example') {
+          sends++;
+          expect(r.uri.queryParameters['grant'], '$grants');
+          expect(
+            await (r.body as HttpUpload).open().expand((b) => b).toList(),
+            [0, 0, 0],
+          );
+          if (mode == 'cancel') scope.cancel();
+          if (mode == 'persistent' ||
+              mode == 'cancel' ||
+              (mode == 'expired' && sends == 1)) {
+            return const HttpResult(403, '');
+          }
+          return const HttpResult(200, '');
+        }
+        expect(r.uri.path, '/person/commitMultiUploadFile');
+        merges++;
+        return jsonResponse({
+          'code': 'SUCCESS',
+          'data': {
+            'fileId': '42',
+            'fileName': 'sample.bin',
+            'fileSize': 3,
+            'parentFolderId': '0',
+          },
+        });
+      });
+      Future<CloudFile> upload() => TianyiConnector(http).upload(
+        const BrowseSession(
+          platform: CloudPlatform.tianyi,
+          mode: BrowseMode.personal,
+          title: 'Files',
+          rootId: '0',
+        ),
+        '0',
+        _source(3),
+        Credential('fixture', {'primary': 'COOKIE_LOGIN_USER=fixture'}),
+      );
+      if (mode == 'persistent' || mode == 'cancel') {
+        await expectLater(scope.run(upload), throwsA(isA<AppException>()));
+        expect(grants, mode == 'persistent' ? 3 : 1);
+        expect(merges, 0);
+      } else {
+        expect((await scope.run(upload)).id, '42');
+        expect(grants, 2);
+        expect(merges, 1);
+      }
+      expect(sessions, 1);
+    });
+  }
   for (final badPart in [false, true]) {
     test(
       'Tianyi concurrent parts verify signed hashes and merge only after success: badPart=$badPart',

@@ -5,8 +5,17 @@ import '../http.dart';
 /// Shared by ordinary uploads and cross-cloud relay uploads. Queued work keeps
 /// its caller's cancellation and account guard without holding a connection.
 class UploadWorkLimiter {
-  UploadWorkLimiter(this.limit, {this.reentrant = false}) : assert(limit > 0);
-  final int limit;
+  UploadWorkLimiter(int limit, {this.reentrant = false})
+    : assert(limit > 0),
+      _limit = limit;
+  int _limit;
+  int get limit => _limit;
+  set limit(int value) {
+    if (value < 1) throw ArgumentError.value(value, 'limit');
+    _limit = value;
+    _fill();
+  }
+
   final bool reentrant;
   final _leaseKey = Object();
   final _waiting = Queue<_UploadSlot>();

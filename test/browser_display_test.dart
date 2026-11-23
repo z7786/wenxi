@@ -46,6 +46,38 @@ class _FileListConnector extends BrowserTestConnector {
       ];
 }
 
+class _NestedDateConnector extends BrowserTestConnector {
+  _NestedDateConnector() : super(CloudPlatform.tianyi);
+  @override
+  Future<List<CloudFile>> list(
+    BrowseSession session,
+    String parentId,
+    Credential? credential,
+  ) async => switch (parentId) {
+    'personal-root' => const [
+      CloudFile(
+        id: 'a',
+        name: '旧目录新文件',
+        isDirectory: true,
+        modifiedAt: '2026-01-01',
+      ),
+      CloudFile(
+        id: 'b',
+        name: '新目录旧文件',
+        isDirectory: true,
+        modifiedAt: '2026-11-22',
+      ),
+    ],
+    'a' => const [CloudFile(id: 'child', name: '子目录', isDirectory: true)],
+    'child' => const [
+      CloudFile(id: 'new', name: 'new.txt', modifiedAt: '2026-11-20'),
+    ],
+    _ => const [
+      CloudFile(id: 'old', name: 'old.txt', modifiedAt: '2026-03-01'),
+    ],
+  };
+}
+
 class _EpisodeNameConnector extends BrowserTestConnector {
   _EpisodeNameConnector() : super(CloudPlatform.tianyi);
 
@@ -294,6 +326,25 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  browserTest(
+    'Folder time sort uses latest nested file instead of folder metadata',
+    (tester) async {
+      final value = await fixture(tester);
+      value.services.cloud.connectors[CloudPlatform.tianyi] =
+          _NestedDateConnector();
+      await value.render(tester, size: const Size(1100, 900));
+      await tester.tap(find.byTooltip('排序'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('时间 · 倒序'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(find.text('旧目录新文件')).dy,
+        lessThan(tester.getTopLeft(find.text('新目录旧文件')).dy),
+      );
+      expect(find.textContaining('2026-11-20'), findsOneWidget);
+    },
+  );
 
   browserTest('Date sort compares mixed formats and keeps undated files last', (
     tester,

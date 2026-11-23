@@ -28,6 +28,7 @@ import '../playback/subtitle_files.dart';
 import '../playback/online_subtitles.dart';
 import '../diagnostics/app_log.dart';
 import 'player_theme.dart';
+import 'player_error_panel.dart';
 import 'windows_gpu_preference_tile.dart';
 import 'player_components_page.dart';
 import 'player_rate_input.dart';
@@ -138,7 +139,7 @@ class _PlayerPageState extends State<PlayerPage>
   bool _brightnessDrag = false, _verticalActive = false;
   final _surfaceTouches = <int, Offset>{};
   bool _multiTouch = false, _pinching = false, _pinchChanged = false;
-  double _pinchInitialSpan = 0, _pinchInitialScale = 1, _pinchRenderScale = 1;
+  double _pinchInitialSpan = 0, _pinchInitialScale = 1;
   double _pinchInitialRotation = 0,
       _pinchLastAngle = 0,
       _pinchRotationDelta = 0;
@@ -1219,7 +1220,6 @@ class _PlayerPageState extends State<PlayerPage>
         _pinchChanged = false;
         _pinchResetShown = false;
         _pinchGeneration = controller.generation;
-        _pinchRenderScale = controller.preferences.videoScale;
         _rebasePinch();
         _hudTimer?.cancel();
         setState(() {
@@ -1387,7 +1387,6 @@ class _PlayerPageState extends State<PlayerPage>
       ),
     );
     if (_pinching) {
-      _pinchRenderScale = 1;
       if (_surfaceTouches.length == 2) {
         _rebasePinch();
       } else {
@@ -3515,11 +3514,10 @@ class _PlayerPageState extends State<PlayerPage>
                             controller.preferences.fit == PlaybackFit.contain
                         ? BoxFit.contain
                         : BoxFit.cover,
-                    desktopPip
-                        ? 1
-                        : _pinching
-                        ? _pinchRenderScale
-                        : controller.preferences.videoScale,
+                    // Zoom is a compositor transform. Resizing the native
+                    // output on finger-up recreates decoder surfaces and can
+                    // stall playback; keep viewport-based output throughout.
+                    1,
                     stableOrientation:
                         device.supportsOrientation &&
                         !device.isTelevision &&
@@ -4590,77 +4588,28 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
-  Widget _errorPanel() => SafeArea(
-    child: Padding(
-      padding: const EdgeInsets.fromLTRB(24, 72, 24, 24),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 480),
-          child: Material(
-            color: playerPanelColor,
-            borderRadius: BorderRadius.circular(14),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    CupertinoIcons.exclamationmark_circle,
-                    color: Colors.white60,
-                    size: 32,
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    controller.error,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white, height: 1.5),
-                  ),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    alignment: WrapAlignment.center,
-                    spacing: 8,
-                    children: [
-                      FilledButton(
-                        onPressed: _authorizing
-                            ? null
-                            : () => _run(
-                                _needsUcTv ? _authorizeUcTv : controller.retry,
-                              ),
-                        child: Text(
-                          _needsUcTv
-                              ? '扫码授权播放'
-                              : controller.playbackRuntimeFailed
-                              ? '重试播放器'
-                              : '刷新重试',
-                        ),
-                      ),
-                      if (controller.playbackRuntimeFailed &&
-                          controller.hasVideo &&
-                          device.supportsExternalPlayer)
-                        OutlinedButton(
-                          onPressed: controller.openingExternalPlayer
-                              ? null
-                              : () => _run(_openExternalPlayer),
-                          child: const Text('外部播放器'),
-                        ),
-                      if (widget.onDownload != null)
-                        OutlinedButton(
-                          onPressed: _adding ? null : () => _run(_download),
-                          child: Text(
-                            controller.current.platform == CloudPlatform.uc
-                                ? '下载原文件'
-                                : '下载文件',
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    ),
+  Widget _errorPanel() => PlayerErrorPanel(
+    error: controller.error,
+    retryLabel: _needsUcTv
+        ? '扫码授权播放'
+        : controller.playbackRuntimeFailed
+        ? '重试播放器'
+        : '刷新重试',
+    onRetry: _authorizing
+        ? null
+        : () => _run(_needsUcTv ? _authorizeUcTv : controller.retry),
+    showExternalPlayer:
+        controller.playbackRuntimeFailed &&
+        controller.hasVideo &&
+        device.supportsExternalPlayer,
+    onExternalPlayer: controller.openingExternalPlayer
+        ? null
+        : () => _run(_openExternalPlayer),
+    showDownload: widget.onDownload != null,
+    downloadLabel: controller.current.platform == CloudPlatform.uc
+        ? '下载原文件'
+        : '下载文件',
+    onDownload: _adding ? null : () => _run(_download),
   );
 }
 

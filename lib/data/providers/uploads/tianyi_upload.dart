@@ -66,6 +66,9 @@ extension _TianyiUpload on TianyiConnector {
         followRedirects: false,
       );
       _checkpoint();
+      if (!response.successful && path == '/person/getMultiUploadUrls') {
+        throw UploadResponseFailure(response);
+      }
       final result = response.json;
       require(
         response.successful && result.str('code') == 'SUCCESS',
@@ -102,33 +105,37 @@ extension _TianyiUpload on TianyiConnector {
     require(uploadId.isNotEmpty, '天翼未创建上传任务');
     if (pre.integer('fileDataExists') != 1) {
       io.notSavedYet();
-      await io.parts(count, (i) async {
-        final hashBytes = [
-          for (var j = 0; j < 32; j += 2)
-            int.parse(hashes[i].substring(j, j + 2), radix: 16),
-        ];
-        final data = await io.temporary(
-          () => call('/person/getMultiUploadUrls', {
-            'partInfo': '${i + 1}-${base64Encode(hashBytes)}',
-            'uploadFileId': uploadId,
-          }),
-        );
-        final part = data.obj('uploadUrls').obj('partNumber_${i + 1}');
-        final headers = <String, String>{};
-        for (final pair in Uri.decodeComponent(
-          part.str('requestHeader'),
-        ).split('&')) {
-          final eq = pair.indexOf('=');
-          if (eq > 0) headers[pair.substring(0, eq)] = pair.substring(eq + 1);
-        }
-        await io.send(
-          part.str('requestURL'),
-          start: i * partSize,
-          end: math.min(source.size, (i + 1) * partSize),
-          commitsFile: false,
-          headers: headers,
-        );
-      });
+      await io.parts(
+        count,
+        (i) => io.retryPart(() async {
+          final hashBytes = [
+            for (var j = 0; j < 32; j += 2)
+              int.parse(hashes[i].substring(j, j + 2), radix: 16),
+          ];
+          final data = await io.temporary(
+            () => call('/person/getMultiUploadUrls', {
+              'partInfo': '${i + 1}-${base64Encode(hashBytes)}',
+              'uploadFileId': uploadId,
+            }),
+          );
+          final part = data.obj('uploadUrls').obj('partNumber_${i + 1}');
+          final headers = <String, String>{};
+          for (final pair in Uri.decodeComponent(
+            part.str('requestHeader'),
+          ).split('&')) {
+            final eq = pair.indexOf('=');
+            if (eq > 0) headers[pair.substring(0, eq)] = pair.substring(eq + 1);
+          }
+          await io.send(
+            part.str('requestURL'),
+            start: i * partSize,
+            end: math.min(source.size, (i + 1) * partSize),
+            commitsFile: false,
+            retry: false,
+            headers: headers,
+          );
+        }, renewAuthorization: true),
+      );
     }
     io.notSavedYet();
     io.progress(UploadPhase.finishing, source.size);

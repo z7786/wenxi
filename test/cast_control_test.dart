@@ -52,6 +52,21 @@ void main() {
   }
 
   test(
+    'failed resume control keeps a successful TV playback and bookmark',
+    () async {
+      final tv = await receiver();
+      tv.responses['Seek'] = TestTvResponse.disconnectBefore;
+      final session = sessionFor(tv);
+      await start(session, tv, position: const Duration(seconds: 197));
+      expect(session.connected, isTrue);
+      expect(tv.transport, 'PLAYING');
+      expect(tv.events, isNot(contains('Stop')));
+      expect(session.bookmarkState.position, const Duration(seconds: 197));
+      expect(session.warning, contains('进度'));
+    },
+  );
+
+  test(
     'control requests work on receivers rejecting reused HTTP connections',
     () async {
       final tv = await receiver()

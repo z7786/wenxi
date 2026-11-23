@@ -277,6 +277,15 @@ class CastSession extends ChangeNotifier {
           'code': e.code,
           'position_s': position.inSeconds,
         });
+      } on CastControlException catch (e) {
+        _check();
+        // Play has already succeeded. An unavailable progress control must not
+        // tear down a working stream or discard the local resume bookmark.
+        if (transportReplaced) rethrow;
+        warning = '电视未确认恢复进度，原进度已保留，可稍后拖动进度条';
+        _seekTarget = null;
+        _state = _state.copyWith(position: Duration.zero);
+        _event('seek_failed', castFailureFields(e, stage: 'seek'));
       }
     }
     _check();
