@@ -55,7 +55,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Source runtime test build failed.' }
           $env:ASTERLINK_JS_LIBRARY = Join-Path $env:GITHUB_WORKSPACE '.local/source-test/Release/asterlink_js.dll'
           if (-not (Test-Path -LiteralPath $env:ASTERLINK_JS_LIBRARY)) { throw 'Source runtime test library is missing.' }
-          python tool/verify.py test test
+          # Native decoder and rendering tests share the runner's CPU/GPU budget.
+          python tool/verify.py test --concurrency 2 test
           if ($LASTEXITCODE -ne 0) { throw 'Flutter and native player regressions failed.' }
       - name: Test browser scripts and configuration editor
         run: |
