@@ -1028,6 +1028,7 @@ class PlaybackController extends ChangeNotifier {
     final scope = _subtitleScope = RequestScope();
     final expected = _generation, revision = session.selection.subtitleRevision;
     subtitleLoading = true;
+    if (!automatic) notice = '';
     _changed();
     File? file;
     try {
@@ -1048,6 +1049,12 @@ class PlaybackController extends ChangeNotifier {
         cloudSubtitleId: subtitle.id,
         scope: scope,
       );
+      if (!automatic &&
+          _current(session) &&
+          !scope.token.isCancelled &&
+          session.selection.cloudSubtitleId == subtitle.id) {
+        notice = '已加载字幕：${subtitle.name}';
+      }
     } catch (e, stack) {
       if (_current(session) && !scope.token.isCancelled) {
         DiagnosticLog.error(
@@ -1056,7 +1063,9 @@ class PlaybackController extends ChangeNotifier {
           stack,
           fields: _logFields(session.entry, 'subtitle', session: session),
         );
-        if (!automatic) notice = '字幕加载失败，请重新选择字幕';
+        if (!automatic) {
+          notice = e is AppException ? '字幕加载失败：${e.message}' : '字幕加载失败，请重新选择字幕';
+        }
       }
     } finally {
       if (file != null) await _deleteSubtitleFile(file);

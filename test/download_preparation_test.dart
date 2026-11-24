@@ -532,6 +532,66 @@ void main() {
   );
 
   test(
+    'WebDAV resume resolves a new local listener before using a persisted URL',
+    () async {
+      final planned = _planned('webdav');
+      final ready = DownloadSpec.fromJson({
+        ...planned.toJson(),
+        'url': 'http://127.0.0.1:1/old-session/file.bin',
+        'source': {
+          ...planned.source!,
+          'platform': CloudPlatform.webdav.key,
+          'session': {
+            ...planned.source!.obj('session'),
+            'platform': CloudPlatform.webdav.key,
+            'metadata': {
+              'accountId': 'original-account',
+              'webdavRoot': 'https://nas.example/dav/',
+            },
+          },
+        },
+      });
+      final fixture = await _Fixture.create(
+        state: StateStore.memory({
+          'tasks': [
+            DownloadTask(
+              id: 'webdav-resume',
+              spec: ready,
+              createdAt: 1,
+              status: DownloadStatus.paused,
+              connections: 7,
+            ).toJson(),
+          ],
+        }),
+      );
+      var resolved = 0;
+      fixture.resolve = (previous) async {
+        resolved++;
+        expect(
+          previous.source!.obj('session').obj('metadata').str('accountId'),
+          'original-account',
+        );
+        return previous.copyWith(
+          url: 'http://127.0.0.1:40000/current-session/file.bin',
+        );
+      };
+      await fixture.manager.resume('webdav-resume');
+      await until(
+        () =>
+            fixture.manager.task('webdav-resume')!.status ==
+            DownloadStatus.completed,
+      );
+      expect(resolved, 1);
+      expect(fixture.http.probes, isNot(contains(ready.url)));
+      expect(
+        fixture.native.begins.single.str('url'),
+        'http://127.0.0.1:40000/current-session/file.bin',
+      );
+      expect(fixture.native.begins.single.integer('connections'), 7);
+    },
+  );
+
+  test(
     'Queued origins survive restart and retain their captured retry, speed, and route settings',
     () async {
       final first = await _Fixture.create();

@@ -95,11 +95,16 @@ class _PlayerOnlineSubtitlePanelState extends State<PlayerOnlineSubtitlePanel> {
       );
     } catch (e, stack) {
       if (!_current(scope)) return;
-      final error = e is AppException
-          ? e
-          : const AppException('在线字幕搜索失败，请检查网络后重试');
+      final error = AppException(
+        onlineSubtitleErrorMessage(e, searching: true),
+      );
       setState(() => _error = error.message);
-      DiagnosticLog.error('player.online_subtitle_search_failed', error, stack);
+      DiagnosticLog.error(
+        'player.online_subtitle_search_failed',
+        error,
+        stack,
+        fields: {'stage': 'search', ...onlineSubtitleFailureFields(e)},
+      );
     } finally {
       if (_current(scope)) setState(() => _searching = false);
     }
@@ -114,6 +119,7 @@ class _PlayerOnlineSubtitlePanelState extends State<PlayerOnlineSubtitlePanel> {
       _error = null;
     });
     File? pending;
+    var stage = 'download';
     try {
       pending = await _service.download(
         subtitle,
@@ -127,6 +133,7 @@ class _PlayerOnlineSubtitlePanelState extends State<PlayerOnlineSubtitlePanel> {
       }
       final staged = pending;
       pending = null;
+      stage = 'attach';
       // The controller owns the file from this point, including failed native
       // attachment and a late video switch, until its native reader is closed.
       await widget.controller.attachSubtitle(
@@ -146,15 +153,19 @@ class _PlayerOnlineSubtitlePanelState extends State<PlayerOnlineSubtitlePanel> {
       widget.onLoaded(subtitle);
     } catch (e, stack) {
       if (!_current(scope)) return;
-      final error = e is AppException
-          ? e
-          : const AppException('字幕加载失败，请重新选择或重试');
+      final error = AppException(
+        onlineSubtitleErrorMessage(e, searching: false),
+      );
       setState(() => _error = error.message);
       DiagnosticLog.error(
         'player.online_subtitle_load_failed',
         error,
         stack,
-        fields: {'format': subtitle.format},
+        fields: {
+          'stage': stage,
+          'format': subtitle.format,
+          ...onlineSubtitleFailureFields(e),
+        },
       );
     } finally {
       if (pending != null && await pending.exists()) await pending.delete();

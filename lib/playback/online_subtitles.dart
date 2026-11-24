@@ -1,15 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
-import 'dart:typed_data';
 import 'package:dio/dio.dart';
-import 'package:enough_convert/gbk.dart';
 import 'package:path/path.dart' as p;
 import '../core/html_entities.dart';
 import '../core/json.dart';
 import '../data/http.dart';
+import '../data/system_proxy_http_adapter.dart';
+import '../diagnostics/app_log.dart';
+import '../domain/download_network_policy.dart';
 import '../download/transfer_http.dart';
+import '../platform/windows_system_proxy.dart';
 import 'subtitle_files.dart';
 
 /// Only a filename or the user's search words leave the device.
@@ -28,54 +29,91 @@ String _displayText(String value) => unescapeDisplayName(
   ),
 ).replaceAll(RegExp(r'[\x00-\x1f\x7f]'), ' ').trim();
 
-Uint8List _utf8Subtitle(Uint8List bytes) {
-  require(bytes.isNotEmpty, '字幕文件为空');
-  String text;
-  if (bytes.length >= 2 &&
-      (bytes[0] == 0xff && bytes[1] == 0xfe ||
-          bytes[0] == 0xfe && bytes[1] == 0xff)) {
-    require(bytes.length.isEven, '字幕编码不完整，请选择其他字幕');
-    final little = bytes[0] == 0xff;
-    text = String.fromCharCodes([
-      for (var i = 2; i < bytes.length; i += 2)
-        little ? bytes[i] | bytes[i + 1] << 8 : bytes[i] << 8 | bytes[i + 1],
-    ]);
-  } else {
-    try {
-      text = utf8.decode(bytes);
-    } on FormatException {
-      try {
-        text = gbk.decode(bytes);
-      } on FormatException {
-        throw const AppException('无法识别字幕编码，请选择其他字幕');
-      }
-    }
+/// Keep only error categories and numeric codes. Search words, subtitle URLs
+/// and proxy addresses are not needed to diagnose a failed connection.
+Map<String, Object?> onlineSubtitleFailureFields(Object error) {
+  final fields = <String, Object?>{};
+  Object? cause = error;
+  if (cause is DownloadHttpException) {
+    fields['httpStatus'] = cause.status;
   }
-  text = text.replaceFirst(RegExp(r'^\uFEFF'), '');
-  require(
-    !RegExp(r'[\x00-\x08\x0b\x0e-\x1f\x7f]').hasMatch(text) &&
-        !RegExp(
-          r'^\s*<(?:!doctype|html|head|body)\b',
-          caseSensitive: false,
-        ).hasMatch(text),
-    '下载内容不是有效字幕，请重新搜索',
-  );
-  require(
-    RegExp(r'\d{1,2}:\d{2}(?:[.,]\d{1,3})?\s*-->').hasMatch(text) ||
-        RegExp(
-          r'^\s*Dialogue\s*:',
-          multiLine: true,
-          caseSensitive: false,
-        ).hasMatch(text),
-    '下载内容不是有效字幕，请重新搜索',
-  );
-  final utf8Bytes = utf8.encode(text);
-  require(utf8Bytes.length <= SubtitleFiles.maximumBytes, '字幕文件不能超过 8 MB');
-  return utf8Bytes;
+  if (cause is DownloadNetworkException) {
+    fields['kind'] = cause.kind;
+    fields['retryable'] = cause.retryable;
+    cause = cause.cause ?? cause;
+  }
+  if (cause is DioException) {
+    fields['kind'] = cause.type.name;
+    cause = cause.error ?? cause;
+  }
+  if (cause is WindowsProxyException) {
+    fields['proxyReason'] = cause.reason;
+    fields['systemCode'] = cause.systemCode;
+    cause = cause.cause ?? cause;
+  }
+  fields['causeType'] = cause.runtimeType.toString();
+  if (cause is SocketException) {
+    fields['errno'] = cause.osError?.errorCode;
+    fields['dns'] = cause.message.toLowerCase().contains('host lookup');
+  }
+  if (cause is TlsException) {
+    fields['tls'] = true;
+    fields['certificate'] = '${cause.message} ${cause.osError?.message ?? ''}'
+        .toUpperCase()
+        .contains('CERTIFICATE_VERIFY_FAILED');
+  }
+  if (cause is TimeoutException ||
+      {
+        'connectionTimeout',
+        'receiveTimeout',
+        'sendTimeout',
+      }.contains(fields['kind'])) {
+    fields['timedOut'] = true;
+  }
+  return fields;
 }
 
-Future<Uint8List> _normalizeSubtitle(Uint8List bytes) =>
-    Isolate.run(() => _utf8Subtitle(bytes));
+String onlineSubtitleErrorMessage(Object error, {required bool searching}) {
+  final operation = searching ? '在线字幕搜索' : '字幕下载';
+  final fields = onlineSubtitleFailureFields(error);
+  if (fields['proxyReason'] case final String reason) {
+    return '$operation失败：${WindowsProxyException(reason).message}';
+  }
+  if (fields['dns'] == true) {
+    return '$operation无法解析服务地址，请检查网络或 DNS 后重试';
+  }
+  if (fields['timedOut'] == true) return '$operation连接超时，请稍后重试';
+  if (fields['kind'] == 'badCertificate' || fields['certificate'] == true) {
+    return '$operation证书校验失败，请检查系统时间和网络设置';
+  }
+  if (fields['tls'] == true) return '$operation安全连接失败，请检查网络后重试';
+  if (error is DownloadNetworkException ||
+      error is DioException ||
+      error is SocketException ||
+      error is HttpException) {
+    return '$operation连接失败，请检查网络后重试';
+  }
+  if (error is DownloadHttpException) {
+    if (error.status == 429) return error.message;
+    if (!searching && {401, 403, 404, 410}.contains(error.status)) {
+      return '字幕下载地址已失效，请重新搜索';
+    }
+    return '$operation服务暂不可用（HTTP ${error.status}），请稍后重试';
+  }
+  return error is AppException
+      ? error.message
+      : searching
+      ? '在线字幕搜索失败，请检查网络后重试'
+      : '字幕加载失败，请重新选择或重试';
+}
+
+bool _retryableSubtitleRequest(Object error) {
+  final fields = onlineSubtitleFailureFields(error);
+  final proxy = fields['proxyReason'];
+  if (proxy != null && proxy != 'connection') return false;
+  if (fields['certificate'] == true) return false;
+  return retryableDownloadError(error);
+}
 
 class OnlineSubtitle {
   const OnlineSubtitle({
@@ -141,15 +179,83 @@ abstract interface class OnlineSubtitleService {
 
 /// A dedicated transport never inherits a video source's cookies or headers.
 class XunleiOnlineSubtitleService implements OnlineSubtitleService {
-  XunleiOnlineSubtitleService({TransferHttp? http})
-    : _http = http ?? TransferHttp(),
-      _ownsHttp = http == null;
+  XunleiOnlineSubtitleService({
+    TransferHttp? http,
+    WindowsSystemProxy? systemProxy,
+    this.wait = RequestScope.wait,
+  }) : _http = http ?? _createHttp(systemProxy),
+       _ownsHttp = http == null;
   static const endpoint = 'https://api-shoulei-ssl.xunlei.com/oracle/subtitle';
   static const maximumSearchBytes = 2 * 1024 * 1024;
+  static const maximumRetries = 1;
   final TransferHttp _http;
   final bool _ownsHttp;
+  final Future<void> Function(Duration) wait;
   final _scopes = <RequestScope>{};
   bool _closed = false;
+
+  static bool _systemProxyRequest(Uri uri) {
+    if (!{'http', 'https'}.contains(uri.scheme)) return false;
+    final address = InternetAddress.tryParse(uri.host);
+    return address == null || DownloadNetworkPolicy.publicAddress(address);
+  }
+
+  static TransferHttp _createHttp(WindowsSystemProxy? systemProxy) {
+    final http = TransferHttp();
+    if (Platform.isWindows || systemProxy != null) {
+      final proxy = systemProxy ?? WindowsSystemProxy();
+      http.dio.httpClientAdapter = SystemProxyHttpClientAdapter(
+        resolve: (uri) async {
+          final route = await proxy.resolve(uri);
+          if (route.source == 'direct') {
+            final environment = HttpClient.findProxyFromEnvironment(uri);
+            if (environment != 'DIRECT') {
+              return WindowsProxyRoute(environment, 'environment');
+            }
+          }
+          return route;
+        },
+        shouldProxy: _systemProxyRequest,
+        diagnosticPlatform: '在线字幕',
+        createHttpClient: () => HttpClient()
+          ..userAgent = null
+          ..idleTimeout = const Duration(seconds: 3)
+          ..findProxy = (uri) => _systemProxyRequest(uri)
+              ? HttpClient.findProxyFromEnvironment(uri)
+              : 'DIRECT',
+      );
+    }
+    return http;
+  }
+
+  Future<T> _read<T>(String stage, Future<T> Function() action) async {
+    for (var attempt = 0; ; attempt++) {
+      RequestScope.checkpoint();
+      try {
+        return await action();
+      } catch (error) {
+        RequestScope.checkpoint();
+        if (attempt >= maximumRetries || !_retryableSubtitleRequest(error)) {
+          rethrow;
+        }
+        final delay = downloadRetryDelay(attempt, error);
+        // Respect a long Retry-After by returning the error for a later manual
+        // retry, rather than retrying too early or blocking this panel.
+        if (delay > const Duration(seconds: 5)) rethrow;
+        DiagnosticLog.event(
+          'player.online_subtitle_retry',
+          fields: {
+            'stage': stage,
+            'attempt': attempt + 1,
+            'delayMs': delay.inMilliseconds,
+            ...onlineSubtitleFailureFields(error),
+          },
+        );
+        await wait(delay);
+        RequestScope.checkpoint();
+      }
+    }
+  }
 
   Future<T> _request<T>(RequestScope scope, Future<T> Function() action) async {
     require(!_closed, '在线字幕已关闭');
@@ -173,9 +279,12 @@ class XunleiOnlineSubtitleService implements OnlineSubtitleService {
         final url = Uri.parse(
           endpoint,
         ).replace(queryParameters: {'name': keyword});
-        final bytes = await _http.limited(url.toString(), const {
-          'Accept': 'application/json',
-        }, maximumSearchBytes);
+        final bytes = await _read(
+          'search',
+          () => _http.limited(url.toString(), const {
+            'Accept': 'application/json',
+          }, maximumSearchBytes),
+        );
         RequestScope.checkpoint();
         Object? decoded;
         try {
@@ -200,70 +309,60 @@ class XunleiOnlineSubtitleService implements OnlineSubtitleService {
     OnlineSubtitle subtitle,
     Directory directory,
     RequestScope scope,
-  ) => _request(scope, () async {
-    require(
-      OnlineSubtitle.fromJson({
-            'url': subtitle.url,
-            'name': subtitle.name,
-            'ext': subtitle.format,
-          }) !=
-          null,
-      '字幕下载地址或格式无效，请重新搜索',
-    );
-    final cancel = CancelToken();
-    final relay = scope.token.whenCancel.asStream().listen((_) {
-      if (!cancel.isCancelled) cancel.cancel();
-    });
-    File? pending;
-    try {
-      final response = await _http.stream(
-        subtitle.url,
-        _http.headers(const {}),
-        cancel: cancel,
-      );
-      if (response.statusCode != 200) {
-        throw DownloadHttpException.response(response);
-      }
-      require(response.data != null, '字幕下载失败，请重试');
-      final length = int.tryParse(
-        response.headers.value('content-length') ?? '',
-      );
+  ) => _request(
+    scope,
+    () => _read('download', () async {
       require(
-        length == null || length <= SubtitleFiles.maximumBytes,
-        '字幕文件不能超过 8 MB',
+        OnlineSubtitle.fromJson({
+              'url': subtitle.url,
+              'name': subtitle.name,
+              'ext': subtitle.format,
+            }) !=
+            null,
+        '字幕下载地址或格式无效，请重新搜索',
       );
-      final type = response.headers.value('content-type')?.toLowerCase() ?? '';
-      require(
-        !type.contains('text/html') && !type.contains('application/json'),
-        '字幕下载地址已失效，请重新搜索',
-      );
-      final bytes = BytesBuilder(copy: false);
-      await for (final chunk in response.data!.stream) {
-        RequestScope.checkpoint();
+      final cancel = CancelToken();
+      final relay = scope.token.whenCancel.asStream().listen((_) {
+        if (!cancel.isCancelled) cancel.cancel();
+      });
+      File? pending;
+      try {
+        final response = await _http.stream(
+          subtitle.url,
+          _http.headers(const {}),
+          cancel: cancel,
+        );
+        if (response.statusCode != 200) {
+          throw DownloadHttpException.response(response);
+        }
+        require(response.data != null, '字幕下载失败，请重试');
+        final length = int.tryParse(
+          response.headers.value('content-length') ?? '',
+        );
         require(
-          bytes.length + chunk.length <= SubtitleFiles.maximumBytes,
+          length == null || length <= SubtitleFiles.maximumBytes,
           '字幕文件不能超过 8 MB',
         );
-        bytes.add(chunk);
+        final type =
+            response.headers.value('content-type')?.toLowerCase() ?? '';
+        require(
+          !type.contains('text/html') && !type.contains('application/json'),
+          '字幕下载地址已失效，请重新搜索',
+        );
+        pending = await SubtitleFiles(
+          directory,
+        ).stage(subtitle.name, response.data!.stream);
+        RequestScope.checkpoint();
+        final file = pending;
+        pending = null;
+        return file;
+      } finally {
+        cancel.cancel();
+        await relay.cancel();
+        if (pending != null && await pending.exists()) await pending.delete();
       }
-      RequestScope.checkpoint();
-      final data = bytes.takeBytes();
-      // Conversion stays off the platform thread used to deliver video frames.
-      final normalized = await _normalizeSubtitle(data);
-      RequestScope.checkpoint();
-      pending = await SubtitleFiles(
-        directory,
-      ).stage(subtitle.name, Stream.value(normalized));
-      RequestScope.checkpoint();
-      final file = pending;
-      pending = null;
-      return file;
-    } finally {
-      cancel.cancel();
-      await relay.cancel();
-      if (pending != null && await pending.exists()) await pending.delete();
-    }
-  });
+    }),
+  );
 
   @override
   void close() {

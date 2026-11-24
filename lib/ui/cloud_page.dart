@@ -39,6 +39,7 @@ const cloudEntries = <(String, String, CloudPlatform?)>[
   ('feijipan', '小飞机网盘', CloudPlatform.feijipan),
   ('pikpak', 'PikPak网盘', CloudPlatform.pikpak),
   ('github', 'GitHub', CloudPlatform.github),
+  ('webdav', 'WebDAV', CloudPlatform.webdav),
 ];
 
 class CloudPage extends StatelessWidget {
@@ -75,7 +76,8 @@ class CloudPage extends StatelessWidget {
         services.accountNeedsLogin.contains(platform)) {
       await openLogin(context, services, platform);
       if (platform != CloudPlatform.lanzou &&
-              platform != CloudPlatform.github ||
+              platform != CloudPlatform.github &&
+              platform != CloudPlatform.webdav ||
           !context.mounted ||
           !LoginCredentials.stored(
             platform,
@@ -231,7 +233,11 @@ class CloudPage extends StatelessWidget {
             if (stored) ...[
               AppMenuAction(
                 value: 'refresh',
-                label: platform == CloudPlatform.github ? '刷新账号信息' : '刷新账号容量',
+                label: platform == CloudPlatform.webdav
+                    ? '检查连接'
+                    : platform == CloudPlatform.github
+                    ? '刷新账号信息'
+                    : '刷新账号容量',
                 icon: CupertinoIcons.refresh,
               ),
               if (platform == CloudPlatform.uc)
@@ -459,11 +465,15 @@ class CloudPage extends StatelessWidget {
                           Text(
                             active
                                 ? services.accountLoading.contains(platform)
-                                      ? '正在读取容量…'
+                                      ? platform == CloudPlatform.webdav
+                                            ? '正在检查连接…'
+                                            : '正在读取容量…'
                                       : services.accountErrors[platform] ??
                                             account?.nickname ??
                                             credential?.field('nickname') ??
                                             '已登录'
+                                : platform == CloudPlatform.webdav
+                                ? '连接服务器与备份目录'
                                 : '未登录',
                             style: TextStyle(
                               fontSize: 13,

@@ -62,8 +62,8 @@ void main() {
         CloudPlatform.uc,
       ]);
       expect(
-        restored.cloudPriority.toSet().length,
-        CloudPlatform.values.length,
+        restored.cloudPriority.toSet(),
+        CloudPlatform.values.where((p) => p != CloudPlatform.webdav).toSet(),
       );
     },
   );

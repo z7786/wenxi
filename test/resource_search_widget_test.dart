@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,10 +21,12 @@ import 'package:asterlink/domain/appearance.dart';
 import 'package:asterlink/domain/background.dart';
 import 'package:asterlink/domain/settings.dart';
 import 'package:asterlink/domain/resource_search.dart';
+import 'package:asterlink/platform/clipboard_links.dart';
 import 'package:asterlink/ui/app_navigation.dart';
 import 'package:asterlink/ui/app_background.dart';
 import 'package:asterlink/ui/app_theme.dart';
 import 'package:asterlink/ui/browser_page.dart';
+import 'package:asterlink/ui/common.dart' show PlatformMark;
 import 'package:asterlink/ui/preview_page.dart';
 import 'package:asterlink/ui/resource_search_page.dart';
 import 'package:asterlink/ui/resource_home_page.dart';
@@ -142,6 +146,7 @@ void main() {
     bool home = false,
     double scale = 1,
     double bottomInset = 0,
+    TargetPlatform? platform,
     AppPalette palette = AppPalette.blue,
     bool wallpaper = false,
     Stream<ResourceSearchBatch> Function(String, dynamic)? response,
@@ -244,33 +249,38 @@ void main() {
           palette: palette,
           fontFamily: loadedChineseFont ? 'ResourceSearchFixture' : null,
         ).copyWith(
-          platform: size.width >= 1000
-              ? TargetPlatform.windows
-              : TargetPlatform.android,
+          platform:
+              platform ??
+              (size.width >= 1000
+                  ? TargetPlatform.windows
+                  : TargetPlatform.android),
         );
     await tester.pumpWidget(
-      MaterialApp(
-        debugShowCheckedModeBanner: false,
-        theme: theme,
-        locale: const Locale('zh', 'CN'),
-        localizationsDelegates: GlobalMaterialLocalizations.delegates,
-        supportedLocales: const [Locale('zh', 'CN')],
-        builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(textScaler: TextScaler.linear(scale)),
-          child: child!,
+      RepaintBoundary(
+        key: const Key('resource-page-capture'),
+        child: MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: theme,
+          locale: const Locale('zh', 'CN'),
+          localizationsDelegates: GlobalMaterialLocalizations.delegates,
+          supportedLocales: const [Locale('zh', 'CN')],
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: TextScaler.linear(scale)),
+            child: child!,
+          ),
+          home: root
+              ? MainShell(services, initialTab: initialTab)
+              : home
+              ? Scaffold(
+                  body: ResourceHomePage(
+                    services,
+                    onOpen: onOpen ?? (_) async {},
+                  ),
+                )
+              : ResourceSearchPage(services, onOpen: onOpen ?? (_) async {}),
         ),
-        home: root
-            ? MainShell(services, initialTab: initialTab)
-            : home
-            ? Scaffold(
-                body: ResourceHomePage(
-                  services,
-                  onOpen: onOpen ?? (_) async {},
-                ),
-              )
-            : ResourceSearchPage(services, onOpen: onOpen ?? (_) async {}),
       ),
     );
     if (!waitForIdle || linkChecks != null && service.searching) {
@@ -290,6 +300,8 @@ void main() {
     final imageContext = tester.element(find.byType(Scaffold).first);
     await tester.runAsync(() async {
       for (final platform in CloudPlatform.values) {
+        // WebDAV uses a themed Icon instead of an image asset.
+        if (platform == CloudPlatform.webdav) continue;
         final icon = platform.icon;
         await precacheImage(
           AssetImage('assets/icons/$icon.${icon == '123' ? 'webp' : 'png'}'),
@@ -396,10 +408,577 @@ void main() {
       await tester.ensureVisible(third);
       await tester.tap(third);
       await tester.pumpAndSettle();
+      expect(opened, isNull);
+      expect(find.byKey(const Key('resource-content-details')), findsOneWidget);
+      expect(find.text('不要显示的来源'), findsNothing);
+      await tester.tap(find.byKey(const Key('resource-content-open')));
+      await tester.pumpAndSettle();
       expect(opened?.recommendationId, 3);
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
+
+  ResourceSearchHit publishedContent({
+    bool multiLink = false,
+    bool empty = false,
+  }) => ResourceSearchHit.fromRaw({
+    'title': '后台推荐的学习资料：从入门到实践，含视频课程、配套代码与练习说明',
+    'url': 'https://pan.quark.cn/s/published',
+    'recommendation_id': 21,
+    'category': '学习资料',
+    'datetime': '2026-11-24',
+    'description': empty
+        ? ''
+        : '这套资料包括视频课程、配套代码和练习说明。\n\n'
+              '${List.generate(16, (n) => '第 ${n + 1} 部分：按章节学习基础知识，再结合示例练习；可以根据需要选择适合自己的内容。').join('\n')}\n\n'
+              '简介结尾：使用前请阅读课程目录。',
+    'open_ticket': 'published-grant',
+    if (multiLink)
+      'links': [
+        {
+          'url': 'https://pan.quark.cn/s/published',
+          'password': 'q123',
+          'open_ticket': 'quark-entry-grant',
+        },
+        {
+          'url': 'https://pan.baidu.com/s/1published',
+          'password': 'b456',
+          'open_ticket': 'baidu-entry-grant',
+        },
+      ],
+  });
+
+  Finder publishedTile(ResourceSearchHit hit, {bool home = true}) => find.byKey(
+    ValueKey(
+      '${home ? 'resource-catalog-item' : 'resource-recommendation'}-${hit.recommendationId}-${hit.identity}',
+    ),
+  );
+
+  Future<void> captureContentDetails(WidgetTester tester, String name) async {
+    final directory = Platform.environment['RESOURCE_DETAILS_PREVIEW_DIR'];
+    if (directory == null) return;
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byKey(const Key('resource-page-capture')),
+    );
+    await tester.runAsync(() async {
+      final image = await boundary.toImage(pixelRatio: 1);
+      try {
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        final file = File('$directory/$name.png');
+        await file.parent.create(recursive: true);
+        await file.writeAsBytes(bytes!.buffer.asUint8List());
+      } finally {
+        image.dispose();
+      }
+    });
+  }
+
+  Future<void> revealPublishedTile(
+    WidgetTester tester,
+    ResourceSearchHit hit, {
+    bool home = true,
+  }) async {
+    await tester.scrollUntilVisible(
+      publishedTile(hit, home: home),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(home ? ResourceHomePage : ResourceSearchPage),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+      maxScrolls: 20,
+    );
+    await tester.pumpAndSettle();
+  }
+
+  void mockContentCopies(
+    WidgetTester tester,
+    Future<void> Function(String) write,
+  ) {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          await write((call.arguments as Map)['text'] as String);
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+  }
+
+  for (final (name, size, scale, inset, dark, platform) in [
+    ('phone', const Size(393, 864), 1.0, 28.0, false, TargetPlatform.android),
+    (
+      'phone-dark',
+      const Size(393, 864),
+      1.0,
+      28.0,
+      true,
+      TargetPlatform.android,
+    ),
+    (
+      'large-text',
+      const Size(320, 700),
+      1.6,
+      34.0,
+      false,
+      TargetPlatform.android,
+    ),
+    (
+      'landscape',
+      const Size(844, 390),
+      1.4,
+      21.0,
+      true,
+      TargetPlatform.android,
+    ),
+    (
+      'short-large-text',
+      const Size(568, 320),
+      1.6,
+      21.0,
+      false,
+      TargetPlatform.android,
+    ),
+    ('desktop', const Size(1280, 900), 1.0, 0.0, false, TargetPlatform.windows),
+    (
+      'desktop-dark',
+      const Size(1280, 900),
+      1.0,
+      0.0,
+      true,
+      TargetPlatform.windows,
+    ),
+    (
+      'desktop-compact',
+      const Size(800, 420),
+      1.3,
+      0.0,
+      false,
+      TargetPlatform.windows,
+    ),
+  ]) {
+    testWidgets(
+      'published content details fit $name and copy the full introduction',
+      (tester) async {
+        final hit = publishedContent();
+        final copied = <String>[];
+        var opens = 0;
+        mockContentCopies(tester, (text) async => copied.add(text));
+        final (_, api) = await render(
+          tester,
+          home: true,
+          catalog: ResourceCatalog(popular: [hit]),
+          onOpen: (_) async => opens++,
+          size: size,
+          scale: scale,
+          bottomInset: inset,
+          dark: dark,
+          platform: platform,
+        );
+        await revealPublishedTile(tester, hit);
+        await tester.tap(publishedTile(hit));
+        await tester.pumpAndSettle();
+        final details = find.byKey(const Key('resource-content-details'));
+        final open = find.byKey(const Key('resource-content-open'));
+        final close = find.byKey(const Key('resource-content-close'));
+        expect(details, findsOneWidget);
+        expect(
+          find.byType(Dialog),
+          platform == TargetPlatform.windows ? findsOneWidget : findsNothing,
+        );
+        expect(
+          find.byType(BottomSheet),
+          platform == TargetPlatform.android ? findsOneWidget : findsNothing,
+        );
+        expect(
+          tester.getSize(details).width,
+          lessThanOrEqualTo(platform == TargetPlatform.windows ? 840 : 700),
+        );
+        expect(tester.getTopLeft(details).dy, greaterThanOrEqualTo(0));
+        expect(
+          tester.getBottomRight(details).dy,
+          lessThanOrEqualTo(size.height - inset),
+        );
+        expect(open.hitTestable(), findsOneWidget);
+        expect(close.hitTestable(), findsOneWidget);
+        await captureContentDetails(tester, '$name-details');
+        expect(
+          tester
+              .widget<SelectableText>(
+                find.byKey(const Key('resource-content-description')),
+              )
+              .data,
+          hit.description,
+        );
+        await tester.tap(
+          find.byKey(const Key('resource-content-copy-description')),
+        );
+        await tester.pumpAndSettle();
+        expect(copied, [hit.description]);
+        expect(find.text('简介已复制'), findsOneWidget);
+        expect(open.hitTestable(), findsOneWidget);
+        await captureContentDetails(tester, '$name-copied');
+        final link = find.byKey(const Key('resource-content-link'));
+        await tester.ensureVisible(link);
+        await tester.pumpAndSettle();
+        expect(link.hitTestable(), findsOneWidget);
+        expect(tester.widget<SelectableText>(link).data, hit.url);
+        expect(opens, 0);
+        expect(api.openCalls, isEmpty);
+        expect(tester.takeException(), isNull);
+        expect(await tester.binding.handlePopRoute(), isTrue);
+        await tester.pumpAndSettle();
+        expect(details, findsNothing);
+        expect(opens, 0);
+        expect(api.openCalls, isEmpty);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'category content opens details and closing does not open the resource',
+    (tester) async {
+      final hit = publishedContent();
+      var opens = 0;
+      final (_, api) = await render(
+        tester,
+        home: true,
+        catalog: ResourceCatalog(
+          categories: [
+            ResourceCategory(id: 7, name: '课程', resources: [hit]),
+          ],
+        ),
+        onOpen: (_) async => opens++,
+      );
+      await revealPublishedTile(tester, hit);
+      await tester.tap(publishedTile(hit));
+      await tester.tap(publishedTile(hit), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('resource-content-details')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('resource-content-close')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
+      expect(opens, 0);
+      expect(api.openCalls, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final home in [true, false]) {
+    testWidgets(
+      'published ${home ? 'catalog' : 'recommendation'} uses the selected drive for copying and opening',
+      (tester) async {
+        final hit = publishedContent(multiLink: true);
+        final copied = <String>[];
+        ResourceSearchHit? opened;
+        bool? detailsPresentOnOpen;
+        mockContentCopies(tester, (text) async => copied.add(text));
+        final (services, api) = await render(
+          tester,
+          home: home,
+          catalog: ResourceCatalog(popular: [hit]),
+          recommendations: [hit],
+          onOpen: (selected) async {
+            detailsPresentOnOpen = find
+                .byKey(const Key('resource-content-details'))
+                .evaluate()
+                .isNotEmpty;
+            opened = selected;
+          },
+        );
+        await revealPublishedTile(tester, hit, home: home);
+        await tester.tap(publishedTile(hit, home: home));
+        await tester.pumpAndSettle();
+        final picker = find.byKey(const Key('resource-content-link-picker'));
+        await tester.ensureVisible(picker);
+        await tester.tap(picker);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('百度网盘').last);
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widgetList<PlatformMark>(
+                find.descendant(
+                  of: picker,
+                  matching: find.byType(PlatformMark),
+                ),
+              )
+              .map((mark) => mark.platform),
+          contains(CloudPlatform.baidu),
+        );
+        expect(
+          tester
+              .widget<SelectableText>(
+                find.byKey(const Key('resource-content-link')),
+              )
+              .data,
+          'https://pan.baidu.com/s/1published',
+        );
+        expect(find.text('提取码：b456'), findsOneWidget);
+        await tester.tap(find.byKey(const Key('resource-content-copy-link')));
+        await tester.pumpAndSettle();
+        expect(copied, [
+          '${hit.title}\nhttps://pan.baidu.com/s/1published\n提取码：b456',
+        ]);
+        expect(
+          services.store.data['clipboardRecognitionLastHandled'],
+          ClipboardLinkSuggestion.fromText(copied.single)!.fingerprint,
+        );
+        expect(find.text('链接和提取码已复制'), findsOneWidget);
+        expect(opened, isNull);
+        expect(api.openCalls, isEmpty);
+        await tester.tap(find.byKey(const Key('resource-content-open')));
+        await tester.pumpAndSettle();
+        expect(detailsPresentOnOpen, isFalse);
+        expect(opened?.platform, CloudPlatform.baidu);
+        expect(opened?.password, 'b456');
+        expect(opened?.link?.passcode, 'b456');
+        expect(opened?.openTicket, 'baidu-entry-grant');
+        expect(opened?.recommendationId, 21);
+        expect(opened?.description, hit.description);
+        expect(
+          find.byKey(const Key('resource-content-link-picker')),
+          findsNothing,
+        );
+        expect(api.openCalls, isEmpty);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'published content without an introduction can still copy and open its link',
+    (tester) async {
+      final hit = publishedContent(empty: true);
+      final copied = <String>[];
+      ResourceSearchHit? opened;
+      mockContentCopies(tester, (text) async => copied.add(text));
+      await render(
+        tester,
+        home: true,
+        catalog: ResourceCatalog(popular: [hit]),
+        onOpen: (selected) async => opened = selected,
+      );
+      await tester.tap(publishedTile(hit));
+      await tester.pumpAndSettle();
+      expect(find.text('暂未填写简介'), findsOneWidget);
+      expect(
+        tester
+            .widget<TextButton>(
+              find.byKey(const Key('resource-content-copy-description')),
+            )
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(find.byKey(const Key('resource-content-copy-link')));
+      await tester.pumpAndSettle();
+      expect(copied, [hit.copyText]);
+      expect(find.text('链接已复制'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('resource-content-open')));
+      await tester.pumpAndSettle();
+      expect(opened?.identity, hit.identity);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'failed content copies can retry and an unfinished copy can be dismissed',
+    (tester) async {
+      final hit = publishedContent(multiLink: true);
+      final pending = Completer<void>();
+      var attempts = 0;
+      mockContentCopies(tester, (_) async {
+        attempts++;
+        if (attempts == 1) {
+          throw PlatformException(code: 'clipboard_unavailable');
+        }
+        await pending.future;
+      });
+      await render(
+        tester,
+        home: true,
+        catalog: ResourceCatalog(popular: [hit]),
+      );
+      await tester.tap(publishedTile(hit));
+      await tester.pumpAndSettle();
+      final copyDescription = find.byKey(
+        const Key('resource-content-copy-description'),
+      );
+      await tester.tap(copyDescription);
+      await tester.pumpAndSettle();
+      expect(find.text('复制失败，请长按文本手动复制'), findsOneWidget);
+      expect(tester.widget<TextButton>(copyDescription).onPressed, isNotNull);
+      await tester.tap(copyDescription);
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextButton>(copyDescription).onPressed, isNull);
+      expect(
+        tester
+            .widget<TextButton>(
+              find.byKey(const Key('resource-content-copy-link')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const Key('resource-content-open')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<DropdownButtonFormField<int>>(
+              find.byKey(const Key('resource-content-link-picker')),
+            )
+            .onChanged,
+        isNull,
+      );
+      await tester.tap(copyDescription);
+      expect(attempts, 2);
+      await tester.tap(find.byKey(const Key('resource-content-close')));
+      await tester.pumpAndSettle();
+      pending.complete();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
+      await tester.tap(publishedTile(hit));
+      await tester.pumpAndSettle();
+      await tester.tap(copyDescription);
+      await tester.pumpAndSettle();
+      expect(attempts, 3);
+      expect(find.text('简介已复制'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'published resource open failure keeps the home usable for retry',
+    (tester) async {
+      final hit = publishedContent();
+      var attempts = 0;
+      await render(
+        tester,
+        home: true,
+        catalog: ResourceCatalog(popular: [hit]),
+        onOpen: (_) async {
+          attempts++;
+          if (attempts == 1) throw const AppException('分享暂时不可用');
+        },
+      );
+      for (var attempt = 1; attempt <= 2; attempt++) {
+        await tester.tap(publishedTile(hit));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('resource-content-open')));
+        await tester.pumpAndSettle();
+        expect(attempts, attempt);
+        expect(find.byKey(const Key('resource-content-details')), findsNothing);
+        if (attempt == 1) expect(find.text('分享暂时不可用'), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'published content closes the keyboard and resumes visible checks after cancel',
+    (tester) async {
+      final hit = publishedContent();
+      final probe = LinkCheckApiFixture();
+      await render(
+        tester,
+        home: true,
+        linkChecks: ResourceLinkChecks(probe),
+        catalog: ResourceCatalog(popular: [hit]),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(probe.calls, hasLength(1));
+      final input = find.byKey(const Key('resource-home-search-input'));
+      await tester.tap(input);
+      await tester.pump();
+      final fieldContext = tester.element(input);
+      expect(FocusScope.of(fieldContext).hasFocus, isTrue);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pump();
+      await revealPublishedTile(tester, hit);
+      await tester.tap(publishedTile(hit));
+      await tester.pumpAndSettle();
+      expect(FocusScope.of(fieldContext).hasFocus, isFalse);
+      expect(probe.calls.single.cancellation.isCancelled, isTrue);
+      await tester.pump(const Duration(seconds: 1));
+      expect(probe.calls, hasLength(1));
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('resource-content-close')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(probe.calls, hasLength(2));
+      probe.calls.last.complete(ResourceLinkState.valid);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final home in [true, false]) {
+    testWidgets(
+      'published ${home ? 'catalog' : 'recommendation'} offers external opening for an unsupported link',
+      (tester) async {
+        final hit = ResourceSearchHit.fromRaw({
+          'title': '后台推荐的公开资料',
+          'url': 'https://example.test/materials',
+          'recommendation_id': 23,
+          'description': '使用浏览器查看资料说明。',
+        });
+        const channel = MethodChannel('plugins.flutter.io/url_launcher');
+        final calls = <MethodCall>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          (call) async {
+            calls.add(call);
+            return true;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        var opens = 0;
+        await render(
+          tester,
+          home: home,
+          catalog: ResourceCatalog(popular: [hit]),
+          recommendations: [hit],
+          onOpen: (_) async => opens++,
+        );
+        await revealPublishedTile(tester, hit, home: home);
+        await tester.tap(publishedTile(hit, home: home));
+        await tester.pumpAndSettle();
+        expect(find.text('浏览器打开'), findsOneWidget);
+        await tester.tap(find.byKey(const Key('resource-content-open')));
+        await tester.pumpAndSettle();
+        expect(calls.single.method, 'launch');
+        expect(calls.single.arguments['url'], hit.url);
+        expect(calls.single.arguments['useWebView'], isFalse);
+        expect(calls.single.arguments['useSafariVC'], isFalse);
+        expect(opens, 0);
+        expect(find.byKey(const Key('resource-content-details')), findsNothing);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 
   for (final (name, size, scale) in [
     ('phone', const Size(430, 932), 1.0),
@@ -1636,6 +2215,7 @@ void main() {
       await tester.tap(find.textContaining('Python 编程：').first);
       await tester.pumpAndSettle();
       expect(find.text('资源详情'), findsOneWidget);
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
       expect(find.text('提取码：aB12'), findsOneWidget);
       expect(find.text('电子书与配套练习代码，适合零基础学习与查阅。'), findsWidgets);
       expect(tester.takeException(), isNull);

@@ -135,6 +135,8 @@ class LoginCredentials {
   static bool stored(CloudPlatform p, Credential? c) {
     if (c == null || !p.requiresAccount) return false;
     return switch (p) {
+      CloudPlatform.webdav =>
+        c.field('authType') == 'webdav' && c.primary.isNotEmpty,
       CloudPlatform.lanzou => plausible(p, c.primary),
       CloudPlatform.aliyun ||
       CloudPlatform.pikpak ||
@@ -183,7 +185,11 @@ class LoginCredentials {
   /// Return the saved Cookie header without exporting passwords, token JSON,
   /// browser metadata, or a token-only primary field.
   static String? savedCookie(CloudPlatform platform, Credential? credential) {
-    if (credential == null || platform == CloudPlatform.github) return null;
+    if (credential == null ||
+        platform == CloudPlatform.github ||
+        platform == CloudPlatform.webdav) {
+      return null;
+    }
     final primary =
         WebTokens.supports(platform) || platform == CloudPlatform.pan123
         ? credential.field('cookie')
@@ -459,6 +465,7 @@ class LoginCredentials {
   }
 
   static String hint(CloudPlatform p) => switch (p) {
+    CloudPlatform.webdav => '请在 WebDAV 连接页填写服务器目录地址、用户名和登录密码',
     CloudPlatform.github => '请粘贴 GitHub 个人访问令牌；管理文件需要所选仓库的 Contents 读写权限',
     CloudPlatform.pikpak =>
       '请粘贴 PikPak 的登录令牌 JSON（access_token、refresh_token）；也可切换账号密码登录',

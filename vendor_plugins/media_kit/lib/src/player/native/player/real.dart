@@ -1197,6 +1197,8 @@ class NativePlayer extends PlatformPlayer {
             track.title ?? 'external',
             track.language ?? 'auto',
           ],
+          // Failed sub-add must not publish an external track as selected.
+          requireSuccess: true,
         );
         state = state.copyWith(
           track: state.track.copyWith(

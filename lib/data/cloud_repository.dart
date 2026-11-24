@@ -30,6 +30,7 @@ import 'providers/ctfile.dart';
 import 'providers/feijipan.dart';
 import 'providers/pikpak.dart';
 import 'providers/github.dart';
+import 'providers/webdav.dart';
 import 'providers/quark.dart';
 import 'providers/uc.dart';
 import 'providers/pan123.dart';
@@ -84,6 +85,7 @@ class CloudRepository {
       hub: parserHub,
     );
     connectors = {
+      CloudPlatform.webdav: WebDavConnector(),
       CloudPlatform.github: GitHubConnector(
         http,
         acceleration: githubAcceleration,

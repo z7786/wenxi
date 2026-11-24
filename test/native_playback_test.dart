@@ -149,6 +149,9 @@ void main() {
             await until(
               () =>
                   backend.diagnosticFields['videoCodec'] == codec &&
+                  backend.diagnosticFields.containsKey(
+                    'decoderDroppedFrames',
+                  ) &&
                   player.state.position > const Duration(milliseconds: 100),
             );
             expect(backend.hardwareDecodingActive, isFalse);

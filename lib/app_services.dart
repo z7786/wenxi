@@ -30,6 +30,7 @@ import 'data/app_update_service.dart';
 import 'data/github_update_service.dart';
 import 'data/providers/uc.dart';
 import 'data/providers/github.dart';
+import 'data/providers/webdav.dart';
 import 'data/providers/baidu.dart';
 import 'data/providers/quark.dart';
 import 'data/providers/pan123.dart';
@@ -54,6 +55,7 @@ import 'transfer/cross_transfer_relay.dart';
 import 'lan/lan_service.dart';
 import 'lan/lan_download_route.dart';
 import 'lan/lan_files.dart';
+import 'lan/lan_browser_receiver.dart';
 import 'download/download_shutdown.dart';
 import 'download/download_overlay.dart';
 import 'download/transfer_http.dart';
@@ -295,6 +297,13 @@ class AppServices extends ChangeNotifier {
         LanService(
           store: store,
           files: LanFiles(android: platformFeatures && Platform.isAndroid),
+          browserReceiver: LanBrowserReceiver(
+            store: store,
+            cache: Directory(p.join(cacheDirectory.path, 'lan-browser')),
+            files: files,
+            destination: () => lanBrowserDestination,
+            budget: () => downloads.space,
+          ),
           foreground: backgroundTransfers
               ? () => transferActivity.sync()
               : null,
@@ -590,6 +599,20 @@ class AppServices extends ChangeNotifier {
   );
   AppSettings get settings => AppSettings.fromJson(store.data.obj('settings'));
 
+  String? get lanBrowserDestination {
+    if (isDesktopPlatform) {
+      final saved = store.data.obj('lanBrowserDestination');
+      final value = saved['path'];
+      if (saved.containsKey('path') && (value == null || value is String)) {
+        return value as String?;
+      }
+    }
+    return settings.destination;
+  }
+
+  Future<void> updateLanBrowserDestination(String? path) =>
+      store.put('lanBrowserDestination', {'path': path});
+
   static Future<AppServices> open() async {
     final startup = Stopwatch()..start();
     Directory data, cache, destination;
@@ -844,6 +867,13 @@ class AppServices extends ChangeNotifier {
   }
 
   void _changed() {
+    final dav = cloud.connector(CloudPlatform.webdav);
+    if (dav is WebDavConnector) {
+      dav.retainSessions([
+        for (final profile in vault.profiles(CloudPlatform.webdav))
+          vault.credentialFor(CloudPlatform.webdav, profile.id)!,
+      ]);
+    }
     for (final platform in CloudPlatform.values) {
       final credential = vault.credential(platform),
           revision = (vault.activeAccountId(platform), credential?.updatedAt);
@@ -934,7 +964,9 @@ class AppServices extends ChangeNotifier {
           accountErrors[platform] = e.message;
         } else {
           accountNeedsLogin.remove(platform);
-          accountErrors[platform] = '容量读取失败，点击重试';
+          accountErrors[platform] = platform == CloudPlatform.webdav
+              ? '连接失败，点击重试'
+              : '容量读取失败，点击重试';
         }
       }
     } finally {
@@ -1194,6 +1226,8 @@ class AppServices extends ChangeNotifier {
     await lan.close();
     await uploads.close();
     await downloads.close();
+    final dav = cloud.connector(CloudPlatform.webdav);
+    if (dav is WebDavConnector) await dav.close();
     cleanups.progress.close();
     _closed = true;
     clipboard.dispose();

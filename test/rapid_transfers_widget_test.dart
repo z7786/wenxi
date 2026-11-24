@@ -16,6 +16,7 @@ import 'package:asterlink/upload/upload_task.dart';
 import 'package:asterlink/domain/rapid_transfer.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/ui/app_context_menu.dart';
+import 'package:asterlink/ui/common.dart';
 import 'rapid_transfer_manager_test.dart' show Drive, file;
 import 'browser_test_support.dart';
 import 'support.dart';
@@ -536,6 +537,21 @@ void main() {
           await tester.tap(find.text('跨盘传输'));
           await tester.pumpAndSettle();
           expect(find.text('跨盘传输 · 选择目标账号'), findsOneWidget);
+          final targetRow = find.ancestor(
+            of: find.text('目标账号'),
+            matching: find.byType(ListTile),
+          );
+          expect(
+            tester
+                .widget<PlatformMark>(
+                  find.descendant(
+                    of: targetRow,
+                    matching: find.byType(PlatformMark),
+                  ),
+                )
+                .platform,
+            CloudPlatform.pan123,
+          );
           await tester.tap(find.text('目标账号'));
           await tester.pumpAndSettle();
           expect(find.text('选择“全部文件”'), findsOneWidget);

@@ -1259,7 +1259,10 @@ class _BrowserPageState extends State<BrowserPage> {
                   children: [
                     for (final account in accounts)
                       ListTile(
-                        leading: const Icon(CupertinoIcons.cloud),
+                        leading: PlatformMark(
+                          platform: account.platform,
+                          size: 30,
+                        ),
                         title: Text(account.platform.label),
                         subtitle: Text(account.name),
                         onTap: () => Navigator.pop(context, account),
@@ -3746,6 +3749,14 @@ class _BrowserPageState extends State<BrowserPage> {
             ? '选择目标文件夹'
             : session.title.ifEmpty(session.platform.label),
         actions: [
+          if (widget.picking)
+            Padding(
+              padding: const EdgeInsets.only(right: 16),
+              child: Tooltip(
+                message: session.platform.label,
+                child: PlatformMark(platform: session.platform, size: 28),
+              ),
+            ),
           if (!widget.picking)
             IconButton(
               key: const Key('browser-download-manager'),

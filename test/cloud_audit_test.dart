@@ -48,6 +48,12 @@ BrowseSession _share(CloudPlatform platform) => BrowseSession(
 );
 Credential _credential(CloudPlatform platform, {int revision = 42}) =>
     Credential(platform.label, switch (platform) {
+      CloudPlatform.webdav => {
+        'primary': 'https://fixture.example/dav/',
+        'authType': 'webdav',
+        'rememberPassword': 'true',
+        'sessionId': 'fixture-session',
+      },
       CloudPlatform.github => {
         'primary': 'github_pat_fixture0123456789',
         'username': 'fixture-user',
@@ -175,7 +181,9 @@ void main() {
         CloudPlatform.values
             .where(
               (platform) =>
-                  platform.requiresAccount && platform != CloudPlatform.github,
+                  platform.requiresAccount &&
+                  platform != CloudPlatform.github &&
+                  platform != CloudPlatform.webdav,
             )
             .toSet(),
       );
@@ -186,7 +194,8 @@ void main() {
     });
 
     for (final platform in CloudPlatform.values.where(
-      (p) => p.requiresAccount,
+      // The WebDAV transport is exercised against loopback HTTP in webdav_test.
+      (p) => p.requiresAccount && p != CloudPlatform.webdav,
     )) {
       test(
         '${platform.key} personal browsing does not depend on quota availability',

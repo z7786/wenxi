@@ -7,9 +7,11 @@ import 'package:enough_convert/gbk.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
+import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/playback/online_subtitles.dart';
 import 'package:asterlink/playback/subtitle_files.dart';
+import 'package:asterlink/platform/windows_system_proxy.dart';
 
 class _Adapter implements HttpClientAdapter {
   _Adapter(this.respond);
@@ -30,6 +32,16 @@ class _Adapter implements HttpClientAdapter {
 
   @override
   void close({bool force = false}) {}
+}
+
+class _LocalIo extends HttpOverrides {}
+
+class _EnvironmentIo extends HttpOverrides {
+  _EnvironmentIo(this.values);
+  final Map<String, String> values;
+  @override
+  String findProxyFromEnvironment(Uri url, Map<String, String>? environment) =>
+      super.findProxyFromEnvironment(url, values);
 }
 
 Json _caption({
@@ -54,10 +66,15 @@ ResponseBody _response(List<Json> data) => ResponseBody.fromString(
 );
 
 void main() {
-  XunleiOnlineSubtitleService create(_Adapter adapter) {
-    final dio = Dio()..httpClientAdapter = adapter;
+  XunleiOnlineSubtitleService create(
+    _Adapter adapter, {
+    Future<void> Function(Duration)? wait,
+  }) {
+    final dio = Dio(BaseOptions(validateStatus: (_) => true))
+      ..httpClientAdapter = adapter;
     final service = XunleiOnlineSubtitleService(
       http: TransferHttp(client: dio),
+      wait: wait ?? RequestScope.wait,
     );
     addTearDown(() {
       service.close();
@@ -73,6 +90,580 @@ void main() {
     addTearDown(() => directory.delete(recursive: true));
     return directory;
   }
+
+  for (final kind in [
+    'socket',
+    'receive timeout',
+    'HTTP 503',
+    'truncated body',
+  ]) {
+    test(
+      'A transient $kind search failure retries once with the same encoded query',
+      () async {
+        var attempts = 0;
+        final waits = <Duration>[];
+        final adapter = _Adapter((options) {
+          if (++attempts > 1) return _response([_caption()]);
+          return switch (kind) {
+            'HTTP 503' => ResponseBody.fromString('temporary', 503),
+            'truncated body' => ResponseBody(
+              Stream.error(
+                const HttpException('Connection closed while receiving data'),
+              ),
+              200,
+            ),
+            _ =>
+              throw kind == 'socket'
+                  ? DioException.connectionError(
+                      requestOptions: options,
+                      reason: 'fixture reset',
+                      error: const SocketException(
+                        'Connection reset',
+                        osError: OSError('reset', 10054),
+                      ),
+                    )
+                  : DioException.receiveTimeout(
+                      requestOptions: options,
+                      timeout: const Duration(seconds: 45),
+                    ),
+          };
+        });
+        final service = create(
+          adapter,
+          wait: (delay) async => waits.add(delay),
+        );
+        expect(
+          await service.search('Name & S01E03.mkv', RequestScope()),
+          hasLength(1),
+        );
+        expect(adapter.requests, hasLength(2));
+        expect(adapter.requests.map((r) => r.uri.queryParameters['name']), [
+          'Name & S01E03.mkv',
+          'Name & S01E03.mkv',
+        ]);
+        expect(waits, [const Duration(seconds: 2)]);
+      },
+    );
+  }
+
+  test(
+    'Repeated connection failures keep the native cause and stop after one retry',
+    () async {
+      const cause = SocketException(
+        'Failed host lookup: subtitle.example',
+        osError: OSError('fixture DNS', 11001),
+      );
+      final adapter = _Adapter(
+        (options) => throw DioException.connectionError(
+          requestOptions: options,
+          reason: 'fixture DNS',
+          error: cause,
+        ),
+      );
+      final service = create(adapter, wait: (_) async {});
+      await expectLater(
+        service.search('Show', RequestScope()),
+        throwsA(
+          isA<DownloadNetworkException>()
+              .having((e) => e.cause, 'native cause', same(cause))
+              .having((e) => e.kind, 'kind', 'connectionError'),
+        ),
+      );
+      expect(adapter.requests, hasLength(2));
+    },
+  );
+
+  for (final kind in [
+    'certificate',
+    'proxy config',
+    'HTTP 403',
+    'HTTP 429 long delay',
+    'invalid JSON',
+  ]) {
+    test(
+      'Nonrecoverable $kind failures do not trigger automatic retries',
+      () async {
+        final adapter = _Adapter(
+          (options) => switch (kind) {
+            'certificate' => throw DioException(
+              requestOptions: options,
+              error: const HandshakeException(
+                'Handshake error',
+                OSError('CERTIFICATE_VERIFY_FAILED'),
+              ),
+            ),
+            'proxy config' => throw DioException.connectionError(
+              requestOptions: options,
+              reason: 'fixture config',
+              error: const WindowsProxyException('unsupported'),
+            ),
+            'HTTP 403' => ResponseBody.fromString('forbidden', 403),
+            'HTTP 429 long delay' => ResponseBody.fromString(
+              'limited',
+              429,
+              headers: {
+                'retry-after': ['60'],
+              },
+            ),
+            _ => ResponseBody.fromString('invalid response', 200),
+          },
+        );
+        final service = create(
+          adapter,
+          wait: (_) async => fail('must not retry'),
+        );
+        await expectLater(
+          service.search('Show', RequestScope()),
+          throwsA(isA<AppException>()),
+        );
+        expect(adapter.requests, hasLength(1));
+      },
+    );
+  }
+
+  test('A short Retry-After is observed before one search retry', () async {
+    var attempts = 0;
+    final waits = <Duration>[];
+    final adapter = _Adapter(
+      (_) => ++attempts == 1
+          ? ResponseBody.fromString(
+              'busy',
+              429,
+              headers: {
+                'retry-after': ['4'],
+              },
+            )
+          : _response([]),
+    );
+    final service = create(adapter, wait: (delay) async => waits.add(delay));
+    expect(await service.search('Show', RequestScope()), isEmpty);
+    expect(waits, [const Duration(seconds: 4)]);
+    expect(adapter.requests, hasLength(2));
+  });
+
+  test(
+    'Cancelling a retry wait cannot send another request; the next query still works',
+    () async {
+      final entered = Completer<void>();
+      var failRequest = true;
+      final adapter = _Adapter((options) {
+        if (!failRequest) return _response([]);
+        throw DioException.connectionError(
+          requestOptions: options,
+          reason: 'fixture reset',
+        );
+      });
+      final service = create(
+        adapter,
+        wait: (delay) {
+          entered.complete();
+          return RequestScope.wait(delay);
+        },
+      );
+      final scope = RequestScope();
+      final rejected = expectLater(
+        service.search('Show', scope),
+        throwsA(isA<AppException>()),
+      );
+      await entered.future;
+      scope.cancel();
+      await rejected;
+      expect(adapter.requests, hasLength(1));
+      failRequest = false;
+      expect(await service.search('Other show', RequestScope()), isEmpty);
+      expect(adapter.requests, hasLength(2));
+    },
+  );
+
+  test(
+    'Interrupted search body diagnostics retain the native socket errno',
+    () async {
+      const cause = SocketException(
+        'fixture reset',
+        osError: OSError('reset', 10054),
+      );
+      final adapter = _Adapter(
+        (options) => ResponseBody(
+          Stream.error(
+            DioException.connectionError(
+              requestOptions: options,
+              reason: 'fixture',
+              error: cause,
+            ),
+          ),
+          200,
+        ),
+      );
+      final service = create(adapter, wait: (_) async {});
+      await expectLater(
+        service.search('Show', RequestScope()),
+        throwsA(
+          isA<DownloadNetworkException>().having(
+            (e) => e.cause,
+            'native cause',
+            same(cause),
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'Retry diagnostics preserve DNS classification without query words or private addresses',
+    () async {
+      final previous = DiagnosticLog.active;
+      final log = DiagnosticLog.open(null);
+      DiagnosticLog.active = log;
+      addTearDown(() {
+        log.dispose();
+        DiagnosticLog.active = previous;
+      });
+      final adapter = _Adapter(
+        (options) => throw DioException.connectionError(
+          requestOptions: options,
+          reason: 'fixture DNS',
+          error: const SocketException(
+            'Failed host lookup: https://private.example/?token=private-token',
+            osError: OSError('fixture address 10.1.2.3', 11001),
+          ),
+        ),
+      );
+      final service = create(adapter, wait: (_) async {});
+      await expectLater(
+        service.search('fixture-private-show', RequestScope()),
+        throwsA(isA<DownloadNetworkException>()),
+      );
+      final entry = log.entries().singleWhere(
+        (e) => e.event == 'player.online_subtitle_retry',
+      );
+      final fields = asJson(entry.data['fields']);
+      expect(fields['stage'], 'search');
+      expect(fields['kind'], 'connectionError');
+      expect(fields['errno'], 11001);
+      expect(fields['dns'], isTrue);
+      for (final private in [
+        'fixture-private-show',
+        'private.example',
+        'private-token',
+        '10.1.2.3',
+      ]) {
+        expect(entry.detail, isNot(contains(private)));
+      }
+    },
+  );
+
+  test(
+    'Network guidance distinguishes DNS, timeout, certificate and proxy failures',
+    () {
+      final errors = <(Object, String)>[
+        (
+          const DownloadNetworkException(
+            'connectionError',
+            cause: SocketException(
+              'Failed host lookup: fixture',
+              osError: OSError('fixture DNS', 11001),
+            ),
+          ),
+          'DNS',
+        ),
+        (const DownloadNetworkException('receiveTimeout'), '连接超时'),
+        (
+          const DownloadNetworkException('badCertificate', retryable: false),
+          '证书校验失败',
+        ),
+        (
+          const DownloadNetworkException(
+            'unknown',
+            retryable: false,
+            cause: HandshakeException(
+              'Handshake error',
+              OSError('CERTIFICATE_VERIFY_FAILED'),
+            ),
+          ),
+          '证书校验失败',
+        ),
+        (
+          const DownloadNetworkException(
+            'connectionError',
+            cause: WindowsProxyException.connection(
+              SocketException(
+                'fixture reset',
+                osError: OSError('reset', 10054),
+              ),
+            ),
+          ),
+          'Windows 系统代理',
+        ),
+      ];
+      for (final (error, guidance) in errors) {
+        final message = onlineSubtitleErrorMessage(error, searching: true);
+        expect(message, contains('在线字幕搜索'));
+        expect(message, contains(guidance));
+        expect(message, isNot(contains('下载连接')));
+      }
+      final proxy = onlineSubtitleFailureFields(errors.last.$1);
+      expect(proxy['proxyReason'], 'connection');
+      expect(proxy['errno'], 10054);
+      expect(
+        onlineSubtitleErrorMessage(
+          DownloadHttpException(403),
+          searching: false,
+        ),
+        '字幕下载地址已失效，请重新搜索',
+      );
+    },
+  );
+
+  test(
+    'A truncated subtitle is retried as a fresh file with no duplicate cues or partial files',
+    () async {
+      const caption = '1\n00:00:01,000 --> 00:00:02,000\n完整中文字幕\n';
+      var attempts = 0;
+      Stream<Uint8List> truncated() async* {
+        yield Uint8List.fromList(utf8.encode(caption.substring(0, 24)));
+        throw const HttpException('Connection closed while receiving data');
+      }
+
+      final adapter = _Adapter(
+        (_) => ++attempts == 1
+            ? ResponseBody(truncated(), 200)
+            : ResponseBody.fromString(caption, 200),
+      );
+      final directory = await subtitleDirectory();
+      final file = await create(adapter, wait: (_) async {}).download(
+        OnlineSubtitle.fromJson(_caption())!,
+        directory,
+        RequestScope(),
+      );
+      expect(await file.readAsString(), caption);
+      expect(await directory.list().toList(), hasLength(1));
+      expect(adapter.requests, hasLength(2));
+    },
+  );
+
+  test(
+    'The default subtitle client uses Windows proxy routing for HTTPS search',
+    () async {
+      await HttpOverrides.runWithHttpOverrides(() async {
+        final requests = <HttpRequest>[];
+        final proxy = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => proxy.close(force: true));
+        proxy.listen((request) async {
+          requests.add(request);
+          request.response.statusCode = 407;
+          await request.response.close();
+        });
+        final service = XunleiOnlineSubtitleService(
+          systemProxy: WindowsSystemProxy(
+            readConfig: () async =>
+                WindowsProxyConfig(proxy: '127.0.0.1:${proxy.port}'),
+          ),
+        );
+        addTearDown(service.close);
+        await expectLater(
+          service.search('Fixture S01E02', RequestScope()),
+          throwsA(isA<DownloadNetworkException>()),
+        );
+        expect(requests, hasLength(1));
+        expect(requests.single.method, 'CONNECT');
+        expect(
+          requests.single.uri.toString(),
+          contains('api-shoulei-ssl.xunlei.com:443'),
+        );
+        expect(requests.single.uri.toString(), isNot(contains('Fixture')));
+        expect(requests.single.headers.value('authorization'), isNull);
+      }, _LocalIo());
+    },
+  );
+
+  test(
+    'Subtitle CDN downloads follow current Windows proxy settings while local files stay direct',
+    () async {
+      await HttpOverrides.runWithHttpOverrides(() async {
+        const caption = '1\n00:00:01,000 --> 00:00:02,000\n代理字幕\n';
+        final proxied = <HttpRequest>[], direct = <HttpRequest>[];
+        Future<HttpServer> server(List<HttpRequest> requests) async {
+          final endpoint = await HttpServer.bind(
+            InternetAddress.loopbackIPv4,
+            0,
+          );
+          addTearDown(() => endpoint.close(force: true));
+          endpoint.listen((request) async {
+            requests.add(request);
+            request.response.headers.contentType = ContentType.text;
+            request.response.write(caption);
+            await request.response.close();
+          });
+          return endpoint;
+        }
+
+        final proxy = await server(proxied), local = await server(direct);
+        var reads = 0;
+        final service = XunleiOnlineSubtitleService(
+          systemProxy: WindowsSystemProxy(
+            readConfig: () async {
+              reads++;
+              return WindowsProxyConfig(proxy: '127.0.0.1:${proxy.port}');
+            },
+          ),
+        );
+        addTearDown(service.close);
+        final directory = await subtitleDirectory();
+        final subtitle = OnlineSubtitle.fromJson(
+          _caption(url: 'http://subtitles.invalid/fixture.srt'),
+        )!;
+        final file = await service.download(
+          subtitle,
+          directory,
+          RequestScope(),
+        );
+        expect(await file.readAsString(), caption);
+        expect(proxied.single.uri.toString(), subtitle.url);
+        expect(proxied.single.headers.value('cookie'), isNull);
+        expect(reads, 1);
+        final localSubtitle = OnlineSubtitle.fromJson(
+          _caption(url: 'http://127.0.0.1:${local.port}/fixture.srt'),
+        )!;
+        expect(
+          await (await service.download(
+            localSubtitle,
+            directory,
+            RequestScope(),
+          )).readAsString(),
+          caption,
+        );
+        expect(direct, hasLength(1));
+        expect(proxied, hasLength(1));
+        expect(reads, 1);
+      }, _LocalIo());
+    },
+  );
+
+  test(
+    'Cancelling during system proxy resolution prevents a late subtitle search request',
+    () async {
+      await HttpOverrides.runWithHttpOverrides(() async {
+        final entered = Completer<void>(),
+            resolving = Completer<WindowsProxyConfig>();
+        final service = XunleiOnlineSubtitleService(
+          systemProxy: WindowsSystemProxy(
+            readConfig: () {
+              entered.complete();
+              return resolving.future;
+            },
+          ),
+        );
+        addTearDown(service.close);
+        final scope = RequestScope();
+        final rejected = expectLater(
+          service.search('Fixture', scope),
+          throwsA(anything),
+        );
+        await entered.future;
+        scope.cancel();
+        await rejected;
+        final requests = <HttpRequest>[];
+        final proxy = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => proxy.close(force: true));
+        proxy.listen((request) async {
+          requests.add(request);
+          request.response.statusCode = 407;
+          await request.response.close();
+        });
+        resolving.complete(
+          WindowsProxyConfig(proxy: '127.0.0.1:${proxy.port}'),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(requests, isEmpty);
+      }, _LocalIo());
+    },
+  );
+
+  test(
+    'An environment HTTPS proxy remains usable when Windows has no system proxy',
+    () async {
+      final requests = <HttpRequest>[];
+      final proxy = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => proxy.close(force: true));
+      proxy.listen((request) async {
+        requests.add(request);
+        request.response.statusCode = 407;
+        await request.response.close();
+      });
+      final previous = DiagnosticLog.active;
+      final log = DiagnosticLog.open(null);
+      DiagnosticLog.active = log;
+      addTearDown(() {
+        log.dispose();
+        DiagnosticLog.active = previous;
+      });
+      await HttpOverrides.runWithHttpOverrides(() async {
+        final service = XunleiOnlineSubtitleService(
+          systemProxy: WindowsSystemProxy(
+            readConfig: () async => const WindowsProxyConfig(),
+          ),
+        );
+        addTearDown(service.close);
+        await expectLater(
+          service.search('Fixture', RequestScope()),
+          throwsA(isA<DownloadNetworkException>()),
+        );
+        expect(requests, hasLength(1));
+        expect(requests.single.method, 'CONNECT');
+        final fields = asJson(
+          log
+              .entries()
+              .singleWhere((e) => e.event == 'network.windows_proxy')
+              .data['fields'],
+        );
+        expect(fields['source'], 'environment');
+        expect(fields['usesProxy'], isTrue);
+      }, _EnvironmentIo({'https_proxy': '127.0.0.1:${proxy.port}'}));
+    },
+  );
+
+  test(
+    'Explicit Windows bypass is respected even with an environment proxy',
+    () async {
+      const caption = '1\n00:00:01,000 --> 00:00:02,000\n本地字幕\n';
+      final direct = <HttpRequest>[], proxied = <HttpRequest>[];
+      Future<HttpServer> server(List<HttpRequest> requests) async {
+        final endpoint = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => endpoint.close(force: true));
+        endpoint.listen((request) async {
+          requests.add(request);
+          request.response.write(caption);
+          await request.response.close();
+        });
+        return endpoint;
+      }
+
+      final local = await server(direct), proxy = await server(proxied);
+      await HttpOverrides.runWithHttpOverrides(() async {
+        final service = XunleiOnlineSubtitleService(
+          systemProxy: WindowsSystemProxy(
+            readConfig: () async =>
+                const WindowsProxyConfig(bypass: 'localhost'),
+          ),
+        );
+        addTearDown(service.close);
+        final directory = await subtitleDirectory();
+        final subtitle = OnlineSubtitle.fromJson(
+          _caption(url: 'http://localhost:${local.port}/fixture.srt'),
+        )!;
+        expect(
+          await (await service.download(
+            subtitle,
+            directory,
+            RequestScope(),
+          )).readAsString(),
+          caption,
+        );
+        expect(direct, hasLength(1));
+        expect(proxied, isEmpty);
+      }, _EnvironmentIo({'http_proxy': '127.0.0.1:${proxy.port}'}));
+    },
+  );
 
   test(
     'Search encodes the filename without leaking paths or stream tokens',

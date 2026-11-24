@@ -23,6 +23,8 @@ class AccountLoginInfo {
   bool get hasCookie => field('cookie') != null;
   String get copyLabel => preferredKey == null
       ? '复制登录信息'
+      : preferredKey == 'webdavUrl'
+      ? '复制连接地址'
       : preferredKey == 'cookie'
       ? '复制 Cookie'
       : preferredKey == 'authorization'
@@ -30,7 +32,9 @@ class AccountLoginInfo {
       : preferredKey == 'tokenInfo'
       ? '复制登录信息'
       : '复制 Token';
-  String get method => hasCookie
+  String get method => field('webdavUrl') != null
+      ? 'WebDAV 连接'
+      : hasCookie
       ? preferredKey == 'cookie' &&
                 !fields.any((f) => f.key.toLowerCase().contains('token'))
             ? 'Cookie 登录'
@@ -48,6 +52,13 @@ class AccountLoginInfo {
     String legacyAccessToken = '',
   }) {
     if (credential == null) return AccountLoginInfo._(const [], null);
+    if (platform == CloudPlatform.webdav) {
+      return AccountLoginInfo._([
+        AccountLoginField('webdavUrl', 'WebDAV 目录地址', credential.primary),
+        if (credential.field('username').isNotEmpty)
+          AccountLoginField('username', '用户名', credential.field('username')),
+      ], 'webdavUrl');
+    }
     var data = WebTokens.decode(credential.primary);
     if ((platform == CloudPlatform.feijipan ||
             platform == CloudPlatform.ilanzou) &&

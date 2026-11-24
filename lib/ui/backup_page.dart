@@ -9,11 +9,14 @@ import '../data/backup_targets.dart';
 import '../data/classified_backup.dart';
 import '../data/http.dart';
 import '../data/state_store.dart';
+import '../data/providers/webdav.dart';
 import '../domain/models.dart';
 import '../platform/document_actions.dart';
 import 'app_switch.dart';
 import 'browser_page.dart';
+import 'cloud_accounts_page.dart';
 import 'common.dart';
+import 'login_page.dart';
 
 class BackupPage extends StatefulWidget {
   const BackupPage(this.services, {super.key, this.restoring = false});
@@ -41,16 +44,12 @@ class _BackupPageState extends State<BackupPage> {
   bool encrypt = false;
   final password = TextEditingController(),
       confirmation = TextEditingController();
-  final davUrl = TextEditingController(),
-      davUser = TextEditingController(),
-      davPassword = TextEditingController();
+  final _scroll = ScrollController();
+  bool _working = false, _passwordVisible = false, _confirmationVisible = false;
 
   @override
   void initState() {
     super.initState();
-    final saved = services.store.data.obj('backupWebDav');
-    davUrl.text = saved.str('url');
-    davUser.text = saved.str('username');
     cloudLocation = services.store.data['backupCloudLocation'] is Map
         ? services.store.data.obj('backupCloudLocation')
         : null;
@@ -64,13 +63,8 @@ class _BackupPageState extends State<BackupPage> {
   @override
   void dispose() {
     services.store.removeListener(_changed);
-    for (final controller in [
-      password,
-      confirmation,
-      davUrl,
-      davUser,
-      davPassword,
-    ]) {
+    _scroll.dispose();
+    for (final controller in [password, confirmation]) {
       controller.dispose();
     }
     super.dispose();
@@ -81,28 +75,119 @@ class _BackupPageState extends State<BackupPage> {
   ];
 
   Future<void> _chooseCloud() async {
-    final account = await showDialog<CloudAccountProfile>(
+    final choice = await showDialog<String>(
       context: context,
       builder: (context) => SimpleDialog(
-        title: const Text('选择已登录的网盘'),
+        title: const Text('选择网盘账号'),
         children: [
           if (profiles.isEmpty)
             const Padding(
               padding: EdgeInsets.all(24),
-              child: Text('请先在网盘页面登录账号，也可以使用本地文件恢复。'),
+              child: Text('先添加网盘账号，再选择存放备份的目录。'),
             ),
           for (final profile in profiles)
             SimpleDialogOption(
-              onPressed: () => Navigator.pop(context, profile),
-              child: Text('${profile.platform.label} · ${profile.name}'),
+              onPressed: () => Navigator.pop(
+                context,
+                backupAccountKey(profile.platform.key, profile.id),
+              ),
+              child: Row(
+                children: [
+                  PlatformMark(platform: profile.platform, size: 30),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(profile.name),
+                        Text(
+                          profile.platform.label,
+                          style: TextStyle(
+                            color: secondary(context),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.chevron_right, size: 20),
+                ],
+              ),
             ),
+          const Divider(),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'webdav'),
+            child: const Row(
+              children: [
+                PlatformMark(platform: CloudPlatform.webdav, size: 30),
+                SizedBox(width: 12),
+                Expanded(child: Text('添加 WebDAV 连接')),
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'manage'),
+            child: const Row(
+              children: [
+                SizedBox(
+                  width: 30,
+                  child: Icon(Icons.manage_accounts_outlined),
+                ),
+                SizedBox(width: 12),
+                Expanded(child: Text('管理网盘账号')),
+              ],
+            ),
+          ),
         ],
       ),
     );
+    if (choice == null || !mounted) return;
+    CloudAccountProfile? account;
+    if (choice == 'manage') {
+      await Navigator.push<void>(
+        context,
+        MaterialPageRoute(builder: (_) => CloudAccountsPage(services)),
+      );
+      if (mounted) await _chooseCloud();
+      return;
+    }
+    if (choice == 'webdav') {
+      final before = services.vault.credential(CloudPlatform.webdav)?.updatedAt;
+      await openLogin(
+        context,
+        services,
+        CloudPlatform.webdav,
+        addAccount: true,
+      );
+      if (!mounted ||
+          services.vault.credential(CloudPlatform.webdav)?.updatedAt ==
+              before) {
+        return;
+      }
+      account = services.vault
+          .profiles(CloudPlatform.webdav)
+          .where((p) => p.active)
+          .firstOrNull;
+    } else {
+      account = profiles
+          .where((p) => backupAccountKey(p.platform.key, p.id) == choice)
+          .firstOrNull;
+    }
     if (account == null || !mounted) return;
+    final selectedAccount = account;
+    if (!await _ensureWebDavLogin(
+          selectedAccount.platform,
+          selectedAccount.id,
+        ) ||
+        !mounted) {
+      return;
+    }
     final session = await busy(
       context,
-      () => services.cloud.personal(account.platform, accountId: account.id),
+      () => services.cloud.personal(
+        selectedAccount.platform,
+        accountId: selectedAccount.id,
+      ),
     );
     if (session == null || !mounted) return;
     BrowseSession selected = session;
@@ -137,6 +222,8 @@ class _BackupPageState extends State<BackupPage> {
       rootId: selected.rootId,
       metadata: {
         ...selected.spaceMetadata,
+        if (selected.platform == CloudPlatform.webdav)
+          'webdavRoot': selected.meta('webdavRoot'),
         'accountId': selected.accountId ?? '',
       },
     );
@@ -151,26 +238,77 @@ class _BackupPageState extends State<BackupPage> {
     if (mounted) setState(() {});
   }
 
-  Json _targetDescription() => location == 'webdav'
-      ? {'kind': 'webdav', 'url': davUrl.text.trim(), 'username': davUser.text}
-      : cloudLocation ?? (throw const AppException('请先选择网盘账号和备份目录'));
+  Json _targetDescription() =>
+      cloudLocation ?? (throw const AppException('请先选择网盘账号和备份目录'));
+
+  Future<bool> _ensureWebDavLogin(CloudPlatform platform, String? id) async {
+    if (platform != CloudPlatform.webdav) return true;
+    final connector = services.cloud.connector(platform) as WebDavConnector;
+    final credential = services.vault.credentialFor(platform, id);
+    require(credential != null, 'WebDAV 账号已移除，请重新选择备份目录');
+    if (connector.hasPassword(credential!)) return true;
+    await openLogin(context, services, platform, accountId: id);
+    final current = services.vault.credentialFor(platform, id);
+    return mounted && current != null && connector.hasPassword(current);
+  }
+
+  Future<BackupTarget?> _connectTarget(Json descriptor) async {
+    String? secret;
+    if (descriptor.str('kind') == 'webdav') {
+      secret = await askText(context, '输入 WebDAV 登录密码', secret: true);
+      if (secret == null || !mounted) return null;
+    } else {
+      final session = BrowseSession.fromJson(descriptor.obj('session'));
+      if (!await _ensureWebDavLogin(session.platform, session.accountId) ||
+          !mounted) {
+        return null;
+      }
+    }
+    return busy(
+      context,
+      () => _target(descriptor, davSecret: secret),
+      label: '正在连接备份位置…',
+    );
+  }
 
   Future<BackupTarget> _target(Json descriptor, {String? davSecret}) async {
     if (descriptor.str('kind') == 'webdav') {
       final target = WebDavBackupTarget(
         url: descriptor.str('url'),
         username: descriptor.str('username'),
-        password: davSecret ?? davPassword.text,
+        password: davSecret ?? '',
       );
-      await services.store.put('backupWebDav', {
-        'url': descriptor.str('url'),
-        'username': descriptor.str('username'),
-      });
       return target;
     }
-    final session = await services.cloud.reopenSpace(
-      BrowseSession.fromJson(descriptor.obj('session')),
-    );
+    final previous = BrowseSession.fromJson(descriptor.obj('session'));
+    final session = await services.cloud.reopenSpace(previous);
+    if (session.platform == CloudPlatform.webdav) {
+      final connector =
+          services.cloud.connector(session.platform) as WebDavConnector;
+      final credential = services.cloud.sessionCredential(session)!;
+      require(
+        previous.meta('webdavRoot').isEmpty ||
+            previous.meta('webdavRoot') == session.meta('webdavRoot'),
+        'WebDAV 地址已变化，请重新选择备份目录',
+      );
+      final directory = connector
+          .location(session, credential)
+          .uri(descriptor.str('parent'), directory: true);
+      return WebDavBackupTarget(
+        url: directory.toString(),
+        username: credential.field('username'),
+        password: connector.password(credential),
+        connection: connector.client,
+        guard: () {
+          services.cloud.ensureAvailable(session.platform);
+          require(
+            services.cloud.sessionCredential(session)?.updatedAt ==
+                credential.updatedAt,
+            'WebDAV 账号已变化，请重新选择备份目录',
+          );
+        },
+      );
+    }
     return CloudBackupTarget(
       cloud: services.cloud,
       uploads: services.uploads,
@@ -199,33 +337,38 @@ class _BackupPageState extends State<BackupPage> {
       message(context, '请勾选要备份的账号');
       return;
     }
-    final saved = await busy(context, () async {
-      final bytes = await repository.create(
-        categories: {...categories},
-        accountKeys: {...accounts},
-        password: encrypt ? password.text : '',
-      );
-      RequestScope.checkpoint();
-      if (!mounted) return false;
-      if (location == 'local') {
-        final result = await const DocumentActions().saveBytes(
-          bytes,
-          'asterlink-backup-${DateTime.now().millisecondsSinceEpoch}.json',
-          mime: 'application/json',
-          acceptedTypeGroups: const [backupFileType],
+    final descriptor = location == 'local' ? null : _targetDescription();
+    final target = descriptor == null ? null : await _connectTarget(descriptor);
+    if (descriptor != null && target == null || !mounted) {
+      target?.close();
+      return;
+    }
+    bool? saved;
+    try {
+      saved = await busy(context, () async {
+        final bytes = await repository.create(
+          categories: {...categories},
+          accountKeys: {...accounts},
+          password: encrypt ? password.text : '',
         );
-        return result != null;
-      }
-      final descriptor = _targetDescription(),
-          target = await _target(descriptor);
-      try {
-        final job = await transfers.stage(bytes, descriptor);
-        await transfers.send(job, target);
+        RequestScope.checkpoint();
+        if (!mounted) return false;
+        if (location == 'local') {
+          final result = await const DocumentActions().saveBytes(
+            bytes,
+            'asterlink-backup-${DateTime.now().millisecondsSinceEpoch}.json',
+            mime: 'application/json',
+            acceptedTypeGroups: const [backupFileType],
+          );
+          return result != null;
+        }
+        final job = await transfers.stage(bytes, descriptor!);
+        await transfers.send(job, target!);
         return true;
-      } finally {
-        target.close();
-      }
-    }, label: location == 'local' ? '正在生成备份…' : '正在上传并校验备份…');
+      }, label: location == 'local' ? '正在生成备份…' : '正在上传并校验备份…');
+    } finally {
+      target?.close();
+    }
     if (saved == true && mounted) {
       password.clear();
       confirmation.clear();
@@ -234,13 +377,12 @@ class _BackupPageState extends State<BackupPage> {
   }
 
   Future<void> _resume(Json job) async {
-    String? secret;
-    if (job.obj('target').str('kind') == 'webdav') {
-      secret = await askText(context, '输入 WebDAV 登录密码', secret: true);
-      if (secret == null || !mounted) return;
+    final target = await _connectTarget(job.obj('target'));
+    if (target == null || !mounted) {
+      target?.close();
+      return;
     }
     final done = await busy(context, () async {
-      final target = await _target(job.obj('target'), davSecret: secret);
       try {
         await transfers.send(job, target);
         return true;
@@ -277,11 +419,7 @@ class _BackupPageState extends State<BackupPage> {
         return file.readAsBytes();
       });
     } else {
-      final target = await busy(
-        context,
-        () => _target(_targetDescription()),
-        label: '正在连接备份位置…',
-      );
+      final target = await _connectTarget(_targetDescription());
       if (target == null) return;
       try {
         if (!mounted) return;
@@ -391,7 +529,13 @@ class _BackupPageState extends State<BackupPage> {
           for (final account in candidates)
             SimpleDialogOption(
               onPressed: () => Navigator.pop(context, account.id),
-              child: Text(account.name),
+              child: Row(
+                children: [
+                  PlatformMark(platform: account.platform, size: 30),
+                  const SizedBox(width: 12),
+                  Expanded(child: Text(account.name)),
+                ],
+              ),
             ),
         ],
       ),
@@ -405,223 +549,844 @@ class _BackupPageState extends State<BackupPage> {
     if (result != null && mounted) message(context, '已关联账号并恢复记录');
   }
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('备份与恢复')),
-    body: Align(
-      alignment: Alignment.topCenter,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 760),
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            SegmentedButton<bool>(
-              segments: const [
-                ButtonSegment(value: false, label: Text('备份')),
-                ButtonSegment(value: true, label: Text('恢复')),
-              ],
-              selected: {restoring},
-              onSelectionChanged: (value) =>
-                  setState(() => restoring = value.single),
+  Future<void> _perform(Future<void> Function() action) async {
+    if (_working) return;
+    FocusScope.of(context).unfocus();
+    setState(() => _working = true);
+    try {
+      await action();
+    } catch (error) {
+      if (mounted) message(context, errorText(error));
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  void _setCategory(BackupCategory category, bool selected) {
+    setState(() {
+      if (selected) {
+        categories.add(category);
+      } else {
+        categories.remove(category);
+      }
+    });
+  }
+
+  Widget _locationSection() => _BackupSection(
+    title: restoring ? '恢复来源' : '保存位置',
+    icon: Icons.folder_outlined,
+    children: [
+      SegmentedButton<String>(
+        segments: const [
+          ButtonSegment(
+            value: 'local',
+            label: Text('本地文件'),
+            icon: Icon(Icons.description_outlined),
+          ),
+          ButtonSegment(
+            value: 'cloud',
+            label: Text('网盘'),
+            icon: Icon(Icons.cloud_outlined),
+          ),
+        ],
+        selected: {location},
+        showSelectedIcon: false,
+        onSelectionChanged: _working
+            ? null
+            : (value) => setState(() => location = value.single),
+      ),
+      const SizedBox(height: 16),
+      if (location == 'local')
+        _BackupNote(
+          icon: Icons.description_outlined,
+          text: restoring ? '选择本机备份文件，查看内容后再恢复。' : '生成备份文件，自行选择保存位置。',
+        )
+      else ...[
+        Material(
+          color: fill(context),
+          borderRadius: BorderRadius.circular(12),
+          clipBehavior: Clip.antiAlias,
+          child: ListTile(
+            key: const Key('backup-target'),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 6,
             ),
-            const SizedBox(height: 16),
-            const Text('本地数据不加密。备份可单独设置密码；密码不会保存，遗忘后无法解密。'),
-            const SizedBox(height: 16),
-            DropdownButtonFormField<String>(
-              initialValue: location,
-              decoration: InputDecoration(
-                labelText: restoring ? '恢复来源' : '保存位置',
-                border: const OutlineInputBorder(),
-              ),
-              items: const [
-                DropdownMenuItem(value: 'local', child: Text('本地文件')),
-                DropdownMenuItem(value: 'webdav', child: Text('WebDAV')),
-                DropdownMenuItem(value: 'cloud', child: Text('已登录网盘')),
-              ],
-              onChanged: (value) => setState(() => location = value!),
+            leading: switch (CloudPlatform.fromKey(
+              cloudLocation?.obj('session').str('platform'),
+            )) {
+              final platform? => PlatformMark(platform: platform, size: 30),
+              null => const Icon(Icons.folder_open_outlined),
+            },
+            title: Text(
+              cloudLocation == null ? '选择网盘与目录' : '已选目录',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
             ),
-            if (location == 'webdav') ...[
-              const SizedBox(height: 12),
-              TextField(
-                controller: davUrl,
-                keyboardType: TextInputType.url,
-                decoration: const InputDecoration(
-                  labelText: 'WebDAV 目录地址',
-                  hintText: 'https://example.com/dav/backups/',
-                ),
+            subtitle: Text(
+              cloudLocation?.str('label') ?? '支持已登录网盘与 WebDAV',
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: const Icon(Icons.chevron_right, size: 20),
+            onTap: _working ? null : () => _perform(_chooseCloud),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          restoring ? '读取目录中的备份版本，下载并校验后预览。' : '上传完成后会回读校验，保留以前的完整版本。',
+          style: TextStyle(
+            fontSize: 12,
+            height: 1.5,
+            color: secondary(context),
+          ),
+        ),
+      ],
+    ],
+  );
+
+  Widget _categoriesSection() => _BackupSection(
+    title: '备份内容',
+    icon: Icons.checklist_outlined,
+    trailing: TextButton(
+      onPressed: _working
+          ? null
+          : () => setState(() {
+              if (categories.length == BackupCategory.values.length) {
+                categories.clear();
+              } else {
+                categories.addAll(BackupCategory.values);
+              }
+            }),
+      child: Text(
+        categories.length == BackupCategory.values.length ? '取消全选' : '全选',
+      ),
+    ),
+    caption: '已选择 ${categories.length} / ${BackupCategory.values.length} 类内容',
+    children: [
+      for (final category in BackupCategory.values) ...[
+        Material(
+          color: categories.contains(category)
+              ? themeAccent(context).withValues(alpha: .06)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+          clipBehavior: Clip.antiAlias,
+          child: CheckboxListTile(
+            key: ValueKey('backup-category-${category.name}'),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 8,
+              vertical: 4,
+            ),
+            value: categories.contains(category),
+            title: Text(
+              category.label,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(
+              category.description,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: secondary(context),
               ),
-              TextField(
-                controller: davUser,
-                decoration: const InputDecoration(labelText: 'WebDAV 用户名'),
-              ),
-              TextField(
-                controller: davPassword,
-                obscureText: true,
-                enableSuggestions: false,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: 'WebDAV 登录密码（仅本次使用）',
-                ),
-              ),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton(
-                  onPressed: () async {
-                    final ok = await busy(context, () async {
-                      final target =
-                          await _target(_targetDescription())
-                              as WebDavBackupTarget;
-                      try {
-                        await target.test();
-                        return true;
-                      } finally {
-                        target.close();
-                      }
-                    }, label: '正在测试目录读写与删除…');
-                    if (ok == true && context.mounted) {
-                      message(context, '目录读写、回读和删除测试通过');
-                    }
-                  },
-                  child: const Text('测试连接与读写'),
-                ),
-              ),
-            ],
-            if (location == 'cloud')
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('备份目录'),
-                subtitle: Text(cloudLocation?.str('label') ?? '选择账号与目录'),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: _chooseCloud,
-              ),
-            if (!restoring) ...[
-              const SizedBox(height: 12),
-              for (final category in BackupCategory.values) ...[
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: categories.contains(category),
-                  title: Text(category.label),
-                  subtitle: Text(category.description),
-                  onChanged: (value) => setState(() {
-                    if (value == true) {
-                      categories.add(category);
-                    } else {
-                      categories.remove(category);
-                    }
-                  }),
-                ),
-                if (category == BackupCategory.accounts &&
-                    categories.contains(category)) ...[
-                  if (profiles.isEmpty) const Text('当前没有已登录账号'),
-                  for (final profile in profiles)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 16),
-                      child: CheckboxListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: Text(
-                          '${profile.platform.shortName} · ${profile.name}',
+            ),
+            onChanged: _working
+                ? null
+                : (value) => _setCategory(category, value == true),
+          ),
+        ),
+        if (category == BackupCategory.accounts &&
+            categories.contains(category))
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 0, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '选择账号 · ${accounts.length} 个',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
                         ),
-                        value: accounts.contains(
-                          backupAccountKey(profile.platform.key, profile.id),
-                        ),
-                        onChanged: (value) => setState(() {
-                          final key = backupAccountKey(
-                            profile.platform.key,
-                            profile.id,
-                          );
-                          if (value == true) {
-                            accounts.add(key);
-                          } else {
-                            accounts.remove(key);
-                          }
-                        }),
                       ),
                     ),
-                ],
-              ],
-              const Divider(),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('使用密码加密备份'),
-                subtitle: Text(encrypt ? '仅加密导出文件，本地数据仍为明文' : '生成明文备份文件'),
-                trailing: AppSwitch(
-                  value: encrypt,
-                  onChanged: (value) => setState(() => encrypt = value),
-                ),
-              ),
-              if (encrypt) ...[
-                TextField(
-                  controller: password,
-                  obscureText: true,
-                  enableSuggestions: false,
-                  autocorrect: false,
-                  decoration: const InputDecoration(labelText: '备份密码（至少 6 位）'),
-                ),
-                TextField(
-                  controller: confirmation,
-                  obscureText: true,
-                  enableSuggestions: false,
-                  autocorrect: false,
-                  decoration: const InputDecoration(labelText: '再次输入备份密码'),
-                ),
-              ],
-            ],
-            const SizedBox(height: 20),
-            FilledButton.icon(
-              onPressed: restoring ? _restore : _export,
-              icon: Icon(restoring ? Icons.restore : Icons.backup_outlined),
-              label: Text(restoring ? '选择备份并预览' : '立即备份'),
-            ),
-            if (repository.canUndo)
-              TextButton(onPressed: _undo, child: const Text('回退上次恢复')),
-            if (transfers.pending.isNotEmpty) ...[
-              const Divider(),
-              const Text('未完成的远程备份'),
-              for (final job in transfers.pending)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(job.str('name'), maxLines: 2),
-                  subtitle: Text(
-                    job
-                        .obj('target')
-                        .str('label')
-                        .ifEmpty(job.obj('target').str('url')),
-                  ),
-                  trailing: Wrap(
-                    children: [
+                    if (profiles.isNotEmpty)
                       TextButton(
-                        onPressed: () => _resume(job),
-                        child: const Text('继续'),
+                        onPressed: _working
+                            ? null
+                            : () => setState(() {
+                                final keys = profiles
+                                    .map(
+                                      (p) => backupAccountKey(
+                                        p.platform.key,
+                                        p.id,
+                                      ),
+                                    )
+                                    .toSet();
+                                if (accounts.containsAll(keys)) {
+                                  accounts.removeAll(keys);
+                                } else {
+                                  accounts.addAll(keys);
+                                }
+                              }),
+                        child: Text(
+                          profiles.every(
+                                (p) => accounts.contains(
+                                  backupAccountKey(p.platform.key, p.id),
+                                ),
+                              )
+                              ? '清空'
+                              : '全选账号',
+                        ),
                       ),
-                      IconButton(
-                        onPressed: () => _discard(job),
-                        tooltip: '放弃此备份',
-                        icon: const Icon(Icons.close),
-                      ),
-                    ],
-                  ),
+                  ],
                 ),
-            ],
-            if (repository.pending.isNotEmpty) ...[
-              const Divider(),
-              const Text('待关联账号的数据'),
-              for (final item in repository.pending)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(
-                    '${CloudPlatform.fromKey(item.obj('account').str('platform'))?.label ?? ''} · ${item.obj('account').str('name').ifEmpty('原账号')}',
+                if (profiles.isEmpty)
+                  Text(
+                    '当前没有已登录账号',
+                    style: TextStyle(fontSize: 12, color: secondary(context)),
                   ),
-                  subtitle: const Text('记录已保留，关联原账号后即可使用'),
-                  trailing: TextButton(
-                    onPressed: () => _bind(item),
-                    child: const Text('关联'),
+                for (final profile in profiles)
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    secondary: PlatformMark(
+                      platform: profile.platform,
+                      size: 26,
+                    ),
+                    title: Text(
+                      '${profile.platform.shortName} · ${profile.name}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    value: accounts.contains(
+                      backupAccountKey(profile.platform.key, profile.id),
+                    ),
+                    onChanged: _working
+                        ? null
+                        : (value) => setState(() {
+                            final key = backupAccountKey(
+                              profile.platform.key,
+                              profile.id,
+                            );
+                            if (value == true) {
+                              accounts.add(key);
+                            } else {
+                              accounts.remove(key);
+                            }
+                          }),
                   ),
-                ),
+              ],
+            ),
+          ),
+        if (category != BackupCategory.values.last) const SizedBox(height: 4),
+      ],
+    ],
+  );
+
+  Widget _securitySection() => _BackupSection(
+    title: '密码保护',
+    icon: Icons.lock_outline,
+    children: [
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text(
+          '使用密码加密备份',
+          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+        ),
+        subtitle: Text(
+          encrypt ? '恢复此备份时需要输入密码' : '生成明文备份文件',
+          style: const TextStyle(fontSize: 12, height: 1.5),
+        ),
+        onTap: _working ? null : () => setState(() => encrypt = !encrypt),
+        trailing: AppSwitch(
+          key: const Key('backup-password-toggle'),
+          semanticLabel: '使用密码加密备份',
+          value: encrypt,
+          onChanged: _working
+              ? null
+              : (value) => setState(() => encrypt = value),
+        ),
+      ),
+      if (encrypt) ...[
+        const SizedBox(height: 12),
+        TextField(
+          key: const Key('backup-password'),
+          controller: password,
+          enabled: !_working,
+          obscureText: !_passwordVisible,
+          enableSuggestions: false,
+          autocorrect: false,
+          textInputAction: TextInputAction.next,
+          decoration: _backupInput(
+            '备份密码（至少 6 位）',
+            suffix: IconButton(
+              tooltip: _passwordVisible ? '隐藏备份密码' : '显示备份密码',
+              onPressed: () =>
+                  setState(() => _passwordVisible = !_passwordVisible),
+              icon: Icon(
+                _passwordVisible
+                    ? Icons.visibility_off_outlined
+                    : Icons.visibility_outlined,
+                size: 20,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        TextField(
+          key: const Key('backup-confirmation'),
+          controller: confirmation,
+          enabled: !_working,
+          obscureText: !_confirmationVisible,
+          enableSuggestions: false,
+          autocorrect: false,
+          textInputAction: TextInputAction.done,
+          decoration: _backupInput(
+            '再次输入备份密码',
+            suffix: IconButton(
+              tooltip: _confirmationVisible ? '隐藏确认密码' : '显示确认密码',
+              onPressed: () =>
+                  setState(() => _confirmationVisible = !_confirmationVisible),
+              icon: Icon(
+                _confirmationVisible
+                    ? Icons.visibility_off_outlined
+                    : Icons.visibility_outlined,
+                size: 20,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          '备份密码不会保存，请妥善保管。',
+          style: TextStyle(
+            fontSize: 12,
+            height: 1.5,
+            color: secondary(context),
+          ),
+        ),
+      ],
+      const SizedBox(height: 14),
+      const _BackupNote(icon: Icons.info_outline, text: '本地数据仍为明文。背景图片不参与备份。'),
+    ],
+  );
+
+  Widget _restoreGuide() => const _BackupSection(
+    title: '先预览，再恢复',
+    icon: Icons.restore_outlined,
+    caption: '按分类恢复你需要的数据',
+    children: [
+      _RestoreStep(number: '1', title: '选择备份', detail: '从本地文件或网盘读取，先校验完整性。'),
+      SizedBox(height: 20),
+      _RestoreStep(
+        number: '2',
+        title: '预览与勾选',
+        detail: '查看备份时间、内容数量，选择要恢复的分类。',
+      ),
+      SizedBox(height: 20),
+      _RestoreStep(number: '3', title: '确认恢复', detail: '收藏和历史会合并，恢复前自动保存回退副本。'),
+      SizedBox(height: 20),
+      _BackupNote(icon: Icons.lock_outline, text: '加密备份在读取时询问密码；下载目录沿用本机设置。'),
+    ],
+  );
+
+  Widget _followUpSections() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      if (repository.canUndo) ...[
+        const SizedBox(height: 20),
+        _BackupSection(
+          title: '最近一次恢复',
+          icon: Icons.history,
+          children: [
+            Text(
+              '可以将上次涉及的分类回退到恢复前，回退前会再次确认。',
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.5,
+                color: secondary(context),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: _working ? null : () => _perform(_undo),
+                icon: const Icon(Icons.undo, size: 18),
+                label: const Text('回退上次恢复'),
+              ),
+            ),
+          ],
+        ),
+      ],
+      if (transfers.pending.isNotEmpty) ...[
+        const SizedBox(height: 20),
+        _BackupSection(
+          title: '未完成的远程备份',
+          icon: Icons.cloud_upload_outlined,
+          caption: '${transfers.pending.length} 个备份可继续上传或校验',
+          children: [
+            for (final job in transfers.pending) ...[
+              _BackupTaskRow(
+                title: job.str('name'),
+                detail: job
+                    .obj('target')
+                    .str('label')
+                    .ifEmpty(job.obj('target').str('url')),
+                metadata:
+                    '${formatBytes(job.integer('size'))} · ${formatDate(job.integer('createdAt'))}',
+                actions: [
+                  TextButton(
+                    onPressed: _working
+                        ? null
+                        : () => _perform(() => _discard(job)),
+                    child: const Text('放弃'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _working
+                        ? null
+                        : () => _perform(() => _resume(job)),
+                    icon: const Icon(Icons.play_arrow_outlined, size: 18),
+                    label: const Text('继续备份'),
+                  ),
+                ],
+              ),
+              if (job != transfers.pending.last) const Divider(height: 28),
             ],
           ],
         ),
+      ],
+      if (repository.pending.isNotEmpty) ...[
+        const SizedBox(height: 20),
+        _BackupSection(
+          title: '待关联账号的数据',
+          icon: Icons.person_outline,
+          caption: '记录已保留，关联原账号后即可使用',
+          children: [
+            for (final item in repository.pending) ...[
+              _BackupTaskRow(
+                title:
+                    '${CloudPlatform.fromKey(item.obj('account').str('platform'))?.label ?? ''} · ${item.obj('account').str('name').ifEmpty('原账号')}',
+                detail: '请选择原来的同一个网盘账号',
+                actions: [
+                  OutlinedButton(
+                    onPressed: _working
+                        ? null
+                        : () => _perform(() => _bind(item)),
+                    child: const Text('关联账号'),
+                  ),
+                ],
+              ),
+              if (item != repository.pending.last) const Divider(height: 28),
+            ],
+          ],
+        ),
+      ],
+    ],
+  );
+
+  Widget _footer() {
+    final needsTarget = location == 'cloud' && cloudLocation == null;
+    final label = needsTarget
+        ? '选择网盘目录'
+        : restoring
+        ? '选择备份并预览'
+        : '立即备份';
+    final summary = restoring
+        ? '预览后选择分类，确认后写入本机'
+        : '已选 ${categories.length} 类内容 · ${encrypt ? '密码加密' : '明文备份'}';
+    final button = FilledButton.icon(
+      key: const Key('backup-primary'),
+      onPressed: _working || (!restoring && categories.isEmpty)
+          ? null
+          : () => _perform(
+              needsTarget
+                  ? _chooseCloud
+                  : restoring
+                  ? _restore
+                  : _export,
+            ),
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(0, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      ),
+      icon: Icon(restoring ? Icons.restore : Icons.backup_outlined, size: 20),
+      label: Text(_working ? '正在处理…' : label),
+    );
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          border: Border(top: BorderSide(color: border(context))),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Align(
+            heightFactor: 1,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 1100),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final text = Text(
+                      summary,
+                      style: TextStyle(fontSize: 12, color: secondary(context)),
+                    );
+                    if (constraints.maxWidth >= 680) {
+                      return Row(
+                        children: [
+                          Expanded(child: text),
+                          const SizedBox(width: 20),
+                          SizedBox(width: 240, child: button),
+                        ],
+                      );
+                    }
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [text, const SizedBox(height: 10), button],
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+    canPop: !_working,
+    child: Scaffold(
+      appBar: AppBar(title: const Text('备份与恢复')),
+      bottomNavigationBar: _footer(),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final wide =
+                constraints.maxWidth >= 900 &&
+                MediaQuery.textScalerOf(context).scale(14) <= 21;
+            return Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 1100),
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: EdgeInsets.fromLTRB(
+                        wide ? 24 : 16,
+                        8,
+                        wide ? 24 : 16,
+                        16,
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: SegmentedButton<bool>(
+                              segments: const [
+                                ButtonSegment(
+                                  value: false,
+                                  label: Text('备份'),
+                                  icon: Icon(Icons.backup_outlined),
+                                ),
+                                ButtonSegment(
+                                  value: true,
+                                  label: Text('恢复'),
+                                  icon: Icon(Icons.restore),
+                                ),
+                              ],
+                              selected: {restoring},
+                              showSelectedIcon: false,
+                              onSelectionChanged: _working
+                                  ? null
+                                  : (value) {
+                                      FocusScope.of(context).unfocus();
+                                      setState(() => restoring = value.single);
+                                      if (_scroll.hasClients) _scroll.jumpTo(0);
+                                    },
+                            ),
+                          ),
+                          if (wide) ...[
+                            const SizedBox(width: 28),
+                            Expanded(
+                              child: Text(
+                                restoring ? '从已有备份找回需要的数据' : '选择内容，留一份可恢复的副本',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: secondary(context),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: Scrollbar(
+                        controller: _scroll,
+                        child: SingleChildScrollView(
+                          key: const Key('backup-scroll'),
+                          controller: _scroll,
+                          keyboardDismissBehavior:
+                              ScrollViewKeyboardDismissBehavior.onDrag,
+                          padding: EdgeInsets.fromLTRB(
+                            wide ? 24 : 16,
+                            0,
+                            wide ? 24 : 16,
+                            24,
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              if (wide)
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      flex: 3,
+                                      child: restoring
+                                          ? _restoreGuide()
+                                          : _categoriesSection(),
+                                    ),
+                                    const SizedBox(width: 24),
+                                    Expanded(
+                                      flex: 2,
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.stretch,
+                                        children: [
+                                          _locationSection(),
+                                          if (!restoring) ...[
+                                            const SizedBox(height: 20),
+                                            _securitySection(),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              else ...[
+                                _locationSection(),
+                                const SizedBox(height: 20),
+                                restoring
+                                    ? _restoreGuide()
+                                    : _categoriesSection(),
+                                if (!restoring) ...[
+                                  const SizedBox(height: 20),
+                                  _securitySection(),
+                                ],
+                              ],
+                              _followUpSections(),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
       ),
     ),
+  );
+}
+
+InputDecoration _backupInput(String label, {Widget? suffix}) => InputDecoration(
+  labelText: label,
+  suffixIcon: suffix,
+  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 18),
+);
+
+class _BackupSection extends StatelessWidget {
+  const _BackupSection({
+    required this.title,
+    required this.icon,
+    required this.children,
+    this.caption,
+    this.trailing,
+  });
+  final String title;
+  final IconData icon;
+  final List<Widget> children;
+  final String? caption;
+  final Widget? trailing;
+  @override
+  Widget build(BuildContext context) => Container(
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.surface,
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: border(context)),
+    ),
+    padding: const EdgeInsets.all(16),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 20, color: themeAccent(context)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            ?trailing,
+          ],
+        ),
+        if (caption != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            caption!,
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.5,
+              color: secondary(context),
+            ),
+          ),
+        ],
+        const SizedBox(height: 16),
+        ...children,
+      ],
+    ),
+  );
+}
+
+class _BackupNote extends StatelessWidget {
+  const _BackupNote({required this.icon, required this.text});
+  final IconData icon;
+  final String text;
+  @override
+  Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Icon(icon, size: 17, color: secondary(context)),
+      const SizedBox(width: 9),
+      Expanded(
+        child: Text(
+          text,
+          style: TextStyle(
+            fontSize: 12,
+            height: 1.6,
+            color: secondary(context),
+          ),
+        ),
+      ),
+    ],
+  );
+}
+
+class _RestoreStep extends StatelessWidget {
+  const _RestoreStep({
+    required this.number,
+    required this.title,
+    required this.detail,
+  });
+  final String number, title, detail;
+  @override
+  Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Container(
+        width: 30,
+        height: 30,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: fill(context),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(
+          number,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: themeAccent(context),
+          ),
+        ),
+      ),
+      const SizedBox(width: 14),
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              detail,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.6,
+                color: secondary(context),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
+}
+
+class _BackupTaskRow extends StatelessWidget {
+  const _BackupTaskRow({
+    required this.title,
+    required this.detail,
+    required this.actions,
+    this.metadata,
+  });
+  final String title, detail;
+  final String? metadata;
+  final List<Widget> actions;
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        title,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 6),
+      Text(
+        detail,
+        maxLines: 3,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 12, height: 1.5, color: secondary(context)),
+      ),
+      if (metadata != null) ...[
+        const SizedBox(height: 6),
+        Text(
+          metadata!,
+          style: TextStyle(fontSize: 12, color: secondary(context)),
+        ),
+      ],
+      const SizedBox(height: 12),
+      Align(
+        alignment: Alignment.centerRight,
+        child: Wrap(spacing: 8, runSpacing: 8, children: actions),
+      ),
+    ],
   );
 }
 
@@ -634,82 +1399,70 @@ class _BackupVersionsDialog extends StatefulWidget {
 }
 
 class _BackupVersionsDialogState extends State<_BackupVersionsDialog> {
+  final _scope = RequestScope();
   bool unconfirmed = false;
-  late Future<List<BackupRemoteFile>> files = widget.transfers.versions(
-    widget.target,
+  late Future<List<BackupRemoteFile>> files = _load();
+  Future<List<BackupRemoteFile>> _load() => _scope.run(
+    () => widget.transfers.versions(
+      widget.target,
+      includeUnconfirmed: unconfirmed,
+    ),
   );
   @override
+  void dispose() {
+    _scope.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) => AlertDialog(
+    insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
     title: const Text('选择备份版本'),
     content: SizedBox(
       width: 540,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('显示旧版或未确认文件'),
-            subtitle: const Text('恢复前仍会验证文件内容'),
-            value: unconfirmed,
-            onChanged: (value) => setState(() {
-              unconfirmed = value ?? false;
-              files = widget.transfers.versions(
-                widget.target,
-                includeUnconfirmed: unconfirmed,
-              );
-            }),
-          ),
-          Flexible(
-            child: FutureBuilder<List<BackupRemoteFile>>(
-              future: files,
-              builder: (context, snapshot) {
-                if (snapshot.hasError) {
-                  return Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(errorText(snapshot.error!)),
-                      TextButton(
-                        onPressed: () => setState(() {
-                          files = widget.transfers.versions(
-                            widget.target,
-                            includeUnconfirmed: unconfirmed,
-                          );
-                        }),
-                        child: const Text('重试'),
-                      ),
-                    ],
-                  );
-                }
-                if (!snapshot.hasData) {
-                  return const Padding(
-                    padding: EdgeInsets.all(24),
-                    child: CircularProgressIndicator(),
-                  );
-                }
-                if (snapshot.data!.isEmpty) {
-                  return const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text('此目录没有已完成的备份'),
-                  );
-                }
-                return ListView(
-                  shrinkWrap: true,
-                  children: [
-                    for (final file in snapshot.data!)
-                      ListTile(
-                        title: Text(file.name),
-                        subtitle: Text(
-                          '${(file.size / 1024).toStringAsFixed(1)} KB',
-                        ),
-                        onTap: () =>
-                            Navigator.pop(context, (file, unconfirmed)),
-                      ),
-                  ],
-                );
-              },
+      height: MediaQuery.sizeOf(context).height * .55,
+      child: FutureBuilder<List<BackupRemoteFile>>(
+        future: files,
+        builder: (context, snapshot) => CustomScrollView(
+          key: const Key('backup-versions-scroll'),
+          slivers: [
+            SliverToBoxAdapter(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '选择一个版本，下载并校验后进入内容预览。',
+                    style: TextStyle(
+                      fontSize: 13,
+                      height: 1.5,
+                      color: secondary(context),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  CheckboxListTile(
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      '显示旧版或未确认文件',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                    subtitle: const Text(
+                      '恢复前仍会验证文件内容',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    value: unconfirmed,
+                    onChanged: (value) => setState(() {
+                      unconfirmed = value ?? false;
+                      files = _load();
+                    }),
+                  ),
+                  const Divider(height: 24),
+                ],
+              ),
             ),
-          ),
-        ],
+            _versionsSliver(context, snapshot),
+          ],
+        ),
       ),
     ),
     actions: [
@@ -719,6 +1472,100 @@ class _BackupVersionsDialogState extends State<_BackupVersionsDialog> {
       ),
     ],
   );
+
+  Widget _versionsSliver(
+    BuildContext context,
+    AsyncSnapshot<List<BackupRemoteFile>> snapshot,
+  ) {
+    if (snapshot.hasError) {
+      return SliverToBoxAdapter(
+        child: Column(
+          children: [
+            Icon(Icons.cloud_off_outlined, size: 32, color: secondary(context)),
+            const SizedBox(height: 12),
+            Text(errorText(snapshot.error!), textAlign: TextAlign.center),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => setState(() {
+                files = _load();
+              }),
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('重试'),
+            ),
+          ],
+        ),
+      );
+    }
+    if (!snapshot.hasData) {
+      return const SliverToBoxAdapter(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+    if (snapshot.data!.isEmpty) {
+      return SliverToBoxAdapter(
+        child: Column(
+          children: [
+            Icon(
+              Icons.inventory_2_outlined,
+              size: 36,
+              color: secondary(context),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              unconfirmed ? '此目录没有可用的备份文件' : '此目录没有已完成的备份',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '可选择其他目录${unconfirmed ? '' : '，或显示旧版文件'}。',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: secondary(context)),
+            ),
+          ],
+        ),
+      );
+    }
+    return SliverList.separated(
+      itemCount: snapshot.data!.length,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (context, index) {
+        final file = snapshot.data![index];
+        final date = _backupFileDate(file.name);
+        return ListTile(
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 4,
+            vertical: 8,
+          ),
+          leading: const Icon(Icons.inventory_2_outlined),
+          title: Text(
+            date ?? file.name,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+          subtitle: Text(
+            '${date == null ? '' : '${file.name}\n'}${formatBytes(file.size)}',
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 12),
+          ),
+          trailing: const Icon(Icons.chevron_right, size: 20),
+          onTap: () => Navigator.pop(context, (file, unconfirmed)),
+        );
+      },
+    );
+  }
+}
+
+String? _backupFileDate(String name) {
+  final stamp = RegExp(
+    r'^asterlink-backup-(\d{13})-',
+  ).firstMatch(name)?.group(1);
+  final milliseconds = int.tryParse(stamp ?? '');
+  return milliseconds == null ? null : formatDate(milliseconds);
 }
 
 class _RestoreChoice {
@@ -742,28 +1589,74 @@ class _RestorePreviewDialogState extends State<_RestorePreviewDialog> {
   bool replace = false;
   @override
   Widget build(BuildContext context) => AlertDialog(
+    insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
     title: const Text('预览与分类恢复'),
     content: SizedBox(
       width: 600,
       child: SingleChildScrollView(
         child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              '备份时间：${widget.preview.createdAt > 0 ? DateTime.fromMillisecondsSinceEpoch(widget.preview.createdAt).toLocal().toString().split('.').first : '未知'}',
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: fill(context),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.preview.createdAt > 0
+                        ? formatDate(widget.preview.createdAt)
+                        : '备份时间未知',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '包含 ${widget.preview.categories.length} 类内容，已选择 ${categories.length} 类',
+                    style: TextStyle(fontSize: 12, color: secondary(context)),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 8),
-            const Text('只恢复勾选内容。收藏和历史合并，账号默认保留本机登录状态，下载目录保持本机设置。'),
-            if (widget.preview.unknownCategories.isNotEmpty)
+            const SizedBox(height: 16),
+            const _BackupNote(
+              icon: Icons.info_outline,
+              text: '收藏和历史合并；默认保留本机登录状态与下载目录。',
+            ),
+            if (widget.preview.unknownCategories.isNotEmpty) ...[
+              const SizedBox(height: 12),
               Text(
                 '以下分类需要更新版本，本次跳过：${widget.preview.unknownCategories.join('、')}',
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.5,
+                  color: secondary(context),
+                ),
               ),
+            ],
+            const SizedBox(height: 16),
+            const Text(
+              '选择恢复内容',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
             for (final category in widget.preview.categories)
               CheckboxListTile(
+                key: ValueKey('restore-category-${category.name}'),
                 contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
                 title: Text(
-                  '${category.label} · ${widget.preview.count(category)} 项',
+                  category.label,
+                  style: const TextStyle(fontSize: 14),
+                ),
+                subtitle: Text(
+                  '${widget.preview.count(category)} 项',
+                  style: const TextStyle(fontSize: 12),
                 ),
                 value: categories.contains(category),
                 onChanged: (value) => setState(() {
@@ -774,23 +1667,46 @@ class _RestorePreviewDialogState extends State<_RestorePreviewDialog> {
                   }
                 }),
               ),
-            if (categories.contains(BackupCategory.accounts))
+            if (categories.contains(BackupCategory.accounts)) ...[
+              const Divider(height: 24),
               CheckboxListTile(
+                controlAffinity: ListTileControlAffinity.leading,
                 contentPadding: EdgeInsets.zero,
-                title: const Text('替换对应账号的现有登录信息'),
+                title: const Text(
+                  '替换对应账号的现有登录信息',
+                  style: TextStyle(fontSize: 13),
+                ),
+                subtitle: const Text(
+                  '默认保留本机账号；勾选后使用备份中的登录信息',
+                  style: TextStyle(fontSize: 12, height: 1.5),
+                ),
                 value: replace,
                 onChanged: (value) => setState(() => replace = value ?? false),
               ),
-            if (categories.any(
-              (c) => {
-                BackupCategory.accounts,
-                BackupCategory.favorites,
-                BackupCategory.playback,
-                BackupCategory.history,
-              }.contains(c),
-            )) ...[
-              const Divider(),
-              const Text('账号关联（请选择原来的同一个账号）'),
+            ],
+            if (widget.preview.accounts.isNotEmpty &&
+                categories.any(
+                  (c) => {
+                    BackupCategory.accounts,
+                    BackupCategory.favorites,
+                    BackupCategory.playback,
+                    BackupCategory.history,
+                  }.contains(c),
+                )) ...[
+              const Divider(height: 24),
+              const Text(
+                '账号关联',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '请选择原来的同一个账号。未关联的数据会保留，之后可继续关联。',
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.5,
+                  color: secondary(context),
+                ),
+              ),
               for (final ref in widget.preview.accounts)
                 Builder(
                   builder: (context) {
@@ -802,35 +1718,58 @@ class _RestorePreviewDialogState extends State<_RestorePreviewDialog> {
                         .where((p) => p.platform.key == ref.str('platform'))
                         .toList();
                     return Padding(
-                      padding: const EdgeInsets.only(top: 12),
-                      child: DropdownButtonFormField<String>(
-                        isExpanded: true,
-                        decoration: InputDecoration(
-                          labelText:
-                              '${CloudPlatform.fromKey(ref.str('platform'))?.shortName ?? ''} · ${ref.str('name').ifEmpty(ref.str('id'))}',
-                        ),
-                        initialValue: bindings[key] ?? '',
-                        items: [
-                          const DropdownMenuItem(
-                            value: '',
-                            child: Text('按原编号恢复，未登录则待关联'),
+                      padding: const EdgeInsets.only(top: 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            '${CloudPlatform.fromKey(ref.str('platform'))?.shortName ?? ''} · ${ref.str('name').ifEmpty(ref.str('id'))}',
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 13),
                           ),
-                          for (final account in matches)
-                            DropdownMenuItem(
-                              value: account.id,
-                              child: Text(
-                                account.name,
-                                overflow: TextOverflow.ellipsis,
+                          const SizedBox(height: 8),
+                          DropdownButtonFormField<String>(
+                            isExpanded: true,
+                            decoration: _backupInput('关联到本机账号'),
+                            initialValue: bindings[key] ?? '',
+                            items: [
+                              const DropdownMenuItem(
+                                value: '',
+                                child: Text(
+                                  '按原编号恢复',
+                                  overflow: TextOverflow.ellipsis,
+                                ),
                               ),
-                            ),
+                              for (final account in matches)
+                                DropdownMenuItem(
+                                  value: account.id,
+                                  child: Row(
+                                    children: [
+                                      PlatformMark(
+                                        platform: account.platform,
+                                        size: 22,
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Text(
+                                          account.name,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                            ],
+                            onChanged: (value) => setState(() {
+                              if (value == null || value.isEmpty) {
+                                bindings.remove(key);
+                              } else {
+                                bindings[key] = value;
+                              }
+                            }),
+                          ),
                         ],
-                        onChanged: (value) => setState(() {
-                          if (value == null || value.isEmpty) {
-                            bindings.remove(key);
-                          } else {
-                            bindings[key] = value;
-                          }
-                        }),
                       ),
                     );
                   },
@@ -852,7 +1791,7 @@ class _RestorePreviewDialogState extends State<_RestorePreviewDialog> {
                 context,
                 _RestoreChoice({...categories}, {...bindings}, replace),
               ),
-        child: const Text('恢复所选内容'),
+        child: Text('恢复所选内容（${categories.length}）'),
       ),
     ],
   );

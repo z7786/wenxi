@@ -11,6 +11,7 @@ import 'skeleton_loading.dart';
 import 'resource_search_bar.dart';
 import 'resource_preferences.dart';
 import 'resource_search_page.dart';
+import 'resource_content_details.dart';
 
 class ResourceHomePage extends StatefulWidget {
   const ResourceHomePage(
@@ -37,6 +38,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
   Set<String> get loading => widget.services.resourceSearch.catalogLoading;
   String get error => widget.services.resourceSearch.catalogError;
   String? opening;
+  bool _showingDetails = false;
   bool get loaded => widget.services.resourceSearch.catalogLoaded;
   int catalogRevision = 0;
   String tileKey(ResourceSearchHit hit) =>
@@ -86,7 +88,11 @@ class _ResourceHomePageState extends State<ResourceHomePage>
 
   void scheduleVisibility() {
     final checks = widget.services.resourceSearch.linkChecks;
-    if (!mounted || !widget.active || checks == null || visibilityScheduled) {
+    if (!mounted ||
+        !widget.active ||
+        _showingDetails ||
+        checks == null ||
+        visibilityScheduled) {
       return;
     }
     visibilityScheduled = true;
@@ -94,6 +100,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
       visibilityScheduled = false;
       if (!mounted ||
           !widget.active ||
+          _showingDetails ||
           opening != null ||
           ModalRoute.of(context)?.isCurrent == false ||
           WidgetsBinding.instance.lifecycleState != null &&
@@ -249,10 +256,30 @@ class _ResourceHomePageState extends State<ResourceHomePage>
     );
   }
 
-  Future<void> open(ResourceSearchHit hit) async {
+  Future<void> showContent(ResourceSearchHit hit) async {
+    if (opening != null || _showingDetails) return;
+    _showingDetails = true;
+    widget.services.resourceSearch.linkChecks?.clearVisible();
+    try {
+      final selected = await showResourceContentDetails(
+        context,
+        hit: hit,
+        copyText: widget.services.copyText,
+        canOpen: (item) =>
+            item.canParse ||
+            widget.services.sources.candidates(item.url).isNotEmpty,
+      );
+      if (selected != null && mounted) {
+        await open(selected);
+      }
+    } finally {
+      _showingDetails = false;
+      if (mounted) scheduleVisibility();
+    }
+  }
+
+  Future<void> open(ResourceSearchHit selected) async {
     if (opening != null) return;
-    final selected = await _selectLink(hit);
-    if (selected == null) return;
     setState(() => opening = selected.identity);
     widget.services.resourceSearch.linkChecks?.clearVisible();
     try {
@@ -273,36 +300,6 @@ class _ResourceHomePageState extends State<ResourceHomePage>
         scheduleVisibility();
       }
     }
-  }
-
-  Future<ResourceSearchHit?> _selectLink(ResourceSearchHit hit) async {
-    if (hit.links.length <= 1 || !mounted) return hit;
-    final selected = await showModalBottomSheet<ResourceSearchLink>(
-      context: context,
-      showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            const ListTile(title: Text('选择网盘入口')),
-            for (final link in hit.links)
-              ListTile(
-                leading: const Icon(Icons.cloud_outlined),
-                title: Text(link.cloudName),
-                subtitle: Text(
-                  link.password.isEmpty
-                      ? link.url
-                      : '${link.url}\n提取码：${link.password}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                onTap: () => Navigator.pop(sheetContext, link),
-              ),
-          ],
-        ),
-      ),
-    );
-    return selected == null ? null : hit.withLink(selected);
   }
 
   Widget sectionHeader(String name, String section, {bool popular = false}) =>
@@ -369,6 +366,13 @@ class _ResourceHomePageState extends State<ResourceHomePage>
             final columns = popular ? popularColumns : categoryColumns;
             final tileWidth =
                 (width - padding * 2 - 12 * (columns - 1)) / columns;
+            var textHeight = (popular ? 68.0 : 48.0) * math.max(scale, 1);
+            for (final hit in rows) {
+              textHeight = math.max(
+                textHeight,
+                _resourceCoverTextHeight(context, hit, tileWidth, popular),
+              );
+            }
             return SliverPadding(
               padding: EdgeInsets.symmetric(horizontal: padding),
               sliver: SliverGrid(
@@ -376,9 +380,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                   crossAxisCount: columns,
                   crossAxisSpacing: 12,
                   mainAxisSpacing: 12,
-                  mainAxisExtent:
-                      tileWidth / (popular ? 1.85 : 1) +
-                      (popular ? 68 : 48) * math.max(scale, 1),
+                  mainAxisExtent: tileWidth / (popular ? 1.85 : 1) + textHeight,
                 ),
                 delegate: SliverChildBuilderDelegate((context, index) {
                   final hit = rows[index];
@@ -388,7 +390,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                     popular: popular,
                     opening: opening == hit.identity,
                     health: checks?.health(hit),
-                    onTap: opening == null ? () => open(hit) : null,
+                    onTap: opening == null ? () => showContent(hit) : null,
                   );
                   return SizedBox(
                     key: rowKeys.putIfAbsent(tileKey(hit), GlobalKey.new),
@@ -671,6 +673,7 @@ class _ResourceCoverTile extends StatelessWidget {
     return Semantics(
       button: true,
       label: hit.title,
+      hint: '查看内容简介与网盘入口',
       child: InkWell(
         key: ValueKey(
           'resource-catalog-item-${hit.recommendationId}-${hit.identity}',
@@ -762,11 +765,7 @@ class _ResourceCoverTile extends StatelessWidget {
                   hit.title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: popular ? 14 : 12,
-                    fontWeight: FontWeight.w600,
-                    height: 1.4,
-                  ),
+                  style: _resourceCoverTitleStyle(popular),
                 ),
                 if (popular && hit.description.isNotEmpty) ...[
                   const SizedBox(height: 4),
@@ -784,6 +783,43 @@ class _ResourceCoverTile extends StatelessWidget {
       ),
     );
   }
+}
+
+TextStyle _resourceCoverTitleStyle(bool popular) => TextStyle(
+  fontSize: popular ? 14 : 12,
+  fontWeight: FontWeight.w600,
+  height: 1.4,
+);
+
+double _resourceCoverTextHeight(
+  BuildContext context,
+  ResourceSearchHit hit,
+  double width,
+  bool popular,
+) {
+  double height(String text, TextStyle style, int lines) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: DefaultTextStyle.of(context).style.merge(style),
+      ),
+      maxLines: lines,
+      ellipsis: '…',
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      locale: Localizations.maybeLocaleOf(context),
+    )..layout(maxWidth: width);
+    final result = painter.height;
+    painter.dispose();
+    return result;
+  }
+
+  return (9 +
+          height(hit.title, _resourceCoverTitleStyle(popular), 2) +
+          (popular && hit.description.isNotEmpty
+              ? 4 + height(hit.description, const TextStyle(fontSize: 11), 1)
+              : 0))
+      .ceilToDouble();
 }
 
 IconData resourceTypeIcon(String text) {

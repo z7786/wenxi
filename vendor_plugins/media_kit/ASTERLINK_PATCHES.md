@@ -72,3 +72,15 @@ Free the command result and arguments in `finally`, also when encoding fails.
 Validate dimensions, stride and buffer length before encoding; cap captures at
 16 megapixels to bound temporary image allocations. The real libmpv subtitle
 render tests exercise PNG captures with and without libass subtitles.
+
+## External subtitle command failures
+
+Require a successful native `sub-add` reply before publishing an external
+subtitle track as selected. The upstream log-only command handling previously
+reported a missing or unreadable subtitle as a successful selection. The
+application can now show a subtitle error and retry while video playback
+continues. Other commands retain their existing optional error handling.
+
+`test/native_subtitle_loading_test.dart` verifies failure and retry with the
+real Windows libmpv runtime, including Chinese UTF-8 captions normalized from
+GBK and private file paths containing Chinese characters, spaces and `%`.

@@ -231,6 +231,16 @@ void main() {
       final title = cloudEntries
           .singleWhere((entry) => entry.$3 == platform)
           .$2;
+      await tester.scrollUntilVisible(
+        find.text(title),
+        250,
+        scrollable: find
+            .descendant(
+              of: find.byKey(const PageStorageKey('cloud-list')),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
       // Account reservation is persisted before opening the login route. Keep
       // this write on the same real event loop as the fixture's storage.
       await tester.runAsync(() async {
@@ -249,6 +259,11 @@ void main() {
       } else if (platform == CloudPlatform.github) {
         expect(find.text('GitHub 登录'), findsOneWidget);
         expect(find.byKey(const Key('github-token')), findsOneWidget);
+        expect(find.byType(WebLoginPage), findsNothing);
+      } else if (platform == CloudPlatform.webdav) {
+        expect(find.text('WebDAV 连接'), findsOneWidget);
+        expect(find.byKey(const Key('webdav-url')), findsOneWidget);
+        expect(find.byKey(const Key('webdav-password')), findsOneWidget);
         expect(find.byType(WebLoginPage), findsNothing);
       } else if (platform == CloudPlatform.pan123 ||
           platform == CloudPlatform.tianyi ||
@@ -408,6 +423,16 @@ void main() {
         expect(find.byTooltip('${entry.$2}账号操作'), findsNothing);
       }
       for (final entry in cloudEntries.where((entry) => entry.$3 != null)) {
+        await tester.scrollUntilVisible(
+          find.text(entry.$2),
+          250,
+          scrollable: find
+              .descendant(
+                of: find.byKey(const PageStorageKey('cloud-list')),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
         expect(find.text(entry.$2), findsOneWidget);
       }
       expect(find.text('暂未开放'), findsNothing);

@@ -2348,7 +2348,8 @@ class DownloadManager extends ChangeNotifier {
         run.storage.target.id,
         () => run.storage.target.path,
       );
-      if (_tasks[id]!.spec.needsPreparation) {
+      final preparedNow = _tasks[id]!.spec.needsPreparation;
+      if (preparedNow) {
         await _prepareSource(id, run);
       }
       _notifyGuestDownload(id);
@@ -2370,8 +2371,9 @@ class DownloadManager extends ChangeNotifier {
         }
       }
       if (output == null) {
-        if (LanDownloadRoute.owns(_tasks[id]!.spec)) {
-          // Rebuild the local listener only when network data is needed. A
+        if (LanDownloadRoute.owns(_tasks[id]!.spec) ||
+            !preparedNow && _tasks[id]!.spec.platform == CloudPlatform.webdav) {
+          // Rebuild local download listeners only when network data is needed. A
           // completed payload can still be verified/exported with LAN off.
           await _prepareSource(id, run);
         }

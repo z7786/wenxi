@@ -12,8 +12,13 @@ import '../domain/links.dart';
 import '../domain/models.dart' show LinkKind, DownloadSpec;
 import '../diagnostics/app_log.dart';
 import '../download/download_activity.dart';
+import '../download/space_budget.dart';
 import '../platform/windows_lan.dart';
+import '../platform/file_access.dart' show safeFileName;
 import 'lan_addresses.dart';
+import 'lan_browser_assets.dart';
+import 'lan_browser_receiver.dart';
+import 'lan_browser_zip.dart';
 import 'lan_datagrams.dart';
 import 'lan_download_route.dart';
 import 'lan_files.dart';
@@ -25,6 +30,7 @@ part 'lan_server.dart';
 part 'lan_discovery.dart';
 part 'lan_reverse.dart';
 part 'lan_http_discovery.dart';
+part 'lan_browser.dart';
 
 class LanShare {
   LanShare(this.manifest, this.sources);
@@ -75,6 +81,7 @@ class LanService extends ChangeNotifier {
   LanService({
     required this.store,
     required this.files,
+    this.browserReceiver,
     this.foreground,
     this.discoveryEnabled = true,
     bool? unicastDiscovery,
@@ -90,9 +97,11 @@ class LanService extends ChangeNotifier {
     _inbox.addAll(
       store.data.list('lanInbox').map(LanInboxItem.fromJson).take(100),
     );
+    browserReceiver?.addListener(_changed);
   }
   final StateStore store;
   final LanFiles files;
+  final LanBrowserReceiver? browserReceiver;
   final Future<void> Function()? foreground;
   final bool discoveryEnabled;
   final bool unicastDiscovery;
@@ -105,6 +114,7 @@ class LanService extends ChangeNotifier {
   final _serviceZone = Zone.current;
   final _shares = <String, LanShare>{}, _peers = <String, LanPeer>{};
   final _sessions = <String, _LanSession>{};
+  final _browserSessions = <String, _LanSession>{};
   final _peerEndpoints = <String, List<Uri>>{};
   final _peerSessions =
       <String, ({String token, Uri base, DateTime expires})>{};
@@ -146,7 +156,10 @@ class LanService extends ChangeNotifier {
   int get discoveryPort => _discovery?.port ?? 0;
   int get unread => _inbox.where((item) => !item.read).length;
   int get activeConnections =>
-      _shares.values.fold(0, (n, share) => n + share.responses.length);
+      _shares.values.fold(0, (n, share) => n + share.responses.length) +
+      (browserReceiver?.activeOperations ?? 0);
+  int get browserConnections =>
+      _browserSessions.values.where((s) => s.expires.isAfter(clock())).length;
   List<LanPeer> get peers =>
       _peers.values.toList()..sort((a, b) => a.name.compareTo(b.name));
   List<LanInboxItem> get inbox => List.unmodifiable(_inbox);
@@ -163,6 +176,8 @@ class LanService extends ChangeNotifier {
     'reverseChannels': _reverseChannels.length,
     'reverseRequests': _reversePending.length,
     'activeConnections': activeConnections,
+    'browserConnections': browserConnections,
+    'browserReceives': browserReceiver?.activeOperations ?? 0,
     'httpDiscovery': _httpDiscoveryScope != null,
     'httpProbes': _httpProbes.length,
     'udpDiscovery': _discovery != null,
@@ -193,27 +208,45 @@ class LanService extends ChangeNotifier {
   Future<void> start() => _lifecycle.run(() async {
     require(!_disposed, '设备互联已关闭');
     if (running) return;
-    addresses = (await _addresses()).where(isLanAddress).toSet().toList();
-    require(addresses.isNotEmpty, '未连接局域网，请先连接 Wi-Fi 或有线网络');
-    id = store.data.str('lanDeviceId');
-    if (!RegExp(r'^[a-f0-9]{32}$').hasMatch(id)) {
-      id = lanId();
-      await store.put('lanDeviceId', id);
-    }
-    name = store.data
-        .str('lanDeviceName')
-        .ifEmpty(Platform.isAndroid || Platform.isIOS ? '我的手机' : '我的电脑');
-    connectionCode = Random.secure()
-        .nextInt(1000000)
-        .toString()
-        .padLeft(6, '0');
+    var stage = 'addresses', detected = 0;
     try {
+      final found = await _addresses();
+      detected = found.length;
+      addresses = found.where(isLanAddress).toSet().toList();
+      RequestScope.checkpoint();
+      require(addresses.isNotEmpty, '未检测到可用的局域网 IPv4 地址，请确认 Wi-Fi 或有线网络已连接后重试');
+      stage = 'identity';
+      id = store.data.str('lanDeviceId');
+      if (!RegExp(r'^[a-f0-9]{32}$').hasMatch(id)) {
+        id = lanId();
+        await store.put('lanDeviceId', id);
+      }
+      RequestScope.checkpoint();
+      name = store.data
+          .str('lanDeviceName')
+          .ifEmpty(Platform.isAndroid || Platform.isIOS ? '我的手机' : '我的电脑');
+      connectionCode = Random.secure()
+          .nextInt(1000000)
+          .toString()
+          .padLeft(6, '0');
+      stage = 'browser_storage';
+      await browserReceiver?.start();
+      RequestScope.checkpoint();
+      stage = 'http_bind';
       try {
         _server = await HttpServer.bind(bindAddress, requestedPort);
-      } on SocketException {
+      } on SocketException catch (error) {
         if (requestedPort == 0) rethrow;
+        DiagnosticLog.event(
+          'lan.http_port_fallback',
+          fields: {
+            'requestedPort': requestedPort,
+            'errno': error.osError?.errorCode,
+          },
+        );
         _server = await HttpServer.bind(bindAddress, 0);
       }
+      RequestScope.checkpoint();
       _server!.idleTimeout = const Duration(seconds: 20);
       _running = true;
       // A picker/preparation cancellation must not cancel future HTTP streams.
@@ -224,9 +257,12 @@ class LanService extends ChangeNotifier {
       );
       try {
         await files.network(true);
-      } catch (_) {
+      } catch (error, stack) {
         networkHint = '自动发现受系统限制，可输入设备地址连接';
+        DiagnosticLog.error('lan.network_permission_failed', error, stack);
       }
+      RequestScope.checkpoint();
+      stage = 'discovery';
       if (discoveryEnabled) await _startDiscovery();
       if (discoveryEnabled) _scheduleHttpDiscovery();
       _heartbeat = _serviceZone.run(
@@ -234,11 +270,29 @@ class LanService extends ChangeNotifier {
           _tick();
         }),
       );
+      stage = 'foreground';
       await foreground?.call();
+      RequestScope.checkpoint();
       notifyListeners();
       DiagnosticLog.event('lan.started', fields: diagnostics);
-    } catch (_) {
+    } catch (error, stack) {
+      if (RequestScope.current?.isCancelled != true) {
+        DiagnosticLog.error(
+          'lan.start_failed',
+          error,
+          stack,
+          fields: {
+            'stage': stage,
+            'detectedAddresses': detected,
+            ...diagnostics,
+            if (error is SocketException) 'errno': error.osError?.errorCode,
+          },
+        );
+      }
       await _stop();
+      if (stage == 'addresses' && error is SocketException) {
+        throw const AppException('无法读取本机网络地址，请重新连接网络后重试');
+      }
       rethrow;
     }
   });
@@ -251,6 +305,8 @@ class LanService extends ChangeNotifier {
 
   Uri shareUrl(LanShare share, [String? address]) =>
       base(address).replace(path: '/s/${share.manifest.token}');
+
+  Uri browserUrl([String? address]) => base(address).replace(path: '/');
 
   String connectionQr([String? address]) => LanConnectionQr(
     address: base(address),
@@ -835,6 +891,8 @@ class LanService extends ChangeNotifier {
     _httpSeen.removeWhere((key, _) => !_peers.containsKey(key));
     _peerEndpoints.removeWhere((id, _) => !_peers.containsKey(id));
     _sessions.removeWhere((key, session) => session.expires.isBefore(now));
+    _pruneBrowserSessions();
+    browserReceiver?.prune();
     _peerSessions.removeWhere((key, session) => !session.expires.isAfter(now));
     _pruneReverseTransfers();
     _pairReplies.removeWhere((key, value) => !value.expires.isAfter(now));
@@ -891,12 +949,17 @@ class LanService extends ChangeNotifier {
     _peerEndpoints.clear();
     _peerSessions.clear();
     _sessions.clear();
+    _browserSessions.clear();
     await _server?.close(force: true);
     _server = null;
+    await browserReceiver?.stop();
     _client?.close(force: true);
     _client = null;
     _loopbackClient?.close(force: true);
     _loopbackClient = null;
+    addresses = [];
+    connectionCode = '';
+    networkHint = '';
     try {
       await files.network(false);
     } catch (_) {}
@@ -906,6 +969,8 @@ class LanService extends ChangeNotifier {
   Future<void> close() async {
     if (_disposed) return;
     await stop();
+    browserReceiver?.removeListener(_changed);
+    await browserReceiver?.close();
     _disposed = true;
     dispose();
   }

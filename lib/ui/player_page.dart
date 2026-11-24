@@ -313,9 +313,9 @@ class _PlayerPageState extends State<PlayerPage>
       _finishPinch(refresh: false);
       _hidePinchReset(refresh: false);
     }
-    if (controller.notice.isNotEmpty && controller.notice != _seenNotice) {
+    if (controller.notice != _seenNotice) {
       _seenNotice = controller.notice;
-      _showHud(controller.notice);
+      if (_seenNotice.isNotEmpty) _showHud(_seenNotice);
     }
     final fontMessage = controller.backend?.subtitleFontMessage ?? '';
     if (fontMessage != _seenFontMessage) {

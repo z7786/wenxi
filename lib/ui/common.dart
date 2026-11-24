@@ -321,6 +321,21 @@ class PlatformMark extends StatelessWidget {
     if (name == null) {
       return Icon(CupertinoIcons.link, size: size, color: themeAccent(context));
     }
+    if (name == 'webdav') {
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: fill(context),
+          borderRadius: BorderRadius.circular(size * .2),
+        ),
+        child: Icon(
+          Icons.dns_outlined,
+          size: size * .65,
+          color: themeAccent(context),
+        ),
+      );
+    }
     return ClipRRect(
       borderRadius: BorderRadius.circular(size * .2),
       child: Image.asset(

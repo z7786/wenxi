@@ -9,6 +9,8 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
+import 'package:asterlink/diagnostics/app_log.dart';
+import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/playback/online_subtitles.dart';
 import 'package:asterlink/playback/subtitle_files.dart';
 import 'package:asterlink/ui/app_theme.dart';
@@ -251,6 +253,54 @@ void main() {
   });
 
   testWidgets(
+    'A failed subtitle network search shows DNS guidance and can be edited and retried',
+    (tester) async {
+      final previous = DiagnosticLog.active;
+      final log = DiagnosticLog.open(null);
+      DiagnosticLog.active = log;
+      addTearDown(() {
+        log.dispose();
+        DiagnosticLog.active = previous;
+      });
+      final service = _Service()
+        ..searchError = const DownloadNetworkException(
+          'connectionError',
+          cause: SocketException(
+            'Failed host lookup: private.example',
+            osError: OSError('fixture DNS', 11001),
+          ),
+        );
+      final page = await render(tester, service: service);
+      await openOnline(tester);
+      expect(find.text('在线字幕搜索无法解析服务地址，请检查网络或 DNS 后重试'), findsOneWidget);
+      expect(find.textContaining('没有找到可用字幕'), findsNothing);
+      expect(find.textContaining('下载连接中断'), findsNothing);
+      final fields = asJson(
+        log
+            .entries()
+            .singleWhere(
+              (e) => e.event == 'player.online_subtitle_search_failed',
+            )
+            .data['fields'],
+      );
+      expect(fields['stage'], 'search');
+      expect(fields['kind'], 'connectionError');
+      expect(fields['errno'], 11001);
+      expect(fields['dns'], isTrue);
+      service.searchError = null;
+      await tester.enterText(
+        find.byKey(const Key('online-subtitle-query')),
+        'Name S01E02',
+      );
+      await tap(tester, find.byKey(const Key('online-subtitle-search')));
+      expect(service.searches.last, 'Name S01E02');
+      expect(find.text(_subtitle.title), findsOneWidget);
+      expect(page.fixture.current.state.playing, isTrue);
+      expect(page.fixture.controller.error, isEmpty);
+    },
+  );
+
+  testWidgets(
     'A video switch during the initial search cannot adopt results for the previous episode',
     (tester) async {
       final gate = Completer<List<OnlineSubtitle>>();
@@ -355,9 +405,12 @@ void main() {
       expect(service.downloadScopes.single.token.isCancelled, isTrue);
       expect(find.textContaining('视频已切换'), findsOneWidget);
       final file = (await tester.runAsync(
-        () => SubtitleFiles(
-          page.directory,
-        ).stage(_subtitle.name, Stream.value(utf8.encode('late subtitle'))),
+        () => SubtitleFiles(page.directory).stage(
+          _subtitle.name,
+          Stream.value(
+            utf8.encode('1\n00:00:01,000 --> 00:00:02,000\nlate subtitle\n'),
+          ),
+        ),
       ))!;
       gate.complete(file);
       await drainFileWork(tester, () => !file.existsSync());
@@ -382,9 +435,12 @@ void main() {
     await tester.tap(find.byTooltip('关闭面板'));
     await tester.pump();
     final file = (await tester.runAsync(
-      () => SubtitleFiles(
-        page.directory,
-      ).stage(_subtitle.name, Stream.value(utf8.encode('abandoned subtitle'))),
+      () => SubtitleFiles(page.directory).stage(
+        _subtitle.name,
+        Stream.value(
+          utf8.encode('1\n00:00:01,000 --> 00:00:02,000\nabandoned subtitle\n'),
+        ),
+      ),
     ))!;
     gate.complete(file);
     await tester.pump(const Duration(milliseconds: 300));

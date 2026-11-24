@@ -538,6 +538,7 @@ class LinkParser {
     }
     final parts = _parts(uri);
     return switch (platform) {
+      CloudPlatform.webdav => null,
       CloudPlatform.github =>
         GitHubLink.parse(uri) == null ? null : '${uri.host}${uri.path}',
       CloudPlatform.pikpak => _pathId(parts, r'^/s/([A-Za-z0-9_-]+)'),

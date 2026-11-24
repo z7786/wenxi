@@ -119,6 +119,8 @@ Gopeed AAR 附带 NDK 28.2.13676358 的 libc++_shared.so。LLVM 及附带组件�
 
 ## 图标
 
+局域网网页互传使用 Tabler Icons 3.35.0 的 file、file-upload、folder 和 chevron-right 轮廓图标，来源：https://github.com/tabler/tabler-icons/tree/v3.35.0。图标以 SVG 内嵌于本地网页，未引入网络运行依赖；MIT 许可及 Copyright (c) 2020-2025 Paweł Kuna 保留于 assets/licenses/Tabler-Icons-LICENSE.txt。
+
 PikPak 接口参考 piko（https://github.com/NihilDigit/piko）使用的 pikpak-kotlin SDK，移植认证、文件、分享和上传协议；SDK 源码：https://github.com/NihilDigit/pikpak-kotlin/tree/6e1e54869acc284a6f253cdcaf7963c082d4f490，MIT 许可见 pikpak-kotlin-LICENSE.txt。
 
 PikPak 图标裁切自 OpenList 文档中的官方页面截图：https://github.com/OpenListTeam/docs/blob/main/docs/.vuepress/public/img/drivers/pikpak.png；标识权利归 PikPak 所有。

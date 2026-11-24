@@ -4,10 +4,11 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:file_selector/file_selector.dart';
-import 'package:xml/xml.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import '../domain/models.dart';
+import '../domain/webdav.dart';
+import 'providers/webdav.dart';
 import '../download/transfer_http.dart';
 import '../upload/upload_manager.dart';
 import '../upload/upload_task.dart';
@@ -36,38 +37,25 @@ abstract class BackupTarget {
 bool isBackupName(String name) =>
     RegExp(r'^asterlink-backup-[a-zA-Z0-9_-]+\.json$').hasMatch(name);
 
-/// No redirects carry WebDAV credentials. All reads are streamed and bounded.
+/// Shares the WebDAV transport with the cloud list while retaining old jobs.
 class WebDavBackupTarget extends BackupTarget {
   WebDavBackupTarget({
     required String url,
     required this.username,
     required this.password,
     Dio? client,
-  }) : base = Uri.parse(url.endsWith('/') ? url : '$url/'),
-       dio = client ?? DioJsonHttp().dio {
-    require(
-      {'https', 'http'}.contains(base.scheme) &&
-          base.host.isNotEmpty &&
-          base.userInfo.isEmpty &&
-          !base.hasQuery &&
-          !base.hasFragment,
-      '请输入完整 WebDAV 目录地址，不含账号、查询参数或片段',
-    );
-  }
-  final Uri base;
+    WebDavClient? connection,
+    this.guard,
+  }) : location = WebDavLocation(url),
+       connection = connection ?? WebDavClient(client: client),
+       _ownsConnection = connection == null;
+  final WebDavLocation location;
   final String username, password;
-  final Dio dio;
-  Uri _uri(String name) {
-    require(
-      name.isNotEmpty &&
-          !name.contains('/') &&
-          !name.contains('\\') &&
-          name != '.' &&
-          name != '..',
-      '备份文件名无效',
-    );
-    return base.resolve(Uri.encodeComponent(name));
-  }
+  final WebDavClient connection;
+  final bool _ownsConnection;
+  final void Function()? guard;
+  Uri get base => location.base;
+  Uri _uri(String name) => location.uri(location.child('/', name));
 
   Future<Uint8List> _request(
     String method,
@@ -76,123 +64,35 @@ class WebDavBackupTarget extends BackupTarget {
     Map<String, String> headers = const {},
     int limit = backupSizeLimit,
     Set<int>? codes,
-  }) async {
-    RequestScope.checkpoint();
-    final cancel = CancelToken(), parent = RequestScope.current;
-    var finished = false;
-    parent?.whenCancel.then((_) {
-      if (!finished) cancel.cancel();
-    });
-    try {
-      final response = await dio.request<ResponseBody>(
-        uri.toString(),
-        data: data == null ? null : Stream.value(data),
-        cancelToken: cancel,
-        options: Options(
-          method: method,
-          responseType: ResponseType.stream,
-          followRedirects: false,
-          validateStatus: (_) => true,
-          headers: {
-            'Authorization':
-                'Basic ${base64Encode(utf8.encode('$username:$password'))}',
-            if (data != null) 'Content-Length': '${data.length}',
-            'Content-Type': method == 'PROPFIND'
-                ? 'application/xml; charset=utf-8'
-                : 'application/octet-stream',
-            ...headers,
-          },
-        ),
-      );
-      final code = response.statusCode ?? 0;
-      if (!(codes?.contains(code) ?? (code >= 200 && code < 300))) {
-        throw AppException(switch (code) {
-          401 => 'WebDAV 账号或密码错误',
-          403 => 'WebDAV 目录权限不足',
-          404 => 'WebDAV 目录或文件不存在',
-          507 => 'WebDAV 存储空间不足',
-          >= 300 && < 400 => 'WebDAV 地址发生重定向，请填写最终目录地址',
-          _ => 'WebDAV 请求失败（$code），请稍后重试',
-        });
-      }
-      final bytes = BytesBuilder(copy: false);
-      await for (final chunk in response.data!.stream) {
-        RequestScope.checkpoint();
-        require(bytes.length + chunk.length <= limit, 'WebDAV 返回内容过大');
-        bytes.add(chunk);
-      }
-      return bytes.takeBytes();
-    } finally {
-      finished = true;
-      cancel.cancel();
-    }
-  }
+  }) => connection.request(
+    method,
+    uri,
+    username: username,
+    password: password,
+    data: data == null ? null : () => Stream.value(data),
+    length: data?.length,
+    headers: headers,
+    limit: limit,
+    codes: codes,
+    guard: guard,
+  );
 
   @override
-  Future<List<BackupRemoteFile>> list() async {
-    final bytes = await _request(
-      'PROPFIND',
-      base,
-      headers: {'Depth': '1'},
-      data: Uint8List.fromList(
-        utf8.encode(
-          '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/></d:prop></d:propfind>',
-        ),
-      ),
-      limit: 2 * 1024 * 1024,
-      codes: {207},
-    );
-    final xml = utf8.decode(bytes);
-    require(
-      !RegExp(r'<!\s*(DOCTYPE|ENTITY)', caseSensitive: false).hasMatch(xml),
-      'WebDAV 目录响应不受支持',
-    );
-    final document = XmlDocument.parse(xml);
-    final files = <BackupRemoteFile>[];
-    for (final response in document.descendants.whereType<XmlElement>().where(
-      (e) => e.name.local == 'response',
-    )) {
-      final elements = response.descendants.whereType<XmlElement>().toList();
-      if (elements.any((e) => e.name.local == 'collection')) continue;
-      final href = elements
-          .where((e) => e.name.local == 'href')
-          .firstOrNull
-          ?.innerText;
-      if (href == null) continue;
-      final uri = base.resolve(href);
-      if (uri.origin != base.origin || uri.hasQuery || uri.hasFragment) {
-        continue;
-      }
-      final parent = base.pathSegments.where((s) => s.isNotEmpty).toList();
-      final segments = uri.pathSegments;
-      if (segments.length != parent.length + 1 ||
-          List.generate(
-            parent.length,
-            (i) => segments[i] == parent[i],
-          ).contains(false)) {
-        continue;
-      }
-      final name = segments.last;
-      if (!isBackupName(name) &&
-          !name.endsWith('.complete') &&
-          !name.startsWith('.asterlink-test-') &&
-          !name.endsWith('.json')) {
-        continue;
-      }
-      final size =
-          int.tryParse(
-            elements
-                    .where((e) => e.name.local == 'getcontentlength')
-                    .firstOrNull
-                    ?.innerText ??
-                '',
-          ) ??
-          0;
-      files.add(BackupRemoteFile(name, size));
-      require(files.length <= 10000, '此目录文件过多，请使用单独的备份目录');
-    }
-    return files;
-  }
+  Future<List<BackupRemoteFile>> list() async => [
+    for (final file in await connection.list(
+      location,
+      '/',
+      username: username,
+      password: password,
+      guard: guard,
+    ))
+      if (!file.isDirectory &&
+          (isBackupName(file.name) ||
+              file.name.endsWith('.complete') ||
+              file.name.startsWith('.asterlink-test-') ||
+              file.name.endsWith('.json')))
+        BackupRemoteFile(file.name, file.size),
+  ];
 
   @override
   Future<Uint8List> read(BackupRemoteFile file, {int limit = backupSizeLimit}) {
@@ -206,7 +106,7 @@ class WebDavBackupTarget extends BackupTarget {
       'PUT',
       _uri(name),
       data: bytes,
-      headers: {'If-None-Match': '*'},
+      headers: const {'If-None-Match': '*'},
       limit: 64 * 1024,
     );
   }
@@ -218,41 +118,16 @@ class WebDavBackupTarget extends BackupTarget {
       !(await list()).any((f) => f.name == '$name.complete'),
       '该备份已经发布，不能覆盖',
     );
-    // Generic WebDAV may leave a truncated object after a cancelled PUT.
-    // Only a locally staged UUID snapshot without a completion marker is retried.
     await _request('PUT', _uri(name), data: bytes, limit: 64 * 1024);
   }
 
-  Future<void> test() async {
-    await list();
-    final name = '.asterlink-test-${newId()}.json';
-    final bytes = Uint8List.fromList(utf8.encode(newId()));
-    var attempted = false;
-    try {
-      attempted = true;
-      await write(name, bytes);
-      require(
-        sha256.convert(await read(BackupRemoteFile(name, bytes.length))) ==
-            sha256.convert(bytes),
-        'WebDAV 回读内容不一致',
-      );
-    } finally {
-      if (attempted) {
-        // Cleanup owns its scope even if the capability test was cancelled.
-        await RequestScope().run(() async {
-          await _request(
-            'DELETE',
-            _uri(name),
-            limit: 64 * 1024,
-            codes: {200, 202, 204, 404},
-          );
-        }, inheritGuard: false);
-      }
-    }
-  }
+  Future<void> test() =>
+      connection.test(location, username: username, password: password);
 
   @override
-  void close() => dio.close(force: true);
+  void close() {
+    if (_ownsConnection) connection.close();
+  }
 }
 
 class CloudBackupTarget extends BackupTarget {

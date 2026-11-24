@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:asterlink/data/playback_store.dart';
 import 'dart:convert';
 import 'package:asterlink/playback/playback_state.dart';
+import 'package:asterlink/playback/subtitle_matching.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -3797,48 +3798,128 @@ void main() {
     expect(page.fixture.leases.values.where((n) => n == 0).length, 1);
   });
 
-  testWidgets(
-    'Subtitle import reads a private copy and exit preserves the original',
-    (tester) async {
-      final original = File('test/fixtures/player-external.srt').absolute;
-      final page = await render(
-        tester,
-        chooseSubtitle: () async => XFile(original.path),
-      );
-      // File I/O uses the real clock; the serialized subtitle commands and
-      // widget frames also need the test clock to drain their microtasks.
-      Future<void> drainFileWork(bool Function() complete) async {
-        for (var attempt = 0; attempt < 100 && !complete(); attempt++) {
-          await tester.runAsync(
-            () => Future<void>.delayed(const Duration(milliseconds: 20)),
-          );
-          await tester.pump();
+  for (final gbk in [false, true]) {
+    testWidgets(
+      '${gbk ? 'GBK' : 'UTF-8'} subtitle import reads a private copy and exit preserves the original',
+      (tester) async {
+        final fixtureBytes = [
+          ...ascii.encode('1\n00:00:00,000 --> 00:00:08,000\n'),
+          0xd6,
+          0xd0,
+          0xce,
+          0xc4,
+          0xd7,
+          0xd6,
+          0xc4,
+          0xbb,
+          10,
+        ];
+        Directory? input;
+        final File original;
+        if (gbk) {
+          input = (await tester.runAsync(
+            () => Directory.systemTemp.createTemp(
+              'asterlink-player-subtitle-import-',
+            ),
+          ))!;
+          addTearDown(() => removePlayerFixture(input!));
+          original = (await tester.runAsync(
+            () => File('${input!.path}/字幕.srt').writeAsBytes(fixtureBytes),
+          ))!;
+        } else {
+          original = File('test/fixtures/player-external.srt').absolute;
         }
-        expect(complete(), isTrue);
-      }
+        final page = await render(
+          tester,
+          chooseSubtitle: () async => XFile(original.path),
+        );
+        // File I/O uses the real clock; the serialized subtitle commands and
+        // widget frames also need the test clock to drain their microtasks.
+        Future<void> drainFileWork(bool Function() complete) async {
+          for (var attempt = 0; attempt < 100 && !complete(); attempt++) {
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 20)),
+            );
+            await tester.pump();
+          }
+          expect(complete(), isTrue);
+        }
 
-      await openSetting(tester, '字幕');
-      await tester.tap(find.text('加载字幕文件'));
-      await drainFileWork(() => page.fixture.current.state.track.subtitle.uri);
-      await tester.pumpAndSettle();
-      final staged = File.fromUri(
-        Uri.parse(page.fixture.current.state.track.subtitle.id),
+        await openSetting(tester, '字幕');
+        await tester.tap(find.text('加载字幕文件'));
+        await drainFileWork(
+          () => page.fixture.current.state.track.subtitle.uri,
+        );
+        await tester.pumpAndSettle();
+        final staged = File.fromUri(
+          Uri.parse(page.fixture.current.state.track.subtitle.id),
+        );
+        expect(staged.parent.path, page.directory.path);
+        await tester.runAsync(() async {
+          if (gbk) {
+            expect(
+              await staged.readAsString(),
+              '1\n00:00:00,000 --> 00:00:08,000\n中文字幕\n',
+            );
+            expect(await original.readAsBytes(), fixtureBytes);
+          } else {
+            expect(await staged.readAsBytes(), await original.readAsBytes());
+          }
+        });
+        await tap(tester, find.byTooltip('返回'));
+        var closed = false;
+        unawaited(page.fixture.controller.close().then((_) => closed = true));
+        await drainFileWork(() => closed);
+        await tester.pumpAndSettle();
+        expect(find.text('播放器已关闭'), findsOneWidget);
+        expect(page.device.finished, isTrue);
+        expect(await tester.runAsync(staged.exists), isFalse);
+        expect(await tester.runAsync(original.exists), isTrue);
+      },
+    );
+  }
+
+  for (final size in [const Size(393, 864), const Size(1280, 800)]) {
+    testWidgets('Cloud subtitle failure and retry remain visible at $size', (
+      tester,
+    ) async {
+      const subtitle = PlaybackSubtitle('caption', 'alternative.srt');
+      Directory? subtitles;
+      var fail = true;
+      final fixture = PlaybackFixture(
+        subtitlesFor: (_) => const [subtitle],
+        readSubtitle: (_, _, _) async {
+          if (fail) throw const AppException('无法识别字幕编码，请选择其他字幕');
+          return File(
+            '${subtitles!.path}/caption.srt',
+          ).writeAsString('1\n00:00:00,000 --> 00:00:08,000\n重试字幕\n');
+        },
       );
-      expect(staged.parent.path, page.directory.path);
-      await tester.runAsync(() async {
-        expect(await staged.readAsBytes(), await original.readAsBytes());
-      });
-      await tap(tester, find.byTooltip('返回'));
-      var closed = false;
-      unawaited(page.fixture.controller.close().then((_) => closed = true));
-      await drainFileWork(() => closed);
+      final page = await render(tester, suppliedFixture: fixture, size: size);
+      subtitles = page.directory;
+      await openSetting(tester, '字幕');
+      await tap(tester, find.text('alternative.srt'));
+      expect(find.text('字幕加载失败：无法识别字幕编码，请选择其他字幕'), findsOneWidget);
+      expect(fixture.controller.cloudSubtitleId, isNull);
+      await tester.pump(const Duration(seconds: 4));
+      expect(find.text('字幕加载失败：无法识别字幕编码，请选择其他字幕'), findsNothing);
+      await tap(tester, find.text('alternative.srt'));
+      expect(find.text('字幕加载失败：无法识别字幕编码，请选择其他字幕'), findsOneWidget);
+      fail = false;
+      await tester.tap(find.text('alternative.srt'));
+      for (var i = 0; i < 100 && fixture.controller.subtitleLoading; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
       await tester.pumpAndSettle();
-      expect(find.text('播放器已关闭'), findsOneWidget);
-      expect(page.device.finished, isTrue);
-      expect(await tester.runAsync(staged.exists), isFalse);
-      expect(await tester.runAsync(original.exists), isTrue);
-    },
-  );
+      expect(fixture.controller.cloudSubtitleId, subtitle.id);
+      expect(find.text('已加载字幕：alternative.srt'), findsOneWidget);
+      expect(fixture.current.state.playing, isTrue);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   for (final systemBack in [false, true]) {
     testWidgets(

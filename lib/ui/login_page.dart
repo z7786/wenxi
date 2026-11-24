@@ -28,6 +28,7 @@ import 'cloud_login_layout.dart';
 import 'loading_indicator.dart';
 import 'native_password_login_page.dart';
 import 'github_login_page.dart';
+import 'webdav_login_page.dart';
 import 'guangya_sms_login_page.dart';
 import 'quark_login_page.dart';
 import 'baidu_login_panel.dart';
@@ -167,6 +168,7 @@ class _LoginEntryPage extends StatelessWidget {
         final services = entry.services, platform = entry.platform;
         final owner = entry.owner;
         return switch (platform) {
+          CloudPlatform.webdav => WebDavLoginPage(services, accountId: owner),
           CloudPlatform.github => GitHubLoginPage(services, accountId: owner),
           CloudPlatform.xunlei ||
           CloudPlatform.ctfile ||
@@ -379,13 +381,21 @@ Future<void> accountMenu(
                 ListTile(
                   leading: const Icon(CupertinoIcons.slider_horizontal_3),
                   title: const Text('账号配置'),
-                  subtitle: const Text('查看与复制 Cookie、Token 等登录信息'),
+                  subtitle: Text(
+                    platform == CloudPlatform.webdav
+                        ? '查看服务器地址与用户名'
+                        : '查看与复制 Cookie、Token 等登录信息',
+                  ),
                   onTap: () => Navigator.pop(context, 'info'),
                 ),
                 ListTile(
                   leading: const Icon(CupertinoIcons.arrow_clockwise),
                   title: Text(
-                    platform == CloudPlatform.github ? '刷新账号信息' : '刷新账号容量',
+                    platform == CloudPlatform.webdav
+                        ? '检查连接'
+                        : platform == CloudPlatform.github
+                        ? '刷新账号信息'
+                        : '刷新账号容量',
                   ),
                   onTap: () => Navigator.pop(context, 'refresh'),
                 ),
@@ -404,7 +414,9 @@ Future<void> accountMenu(
                 ),
                 ListTile(
                   leading: const Icon(CupertinoIcons.doc_on_clipboard),
-                  title: const Text('手动填写登录信息'),
+                  title: Text(
+                    platform == CloudPlatform.webdav ? '编辑连接设置' : '手动填写登录信息',
+                  ),
                   onTap: () => Navigator.pop(context, 'manual'),
                 ),
                 if (services.vault.credentialFor(platform, accountId) != null)
@@ -477,7 +489,9 @@ Future<void> accountMenu(
       await Navigator.push<void>(
         context,
         MaterialPageRoute(
-          builder: (_) => platform == CloudPlatform.github
+          builder: (_) => platform == CloudPlatform.webdav
+              ? WebDavLoginPage(services, accountId: accountId)
+              : platform == CloudPlatform.github
               ? GitHubLoginPage(services, accountId: accountId)
               : ManualLoginPage(services, platform),
         ),

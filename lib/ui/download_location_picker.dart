@@ -93,11 +93,12 @@ class DownloadLocationField extends StatefulWidget {
     this.enabled = true,
     this.compact = false,
     this.onChoosing,
+    this.showDefaultOption = true,
   });
   final AppServices services;
   final DownloadDestinationSelection selection;
   final ValueChanged<DownloadDestinationSelection> onChanged;
-  final bool enabled, compact;
+  final bool enabled, compact, showDefaultOption;
   final ValueChanged<bool>? onChoosing;
 
   @override
@@ -167,7 +168,7 @@ class _DownloadLocationFieldState extends State<DownloadLocationField> {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-        if (widget.compact) ...[
+        if (widget.compact && widget.showDefaultOption) ...[
           const PopupMenuDivider(),
           CheckedPopupMenuItem<int>(
             key: const Key('download-location-default'),
@@ -206,7 +207,7 @@ class _DownloadLocationFieldState extends State<DownloadLocationField> {
             ),
           ],
         ),
-        if (!widget.compact)
+        if (!widget.compact && widget.showDefaultOption)
           AppSwitchListTile(
             key: const Key('download-location-default'),
             contentPadding: EdgeInsets.zero,

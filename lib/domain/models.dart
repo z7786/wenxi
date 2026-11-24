@@ -51,7 +51,8 @@ enum CloudPlatform {
     'github.com',
     'raw.githubusercontent.com',
     'codeload.github.com',
-  ]);
+  ]),
+  webdav('WebDAV', 'WebDAV', 'WebDAV', 'webdav', []);
 
   const CloudPlatform(
     this.key,
@@ -67,7 +68,8 @@ enum CloudPlatform {
   bool get supportsFamilyCloud =>
       this == tianyi || this == c139 || this == wopan;
   bool get supportsPersonalSpaces => this == aliyun || this == ctfile;
-  bool get supportsShareParsing => this != ilanzou && this != weiyun;
+  bool get supportsShareParsing =>
+      this != ilanzou && this != weiyun && this != webdav;
   bool get shareRequiresAccount => !{
     baidu,
     lanzou,
@@ -83,7 +85,11 @@ enum CloudPlatform {
     github,
   }.contains(this);
   bool get supportsSharing =>
-      this != ilanzou && this != weiyun && this != wopan && this != github;
+      this != ilanzou &&
+      this != weiyun &&
+      this != wopan &&
+      this != github &&
+      this != webdav;
   String get shareUnavailableMessage => '$label暂不支持分享解析，请在网盘页登录后浏览个人文件';
   bool get exactFileSize =>
       this != ilanzou && this != lanzou && this != feijipan;
@@ -401,6 +407,8 @@ class BrowseSession {
       ? mode == BrowseMode.personal && meta('githubAuthenticated') == 'true'
       : mode == BrowseMode.personal && !isFamily;
   Map<String, String> get spaceMetadata => {
+    if (platform == CloudPlatform.webdav && meta('webdavRoot').isNotEmpty)
+      'webdavRoot': meta('webdavRoot'),
     if (isFamily) 'familyId': familyId,
     if (isFamily) 'familyName': meta('familyName'),
     if (personalSpaceId.isNotEmpty) 'driveId': personalSpaceId,

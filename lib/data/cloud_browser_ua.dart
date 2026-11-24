@@ -23,6 +23,7 @@ class CloudBrowserUa {
     CloudPlatform.baidu,
     CloudPlatform.quark,
     CloudPlatform.github,
+    CloudPlatform.webdav,
     // These connectors already manage their own per-parse identities.
     CloudPlatform.feijipan,
   }.contains(platform);

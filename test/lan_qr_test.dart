@@ -29,6 +29,26 @@ void main() {
   });
 
   test(
+    'Shared and link-local IPv4 addresses work in connection and file QR',
+    () {
+      for (final host in ['100.64.12.5', '100.127.255.254', '169.254.12.5']) {
+        final base = Uri(scheme: 'http', host: host, port: 53124);
+        final qr = LanConnectionQr(
+          address: base,
+          deviceId: device,
+          code: '001234',
+        );
+        expect(
+          (LanQrTarget.parse(qr.encode()) as LanConnectionQr).address,
+          base,
+        );
+        final url = base.replace(path: '/s/$device');
+        expect((LanQrTarget.parse(url.toString()) as LanShareQr).address, url);
+      }
+    },
+  );
+
+  test(
     'Unrelated, ambiguous and malformed QR contents are rejected locally',
     () {
       final valid = Uri.parse(connection.encode());

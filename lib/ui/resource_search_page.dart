@@ -13,6 +13,7 @@ import 'common.dart';
 import 'skeleton_loading.dart';
 import 'resource_search_bar.dart';
 import 'resource_preferences.dart';
+import 'resource_content_details.dart';
 
 class ResourceSearchPage extends StatefulWidget {
   const ResourceSearchPage(
@@ -49,6 +50,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   bool _waitingUpdate = false;
   bool _visibilityScheduled = false;
   String? opening;
+  bool _showingContentDetails = false;
   bool advanced = false, showTop = false;
   final _tabKeys = <String, GlobalKey>{};
   double _swipeDistance = 0;
@@ -105,6 +107,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   void scheduleVisibility() {
     if (!mounted ||
         !widget.active ||
+        _showingContentDetails ||
         search.phase != ResourceSearchPhase.idle ||
         search.linkChecks == null ||
         _visibilityScheduled) {
@@ -115,6 +118,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
       _visibilityScheduled = false;
       if (!mounted ||
           !widget.active ||
+          _showingContentDetails ||
           opening != null ||
           WidgetsBinding.instance.lifecycleState != null &&
               WidgetsBinding.instance.lifecycleState !=
@@ -273,9 +277,29 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
               widget.services.control.cloudEnabled(hit.platform!)) ||
       widget.services.sources.candidates(hit.url).isNotEmpty;
 
-  Future<void> open(ResourceSearchHit hit) async {
+  Future<void> showContent(ResourceSearchHit hit) async {
+    if (opening != null || _showingContentDetails) return;
+    _showingContentDetails = true;
+    search.linkChecks?.clearVisible();
+    try {
+      final selected = await showResourceContentDetails(
+        context,
+        hit: hit,
+        copyText: widget.services.copyText,
+        canOpen: canOpen,
+      );
+      if (selected != null && mounted) {
+        await open(selected, chooseLink: false);
+      }
+    } finally {
+      _showingContentDetails = false;
+      if (mounted) scheduleVisibility();
+    }
+  }
+
+  Future<void> open(ResourceSearchHit hit, {bool chooseLink = true}) async {
     if (opening != null) return;
-    final selected = await _selectLink(hit);
+    final selected = chooseLink ? await _selectLink(hit) : hit;
     if (selected == null) return;
     if (!canOpen(selected)) {
       await external(selected);
@@ -782,7 +806,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                           child: InkWell(
                             onTap: opening != null
                                 ? null
-                                : () => unawaited(open(hit)),
+                                : () => unawaited(showContent(hit)),
                             child: Padding(
                               padding: const EdgeInsets.all(16),
                               child: Column(
@@ -875,7 +899,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                                         )
                                       else
                                         Text(
-                                          canOpen(hit) ? '打开资源' : '浏览器打开',
+                                          '查看简介',
                                           style: TextStyle(
                                             fontSize: 12,
                                             color: themeAccent(context),

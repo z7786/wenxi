@@ -99,6 +99,7 @@ class AppSettings {
   final bool warnOnMobileDataDownload;
   static const profiles = {
     'github': ('GitHub', 8),
+    'webdav': ('WebDAV', 8),
     'pikpak': ('PikPak网盘', 8),
     'feijipan': ('小飞机网盘', 8),
     'ctfile': ('城通网盘', 8),
@@ -123,6 +124,7 @@ class AppSettings {
       profile == 'baidu_preview' || profiles.containsKey(profile)
       ? profile
       : switch (platform) {
+          CloudPlatform.webdav => 'webdav',
           CloudPlatform.github => 'github',
           CloudPlatform.pikpak => 'pikpak',
           CloudPlatform.feijipan => 'feijipan',
