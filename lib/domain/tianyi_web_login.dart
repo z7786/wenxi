@@ -3,7 +3,17 @@ import '../core/json.dart';
 
 class TianyiWebLogin {
   static const loginUrl =
-      'https://m.cloud.189.cn/udb/udb_login.jsp?pageId=1&pageKey=normal&clientType=wap&redirectURL=https%3A%2F%2Fcloud.189.cn%2Fweb%2Fredirect.html';
+      'https://cloud.189.cn/api/portal/loginUrl.action?redirectURL=https%3A%2F%2Fcloud.189.cn%2Fweb%2Fredirect.html&defaultSaveName=3&defaultSaveNameCheck=uncheck';
+
+  static const identityUrl =
+      'https://cloud.189.cn/api/open/user/getUserInfoForPortal.action';
+  // Only scopes which can actually send cookies to the portal identity API.
+  // The WAP callback and /web path can hold unrelated same-name sessions.
+  static const cookieUrls = [
+    identityUrl,
+    'https://cloud.189.cn/api/',
+    'https://cloud.189.cn/',
+  ];
 
   static const origins = {
     'https://cloud.189.cn',
@@ -71,17 +81,25 @@ class TianyiWebLogin {
       'browserId': browserId(decode(raw)['browserId']),
   };
 
-  static const mobileFormScript = r'''(() => {
+  static const formScript = r'''(() => {
     if (window.top !== window || location.origin !== 'https://open.e.189.cn' ||
-        location.pathname !== '/api/logbox/separate/wap/index.html' || window.__asterTianyiForm) return;
+        location.pathname !== '/api/logbox/separate/web/index.html' ||
+        new URL(location.href).searchParams.get('appId') !== 'cloud' || window.__asterTianyiForm) return;
     window.__asterTianyiForm = true;
-    let observer;
+    let observer, accountSelected = false;
+    const visible = el => el && el.getClientRects().length && !el.disabled;
     const select = () => {
-      const button = [...document.querySelectorAll('a,button,[role="button"]')].find(el =>
-        ['其它方式登录', '其他方式登录'].includes(el.textContent?.trim()) && el.getClientRects().length && !el.disabled);
-      if (!button) return;
-      observer?.disconnect();
-      button.click();
+      const sms = document.getElementById('j-jump-sms');
+      if (visible(sms)) {
+        observer.disconnect();
+        sms.click();
+        return;
+      }
+      const account = document.getElementById('tab-pw');
+      if (!accountSelected && visible(account)) {
+        accountSelected = true;
+        account.click();
+      }
     };
     observer = new MutationObserver(select);
     observer.observe(document, {childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden']});

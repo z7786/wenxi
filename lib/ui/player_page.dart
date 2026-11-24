@@ -136,6 +136,8 @@ class _PlayerPageState extends State<PlayerPage>
   Duration _seekStart = Duration.zero;
   double _dragX = 0, _dragY = 0, _viewportWidth = 1, _viewportHeight = 1;
   double _verticalInitial = 0, _verticalTarget = 0;
+  double? _verticalStartX;
+  static const _verticalSideFraction = .3;
   bool _brightnessDrag = false, _verticalActive = false;
   final _surfaceTouches = <int, Offset>{};
   bool _multiTouch = false, _pinching = false, _pinchChanged = false;
@@ -1486,8 +1488,13 @@ class _PlayerPageState extends State<PlayerPage>
   void _verticalStart(DragStartDetails details) {
     _clearTapSequence();
     if (_multiTouch || locked || !controller.ready) return;
+    // Select by pointer-down position: crossing a boundary before the drag
+    // recognizer starts must not turn a middle touch into a side adjustment.
+    final startX = _verticalStartX ?? details.localPosition.dx;
+    final sideWidth = _viewportWidth * _verticalSideFraction;
+    if (startX >= sideWidth && startX <= _viewportWidth - sideWidth) return;
     _verticalActive = true;
-    _brightnessDrag = details.localPosition.dx < _viewportWidth / 2;
+    _brightnessDrag = startX < sideWidth;
     _brightnessFolder = controller.folderKey;
     _brightnessChanged = false;
     _verticalInitial = _brightnessDrag
@@ -1543,6 +1550,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _verticalEnd() {
+    _verticalStartX = null;
     if (_multiTouch) return;
     _volumeTimer?.cancel();
     _volumeTimer = null;
@@ -2919,7 +2927,7 @@ class _PlayerPageState extends State<PlayerPage>
             child: Text(
               [
                 '拖动进度条可快速定位播放位置。',
-                '横向滑动调整进度，左侧上下滑动调亮度，右侧调音量；长按加速，按住上滑锁定、下滑取消。',
+                '横向滑动调整进度，左侧 30% 上下滑动调亮度，右侧 30% 调音量；中间可双指缩放。长按加速，按住上滑锁定、下滑取消。',
                 if (Platform.isWindows || Platform.isMacOS)
                   '键盘：空格播放/暂停，←/→跳转，↑/↓音量，F 全屏，Esc 返回，M 静音。',
                 if (Platform.isWindows) '鼠标中键切换全屏；逗号增加 0.5 倍速，句号降低 0.5 倍速。',
@@ -3696,6 +3704,8 @@ class _PlayerPageState extends State<PlayerPage>
                                   }
                                 },
                                 onVerticalDragStart: _verticalStart,
+                                onVerticalDragDown: (details) =>
+                                    _verticalStartX = details.localPosition.dx,
                                 onVerticalDragUpdate: _verticalUpdate,
                                 onVerticalDragEnd: (_) => _verticalEnd(),
                                 onVerticalDragCancel: _verticalEnd,

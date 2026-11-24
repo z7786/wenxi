@@ -1496,7 +1496,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         await web.evaluateJavascript(source: desktopLoginViewportScript);
       }
       if (_target.platform == CloudPlatform.tianyi && _current(web)) {
-        await web.evaluateJavascript(source: TianyiWebLogin.mobileFormScript);
+        await web.evaluateJavascript(source: TianyiWebLogin.formScript);
       }
       final attempt = widget.passwordLogin;
       if (attempt != null && _current(web)) {
@@ -1589,7 +1589,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         ),
       if (_target.platform == CloudPlatform.tianyi)
         UserScript(
-          source: TianyiWebLogin.mobileFormScript,
+          source: TianyiWebLogin.formScript,
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
           forMainFrameOnly: true,
           allowedOriginRules: const {'https://open.e.189.cn'},
@@ -1692,12 +1692,9 @@ class _WebLoginPageState extends State<WebLoginPage>
           _target.platform == CloudPlatform.tianyi &&
           action.isForMainFrame &&
           TianyiWebLogin.isCompletionLanding(url?.toString())) {
-        // The official mobile SSO callback has already stored its HttpOnly
-        // cookies. Its home/redirect document would send this mobile UA to a
-        // client promotion page. Validate the native jar before that hop.
+        // Let the portal callback and landing finish before the normal
+        // load/history polling reads their native cookies and browser binding.
         diagnostics.record('completion_redirect', stage: 'read_credentials');
-        unawaited(_poll(userInitiated: true));
-        return NavigationActionPolicy.CANCEL;
       }
       return active &&
               url != null &&

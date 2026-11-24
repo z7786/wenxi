@@ -186,10 +186,10 @@ test('desktop viewport stays wide and zoomable after a provider rewrites it', ()
   assert.equal(nested.content, 'width=device-width');
 });
 
-function viewportScene(hostname, hash = '#/oauth/login', protocol = 'https:') {
+function viewportScene(hostname, hash = '#/oauth/login', protocol = 'https:', pathname = '/') {
   const tags = [{name: 'viewport', content: 'width=1100,user-scalable=no'}];
   const attributes = new Set(), listeners = new Map();
-  const location = {protocol, hostname, hash, pathname: '/'};
+  const location = {protocol, hostname, hash, pathname, origin: `${protocol}//${hostname}`};
   const document = {
     head: {
       querySelectorAll: () => tags.filter(tag => tag.name === 'viewport'),
@@ -230,6 +230,19 @@ test('Guangya layout is limited to its trusted HTTPS login route', () => {
   }
   assert.equal(viewportScene('www.guangyapan.com', '#/oauth/login', 'http:').tags[0].content,
     'width=1100,user-scalable=no');
+});
+
+test('Tianyi portal form stays within a 400px zoomable viewport on phones', () => {
+  const route = '/api/logbox/separate/web/index.html';
+  const page = viewportScene('open.e.189.cn', '', 'https:', route);
+  assert.ok(page.tags[0].content.includes('width=400'));
+  assert.ok(page.tags[0].content.includes('user-scalable=yes'));
+  assert.ok(!page.tags[0].content.includes('initial-scale=1'));
+  page.location.pathname = '/other'; page.change();
+  assert.ok(page.tags[0].content.includes('width=1280'));
+  for (const host of ['open.e.189.cn.invalid', 'cloud.189.cn', 'www.alipan.com']) {
+    assert.ok(viewportScene(host, '', 'https:', route).tags[0].content.includes('width=1280'));
+  }
 });
 
 function storageScene({local = {}, session = {}, cookie = '', origin = 'https://www.ilanzou.com'} = {}) {
@@ -671,47 +684,53 @@ test('Tianyi ignores unrelated requests, frames and unsafe browser identifiers',
   assert.deepEqual(page.read(), {browserId: ''});
 });
 
-function tianyiMobileForm({origin = 'https://open.e.189.cn', pathname = '/api/logbox/separate/wap/index.html', nested = false} = {}) {
+function tianyiPortalForm({origin = 'https://open.e.189.cn', pathname = '/api/logbox/separate/web/index.html', appId = 'cloud', nested = false} = {}) {
   const window = {};
   window.top = nested ? {} : window;
-  const nodes = [], timers = [], observers = [];
+  const nodes = new Map(), timers = [], observers = [];
   class Observer {
     constructor(fn) { this.fn = fn; this.closed = false; observers.push(this); }
     observe() {}
     disconnect() { this.closed = true; }
   }
-  const context = vm.createContext({window, location: {origin, pathname}, document: {querySelectorAll: () => nodes}, MutationObserver: Observer, setTimeout: (fn, delay) => timers.push({fn, delay})});
-  const run = () => vm.runInContext(scripts.tianyi.mobileForm, context);
+  const context = vm.createContext({window, location: {origin, pathname, href: `${origin}${pathname}?appId=${appId}`}, URL, document: {getElementById: id => nodes.get(id)}, MutationObserver: Observer, setTimeout: (fn, delay) => timers.push({fn, delay})});
+  const run = () => vm.runInContext(scripts.tianyi.form, context);
   return {nodes, timers, observers, run};
 }
 
-test('Tianyi mobile entry opens the account form once without submitting login or SMS', () => {
-  const page = tianyiMobileForm();
-  let modeClicks = 0, submissions = 0;
-  page.nodes.push({textContent: '登录', getClientRects: () => [1], click: () => submissions++});
-  page.nodes.push({textContent: '获取验证码', getClientRects: () => [1], click: () => submissions++});
+test('Tianyi portal entry opens the SMS form once without submitting login or requesting codes', () => {
+  const page = tianyiPortalForm();
+  let accountClicks = 0, smsClicks = 0, submissions = 0;
+  page.nodes.set('j-login', {getClientRects: () => [1], click: () => submissions++});
+  page.nodes.set('j-msg-verifyCode', {getClientRects: () => [1], click: () => submissions++});
+  page.nodes.set('j-agreement-box', {getClientRects: () => [1], click: () => submissions++});
+  page.nodes.set('tab-pw', {getClientRects: () => [1], click: () => accountClicks++});
+  page.nodes.set('j-jump-sms', {getClientRects: () => accountClicks ? [1] : [], click: () => smsClicks++});
   page.run();
+  assert.equal(accountClicks, 1);
+  assert.equal(smsClicks, 0);
   assert.equal(submissions, 0);
-  page.nodes.push({textContent: '其它方式登录', getClientRects: () => [1], click: () => modeClicks++});
   page.observers[0].fn();
-  assert.equal(modeClicks, 1);
+  assert.equal(smsClicks, 1);
   assert.equal(page.observers[0].closed, true);
   page.run();
-  assert.equal(modeClicks, 1);
+  assert.equal(accountClicks, 1);
+  assert.equal(smsClicks, 1);
   assert.equal(submissions, 0);
   assert.equal(page.timers[0].delay, 15000);
   page.timers[0].fn();
 });
 
-test('Tianyi mobile form selection stays within its official top-level login page', () => {
-  for (const options of [{origin: 'https://open.e.189.cn.attacker.invalid'}, {origin: 'http://open.e.189.cn'}, {pathname: '/api/logbox/separate/web/index.html'}, {nested: true}]) {
-    const page = tianyiMobileForm(options);
+test('Tianyi SMS form selection stays within the official cloud portal login page', () => {
+  for (const options of [{origin: 'https://open.e.189.cn.attacker.invalid'}, {origin: 'http://open.e.189.cn'}, {pathname: '/api/logbox/separate/wap/index.html'}, {appId: 'another-app'}, {nested: true}]) {
+    const page = tianyiPortalForm(options);
     page.run();
     assert.equal(page.observers.length, 0);
   }
-  const page = tianyiMobileForm();
+  const page = tianyiPortalForm();
   let clicks = 0;
-  page.nodes.push({textContent: '其它方式登录', getClientRects: () => [], click: () => clicks++});
+  page.nodes.set('tab-pw', {getClientRects: () => [], click: () => clicks++});
+  page.nodes.set('j-jump-sms', {getClientRects: () => [1], disabled: true, click: () => clicks++});
   page.run();
   assert.equal(clicks, 0);
 });

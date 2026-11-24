@@ -18,26 +18,27 @@ const _identity =
 
 void main() {
   test(
-    'Tianyi keeps mobile login and post-login pages inside mobile origins',
+    'Tianyi web login uses the portal callback and its API cookie scope',
     () {
       final target = WebLoginTarget.targets[_cloud]!;
       final login = Uri.parse(target.url);
-      expect(login.host, 'm.cloud.189.cn');
-      expect(login.path, '/udb/udb_login.jsp');
-      expect(login.queryParameters['clientType'], 'wap');
-      expect(login.queryParameters['pageKey'], 'normal');
+      expect(login.host, 'cloud.189.cn');
+      expect(login.path, '/api/portal/loginUrl.action');
+      expect(login.queryParameters['defaultSaveName'], '3');
+      expect(login.queryParameters['defaultSaveNameCheck'], 'uncheck');
       expect(
         login.queryParameters['redirectURL'],
         'https://cloud.189.cn/web/redirect.html',
       );
-      expect(target.desktopMode, false);
+      expect(target.desktopMode, true);
+      expect(target.userAgent, WebLoginTarget.desktopUserAgent);
       for (final page in [
         'https://m.cloud.189.cn/main.action?menu=true',
         'https://h5.cloud.189.cn/main.html',
       ]) {
         expect(TianyiWebLogin.trusted(page), true);
         expect(target.cookieUrls(page).first, _identity);
-        expect(target.cookieUrls(page), contains(page.split('?').first));
+        expect(target.cookieUrls(page), TianyiWebLogin.cookieUrls);
       }
       expect(TianyiWebLogin.trusted('https://open.e.189.cn/'), false);
       expect(
@@ -48,7 +49,7 @@ void main() {
   );
 
   test(
-    'Tianyi completes before mobile home promotion, after the SSO callback',
+    'Tianyi identifies post-login landings without treating a callback as completion',
     () {
       for (final url in [
         'https://cloud.189.cn/web/redirect.html',
@@ -286,6 +287,58 @@ void main() {
       expect(vault.credential(_cloud)!.primary, 'COOKIE_LOGIN_USER=retry');
     });
   });
+
+  test(
+    'Tianyi rejects expired portal cookies without replacing the account and allows a new session',
+    () async {
+      final vault = Vault(StateStore.memory());
+      final previous = Credential('previous', {
+        'primary': 'COOKIE_LOGIN_USER=previous',
+      }, updatedAt: 1);
+      await vault.putCredential(_cloud, previous);
+      final http = FakeHttp((request) {
+        if (request.headers['Cookie'] == 'COOKIE_LOGIN_USER=expired') {
+          return jsonResponse({'errorCode': 'InvalidSessionKey'}, 400);
+        }
+        if (request.uri.path.endsWith('/getUserInfoForPortal.action')) {
+          return jsonResponse({
+            'res_code': 0,
+            'userId': 'fixture-user',
+            'loginName': 'fixture-name',
+          });
+        }
+        if (request.uri.path.endsWith('/getUserSizeInfo.action')) {
+          return jsonResponse({
+            'res_code': 0,
+            'cloudCapacityInfo': {'totalSize': 100, 'usedSize': 30},
+          });
+        }
+        throw StateError('Unexpected Tianyi route');
+      });
+      final login = AccountLoginService(
+        vault,
+        (_, _) async => const CloudAccount('unused'),
+        webAuthenticators: {_cloud: TianyiConnector(http).authenticate},
+      );
+      await expectLater(
+        login.submitWeb(_cloud, 'COOKIE_LOGIN_USER=expired'),
+        throwsA(
+          isA<AccountLoginRequired>().having(
+            (error) => error.message,
+            'message',
+            contains('登录已失效'),
+          ),
+        ),
+      );
+      expect(vault.credential(_cloud)!.sameAs(previous), isTrue);
+      final result = await login.submitWeb(
+        _cloud,
+        'COOKIE_LOGIN_USER=portal-retry',
+      );
+      expect(result.credential.primary, 'COOKIE_LOGIN_USER=portal-retry');
+      expect(vault.credential(_cloud)!.primary, result.credential.primary);
+    },
+  );
 
   test('Browser metadata never makes an incomplete Cookie a valid account', () {
     for (final value in ['', 'SSO_TOKEN=not-a-cloud-session']) {

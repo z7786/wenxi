@@ -747,6 +747,95 @@ void main() {
   );
 
   testWidgets(
+    'Vertical gestures use the outer 30 percent and keep the middle free for pinch',
+    (tester) async {
+      final page = await _render(tester);
+      final controller = page.fixture.controller;
+      final bounds = tester.getRect(find.byKey(_surface));
+      final position = controller.state.position;
+      for (final fraction in [.31, .4, .5, .6, .69]) {
+        await tester.dragFrom(
+          Offset(bounds.left + bounds.width * fraction, bounds.center.dy),
+          const Offset(0, -90),
+        );
+        await tester.pumpAndSettle();
+        expect(page.device.brightness, .5, reason: 'Middle swipe at $fraction');
+        expect(
+          controller.state.volume,
+          100,
+          reason: 'Middle swipe at $fraction',
+        );
+        expect(controller.state.position, position);
+      }
+      await tester.dragFrom(
+        Offset(bounds.left + bounds.width * .29, bounds.center.dy),
+        const Offset(0, -90),
+      );
+      await tester.pumpAndSettle();
+      expect(page.device.brightness, greaterThan(.5));
+      final brightness = page.device.brightness;
+      await tester.dragFrom(
+        Offset(bounds.left + bounds.width * .71, bounds.center.dy),
+        const Offset(0, 90),
+      );
+      await tester.pumpAndSettle();
+      expect(controller.state.volume, lessThan(100));
+      final volume = controller.state.volume;
+      final first = await tester.startGesture(
+        bounds.center - const Offset(40, 0),
+        pointer: 1,
+      );
+      await first.moveBy(const Offset(0, -45));
+      await tester.pump();
+      expect(page.device.brightness, brightness);
+      expect(controller.state.volume, volume);
+      final second = await tester.startGesture(
+        bounds.center + const Offset(40, 0),
+        pointer: 2,
+      );
+      await first.moveBy(const Offset(-30, 0));
+      await second.moveBy(const Offset(30, 0));
+      await tester.pump();
+      expect(controller.preferences.videoScale, greaterThan(1));
+      expect(page.device.brightness, brightness);
+      expect(controller.state.volume, volume);
+      await first.up();
+      await second.up();
+      await tester.pumpAndSettle();
+      expect(controller.state.position, position);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'A diagonal swipe keeps the control zone selected at pointer down',
+    (tester) async {
+      final page = await _render(tester);
+      final bounds = tester.getRect(find.byKey(_surface));
+      final controller = page.fixture.controller;
+      final middle = await tester.startGesture(
+        Offset(bounds.left + bounds.width * .32, bounds.center.dy),
+      );
+      await middle.moveBy(const Offset(-18, -45));
+      await middle.moveBy(const Offset(0, -60));
+      await middle.up();
+      await tester.pumpAndSettle();
+      expect(page.device.brightness, .5);
+      expect(controller.state.volume, 100);
+      final side = await tester.startGesture(
+        Offset(bounds.left + bounds.width * .28, bounds.center.dy),
+      );
+      await side.moveBy(const Offset(18, -45));
+      await side.moveBy(const Offset(0, -60));
+      await side.up();
+      await tester.pumpAndSettle();
+      expect(page.device.brightness, greaterThan(.5));
+      expect(controller.state.volume, 100);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'A second finger cancels seeking and suppresses the remaining finger',
     (tester) async {
       final page = await _render(tester);

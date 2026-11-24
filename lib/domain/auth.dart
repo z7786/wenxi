@@ -893,8 +893,6 @@ class WebLoginTarget {
         'https://h5.cloud.189.cn/',
         'https://api.cloud.189.cn/',
       ],
-      userAgent: mobileUserAgent,
-      desktopMode: false,
       clearCookieDomains: ['https://open.e.189.cn/'],
     ),
     CloudPlatform.ilanzou: WebLoginTarget(
@@ -1083,6 +1081,7 @@ class WebLoginTarget {
           Uri.parse(value!).origin == XunleiWebLogin.storageOrigin);
 
   List<String> cookieUrls(String? page) {
+    if (platform == CloudPlatform.tianyi) return TianyiWebLogin.cookieUrls;
     final uri = Uri.tryParse(page ?? '');
     return {
       if (platform == CloudPlatform.lanzou) ...[
@@ -1090,8 +1089,6 @@ class WebLoginTarget {
         'https://pc.woozooo.com/doupload.php',
         'https://up.woozooo.com/mydisk.php',
       ],
-      if (platform == CloudPlatform.tianyi)
-        'https://cloud.189.cn/api/open/user/getUserInfoForPortal.action',
       if (platform == CloudPlatform.ctfile)
         'https://api.ctfile.com/v4/user/auth/exchange-token',
       // Prefer the cookies the account API receives, including HttpOnly cookies
