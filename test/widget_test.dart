@@ -1268,9 +1268,8 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
     }
-    // Time sorting now reads both folders to inspect their descendants.
-    expect(http.calls, hasLength(2));
-    expect(http.calls.every((call) => call.method == 'GET'), isTrue);
+    // Sorting uses the already loaded metadata without child-folder requests.
+    expect(http.calls, isEmpty);
     expect(tester.takeException(), isNull);
   });
 
