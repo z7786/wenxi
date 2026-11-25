@@ -1,5 +1,15 @@
 # AsterLink local patch
 
+## Test process reference buffers
+
+Flutter test processes allocate a fresh debug reference buffer and ignore the
+hot-restart pointer file. Process IDs can be reused, leaving an address from a
+dead process in the temporary file; dereferencing it can crash the test runner.
+Normal application debug hot-restarts retain the existing process buffer, and
+release/profile behavior is unchanged. `test/native_reference_holder_test.dart`
+uses isolated Dart child processes to verify a stale address is ignored and a
+live process buffer remains available across an isolate restart.
+
 ## Optional property reads
 
 Free the allocated property name when `mpv_get_property_string` returns null.
