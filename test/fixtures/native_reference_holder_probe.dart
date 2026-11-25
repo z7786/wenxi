@@ -31,8 +31,9 @@ Future<void> main(List<String> arguments) async {
     // invalid fixture in this child process so a regression cannot crash tests.
     await file.writeAsString('1');
     final references = await initialize();
-    if (references.isNotEmpty)
+    if (references.isNotEmpty) {
       throw StateError('Stale pointer reported as live');
+    }
     final reference = calloc<Int64>();
     try {
       await NativeReferenceHolder.instance.add(reference);
