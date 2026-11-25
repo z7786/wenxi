@@ -1571,6 +1571,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         : null,
     initialSettings:
         webSettings(
+            cloud: _target.platform,
             userAgent: _target.userAgent,
             desktopMode: _target.desktopMode,
             isPopup: popup != null,
@@ -1591,7 +1592,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         UserScript(
           source: TianyiWebLogin.formScript,
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-          forMainFrameOnly: true,
+          forMainFrameOnly: false,
           allowedOriginRules: const {'https://open.e.189.cn'},
         ),
       if (_target.platform == CloudPlatform.tianyi)

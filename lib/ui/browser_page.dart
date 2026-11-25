@@ -23,7 +23,6 @@ import '../domain/public_share_route.dart';
 import '../domain/github.dart';
 import '../domain/settings.dart';
 import '../domain/cloud_file_time.dart';
-import '../data/cloud_folder_dates.dart';
 import '../diagnostics/app_log.dart';
 import 'app_popup_menu.dart';
 import 'app_context_menu.dart';
@@ -131,34 +130,6 @@ class _BrowserPageState extends State<BrowserPage> {
   late DateTime _timeReference;
   // CloudFile is immutable. Reuse pinyin keys across selection/menu rebuilds;
   // weak keys let discarded directory and search results leave memory.
-  late final _folderDates = CloudFolderDates(
-    read: (session, parent, cursor) =>
-        widget.services.cloud.listPage(session, parent, cursor: cursor),
-    directoryId: widget.services.cloud.directoryId,
-    validate: (captured) {
-      require(
-        mounted && identical(captured, session) && sort == 'date' && !loading,
-        '目录已变化',
-      );
-      _checkAccount();
-    },
-  )..addListener(_folderDatesChanged);
-  void _folderDatesChanged() {
-    if (mounted) setState(() => _displayInputs = null);
-  }
-
-  DateTime? _fileDate(CloudFile file) =>
-      (file.isDirectory
-          ? _folderDates.dates[widget.services.cloud.directoryId(session, file)]
-          : null) ??
-      cloudFileSortDate(file.modifiedAt, reference: _timeReference);
-  String _fileDateText(CloudFile file) {
-    final date = file.isDirectory
-        ? _folderDates.dates[widget.services.cloud.directoryId(session, file)]
-        : null;
-    return date == null ? file.modifiedAt : date.toIso8601String();
-  }
-
   final _nameKeys = Expando<NaturalName>();
   Object? _displayInputs;
   List<CloudFile> _displayed = const [];
@@ -333,7 +304,6 @@ class _BrowserPageState extends State<BrowserPage> {
     _rapidChanges?.cancel();
     _uploadRefresh?.cancel();
     _searchPaint?.cancel();
-    _folderDates.dispose();
     _deepSearch.dispose();
     request?.cancel();
     _pageRequest?.cancel();
@@ -442,7 +412,6 @@ class _BrowserPageState extends State<BrowserPage> {
     _pageRequest = null;
     _progress.close(cancelled: true);
     _resetSearch(clearCache: true);
-    _folderDates.stop();
     generation++;
     _replaceFileScroll(offset);
     setState(() {
@@ -530,7 +499,6 @@ class _BrowserPageState extends State<BrowserPage> {
       request?.cancel();
       _pageRequest?.cancel();
       _progress.close(cancelled: true);
-      _folderDates.stop();
       generation++;
       setState(() {
         loading = false;
@@ -545,8 +513,6 @@ class _BrowserPageState extends State<BrowserPage> {
     if (accountRevision !=
         widget.services.cloud.sessionCredential(session)?.updatedAt) {
       _directoryCheckpoints.clear();
-      _folderDates.stop();
-      _folderDates.dates.clear();
       _displayInputs = null;
     }
     if ((_searchResults || widget.searchPage) &&
@@ -696,7 +662,6 @@ class _BrowserPageState extends State<BrowserPage> {
     unawaited(_rememberSearch(search.text));
     request?.cancel();
     _progress.close(cancelled: true);
-    _folderDates.stop();
     generation++;
     final current = ++_searchGeneration, captured = session;
     setState(() {
@@ -789,7 +754,6 @@ class _BrowserPageState extends State<BrowserPage> {
         : <String>{};
     _resetSearch(clearCache: true);
     request?.cancel();
-    _folderDates.stop();
     final current = ++generation,
         scope = request = RequestScope(),
         captured = session,
@@ -913,26 +877,6 @@ class _BrowserPageState extends State<BrowserPage> {
         ? ''
         : search.text.trim().toLowerCase();
     final source = _sourceItems;
-    _folderDates.update(
-      (
-        session,
-        generation,
-        stack.last.$1,
-        _timeReference,
-        sort,
-        loading,
-        _available,
-      ),
-      session,
-      source,
-      _timeReference,
-      enabled:
-          sort == 'date' &&
-          !loading &&
-          !widget.searchPage &&
-          !widget.picking &&
-          _available,
-    );
     final inputs = (
       source,
       session,
@@ -977,7 +921,13 @@ class _BrowserPageState extends State<BrowserPage> {
   void _sortFiles(List<CloudFile> result) {
     final sort = _display.sort, ascending = _display.ascending;
     final dates = sort == 'date'
-        ? {for (final file in result) file: _fileDate(file)}
+        ? {
+            for (final file in result)
+              file: cloudFileSortDate(
+                file.modifiedAt,
+                reference: _timeReference,
+              ),
+          }
         : <CloudFile, DateTime?>{};
     // Valid modification dates do not need a pinyin key. Build names lazily
     // only for name sorting or the missing-date fallback.
@@ -2366,7 +2316,6 @@ class _BrowserPageState extends State<BrowserPage> {
     _directoryCheckpoints.clear();
     request?.cancel();
     _pageRequest?.cancel();
-    _folderDates.stop();
     generation++;
     _replaceFileScroll(0);
     setState(() {
@@ -2758,9 +2707,7 @@ class _BrowserPageState extends State<BrowserPage> {
       final scaler = MediaQuery.textScalerOf(context);
       final titleHeight = scaler.scale(14) * 1.35 * 2;
       final timeHeight =
-          files.any(
-            (file) => formatCloudFileTime(_fileDateText(file)).isNotEmpty,
-          )
+          files.any((file) => formatCloudFileTime(file.modifiedAt).isNotEmpty)
           ? scaler.scale(11) * 1.3 * 2 + 4
           : 0.0;
       return GridView.builder(
@@ -2907,7 +2854,7 @@ class _BrowserPageState extends State<BrowserPage> {
     bool wide,
   ) {
     final checked = selected.contains(_fileKey(file));
-    final time = formatCloudFileTime(_fileDateText(file));
+    final time = formatCloudFileTime(file.modifiedAt);
     return Semantics(
       key: ValueKey('browser-file-${_fileKey(file)}'),
       selected: checked,
@@ -3045,7 +2992,7 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   Widget _fileMetadata(CloudFile file) {
-    final time = formatCloudFileTime(_fileDateText(file));
+    final time = formatCloudFileTime(file.modifiedAt);
     final style = TextStyle(fontSize: 11, color: secondary(context));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3915,23 +3862,6 @@ class _BrowserPageState extends State<BrowserPage> {
                             BaiduShareRoute.publicParser,
                             parserSiteId: id,
                           ),
-                        ),
-                      ),
-                    ),
-                  if (sort == 'date' &&
-                      (_folderDates.busy || _folderDates.failed > 0))
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 4,
-                      ),
-                      child: Text(
-                        _folderDates.busy
-                            ? '正在读取子文件夹中的最新文件时间…'
-                            : '部分文件夹读取失败，暂按文件夹自身时间排序；刷新可重试',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: secondary(context),
                         ),
                       ),
                     ),

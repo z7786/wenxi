@@ -18,18 +18,13 @@ const _identity =
 
 void main() {
   test(
-    'Tianyi web login uses the portal callback and its API cookie scope',
+    'Tianyi web login keeps the official parent that creates the portal browser binding',
     () {
       final target = WebLoginTarget.targets[_cloud]!;
       final login = Uri.parse(target.url);
       expect(login.host, 'cloud.189.cn');
-      expect(login.path, '/api/portal/loginUrl.action');
-      expect(login.queryParameters['defaultSaveName'], '3');
-      expect(login.queryParameters['defaultSaveNameCheck'], 'uncheck');
-      expect(
-        login.queryParameters['redirectURL'],
-        'https://cloud.189.cn/web/redirect.html',
-      );
+      expect(login.path, '/web/login.html');
+      expect(login.hasQuery, false);
       expect(target.desktopMode, true);
       expect(target.userAgent, WebLoginTarget.desktopUserAgent);
       for (final page in [

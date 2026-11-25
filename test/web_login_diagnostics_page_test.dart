@@ -671,16 +671,13 @@ void main() {
   );
 
   testWidgets(
-    'Tianyi portal login uses the same desktop identity and form layout in popups',
+    'Tianyi official parent keeps one browser identity and allows the SSO iframe to open SMS',
     (tester) async {
       await openLogin(tester, CloudPlatform.tianyi);
       final native = _TianyiController(410);
       final (view, web) = attach(410, instance: native);
       expect(view.params.initialUrlRequest!.url!.host, 'cloud.189.cn');
-      expect(
-        view.params.initialUrlRequest!.url!.path,
-        '/api/portal/loginUrl.action',
-      );
+      expect(view.params.initialUrlRequest!.url!.path, '/web/login.html');
       expect(
         view.params.initialSettings!.preferredContentMode,
         UserPreferredContentMode.DESKTOP,
@@ -695,6 +692,20 @@ void main() {
         ),
         isTrue,
       );
+      final form = view.params.initialUserScripts!.singleWhere(
+        (script) => script.source == TianyiWebLogin.formScript,
+      );
+      expect(form.forMainFrameOnly, isFalse);
+      expect(form.allowedOriginRules, {'https://open.e.189.cn'});
+      final binding = view.params.initialUserScripts!.singleWhere(
+        (script) => script.source == TianyiWebLogin.bootstrapScript,
+      );
+      expect(binding.forMainFrameOnly, isTrue);
+      expect(
+        view.params.initialSettings!.incognito,
+        defaultTargetPlatform != TargetPlatform.android,
+      );
+      expect(platform.cookies.deleteAllCalls, 1);
       view.params.onLoadStop!(web, native.url);
       await tester.pump();
       expect(native.scripts, contains(desktopLoginViewportScript));
@@ -720,6 +731,11 @@ void main() {
         view.params.initialSettings!.userAgent,
       );
       expect(
+        popup.params.initialSettings!.incognito,
+        defaultTargetPlatform == TargetPlatform.windows,
+      );
+      expect(platform.cookies.deleteAllCalls, 1);
+      expect(
         popup.params.initialUserScripts!.any(
           (script) => script.source == desktopLoginViewportScript,
         ),
@@ -727,6 +743,10 @@ void main() {
       );
       await tester.pumpWidget(const SizedBox.shrink());
     },
+    variant: const TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.windows,
+    }),
   );
 
   for (final cloud in [

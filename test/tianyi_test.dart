@@ -388,7 +388,7 @@ void main() {
     test('Cloud cookies are polled separately from cleared SSO cookies', () {
       final target = WebLoginTarget.targets[_platform]!;
       expect(Uri.parse(target.url).host, 'cloud.189.cn');
-      expect(Uri.parse(target.url).path, '/api/portal/loginUrl.action');
+      expect(Uri.parse(target.url).path, '/web/login.html');
       expect(target.desktopMode, isTrue);
       expect(target.cookieDomains, contains('https://cloud.189.cn/api/'));
       expect(

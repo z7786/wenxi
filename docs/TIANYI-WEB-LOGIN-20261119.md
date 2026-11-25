@@ -1,13 +1,28 @@
 # 天翼网页登录
 
-Android 和桌面统一使用官网 portal 登录入口，在官方页面打开短信表单；验证码、协议确认和提交仍由用户操作。浏览器和身份验证沿用同一账号隔离的桌面 UA，Android 登录表单使用 400px 可缩放视口。
+Android 和桌面统一使用官网 `/web/login.html`，保留生成浏览器标识并打开 portal 登录 iframe 的完整流程；验证码、协议确认和提交仍由用户操作。浏览器和身份验证沿用同一账号隔离的桌面 UA，登录表单使用 400px 可缩放视口。
+
+## 官网登录成功但应用未检测到
+
+2026-11-25 通过用户授权的真实短信登录，官网完成 cloud 域的 portal 回调并进入个人文件列表。回调生成 `JSESSIONID` 和 HttpOnly `COOKIE_LOGIN_USER`；网页的 `document.cookie` 仅能读取跟踪 Cookie，应用继续通过原生 CookieManager 读取身份接口可用的 Cookie。
+
+真实会话通过当前 Dart `TianyiConnector`、`AccountLoginService` 和浏览器 UA 策略完成账号保存、容量读取与个人文件列表请求。带或不带 Browser-Id 都成功，单独的 JSESSIONID 则被官网拒绝。因此不能把缺少 Browser-Id 认定为所有检测失败的根因，也不放宽凭据检查或跳过真实身份验证。
+
+本轮修正已核实的流程差异：
+
+- 官网外层页会生成浏览器标识并写入 `udb_login` iframe 的 portal URL。入口保留该页，避免直接打开 portal API 跳过初始化；原有绑定脚本捕获官网使用的值。
+- 短信切换脚本允许官方 cloud 顶层页直接嵌入的 `open.e.189.cn` web 授权 iframe，限定 HTTPS、准确域名、web 登录路径及 `appId=cloud`。其他父域、端口、嵌套层级和 WAP 表单不自动操作；不修改 iframe URL、不发送短信、不勾选协议、不提交登录。
+- 官网外层登录页保持 400px 可缩放表单布局，账号回调及导航继续由官网完成。离开登录路由后恢复文件列表的桌面视口。
+- Android 天翼登录依赖已有且被等待的登录前 Cookie 清理，关闭插件的额外 incognito 清理；插件 1.1.3 的该选项会启动未等待的全局 `removeAllCookies`。缓存仍禁用，登录成功、取消和失败的原有清理与账号归属检查保留。
+
+本轮局部回归 234 项通过；生产浏览器脚本 42 项通过，其中官方 iframe 短信切换回归已确认修改前失败、修改后成功。真实官网脚本验收确认短信表单、原样浏览器标识和手机尺寸布局。私有 Dart 真实会话验证通过账号保存、容量和文件列表。尚未复现用户 Android 真机上的本次失败，以上不代表该设备已完成修复验收；需要新版真机结果与对应日志确认。
 
 ## 短信登录后会话失效
 
 2026-11-24 用户提供的 Android 日志显示：完成短信登录后，身份接口返回 `_TianyiSessionExpired`。匿名检查官网确认，旧 WAP 入口将短信会话回调到移动域，客户端随后在 cloud 域校验 portal 身份；混读 mobile、h5、web 路径的同名 Cookie，并切换网页与校验 UA，可能提交不匹配的会话。
 
-- 登录入口改为 `cloud.189.cn/api/portal/loginUrl.action`，官网使用 cloud 域的 `/api/portal/callbackUnify.action` 完成登录。
-- 自动切换短信表单仅限官方顶层 web 登录页且 `appId=cloud`，每个步骤只点击一次，不发送短信、不自动勾选协议或提交登录。
+- 当时入口改为 `cloud.189.cn/api/portal/loginUrl.action`，官网使用 cloud 域的 `/api/portal/callbackUnify.action` 完成登录；当前入口进一步保留上文的官网外层初始化。
+- 当时自动切换短信表单仅限官方顶层 web 登录页且 `appId=cloud`，每个步骤只点击一次；当前增加上述官方直接授权 iframe 支持。
 - Cookie 仅从身份接口地址、cloud `/api/` 和 cloud `/` 读取，优先保留身份接口收到的 Cookie，包括 HttpOnly；其余旧来源保留在登录清理范围。
 - 允许回调和落地页面正常导航，由原有加载、历史更新和轮询完成检测。真实身份接口仍决定成功或失效，失败不覆盖已有账号，更新 Cookie 后可以重试。
 
@@ -29,4 +44,4 @@ Android 和桌面统一使用官网 portal 登录入口，在官方页面打开�
 - 天翼会话、原生登录、账号存储、浏览器 UA、Apple 登录回归：96 项通过。
 - 本次修改文件的静态检查通过。
 
-以上历史测试数仅说明当时的局部验证；本次测试结果见短信修复段落，发布验收另关联实际 GitHub 提交和构建记录。
+以上历史测试数仅说明当时的局部验证；本轮结果见“官网登录成功但应用未检测到”，发布验收另关联实际 GitHub 提交和构建记录。

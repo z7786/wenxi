@@ -2,8 +2,9 @@ import 'dart:convert';
 import '../core/json.dart';
 
 class TianyiWebLogin {
-  static const loginUrl =
-      'https://cloud.189.cn/api/portal/loginUrl.action?redirectURL=https%3A%2F%2Fcloud.189.cn%2Fweb%2Fredirect.html&defaultSaveName=3&defaultSaveNameCheck=uncheck';
+  // The official parent creates the browser fingerprint and passes it to the
+  // SSO iframe. Opening the portal API directly skips that initialization.
+  static const loginUrl = 'https://cloud.189.cn/web/login.html';
 
   static const identityUrl =
       'https://cloud.189.cn/api/open/user/getUserInfoForPortal.action';
@@ -82,9 +83,16 @@ class TianyiWebLogin {
   };
 
   static const formScript = r'''(() => {
-    if (window.top !== window || location.origin !== 'https://open.e.189.cn' ||
+    if (location.origin !== 'https://open.e.189.cn' ||
         location.pathname !== '/api/logbox/separate/web/index.html' ||
         new URL(location.href).searchParams.get('appId') !== 'cloud' || window.__asterTianyiForm) return;
+    if (window.top !== window) {
+      try {
+        const parent = new URL(document.referrer);
+        if (window.parent !== window.top || parent.origin !== 'https://cloud.189.cn' ||
+            parent.username || parent.password) return;
+      } catch (_) { return; }
+    }
     window.__asterTianyiForm = true;
     let observer, accountSelected = false;
     const visible = el => el && el.getClientRects().length && !el.disabled;

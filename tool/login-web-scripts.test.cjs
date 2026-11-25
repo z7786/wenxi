@@ -245,6 +245,24 @@ test('Tianyi portal form stays within a 400px zoomable viewport on phones', () =
   }
 });
 
+test('Tianyi official parent keeps its form visible and restores file-list layout', () => {
+  const page = viewportScene('cloud.189.cn', '', 'https:', '/web/login.html');
+  assert.ok(page.tags[0].content.includes('width=400'));
+  assert.ok(page.tags[0].content.includes('user-scalable=yes'));
+  assert.ok(page.attributes.has('data-aster-tianyi-login'));
+  assert.equal(page.tags.filter(tag => tag.id === 'aster-tianyi-login-layout').length, 1);
+  page.change();
+  assert.equal(page.tags.filter(tag => tag.id === 'aster-tianyi-login-layout').length, 1);
+  page.location.pathname = '/web/main/file/folder/-11'; page.change();
+  assert.ok(page.tags[0].content.includes('width=1280'));
+  assert.equal(page.attributes.has('data-aster-tianyi-login'), false);
+  for (const host of ['cloud.189.cn.invalid', 'm.cloud.189.cn', 'open.e.189.cn']) {
+    const other = viewportScene(host, '', 'https:', '/web/login.html');
+    assert.ok(other.tags[0].content.includes('width=1280'));
+    assert.equal(other.attributes.has('data-aster-tianyi-login'), false);
+  }
+});
+
 function storageScene({local = {}, session = {}, cookie = '', origin = 'https://www.ilanzou.com'} = {}) {
   const storage = entries => new Proxy({
     entries: new Map(Object.entries(entries)),
@@ -684,16 +702,17 @@ test('Tianyi ignores unrelated requests, frames and unsafe browser identifiers',
   assert.deepEqual(page.read(), {browserId: ''});
 });
 
-function tianyiPortalForm({origin = 'https://open.e.189.cn', pathname = '/api/logbox/separate/web/index.html', appId = 'cloud', nested = false} = {}) {
+function tianyiPortalForm({origin = 'https://open.e.189.cn', pathname = '/api/logbox/separate/web/index.html', appId = 'cloud', nested = false, referrer = '', direct = true} = {}) {
   const window = {};
   window.top = nested ? {} : window;
+  window.parent = direct ? window.top : {};
   const nodes = new Map(), timers = [], observers = [];
   class Observer {
     constructor(fn) { this.fn = fn; this.closed = false; observers.push(this); }
     observe() {}
     disconnect() { this.closed = true; }
   }
-  const context = vm.createContext({window, location: {origin, pathname, href: `${origin}${pathname}?appId=${appId}`}, URL, document: {getElementById: id => nodes.get(id)}, MutationObserver: Observer, setTimeout: (fn, delay) => timers.push({fn, delay})});
+  const context = vm.createContext({window, location: {origin, pathname, href: `${origin}${pathname}?appId=${appId}`}, URL, document: {referrer, getElementById: id => nodes.get(id)}, MutationObserver: Observer, setTimeout: (fn, delay) => timers.push({fn, delay})});
   const run = () => vm.runInContext(scripts.tianyi.form, context);
   return {nodes, timers, observers, run};
 }
@@ -721,8 +740,26 @@ test('Tianyi portal entry opens the SMS form once without submitting login or re
   page.timers[0].fn();
 });
 
+test('Tianyi official login iframe opens SMS while retaining the parent portal session', () => {
+  const page = tianyiPortalForm({nested: true, referrer: 'https://cloud.189.cn/'});
+  let accountClicks = 0, smsClicks = 0, submissions = 0;
+  page.nodes.set('tab-pw', {getClientRects: () => [1], click: () => accountClicks++});
+  page.nodes.set('j-jump-sms', {getClientRects: () => accountClicks ? [1] : [], click: () => smsClicks++});
+  for (const id of ['j-login', 'j-msg-verifyCode', 'j-agreement-box']) {
+    page.nodes.set(id, {getClientRects: () => [1], click: () => submissions++});
+  }
+  page.run();
+  assert.equal(accountClicks, 1);
+  page.observers[0].fn();
+  assert.equal(smsClicks, 1);
+  assert.equal(submissions, 0);
+  page.run();
+  assert.equal(accountClicks, 1);
+  assert.equal(smsClicks, 1);
+});
+
 test('Tianyi SMS form selection stays within the official cloud portal login page', () => {
-  for (const options of [{origin: 'https://open.e.189.cn.attacker.invalid'}, {origin: 'http://open.e.189.cn'}, {pathname: '/api/logbox/separate/wap/index.html'}, {appId: 'another-app'}, {nested: true}]) {
+  for (const options of [{origin: 'https://open.e.189.cn.attacker.invalid'}, {origin: 'http://open.e.189.cn'}, {pathname: '/api/logbox/separate/wap/index.html'}, {appId: 'another-app'}, {nested: true}, {nested: true, referrer: 'https://cloud.189.cn.attacker.invalid/'}, {nested: true, referrer: 'http://cloud.189.cn/'}, {nested: true, referrer: 'https://cloud.189.cn:444/'}, {nested: true, referrer: 'https://user@cloud.189.cn/'}, {nested: true, referrer: 'https://cloud.189.cn/', direct: false}]) {
     const page = tianyiPortalForm(options);
     page.run();
     assert.equal(page.observers.length, 0);
