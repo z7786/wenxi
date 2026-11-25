@@ -79,7 +79,7 @@ class GitHubUpdateService {
         if (error.statusCode != 404) rethrow;
       }
       if (_closed) throw StateError('GitHub 更新检查已关闭');
-      _latest = text == null
+      var latest = text == null
           ? null
           : GitHubReleaseParser.parse(
               text,
@@ -87,6 +87,30 @@ class GitHubUpdateService {
               platform: platform,
               architecture: architecture,
             );
+      if (text != null && latest != null && latest.packageSha256.isEmpty) {
+        final manifest = GitHubReleaseParser.checksumUrl(
+          text,
+          latest.downloadUrl,
+        );
+        if (manifest != null) {
+          final digest = GitHubReleaseParser.checksumFor(
+            await _fetcher.fetch(manifest),
+            latest.downloadUrl.pathSegments.last,
+          );
+          if (_closed) throw StateError('GitHub 更新检查已关闭');
+          latest = RemoteUpdate(
+            latest.version,
+            latest.build,
+            latest.downloadUrl,
+            latest.notes,
+            releaseKey: latest.releaseKey,
+            packageSha256: digest,
+            packageSize: latest.packageSize,
+          );
+        }
+      }
+      if (_closed) throw StateError('GitHub 更新检查已关闭');
+      _latest = latest;
       _failure = null;
       _nextAttempt = clock().add(refreshInterval);
       return _latest;

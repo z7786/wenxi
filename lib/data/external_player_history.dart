@@ -6,6 +6,40 @@ class ExternalPlayerHistory {
   ExternalPlayerHistory(this.store);
   final StateStore store;
   static const limit = 12;
+  static const preferenceKey = 'defaultVideoPlayers';
+  String defaultFor(String platform) {
+    final value = store.data.obj(preferenceKey).str(platform);
+    return _validDefault(platform, value) ? value : '';
+  }
+
+  static bool _validDefault(
+    String platform,
+    String value,
+  ) => switch (platform) {
+    'windows' => _valid(value),
+    'macos' => _validMac(value),
+    'android' =>
+      value.length <= 512 &&
+          RegExp(
+            r'^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+/\.?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$',
+          ).hasMatch(value),
+    _ => false,
+  };
+  Future<void> setDefault(String platform, String? path) =>
+      store.change((draft) {
+        require(
+          {'android', 'windows', 'macos'}.contains(platform),
+          '当前设备不支持默认第三方播放器',
+        );
+        final defaults = draft.obj(preferenceKey);
+        if (path == null) {
+          defaults.remove(platform);
+        } else {
+          require(_validDefault(platform, path), '播放器选择无效');
+          defaults[platform] = path;
+        }
+        draft[preferenceKey] = defaults;
+      });
   List<String> get windows => _paths(store.data);
   List<String> get macos => _macPaths(store.data);
   static bool _validMac(String path) =>

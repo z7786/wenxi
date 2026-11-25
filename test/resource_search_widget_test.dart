@@ -36,6 +36,9 @@ import 'support.dart';
 import 'fixtures/resource_search_samples.dart';
 import 'resource_link_check_support.dart';
 import 'background_support.dart';
+import 'browser_test_support.dart' show ThumbnailHttpClient;
+import 'remote_control_support.dart';
+import 'package:asterlink/domain/remote_control.dart';
 
 List<ResourceSearchHit> results() => [
   ResourceSearchHit.fromRaw({
@@ -156,6 +159,7 @@ void main() {
     ResourceCatalog? catalog,
     void Function(SearchApiFixture)? configureApi,
     bool waitForIdle = true,
+    SearchAnnouncement? searchAnnouncement,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;
@@ -179,6 +183,8 @@ void main() {
             height: 1280,
           );
     final store = StateStore.memory({
+      if (searchAnnouncement != null)
+        ...controlCache({'searchAnnouncement': searchAnnouncement.toJson()}),
       'resourceSearchHistory': ['Python 教程', '设计素材', '电子书'],
       'settings': AppSettings(
         themePalette: palette,
@@ -209,7 +215,10 @@ void main() {
       files: FakeFiles(Directory('${directory.path}/files')),
       http: FakeHttp(),
       platformFeatures: false,
-      controlEnabled: false,
+      controlEnabled: searchAnnouncement != null,
+      controlUrl: controlEndpoint,
+      controlFetcher: FakeControlFetcher(),
+      clock: () => controlNow,
       resourceSearch: service,
     );
     if (picture != null) {
@@ -422,12 +431,14 @@ void main() {
   ResourceSearchHit publishedContent({
     bool multiLink = false,
     bool empty = false,
+    String cover = '',
   }) => ResourceSearchHit.fromRaw({
     'title': '后台推荐的学习资料：从入门到实践，含视频课程、配套代码与练习说明',
     'url': 'https://pan.quark.cn/s/published',
     'recommendation_id': 21,
     'category': '学习资料',
     'datetime': '2026-11-24',
+    'cover_url': cover,
     'description': empty
         ? ''
         : '这套资料包括视频课程、配套代码和练习说明。\n\n'
@@ -474,6 +485,70 @@ void main() {
     });
   }
 
+  for (final (name, size, dark, scale) in [
+    ('phone', const Size(390, 844), false, 1.0),
+    ('phone-large', const Size(320, 700), true, 2.0),
+    ('desktop', const Size(1280, 900), false, 1.0),
+    ('desktop-dark', const Size(1280, 900), true, 1.0),
+  ]) {
+    testWidgets('Search home notice placement and details $name', (
+      tester,
+    ) async {
+      final (services, _) = await render(
+        tester,
+        home: true,
+        size: size,
+        dark: dark,
+        scale: scale,
+        searchAnnouncement: SearchAnnouncement(
+          title: '本周资源已更新',
+          content:
+              '本周新增学习资料、精选影片与实用软件。\n\n### 使用提示\n\n- 点击首页推荐，查看资源简介。\n- 分享链接失效时，欢迎通过反馈入口告诉我们。',
+          buttonText: '查看更新说明',
+          buttonUrl: Uri.parse('https://example.test/news'),
+        ),
+      );
+      final bar = find.byKey(const Key('search-announcement-bar'));
+      expect(bar, findsOneWidget);
+      final searchBottom = tester
+          .getBottomLeft(find.byKey(const Key('resource-home-search-input')))
+          .dy;
+      expect(tester.getTopLeft(bar).dy, greaterThan(searchBottom));
+      final historyBefore = tester.getTopLeft(find.text('最近搜索')).dy;
+      expect(tester.getBottomLeft(bar).dy, lessThan(historyBefore));
+      final occupied = tester.getSize(bar).height + 12;
+      await captureContentDetails(tester, 'announcement-home-$name');
+      await tester.tap(bar);
+      await tester.pumpAndSettle();
+      await captureContentDetails(tester, 'announcement-detail-$name');
+      expect(
+        find.byKey(const Key('search-announcement-details')),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-home-search-input')),
+        '资料',
+      );
+      await tester.tap(find.byKey(const Key('resource-home-search-submit')));
+      await tester.pumpAndSettle();
+      expect(bar, findsNothing);
+      Navigator.of(tester.element(find.byType(ResourceSearchPage))).pop();
+      await tester.pumpAndSettle();
+      expect(bar, findsOneWidget);
+      // A valid publication omitting the notice removes its spacing as well.
+      await services.control.refresh(force: true);
+      await tester.pumpAndSettle();
+      expect(bar, findsNothing);
+      expect(
+        tester.getTopLeft(find.text('最近搜索')).dy,
+        closeTo(historyBefore - occupied, .1),
+      );
+    });
+  }
+
   Future<void> revealPublishedTile(
     WidgetTester tester,
     ResourceSearchHit hit, {
@@ -512,6 +587,124 @@ void main() {
         null,
       ),
     );
+  }
+
+  for (final (name, size, scale, platform, width, height) in [
+    ('phone', const Size(393, 864), 1.0, TargetPlatform.android, 200, 2000),
+    ('narrow', const Size(320, 700), 1.6, TargetPlatform.android, 2000, 400),
+    ('desktop', const Size(1280, 900), 1.0, TargetPlatform.windows, 2000, 400),
+  ]) {
+    for (final broken in [false, true]) {
+      testWidgets(
+        'Published content image follows its introduction on $name: broken=$broken',
+        (tester) async {
+          final png = await tester.runAsync(
+            () => backgroundFixture(width: width, height: height),
+          );
+          final client = ThumbnailHttpClient(image: png);
+          debugNetworkImageHttpClientProvider = () => client;
+          addTearDown(() {
+            debugNetworkImageHttpClientProvider = null;
+            PaintingBinding.instance.imageCache.clear();
+            PaintingBinding.instance.imageCache.clearLiveImages();
+          });
+          try {
+            final hit = publishedContent(
+              cover:
+                  'https://images.example.test/${broken ? 'broken' : 'content'}-$name.png',
+            );
+            final copied = <String>[];
+            ResourceSearchHit? opened;
+            mockContentCopies(tester, (text) async => copied.add(text));
+            await render(
+              tester,
+              home: true,
+              catalog: ResourceCatalog(popular: [hit]),
+              size: size,
+              scale: scale,
+              platform: platform,
+              onOpen: (selected) async => opened = selected,
+            );
+            await revealPublishedTile(tester, hit);
+            await tester.tap(publishedTile(hit));
+            await tester.pump(const Duration(milliseconds: 400));
+            final figure = find.byKey(const Key('resource-content-image'));
+            final image = find.descendant(
+              of: figure,
+              matching: find.byType(RawImage),
+            );
+            for (var attempt = 0; attempt < 40; attempt++) {
+              final ready = broken
+                  ? find.text('图片暂时无法加载').evaluate().isNotEmpty
+                  : image.evaluate().isNotEmpty &&
+                        tester.widget<RawImage>(image).image != null;
+              if (ready) break;
+              await tester.runAsync(
+                () => Future<void>.delayed(const Duration(milliseconds: 20)),
+              );
+              await tester.pump();
+            }
+            expect(figure, findsOneWidget);
+            expect(
+              tester.getTopLeft(figure).dy,
+              greaterThanOrEqualTo(
+                tester
+                    .getBottomRight(
+                      find.byKey(const Key('resource-content-description')),
+                    )
+                    .dy,
+              ),
+            );
+            if (broken) {
+              expect(find.text('图片暂时无法加载'), findsOneWidget);
+            } else {
+              final pixels = tester.widget<RawImage>(image).image!;
+              expect(pixels.width, lessThanOrEqualTo(1600));
+              expect(pixels.height, lessThanOrEqualTo(1600));
+              expect(
+                pixels.width / pixels.height,
+                closeTo(width / height, .02),
+              );
+              final imageWidget = tester.widget<Image>(
+                find.descendant(of: figure, matching: find.byType(Image)),
+              );
+              expect(imageWidget.fit, BoxFit.contain);
+            }
+            expect(
+              client.requests.map((request) => request.uri),
+              contains(Uri.parse(hit.coverUrl)),
+            );
+            expect(tester.getSize(figure).height, lessThanOrEqualTo(640));
+            expect(tester.getSize(figure).width, lessThanOrEqualTo(size.width));
+            await tester.ensureVisible(figure);
+            await tester.pumpAndSettle();
+            await captureContentDetails(
+              tester,
+              '$name-content-image${broken ? '-error' : ''}',
+            );
+            final open = find.byKey(const Key('resource-content-open'));
+            expect(open.hitTestable(), findsOneWidget);
+            await tester.tap(
+              find.byKey(const Key('resource-content-copy-description')),
+            );
+            await tester.pumpAndSettle();
+            expect(copied, [hit.description]);
+            await tester.tap(open);
+            await tester.pumpAndSettle();
+            expect(opened?.coverUrl, hit.coverUrl);
+            expect(
+              find.byKey(const Key('resource-content-details')),
+              findsNothing,
+            );
+            expect(tester.takeException(), isNull);
+          } finally {
+            debugNetworkImageHttpClientProvider = null;
+            PaintingBinding.instance.imageCache.clear();
+            PaintingBinding.instance.imageCache.clearLiveImages();
+          }
+        },
+      );
+    }
   }
 
   for (final (name, size, scale, inset, dark, platform) in [

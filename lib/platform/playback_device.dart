@@ -13,6 +13,7 @@ import 'windows_external_player.dart';
 import 'macos_external_player.dart';
 
 abstract class PlaybackDevice extends ChangeNotifier {
+  TargetPlatform get targetPlatform => defaultTargetPlatform;
   bool get isTelevision => false;
   bool get supportsOrientation => false;
 
@@ -41,6 +42,13 @@ abstract class PlaybackDevice extends ChangeNotifier {
   bool get supportsDesktopPip => false;
   bool get supportsIndependentPlayerWindows => false;
   bool get supportsExternalPlayer => false;
+  bool get supportsDefaultExternalPlayer =>
+      supportsExternalPlayer &&
+      {
+        TargetPlatform.android,
+        TargetPlatform.windows,
+        TargetPlatform.macOS,
+      }.contains(targetPlatform);
   bool get externalPlayerNeedsDirectLink => false;
   SystemPipPlayback? get systemPip => null;
   WindowsExternalPlayer? get windowsExternalPlayer => null;
@@ -70,10 +78,12 @@ abstract class PlaybackDevice extends ChangeNotifier {
   Future<void> resizePip(ResizeEdge edge) async {}
   Future<bool> queryPip();
   Future<void> finish();
+  Future<String?> chooseDefaultExternalPlayer() async => null;
   Future<bool> openExternalPlayer({
     required String url,
     required String title,
     required Duration position,
+    String? playerComponent,
   }) async => false;
 }
 
@@ -86,6 +96,8 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   final WindowsExternalPlayer _windowsPlayer;
   final _macosPlayer = MacOSExternalPlayer();
   final TargetPlatform _platform;
+  @override
+  TargetPlatform get targetPlatform => _platform;
   bool get _android => _platform == TargetPlatform.android;
   bool get _ios => _platform == TargetPlatform.iOS;
   bool get _mobile => _android || _ios;
@@ -531,10 +543,24 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   }
 
   @override
+  Future<String?> chooseDefaultExternalPlayer() async {
+    require(_android && !_closed, '当前设备不支持选择默认第三方播放器');
+    try {
+      return await _nativeChannel.invokeMethod<String>(
+        'selectDefaultExternalPlayer',
+        {'session': _session},
+      );
+    } on PlatformException catch (error) {
+      throw AppException(error.message ?? '无法选择第三方播放器，请重试');
+    }
+  }
+
+  @override
   Future<bool> openExternalPlayer({
     required String url,
     required String title,
     required Duration position,
+    String? playerComponent,
   }) async {
     require(supportsExternalPlayer && !_closed, '当前设备不支持选择第三方播放器');
     if (_windows) return _windowsPlayer.open(url);
@@ -545,6 +571,8 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
             'url': url,
             'title': title,
             'positionMs': position.inMilliseconds,
+            if (_android && playerComponent != null)
+              'playerComponent': playerComponent,
           }) ??
           false;
     } on PlatformException catch (error) {

@@ -413,13 +413,20 @@ class FakePlaybackDevice extends PlaybackDevice {
   @override
   bool supportsExternalPlayer = false;
   Future<bool> Function(String, String, Duration)? externalPlayer;
+  Future<String?> Function()? defaultExternalPlayerChoice;
+  String? openedPlayerComponent;
+  @override
+  Future<String?> chooseDefaultExternalPlayer() async =>
+      defaultExternalPlayerChoice?.call();
   @override
   Future<bool> openExternalPlayer({
     required String url,
     required String title,
     required Duration position,
+    String? playerComponent,
   }) async {
     calls.add('externalPlayer');
+    openedPlayerComponent = playerComponent;
     return await externalPlayer?.call(url, title, position) ?? false;
   }
 

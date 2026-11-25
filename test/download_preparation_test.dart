@@ -433,6 +433,68 @@ void main() {
     },
   );
 
+  for (final corrupt in [false, true]) {
+    test(
+      'Published update SHA-256 survives a cloud MD5 response: corrupt=$corrupt',
+      () async {
+        final fixture = await _Fixture.create();
+        final digest = sha256.convert(fixture.native.content).toString();
+        if (corrupt) fixture.native.content[3] ^= 1;
+        final planned = DownloadSpec.fromJson({
+          ..._planned('update-sha256').toJson(),
+          'checksumType': 'sha256',
+          'checksumValue': digest,
+          'appUpdateKey': 'published-package',
+        });
+        fixture.resolve = (previous) async => DownloadSpec.fromJson({
+          ..._ready(previous).toJson(),
+          'checksumType': 'md5',
+          'checksumValue': md5.convert(fixture.native.content).toString(),
+          'appUpdateKey': null,
+        });
+        final id = await fixture.manager.enqueue(planned);
+        await until(
+          () =>
+              fixture.manager.activeCount == 0 &&
+              fixture.manager.task(id)!.status ==
+                  (corrupt ? DownloadStatus.failed : DownloadStatus.completed),
+        );
+        final task = fixture.manager.task(id)!;
+        expect(task.spec.checksumType, 'sha256');
+        expect(task.spec.checksumValue, digest);
+        expect(task.spec.appUpdateKey, 'published-package');
+        expect(fixture.files.savedCount, corrupt ? 0 : 1);
+        if (corrupt) expect(task.error, contains('校验'));
+      },
+    );
+  }
+
+  test(
+    'A refreshed update URL cannot replace the published package size',
+    () async {
+      final fixture = await _Fixture.create();
+      final planned = DownloadSpec.fromJson({
+        ..._planned('update-size').toJson(),
+        'checksumType': 'sha256',
+        'checksumValue': sha256.convert(fixture.native.content).toString(),
+        'appUpdateKey': 'published-package',
+      });
+      fixture.resolve = (previous) async => DownloadSpec.fromJson({
+        ..._ready(previous).toJson(),
+        'expectedSize': 8,
+      });
+      final id = await fixture.manager.enqueue(planned);
+      await until(
+        () =>
+            fixture.manager.activeCount == 0 &&
+            fixture.manager.task(id)!.status == DownloadStatus.failed,
+      );
+      expect(fixture.manager.task(id)!.error, contains('大小与发布信息不一致'));
+      expect(fixture.files.savedCount, 0);
+      expect(fixture.native.begins, isEmpty);
+    },
+  );
+
   test(
     'An uncommitted prepared source rolls back and remains recoverable after a storage failure',
     () async {

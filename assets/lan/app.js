@@ -366,8 +366,14 @@
   const dropzone = $("dropzone");
   document.addEventListener("dragover", event => event.preventDefault());
   document.addEventListener("drop", event => event.preventDefault());
-  dropzone.ondragover = event => { event.preventDefault(); if (connected) dropzone.classList.add("drag-over"); };
-  dropzone.ondragleave = () => dropzone.classList.remove("drag-over");
+  dropzone.ondragover = event => {
+    event.preventDefault();
+    if (connected && enabled && Array.from(event.dataTransfer.types).includes("Files")) {
+      event.dataTransfer.dropEffect = "copy";
+      dropzone.classList.add("drag-over");
+    }
+  };
+  dropzone.ondragleave = event => { if (!dropzone.contains(event.relatedTarget)) dropzone.classList.remove("drag-over"); };
   dropzone.ondrop = event => { event.preventDefault(); dropzone.classList.remove("drag-over"); addFiles(Array.from(event.dataTransfer.files)); };
   window.addEventListener("beforeunload", event => { if (working) { event.preventDefault(); event.returnValue = ""; } });
   setInterval(() => { if (connected && !document.hidden) refresh(); }, 4000);

@@ -16,6 +16,9 @@ import 'package:asterlink/platform/windows_actions.dart';
 import 'package:asterlink/platform/quark_transfer_device.dart';
 import 'support.dart';
 
+const updatePackageSha256 =
+    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
 class UpdateDownloads extends ChangeNotifier implements DownloadManager {
   final records = <DownloadTask>[];
   int created = 0, resumed = 0;
@@ -123,6 +126,19 @@ class UpdateFixture {
     JsonHttp? transport,
     QuarkTransferDevice? quarkTransferDevice,
   }) {
+    if (platform == 'windows') {
+      final update = current!;
+      current = RemoteUpdate(
+        update.version,
+        update.build,
+        update.downloadUrl,
+        update.notes,
+        inAppDownloadUrl: update.inAppDownloadUrl,
+        inAppPasscode: update.inAppPasscode,
+        packageSha256: updatePackageSha256,
+        packageSize: 1024,
+      );
+    }
     final http = transport ?? FakeHttp();
     cleanups = CleanupOutbox(store, http);
     cloud = CloudRepository(

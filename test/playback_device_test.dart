@@ -53,6 +53,47 @@ void main() {
   });
 
   test(
+    'Android default app selection and launch preserve the native session and component',
+    () async {
+      messenger.setMockMethodCallHandler(nativeChannel, (call) async {
+        nativeCalls.add(call);
+        return call.method == 'selectDefaultExternalPlayer'
+            ? 'fixture.player/PlayerActivity'
+            : true;
+      });
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      expect(device.supportsDefaultExternalPlayer, isTrue);
+      final component = await device.chooseDefaultExternalPlayer();
+      expect(component, 'fixture.player/PlayerActivity');
+      expect(
+        await device.openExternalPlayer(
+          url: 'http://127.0.0.1/video',
+          title: 'movie.mp4',
+          position: const Duration(seconds: 10),
+          playerComponent: component,
+        ),
+        isTrue,
+      );
+      expect(nativeCalls[0].method, 'selectDefaultExternalPlayer');
+      expect(
+        nativeCalls[1].arguments['session'],
+        nativeCalls[0].arguments['session'],
+      );
+      expect(nativeCalls[1].arguments['playerComponent'], component);
+      expect(nativeCalls[1].arguments['positionMs'], 10000);
+      expect(
+        NativePlaybackDevice(
+          targetPlatform: TargetPlatform.iOS,
+        ).supportsDefaultExternalPlayer,
+        isFalse,
+      );
+    },
+  );
+
+  test(
     'Android cadence updates are deduplicated and cleared on pause or unknown media',
     () async {
       final device = NativePlaybackDevice(

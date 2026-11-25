@@ -53,6 +53,10 @@ class AppUpdateService extends ChangeNotifier {
             update.version,
             update.appDownloadUrl.toString(),
             update.inAppPasscode,
+            if (update.packageSha256.isNotEmpty || update.packageSize > 0) ...[
+              update.packageSha256.toLowerCase(),
+              update.packageSize,
+            ],
           ]),
         ),
       )
@@ -123,6 +127,7 @@ class AppUpdateService extends ChangeNotifier {
       _perform(update, () async {
         require(supported, '当前平台请使用浏览器更新');
         _checkCurrent(update);
+        _requireIntegrity(update);
         final existing = taskFor(update);
         if (existing != null) {
           if (existing.active) return;
@@ -151,13 +156,17 @@ class AppUpdateService extends ChangeNotifier {
       });
 
   Future<DownloadSpec> resolve(RemoteUpdate update) async {
+    _requireIntegrity(update);
     final url = httpsUri(update.appDownloadUrl.toString());
     // Release installation links remain independent of the optional GitHub
     // account/provider and its API quota, including the fallback update feed.
     if (GitHubLink.parse(url)?.isReleaseAsset == true) {
       final name = url.pathSegments.lastOrNull ?? '';
       AppUpdateInstaller.requirePackageName(name, platform);
-      return DownloadSpec(url: url.toString(), fileName: name);
+      return _packageSpec(
+        DownloadSpec(url: url.toString(), fileName: name),
+        update,
+      );
     }
     final links = LinkParser.parse(url.toString());
     require(links.length == 1, '更新链接无效，请使用浏览器更新');
@@ -179,7 +188,7 @@ class AppUpdateService extends ChangeNotifier {
       );
       final file = entries.single;
       AppUpdateInstaller.requirePackageName(file.name, platform);
-      return cloud.planDownload(session, file);
+      return _packageSpec(cloud.planDownload(session, file), update);
     }
     require(
       link.kind == LinkKind.direct && link.platform == null,
@@ -190,7 +199,36 @@ class AppUpdateService extends ChangeNotifier {
       AppUpdateInstaller.supportsName(name, platform),
       '此地址不是可识别的安装包直链或已支持的网盘分享，请使用浏览器更新',
     );
-    return DownloadSpec(url: url.toString(), fileName: name);
+    return _packageSpec(
+      DownloadSpec(url: url.toString(), fileName: name),
+      update,
+    );
+  }
+
+  DownloadSpec _packageSpec(DownloadSpec spec, RemoteUpdate update) {
+    require(
+      update.packageSize <= 0 ||
+          spec.expectedSize <= 0 ||
+          spec.expectedSize == update.packageSize,
+      '更新安装包大小与发布信息不一致，请刷新更新信息或使用浏览器更新',
+    );
+    return DownloadSpec.fromJson({
+      ...spec.toJson(),
+      if (update.packageSize > 0) 'expectedSize': update.packageSize,
+      if (update.packageSha256.isNotEmpty) ...{
+        'checksumType': 'sha256',
+        'checksumValue': update.packageSha256.toLowerCase(),
+      },
+    });
+  }
+
+  void _requireIntegrity(RemoteUpdate update) {
+    require(
+      platform != 'windows' && update.packageSha256.isEmpty ||
+          RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(update.packageSha256),
+      '此更新缺少安装包完整性校验信息，请使用浏览器更新',
+    );
+    require(update.packageSize >= 0, '更新安装包大小无效，请刷新更新信息');
   }
 
   Future<bool> pause(RemoteUpdate update) => _perform(update, () async {
@@ -201,6 +239,7 @@ class AppUpdateService extends ChangeNotifier {
   Future<bool> install(RemoteUpdate update, {bool Function()? canOpen}) =>
       _perform(update, () async {
         _checkCurrent(update);
+        _requireIntegrity(update);
         require(inForeground(), '请回到应用后点击立即安装');
         final task = taskFor(update);
         require(
@@ -217,7 +256,9 @@ class AppUpdateService extends ChangeNotifier {
         require(inForeground(), '安装包已就绪，请回到应用后点击立即安装');
         require(canOpen?.call() ?? true, '安装包已就绪，请重新打开更新弹窗后点击立即安装');
         require(
-          downloads.task(task.id)?.savedPath == task.savedPath,
+          downloads.task(task.id)?.savedPath == task.savedPath &&
+              downloads.task(task.id)?.status == DownloadStatus.completed &&
+              downloads.task(task.id)?.spec.appUpdateKey == keyFor(update),
           '下载记录已变化，请重新下载',
         );
         _stage(

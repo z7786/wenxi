@@ -13,6 +13,15 @@ class ControlConfigIssue {
 
   static bool isKnownPath(String path) {
     final fields = <String, List<String>>{
+      'searchAnnouncement': [
+        'enabled',
+        'title',
+        'content',
+        'buttonText',
+        'buttonUrl',
+        'startsAt',
+        'expiresAt',
+      ],
       'announcement': [
         'enabled',
         'id',
@@ -33,6 +42,8 @@ class ControlConfigIssue {
           'downloadUrl',
           'inAppDownloadUrl',
           'inAppPasscode',
+          'packageSha256',
+          'packageSize',
           'notes',
           'force',
           'expiresAt',
@@ -64,6 +75,7 @@ class RemoteControlDocument {
   final String fingerprint;
   static final sectionNames = List<String>.unmodifiable([
     'announcement',
+    'searchAnnouncement',
     for (final platform in CloudPlatform.values) 'clouds.${platform.name}',
     for (final platform in remoteUpdatePlatforms) 'updates.$platform',
     'help',
@@ -163,6 +175,43 @@ class RemoteControlDocument {
           : RemoteControlConfig(announcement: a).toJson()['announcement'],
     );
 
+    final searchAnnouncement = section<SearchAnnouncement?>(
+      'searchAnnouncement',
+      raw['searchAnnouncement'],
+      previous.searchAnnouncement,
+      () {
+        if (!raw.containsKey('searchAnnouncement')) return null;
+        final f = _ControlFields(
+          raw['searchAnnouncement'],
+          'searchAnnouncement',
+        );
+        if (!f.boolean('enabled', fallback: false)) return null;
+        final title = f.string('title', 160);
+        if (title.isEmpty) f.fail('title', '启用搜索首页公告需要填写简短公告');
+        final content = f.string('content', 8192);
+        final button = f.string('buttonText', 24),
+            url = f.string('buttonUrl', 2048);
+        if (button.isEmpty != url.isEmpty) {
+          f.fail(button.isEmpty ? 'buttonText' : 'buttonUrl', '按钮文字和地址需要同时填写');
+        }
+        final start = f.dateTime('startsAt'), end = f.expiry();
+        if (start != null && end != null && !end.isAfter(start)) {
+          f.fail('expiresAt', '结束时间必须晚于生效时间');
+        }
+        return SearchAnnouncement(
+          title: title,
+          content: content,
+          buttonText: button,
+          buttonUrl: url.isEmpty
+              ? null
+              : f.read('buttonUrl', () => announcementButtonUri(url)),
+          startsAt: start,
+          expiresAt: end,
+        );
+      },
+      (notice) => notice?.toJson(),
+    );
+
     final clouds = <CloudPlatform, CloudControl>{};
     for (final platform in CloudPlatform.values) {
       final key = 'clouds.${platform.name}';
@@ -229,6 +278,13 @@ class RemoteControlDocument {
           final force = f.boolean('force', fallback: false);
           final appUrl = f.string('inAppDownloadUrl', 2048);
           final passcode = f.string('inAppPasscode', 32).trim();
+          final digest = f.string('packageSha256', 64).trim().toLowerCase();
+          if (digest.isNotEmpty &&
+              !RegExp(r'^[0-9a-f]{64}$').hasMatch(digest)) {
+            f.fail('packageSha256', '请填写安装包的 64 位 SHA-256');
+          }
+          final size = f.integer('packageSize');
+          if (size < 0) f.fail('packageSize', '安装包大小必须是非负整数（字节）');
           return RemoteUpdate(
             version,
             build,
@@ -240,6 +296,8 @@ class RemoteControlDocument {
                 ? null
                 : f.link('inAppDownloadUrl', appUrl),
             inAppPasscode: passcode,
+            packageSha256: digest,
+            packageSize: size,
           );
         },
         (u) => u == null
@@ -283,6 +341,7 @@ class RemoteControlDocument {
     final config = RemoteControlConfig(
       revision: revision,
       announcement: announcement,
+      searchAnnouncement: searchAnnouncement,
       clouds: Map.unmodifiable(clouds),
       updates: Map.unmodifiable(updates),
       helpUrl: help,
@@ -337,13 +396,14 @@ class _ControlFields {
   int integer(String key, {bool required = false}) =>
       read(key, () => _integer(value, key, required: required));
   Uri link(String key, String text) => read(key, () => httpsUri(text));
-  DateTime? expiry() {
-    final text = string('expiresAt', 32);
+  DateTime? expiry() => dateTime('expiresAt');
+  DateTime? dateTime(String key) {
+    final text = string(key, 32);
     if (text.isEmpty) return null;
     final match = RegExp(
       r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$',
     ).firstMatch(text);
-    if (match == null) fail('expiresAt', '请使用 UTC 时间，例如 2026-10-01T00:00:00Z');
+    if (match == null) fail(key, '请使用 UTC 时间，例如 2026-10-01T00:00:00Z');
     final parts = [for (var i = 1; i <= 6; i++) int.parse(match[i]!)];
     final date = DateTime.utc(
       parts[0],
@@ -360,7 +420,7 @@ class _ControlFields {
         date.hour != parts[3] ||
         date.minute != parts[4] ||
         date.second != parts[5]) {
-      fail('expiresAt', '结束时间不是有效日期');
+      fail(key, '时间不是有效日期');
     }
     return date;
   }

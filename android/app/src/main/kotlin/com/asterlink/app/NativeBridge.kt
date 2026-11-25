@@ -158,12 +158,20 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             }
             return
         }
+        if (call.method == "selectDefaultExternalPlayer") {
+            externalPlayer.selectDefault(call.argument<String>("session").orEmpty()) { component, error ->
+                if (error == null) result.success(component)
+                else result.error(error.code, error.message, null)
+            }
+            return
+        }
         if (call.method == "openExternalPlayer") {
             externalPlayer.open(
                 call.argument<String>("url").orEmpty(),
                 call.argument<String>("title").orEmpty(),
                 call.argument<Number>("positionMs")?.toLong() ?: 0,
                 call.argument<String>("session").orEmpty(),
+                call.argument<String>("playerComponent"),
             ) { opened, error ->
                 if (error == null) result.success(opened)
                 else result.error(error.code, error.message, null)

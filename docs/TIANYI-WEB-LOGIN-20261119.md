@@ -2,6 +2,14 @@
 
 Android 和桌面统一使用官网 `/web/login.html`，保留生成浏览器标识并打开 portal 登录 iframe 的完整流程；验证码、协议确认和提交仍由用户操作。浏览器和身份验证沿用同一账号隔离的桌面 UA，登录表单使用 400px 可缩放视口。
 
+## 同名登录 Cookie 与开源参考
+
+2026-11-25 11:59 的用户日志已进入真实身份验证，并返回 `_TianyiSessionExpired`；这不能解释为完全未读到登录信息。只读真实会话复测确认：有效 `COOKIE_LOGIN_USER` 可独立通过身份接口；同一请求中错误的同名 Cookie 在前、有效值在后时，官网返回 `InvalidSessionKey`，顺序相反则成功。无效 JSESSIONID / LOGIN_USER 与 Browser-Id 缺失在这份会话中均未触发故障。因此，本次针对已证实的同名值遮蔽修复，尚不能断定用户 Android 真机失败只有这一原因。
+
+原生 CookieManager 读取身份接口、cloud `/api/`、cloud `/` 时，先保留实际读取到的登录 Cookie 替代值，再进行通用合并；最多三份，仅在身份接口明确返回会话过期时核验下一份。每次沿用相同 UA、Browser-Id 和原请求取消范围，共用原有 15 秒验证上限。全部过期、服务错误、安全验证、取消或超时保留原账号，不通过另一份凭据绕过服务或设备验证。保存经过真实身份接口验证成功的 Cookie，清除临时候选字段；日志只记候选数量和序号，不记凭据。其他网盘的 Cookie 合并规则沿用原行为。
+
+用户指定参考 [CYQawa/YunX](https://github.com/CYQawa/YunX)。检查其公开 master `cc9afe24c9409b239c361263b976f7aad77d1d9e`，平台与协议目录未见天翼登录实现。其 Android `QuarkLoginScreen.kt` 使用原生 `CookieManager.getCookie()`，`WebLoginAutoDetect.kt` 按 1.5 秒采样、5 秒校验节流、同凭据失败后 10 秒重试，经接口验证后保存；本项目复用已有同类流程并核对 Cookie 来源。这里只参考通用网页登录方式，没有移植云析的天翼适配。
+
 ## 官网登录成功但应用未检测到
 
 2026-11-25 通过用户授权的真实短信登录，官网完成 cloud 域的 portal 回调并进入个人文件列表。回调生成 `JSESSIONID` 和 HttpOnly `COOKIE_LOGIN_USER`；网页的 `document.cookie` 仅能读取跟踪 Cookie，应用继续通过原生 CookieManager 读取身份接口可用的 Cookie。

@@ -1024,6 +1024,71 @@ void main() {
   );
 
   testWidgets(
+    'Tianyi Android detects a valid HttpOnly session behind a stale same-name cookie',
+    (tester) async {
+      const cloud = CloudPlatform.tianyi;
+      final observed = <String>[];
+      String? ua;
+      final http = FakeHttp((request) {
+        expect(request.headers['User-Agent'], ua);
+        if (request.uri.path.endsWith('/getUserInfoForPortal.action')) {
+          observed.add(request.headers['Cookie']!);
+          if (observed.last == 'COOKIE_LOGIN_USER=private-stale') {
+            return jsonResponse({'errorCode': 'InvalidSessionKey'}, 400);
+          }
+          expect(observed.last, 'COOKIE_LOGIN_USER=private-valid');
+          return jsonResponse({
+            'res_code': 0,
+            'userId': 'fixture-user',
+            'loginName': 'fixture-name',
+          });
+        }
+        return jsonResponse({
+          'res_code': 0,
+          'cloudCapacityInfo': {'totalSize': 100, 'usedSize': 30},
+        });
+      });
+      services.login.webAuthenticators[cloud] = TianyiConnector(
+        BrowserUaJsonHttp(http, services.cloud.browserUa, cloud),
+      ).authenticate;
+      await openLogin(tester, cloud);
+      final native = _TianyiController(449)
+        ..url = WebUri('https://cloud.189.cn/web/main');
+      final (view, _) = attach(449, instance: native);
+      ua = view.params.initialSettings!.userAgent;
+      platform.cookies.values[TianyiWebLogin.identityUrl] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-stale',
+          path: '/api',
+          isHttpOnly: true,
+        ),
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-valid',
+          path: '/',
+          isHttpOnly: true,
+        ),
+      ];
+      await detect(tester);
+      expect(observed, [
+        'COOKIE_LOGIN_USER=private-stale',
+        'COOKIE_LOGIN_USER=private-valid',
+      ]);
+      final saved = services.vault.credential(cloud)!;
+      expect(saved.primary, 'COOKIE_LOGIN_USER=private-valid');
+      expect(saved.fields.containsKey('cookieCandidates'), isFalse);
+      final diagnostics = log.entries().map((entry) => entry.detail).join();
+      expect(diagnostics, contains('session_candidates_captured'));
+      expect(diagnostics, isNot(contains('private-')));
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
     'Tianyi detects the account API cookie while the mobile page stays open',
     (tester) async {
       services.login.webAuthenticators[CloudPlatform

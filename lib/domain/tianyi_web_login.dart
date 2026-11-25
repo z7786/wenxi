@@ -69,17 +69,50 @@ class TianyiWebLogin {
       ? value
       : '';
 
-  static String encode(String cookie, Object? browser) {
+  static const maxCookieCandidates = 3;
+
+  static List<String> cookieCandidates(Object? raw) {
+    final result = <String>{};
+    final values = decode(raw)['cookieCandidates'];
+    if (values is! List) return const [];
+    for (final value in values.take(maxCookieCandidates)) {
+      if (value is! String ||
+          value.length > 16384 ||
+          RegExp(r'[\x00-\x1f\x7f-\x9f]').hasMatch(value) ||
+          !RegExp(
+            r'(?:^|;)\s*(?:COOKIE_LOGIN_USER|LOGIN_USER)=[^;\s]+',
+          ).hasMatch(value)) {
+        continue;
+      }
+      result.add(value.trim());
+    }
+    return result.toList();
+  }
+
+  static String encode(
+    String cookie,
+    Object? browser, {
+    List<String> candidates = const [],
+  }) {
     final id = browserId(browser);
-    return id.isEmpty
+    final headers = cookieCandidates({'cookieCandidates': candidates});
+    return id.isEmpty && headers.length < 2
         ? cookie
-        : jsonEncode({'cookie': cookie, 'browserId': id});
+        : jsonEncode({
+            'cookie': cookie,
+            if (id.isNotEmpty) 'browserId': id,
+            if (headers.length > 1) 'cookieCandidates': headers,
+          });
   }
 
   static Map<String, String> fields(String raw) => {
     'primary': cookie(raw),
     if (browserId(decode(raw)['browserId']).isNotEmpty)
       'browserId': browserId(decode(raw)['browserId']),
+    if (cookieCandidates(raw).length > 1)
+      'cookieCandidates': jsonEncode({
+        'cookieCandidates': cookieCandidates(raw),
+      }),
   };
 
   static const formScript = r'''(() => {

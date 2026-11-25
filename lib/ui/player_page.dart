@@ -249,8 +249,19 @@ class _PlayerPageState extends State<PlayerPage>
       if (mounted) _showHud('系统播放控制暂不可用');
     }
     if (!mounted) return;
+    final useDefaultPlayer =
+        !widget.resumeSession &&
+        controller.hasVideo &&
+        device.supportsDefaultExternalPlayer &&
+        ExternalPlayerHistory(
+          controller.history.store,
+        ).defaultFor(_externalPlatform).isNotEmpty;
     if (!widget.resumeSession || !controller.ready) {
-      await controller.start();
+      if (useDefaultPlayer) {
+        await controller.load(controller.initialIndex, playWhenReady: false);
+      } else {
+        await controller.start();
+      }
     } else {
       controller.foreground();
       await _syncDevice();
@@ -259,6 +270,23 @@ class _PlayerPageState extends State<PlayerPage>
       _onController();
       _touch();
       if (device.isTelevision) _focusTvControls();
+      if (useDefaultPlayer) {
+        final generation = controller.generation;
+        final stopRevision = controller.sleepTimer.stopRevision;
+        try {
+          await _openExternalPlayer(useDefault: true);
+        } catch (error) {
+          if (mounted) {
+            _showHud(error is AppException ? error.message : '默认播放器无法打开，请重新选择');
+          }
+        }
+        if (mounted &&
+            !_leaving &&
+            !controller.playingExternally &&
+            controller.canResumeAfterPanel(generation, stopRevision)) {
+          await controller.play();
+        }
+      }
     }
   }
 
@@ -2541,6 +2569,14 @@ class _PlayerPageState extends State<PlayerPage>
                           !controller.casting &&
                           !controller.connectingCast,
                     ),
+                  if (controller.hasVideo &&
+                      device.supportsDefaultExternalPlayer)
+                    _PlayerMenuAction(
+                      '默认播放器',
+                      CupertinoIcons.play_rectangle,
+                      _setDefaultPlayer,
+                      key: const Key('player-default-player'),
+                    ),
                   if (widget.onDownload != null)
                     _PlayerMenuAction(
                       controller.current.platform == CloudPlatform.uc
@@ -3232,7 +3268,74 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
-  Future<void> _openExternalPlayer() async {
+  String get _externalPlatform => switch (device.targetPlatform) {
+    TargetPlatform.android => 'android',
+    TargetPlatform.macOS => 'macos',
+    _ => 'windows',
+  };
+
+  Future<void> _setDefaultPlayer() async {
+    final history = ExternalPlayerHistory(controller.history.store);
+    final saved = history.defaultFor(_externalPlatform);
+    final route = DialogRoute<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('视频默认播放器'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              key: const Key('default-player-internal'),
+              leading: const Icon(CupertinoIcons.play_circle),
+              title: const Text('应用内播放器'),
+              trailing: saved.isEmpty
+                  ? const Icon(CupertinoIcons.check_mark)
+                  : null,
+              onTap: () => Navigator.pop(context, 'internal'),
+            ),
+            ListTile(
+              key: const Key('default-player-external'),
+              leading: const Icon(CupertinoIcons.play_rectangle),
+              title: const Text('第三方播放器'),
+              subtitle: Text(
+                saved.isEmpty
+                    ? '打开视频时使用第三方播放器'
+                    : _externalPlatform == 'android'
+                    ? saved.split('/').first
+                    : p.basename(saved),
+              ),
+              trailing: saved.isNotEmpty
+                  ? const Icon(CupertinoIcons.check_mark)
+                  : null,
+              onTap: () => Navigator.pop(context, 'external'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    final choice = await Navigator.of(context).push(route);
+    await route.completed;
+    if (!mounted || _leaving || choice == null) return;
+    if (choice == 'internal') {
+      await history.setDefault(_externalPlatform, null);
+      if (controller.playingExternally) await controller.play();
+    } else {
+      final player = device.windowsExternalPlayer == null
+          ? await device.chooseDefaultExternalPlayer()
+          : await _chooseWindowsPlayer();
+      if (!mounted || _leaving || player == null) return;
+      await history.setDefault(_externalPlatform, player);
+    }
+    if (mounted) _showHud(choice == 'internal' ? '已改回应用内播放' : '已设置默认第三方播放器');
+  }
+
+  Future<void> _openExternalPlayer({bool useDefault = false}) async {
     if (_leaving || controller.openingExternalPlayer || controller.loading) {
       return;
     }
@@ -3244,7 +3347,13 @@ class _PlayerPageState extends State<PlayerPage>
       // Choose before retiring the current stream. A cancelled/repeated picker
       // must not wait for the player currently reading that stream to stop.
       final windows = device.windowsExternalPlayer;
-      final executable = windows == null ? null : await _chooseWindowsPlayer();
+      final executable = windows == null
+          ? null
+          : useDefault
+          ? ExternalPlayerHistory(
+              controller.history.store,
+            ).defaultFor(_externalPlatform)
+          : await _chooseWindowsPlayer();
       if (windows != null && executable == null || !mounted || _leaving) return;
       if (windows != null) windows.executable = executable;
       await controller.openExternalPlayer((url, title, position) async {
@@ -3256,13 +3365,17 @@ class _PlayerPageState extends State<PlayerPage>
           url: url,
           title: title,
           position: position,
+          playerComponent: useDefault && _externalPlatform == 'android'
+              ? ExternalPlayerHistory(
+                  controller.history.store,
+                ).defaultFor(_externalPlatform)
+              : null,
         );
         if (opened && executable != null) {
           try {
-            await ExternalPlayerHistory(controller.history.store).used(
-              executable,
-              platform: Platform.isMacOS ? 'macos' : 'windows',
-            );
+            await ExternalPlayerHistory(
+              controller.history.store,
+            ).used(executable, platform: _externalPlatform);
           } catch (_) {
             // A launched player already owns the stream. A failed preference
             // write must not close that stream or restart internal audio.
@@ -3279,7 +3392,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   Future<String?> _chooseWindowsPlayer() async {
     final historyStore = ExternalPlayerHistory(controller.history.store);
-    final history = Platform.isMacOS
+    final history = _externalPlatform == 'macos'
         ? historyStore.macos
         : historyStore.windows;
     final saved = history.firstOrNull ?? '';
@@ -3329,7 +3442,7 @@ class _PlayerPageState extends State<PlayerPage>
       if (selected == null || !mounted || _leaving) return null;
       if (selected != 'choose') return selected;
     }
-    if (Platform.isMacOS && widget.chooseExternalPlayer == null) {
+    if (_externalPlatform == 'macos' && widget.chooseExternalPlayer == null) {
       return const MethodChannel(
         'com.asterlink.app/native',
       ).invokeMethod<String>('selectExternalPlayer');

@@ -12,6 +12,15 @@
     "buttonText": "",
     "buttonUrl": ""
   },
+  "searchAnnouncement": {
+    "enabled": false,
+    "title": "",
+    "content": "",
+    "startsAt": "",
+    "expiresAt": "",
+    "buttonText": "",
+    "buttonUrl": ""
+  },
   "clouds": {
     "baidu": {
       "enabled": true,
@@ -93,6 +102,8 @@
       "downloadUrl": "",
       "inAppDownloadUrl": "",
       "inAppPasscode": "",
+      "packageSha256": "",
+      "packageSize": 0,
       "notes": "",
       "expiresAt": ""
     },
@@ -104,6 +115,8 @@
       "downloadUrl": "",
       "inAppDownloadUrl": "",
       "inAppPasscode": "",
+      "packageSha256": "",
+      "packageSize": 0,
       "notes": "",
       "expiresAt": ""
     },

@@ -693,6 +693,31 @@ class TianyiConnector extends CloudConnector {
     return info;
   }
 
+  Future<Json> _loginIdentity(Credential candidate) async {
+    final candidates = <String>{
+      _session.cookie,
+      ...TianyiWebLogin.cookieCandidates(candidate.field('cookieCandidates')),
+    }.take(TianyiWebLogin.maxCookieCandidates).toList();
+    for (final (index, cookie) in candidates.indexed) {
+      _checkpoint();
+      _session.cookie = cookie;
+      try {
+        return await _identity();
+      } on _TianyiSessionExpired {
+        _checkpoint();
+        if (index == candidates.length - 1) rethrow;
+        DiagnosticLog.event(
+          'tianyi.login_session_candidate_rejected',
+          fields: {
+            'candidateIndex': index,
+            'candidateCount': candidates.length,
+          },
+        );
+      }
+    }
+    throw const _TianyiSessionExpired();
+  }
+
   String _nickname(Json info) => info
       .obj('userExtResp')
       .str('nickName')
@@ -718,7 +743,8 @@ class TianyiConnector extends CloudConnector {
   Future<LoginResult> authenticate(Credential credential) => _run(
     credential,
     () async {
-      final identity = await _identity(), nickname = _nickname(identity);
+      final identity = await _loginIdentity(credential),
+          nickname = _nickname(identity);
       CloudAccount account;
       try {
         // Quota is optional once identity has succeeded. Use a child scope so
@@ -753,7 +779,9 @@ class TianyiConnector extends CloudConnector {
         account = CloudAccount(nickname);
       }
       return LoginResult(
-        credential.withFields({
+        Credential(credential.label, {
+          for (final entry in credential.fields.entries)
+            if (entry.key != 'cookieCandidates') entry.key: entry.value,
           'primary': _session.cookie,
           'browserId': _session.browserId,
           'userId': identity.str('userId').trim(),

@@ -190,6 +190,8 @@ void main() {
                 ? Uri.parse('https://pan.quark.cn/s/updatefixture?pwd=old1')
                 : null,
             inAppPasscode: 'new1',
+            packageSha256: platform == 'windows' ? updatePackageSha256 : '',
+            packageSize: platform == 'windows' ? 1024 : 0,
           );
           expect(await f.service.start(f.current!), isTrue);
           expect(
@@ -382,6 +384,8 @@ void main() {
           ),
           '',
           releaseKey: 'github:v1.2.0',
+          packageSha256: platform == 'windows' ? updatePackageSha256 : '',
+          packageSize: 1024,
         );
         expect(await f.service.start(f.current!), isTrue);
         expect(
@@ -463,4 +467,152 @@ void main() {
       expect(f.installer.opens, 0);
     },
   );
+
+  RemoteUpdate windowsRelease({
+    String digest = updatePackageSha256,
+    int size = 1024,
+  }) => RemoteUpdate(
+    '1.2.0',
+    120,
+    Uri.parse('https://downloads.example.test/setup.exe'),
+    '',
+    packageSha256: digest,
+    packageSize: size,
+  );
+
+  test(
+    'Windows refuses missing integrity even when an old task is completed',
+    () async {
+      f.close();
+      f = UpdateFixture(platform: 'windows');
+      for (final digest in ['', 'not-a-sha256']) {
+        final update = f.current = windowsRelease(digest: digest);
+        expect(await f.service.start(update), isFalse);
+        expect(f.downloads.tasks, isEmpty);
+        expect(f.service.error(update), contains('浏览器更新'));
+        await expectLater(
+          f.service.resolve(update),
+          throwsA(isA<AppException>()),
+        );
+        f.downloads.records.add(
+          DownloadTask(
+            id: 'legacy',
+            createdAt: 1,
+            status: DownloadStatus.completed,
+            savedPath: '/saved/setup.exe',
+            spec: DownloadSpec(
+              url: update.downloadUrl.toString(),
+              fileName: 'setup.exe',
+              appUpdateKey: f.service.keyFor(update),
+            ),
+          ),
+        );
+        expect(await f.service.install(update), isFalse);
+        expect(f.installer.preparations, 0);
+        expect(f.installer.opens, 0);
+        f.downloads.records.clear();
+      }
+    },
+  );
+
+  test(
+    'Windows restored downloads retain the published hash and size',
+    () async {
+      f.close();
+      f = UpdateFixture(platform: 'windows');
+      final update = f.current = windowsRelease(
+        digest: updatePackageSha256.toUpperCase(),
+      );
+      expect(await f.service.start(update), isTrue);
+      final task = f.downloads.tasks.single;
+      expect(task.spec.checksumType, 'sha256');
+      expect(task.spec.checksumValue, updatePackageSha256);
+      expect(task.spec.expectedSize, 1024);
+      final restored = DownloadTask.fromJson(
+        jsonDecode(jsonEncode(task.toJson())),
+      );
+      f.close();
+      f = UpdateFixture(platform: 'windows')..current = update;
+      f.downloads.records.add(restored.update({'status': 'paused'}));
+      expect(await f.service.start(update), isTrue);
+      expect(f.downloads.created, 0);
+      expect(f.downloads.resumed, 1);
+      expect(f.downloads.tasks.single.spec.checksumValue, updatePackageSha256);
+      expect(f.downloads.tasks.single.spec.expectedSize, 1024);
+    },
+  );
+
+  test(
+    'A replacement package at the same version and URL gets a new task',
+    () async {
+      f.close();
+      f = UpdateFixture(platform: 'windows');
+      final first = f.current = windowsRelease();
+      expect(await f.service.start(first), isTrue);
+      final originalId = f.downloads.tasks.single.id;
+      final replacement = f.current = windowsRelease(digest: 'a' * 64);
+      expect(f.service.keyFor(first), isNot(f.service.keyFor(replacement)));
+      expect(await f.service.start(replacement), isTrue);
+      expect(f.downloads.created, 2);
+      expect(f.service.taskFor(replacement)!.id, isNot(originalId));
+      expect(f.service.taskFor(replacement)!.spec.checksumValue, 'a' * 64);
+      expect(
+        f.service.keyFor(replacement),
+        isNot(f.service.keyFor(windowsRelease(digest: 'a' * 64, size: 2048))),
+      );
+    },
+  );
+
+  test(
+    'An estimated share size leaves the published package size authoritative',
+    () async {
+      f.close();
+      f = UpdateFixture(platform: 'windows');
+      f.connector.entries = [
+        const CloudFile(id: 'file', name: 'setup.exe', size: 2048),
+      ];
+      expect(await f.service.start(f.current!), isTrue);
+      expect(f.downloads.tasks.single.spec.expectedSize, 1024);
+      expect(f.downloads.tasks.single.spec.checksumValue, updatePackageSha256);
+    },
+  );
+
+  for (final change in [
+    'cancelled',
+    'removed',
+    'replaced',
+    'background',
+    'closed',
+  ]) {
+    test(
+      'Windows validation cannot launch after task or lifecycle changes: $change',
+      () async {
+        f.close();
+        f = UpdateFixture(platform: 'windows');
+        final update = f.current = windowsRelease();
+        await f.service.start(update);
+        f.complete();
+        final task = f.downloads.tasks.single;
+        f.installer.pending = Completer<void>();
+        final operation = f.service.install(update);
+        await Future<void>.delayed(Duration.zero);
+        expect(f.installer.preparations, 1);
+        switch (change) {
+          case 'cancelled':
+            f.downloads.change(task.id, {'status': 'cancelled'});
+          case 'removed':
+            await f.downloads.delete(task.id);
+          case 'replaced':
+            f.downloads.change(task.id, {'savedPath': '/saved/different.exe'});
+          case 'background':
+            f.foreground = false;
+          case 'closed':
+            f.service.close();
+        }
+        f.installer.pending!.complete();
+        expect(await operation, isFalse);
+        expect(f.installer.opens, 0);
+      },
+    );
+  }
 }

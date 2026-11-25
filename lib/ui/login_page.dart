@@ -1243,11 +1243,20 @@ class _WebLoginPageState extends State<WebLoginPage>
         fields: fields,
       );
     }
-    return LoginCredentials.fromBrowser(
+    final raw = LoginCredentials.fromBrowser(
       CloudPlatform.tianyi,
       storage: {'browserId': _tianyiBrowserId},
       cookies: values,
     );
+    final candidates = TianyiWebLogin.cookieCandidates(raw);
+    if (candidates.length > 1) {
+      diagnostics.record(
+        'session_candidates_captured',
+        stage: 'read_credentials',
+        fields: {'poll': poll, 'candidateCount': candidates.length},
+      );
+    }
+    return raw;
   }
 
   Future<void> _poll({bool userInitiated = false}) async {

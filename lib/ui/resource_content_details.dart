@@ -259,6 +259,32 @@ class _ResourceContentDetailsState extends State<_ResourceContentDetails> {
                     color: description.isEmpty ? secondary(context) : null,
                   ),
                 ),
+                if (widget.hit.coverUrl.isNotEmpty) ...[
+                  const SizedBox(height: 18),
+                  ClipRRect(
+                    key: const Key('resource-content-image'),
+                    borderRadius: BorderRadius.circular(12),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 640),
+                      child: Image(
+                        image: ResizeImage(
+                          NetworkImage(widget.hit.coverUrl),
+                          width: 1600,
+                          height: 1600,
+                          policy: ResizeImagePolicy.fit,
+                        ),
+                        fit: BoxFit.contain,
+                        semanticLabel: '${widget.hit.title}的配图',
+                        frameBuilder: (context, child, frame, _) =>
+                            frame == null
+                            ? _imagePlaceholder(context, loading: true)
+                            : child,
+                        errorBuilder: (context, _, _) =>
+                            _imagePlaceholder(context),
+                      ),
+                    ),
+                  ),
+                ],
                 const Divider(height: 40),
                 const Text('分享链接', style: TextStyle(fontSize: 12)),
                 const SizedBox(height: 8),
@@ -326,4 +352,18 @@ class _ResourceContentDetailsState extends State<_ResourceContentDetails> {
       ],
     );
   }
+
+  Widget _imagePlaceholder(BuildContext context, {bool loading = false}) =>
+      Container(
+        height: 160,
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+        alignment: Alignment.center,
+        child: loading
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Text('图片暂时无法加载', style: TextStyle(color: secondary(context))),
+      );
 }

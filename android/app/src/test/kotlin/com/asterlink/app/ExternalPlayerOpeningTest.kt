@@ -55,8 +55,10 @@ class ExternalPlayerOpeningTest {
     }
 
     private fun installed(vararg players: ResolveInfo) {
-        val intent = opening.prepare(video, "movie.mp4", 0)
-        for (player in players) shadowOf(context.packageManager).addResolveInfoForIntent(intent, player)
+        for (url in listOf(video, "http://127.0.0.1/default-video")) {
+            val intent = opening.prepare(url, "movie.mp4", 0)
+            for (player in players) shadowOf(context.packageManager).addResolveInfoForIntent(intent, player)
+        }
     }
 
     private fun open() = opening.open(video, "movie.mp4", 43210) { success, error -> results.add(success to error) }
@@ -64,7 +66,9 @@ class ExternalPlayerOpeningTest {
     @Test fun onlyExportedEnabledThirdPartyPlayersAreOfferedAndDuplicateActivitiesCollapse() {
         val hidden = player("hidden.player").apply { activityInfo.exported = false }
         val disabled = player("disabled.player").apply { activityInfo.enabled = false }
-        installed(player(context.packageName), player("vlc.player"), player("vlc.player", "Alias"), hidden, disabled)
+        val disabledApp = player("disabled.app").apply { activityInfo.applicationInfo.enabled = false }
+        val protected = player("protected.player").apply { activityInfo.permission = "fixture.player.PRIVATE" }
+        installed(player(context.packageName), player("vlc.player"), player("vlc.player", "Alias"), hidden, disabled, disabledApp, protected)
         val targets = opening.targets(opening.prepare(video, "movie.mp4", 0))
         assertEquals(listOf("vlc.player"), targets.map { it.activityInfo.packageName })
     }
@@ -86,6 +90,54 @@ class ExternalPlayerOpeningTest {
         assertEquals(43210, intent.getIntExtra("position", -1))
         assertEquals(43210L, intent.getLongExtra("extra_start_time", -1))
         assertEquals(listOf(true to null), results)
+    }
+
+    @Test fun defaultSelectionReturnsAConcreteComponentWithoutLaunchingAnApp() {
+        installed(player("fixture.player", label = "Fixture Player"))
+        val choices = mutableListOf<Pair<String?, FileOpenFailure?>>()
+        opening.selectDefault("fixture-session") { component, error -> choices.add(component to error) }
+        val chooser = ShadowAlertDialog.getLatestAlertDialog()
+        assertEquals("选择默认播放器", shadowOf(chooser).title.toString())
+        chooser.listView.performItemClick(null, 0, 0)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(listOf("fixture.player/PlayerActivity" to null), choices)
+        assertNull(shadowOf(activity).nextStartedActivity)
+
+        opening.open(video, "movie.mp4", 43210, playerComponent = choices.single().first) { opened, error ->
+            results.add(opened to error)
+        }
+        assertEquals(listOf(true to null), results)
+        assertEquals(ComponentName("fixture.player", "PlayerActivity"), shadowOf(activity).nextStartedActivity.component)
+        assertFalse(chooser.isShowing)
+    }
+
+    @Test fun unavailableOrPrivateDefaultPlayerIsRejectedWithoutLaunchingAnotherApp() {
+        installed(
+            player("another.player"),
+            player("private.player").apply { activityInfo.exported = false },
+            player("disabled.app").apply { activityInfo.applicationInfo.enabled = false },
+            player("protected.player").apply { activityInfo.permission = "fixture.player.PRIVATE" },
+        )
+        for (component in listOf("missing.player/PlayerActivity", "private.player/PlayerActivity", "disabled.app/PlayerActivity", "protected.player/PlayerActivity", "not-a-component")) {
+            opening.open(video, "movie.mp4", 0, playerComponent = component) { opened, error -> results.add(opened to error) }
+            assertFalse(results.last().first)
+            assertEquals("default_player", results.last().second!!.code)
+            assertNull(shadowOf(activity).nextStartedActivity)
+        }
+    }
+
+    @Test fun cancellingDefaultSelectionReturnsNullOnceAndDoesNotLaunchAnything() {
+        installed(player("fixture.player"))
+        val choices = mutableListOf<Pair<String?, FileOpenFailure?>>()
+        opening.selectDefault("current-session") { component, error -> choices.add(component to error) }
+        val chooser = ShadowAlertDialog.getLatestAlertDialog()
+        opening.dismiss(session = "old-session")
+        assertTrue(chooser.isShowing)
+        opening.dismiss(session = "current-session")
+        shadowOf(Looper.getMainLooper()).idle()
+        opening.dismiss()
+        assertEquals(listOf(null to null), choices)
+        assertNull(shadowOf(activity).nextStartedActivity)
     }
 
     @Test fun cancellingOrDestroyingTheChooserCompletesOnceWithoutLaunchingAnyApp() {

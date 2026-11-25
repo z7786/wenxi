@@ -25,9 +25,6 @@
     <symbol id="icon-folder" viewBox="0 0 24 24">
       <path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2" />
     </symbol>
-    <symbol id="icon-chevron-right" viewBox="0 0 24 24">
-      <path d="M9 6l6 6l-6 6" />
-    </symbol>
   </svg>
   <header class="topbar">
     <div class="navigation">
@@ -40,10 +37,15 @@
     <section id="pair-view" class="pair-view" aria-labelledby="pair-title">
       <div class="pair-heading">
         <h1 id="pair-title">连接这台设备</h1>
+        <p class="pair-description">用浏览器收发文件。</p>
         <p id="pair-help">在文析助手「设备互联」中查看 6 位连接码。</p>
+        <div class="pair-capabilities">
+          <p>发送文件与文件夹<span>从本机选择，或直接拖入网页。</span></p>
+          <p>下载设备分享<span>连接后查看设备分享的文件。</span></p>
+        </div>
       </div>
       <form id="pair-form">
-        <div class="group form-group">
+        <div class="form-group">
           <div class="form-row code-row">
             <label for="pair-code">连接码</label>
             <input id="pair-code" name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="6 位数字" aria-describedby="pair-help" required>
@@ -55,11 +57,11 @@
         </div>
         <p id="pair-error" class="error form-error" role="alert" hidden></p>
         <button id="pair-submit" class="primary" type="submit">连接设备</button>
-        <p class="footnote pair-footnote">连接后可发送文件，也可下载设备的分享。<br>请保持文析助手的设备互联开启。</p>
+        <p class="footnote pair-footnote">请保持文析助手的设备互联开启。</p>
       </form>
     </section>
     <section id="transfer-view" hidden>
-      <div class="device-group group">
+      <div class="device-group">
         <div class="device-identity">
           <p class="device-label">已连接设备</p>
           <h1 id="device-name">这台设备</h1>
@@ -70,23 +72,24 @@
       <div class="transfer-layout">
         <section class="send-panel" aria-labelledby="send-title">
           <div class="section-heading"><h2 id="send-title">发送到设备</h2></div>
-          <div id="dropzone" class="group picker-group">
-            <label class="picker-row file-button" for="file-input">
-              <svg class="row-icon" aria-hidden="true" focusable="false"><use href="#icon-file-upload" /></svg>
-              <span>选择文件</span>
-              <svg class="chevron" aria-hidden="true" focusable="false"><use href="#icon-chevron-right" /></svg>
-              <input id="file-input" type="file" multiple aria-label="选择要发送的文件">
-            </label>
-            <label id="folder-button" class="picker-row file-button" for="folder-input">
-              <svg class="row-icon" aria-hidden="true" focusable="false"><use href="#icon-folder" /></svg>
-              <span>选择文件夹</span>
-              <svg class="chevron" aria-hidden="true" focusable="false"><use href="#icon-chevron-right" /></svg>
-              <input id="folder-input" type="file" webkitdirectory multiple aria-label="选择要发送的文件夹">
-            </label>
+          <div id="dropzone" class="dropzone" aria-describedby="upload-help">
+            <svg class="drop-icon" aria-hidden="true" focusable="false"><use href="#icon-file-upload" /></svg>
+            <p class="drop-title"><span class="drag-hint">将文件拖到这里</span><span class="touch-hint">选择要发送的文件</span></p>
+            <p class="drop-description">选择后自动发送，支持多个文件</p>
+            <div class="picker-actions">
+              <label class="file-button primary" for="file-input">
+                <span>选择文件</span>
+                <input id="file-input" type="file" multiple aria-label="选择要发送的文件">
+              </label>
+              <label id="folder-button" class="file-button secondary" for="folder-input">
+                <span>选择文件夹</span>
+                <input id="folder-input" type="file" webkitdirectory multiple aria-label="选择要发送的文件夹">
+              </label>
+            </div>
           </div>
-          <p id="upload-help" class="footnote"><span class="drag-hint">也可将文件拖入上方列表。</span>中断后可重试，同名文件自动编号。</p>
+          <p id="upload-help" class="footnote">中断后可重试，同名文件自动编号。</p>
           <div class="section-heading queue-heading"><h3>发送队列</h3><span id="queue-count">0 个文件</span></div>
-          <div class="group queue-group">
+          <div class="queue-group">
             <p id="queue-empty" class="empty">还没有选择文件</p>
             <ul id="upload-list" class="file-list" aria-label="发送队列"></ul>
             <div id="queue-actions" class="queue-actions" hidden>
@@ -97,7 +100,7 @@
         </section>
         <section class="receive-panel" aria-labelledby="receive-title">
           <div class="section-heading"><h2 id="receive-title">从设备下载</h2><button id="refresh" class="text-button" type="button">刷新</button></div>
-          <div class="group">
+          <div class="shares-group">
             <p id="shares-empty" class="empty">这台设备暂时没有分享文件</p>
             <ul id="share-list" class="file-list" aria-label="可下载的分享"></ul>
           </div>

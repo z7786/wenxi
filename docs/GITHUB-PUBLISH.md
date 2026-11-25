@@ -56,3 +56,5 @@ Secrets 中另设 `ASTERLINK_CONTROL_URL`、`UMENG_APPKEY`；Variables 中设置
 修改 `pubspec.yaml` 后运行 `dart tool/sync_version.dart --write`。推送与完整版本一致的新标签，或在 Actions → Build signed release → Run workflow 选择分支，均可生成正式签名安装包。完成后下载 `release-android`、`release-windows`、`release-windows-arm64` 附件；工作流不会自动创建或发布 Release。需要发布时，再单独上传附件并发布版本。不要覆盖已发布标签。只有正式 Release 会被备用更新识别。
 
 每个平台附件包含各自产物的 `SHA256SUMS.txt`，由已有打包工具生成。下载多个平台时分目录保存校验文件，避免同名文件互相覆盖。验收记录写明 GitHub run URL、提交 SHA、版本、对应平台结果和安装测试；只引用同一次提交的构建结果。本机仍有未提交修改时，远端旧提交的绿灯不能证明这些修改已通过。
+
+手动运行时可将 `targets` 选择为 `android-windows`，仅构建 Android ARM64 与 Windows x64；默认 `all` 和标签触发仍包含 Windows ARM64。无论选择哪些目标，均须通过同一套源码检查与测试。

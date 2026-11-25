@@ -335,6 +335,223 @@ void main() {
     },
   );
 
+  for (final sameScope in [true, false]) {
+    test(
+      'Tianyi validates the captured replacement session after a stale same-name cookie: sameScope=$sameScope',
+      () async {
+        final store = StateStore.memory();
+        addTearDown(store.dispose);
+        final vault = Vault(store);
+        final previous = Credential('previous', {
+          'primary': 'COOKIE_LOGIN_USER=previous',
+        }, updatedAt: 1);
+        await vault.putCredential(_cloud, previous);
+        final identities = <String>[];
+        final http = FakeHttp((request) {
+          final cookie = request.headers['Cookie']!;
+          expect(request.headers['Browser-Id'], _id);
+          if (request.uri.path.endsWith('/getUserInfoForPortal.action')) {
+            identities.add(cookie);
+            expect(vault.credential(_cloud)!.sameAs(previous), isTrue);
+            if (cookie == 'COOKIE_LOGIN_USER=stale') {
+              return jsonResponse({'errorCode': 'InvalidSessionKey'}, 400);
+            }
+            expect(cookie, 'COOKIE_LOGIN_USER=replacement');
+            return jsonResponse({
+              'res_code': 0,
+              'userId': 'fixture-replacement-user',
+              'loginName': 'fixture-replacement-name',
+            });
+          }
+          expect(cookie, 'COOKIE_LOGIN_USER=replacement');
+          return jsonResponse({
+            'res_code': 0,
+            'cloudCapacityInfo': {'totalSize': 100, 'usedSize': 30},
+          });
+        });
+        final login = AccountLoginService(
+          vault,
+          (_, _) async => const CloudAccount('unused'),
+          webAuthenticators: {_cloud: TianyiConnector(http).authenticate},
+        );
+        final raw = LoginCredentials.fromBrowser(
+          _cloud,
+          storage: {'browserId': _id},
+          cookies: sameScope
+              ? ['COOKIE_LOGIN_USER=stale; COOKIE_LOGIN_USER=replacement']
+              : ['COOKIE_LOGIN_USER=stale', 'COOKIE_LOGIN_USER=replacement'],
+        );
+        final result = await login.submitWeb(_cloud, raw);
+        expect(identities, [
+          'COOKIE_LOGIN_USER=stale',
+          'COOKIE_LOGIN_USER=replacement',
+        ]);
+        expect(result.credential.primary, 'COOKIE_LOGIN_USER=replacement');
+        expect(
+          result.credential.fields.containsKey('cookieCandidates'),
+          isFalse,
+        );
+        expect(vault.credential(_cloud)!.sameAs(result.credential), isTrue);
+      },
+    );
+  }
+
+  test(
+    'Tianyi limits observed cookie alternatives and rejects malformed candidate headers',
+    () {
+      final raw = LoginCredentials.fromBrowser(
+        _cloud,
+        cookies: [
+          'COOKIE_LOGIN_USER=one; COOKIE_LOGIN_USER=two; COOKIE_LOGIN_USER=three; COOKIE_LOGIN_USER=four',
+        ],
+      );
+      final candidate = LoginCredentials.candidate(_cloud, raw, null);
+      expect(
+        TianyiWebLogin.cookieCandidates(candidate.field('cookieCandidates')),
+        [
+          'COOKIE_LOGIN_USER=one',
+          'COOKIE_LOGIN_USER=two',
+          'COOKIE_LOGIN_USER=three',
+        ],
+      );
+      for (final invalid in [
+        'COOKIE_LOGIN_USER=bad\r\nInjected: true',
+        'COOKIE_LOGIN_USER=${'x' * 16385}',
+        'SSO_TOKEN=unrelated',
+        'COOKIE_LOGIN_USER= ',
+        123,
+      ]) {
+        expect(
+          TianyiWebLogin.cookieCandidates({
+            'cookieCandidates': [invalid],
+          }),
+          isEmpty,
+        );
+      }
+      expect(
+        TianyiWebLogin.cookieCandidates({
+          'cookieCandidates': [
+            'COOKIE_LOGIN_USER=one',
+            'COOKIE_LOGIN_USER=one',
+            'COOKIE_LOGIN_USER=two',
+            'COOKIE_LOGIN_USER=three',
+          ],
+        }),
+        ['COOKIE_LOGIN_USER=one', 'COOKIE_LOGIN_USER=two'],
+      );
+    },
+  );
+
+  for (final code in [
+    'InvalidSessionKey',
+    'ServiceUnavailable',
+    'InvalidDeviceStatus',
+  ]) {
+    test(
+      'Only expired sessions permit another Tianyi cookie attempt: $code',
+      () async {
+        final store = StateStore.memory();
+        addTearDown(store.dispose);
+        final vault = Vault(store);
+        final previous = Credential('previous', {
+          'primary': 'COOKIE_LOGIN_USER=previous',
+        }, updatedAt: 1);
+        await vault.putCredential(_cloud, previous);
+        final http = FakeHttp((request) {
+          expect(request.uri.path, Uri.parse(_identity).path);
+          return jsonResponse({
+            'errorCode': code,
+          }, code == 'ServiceUnavailable' ? 503 : 400);
+        });
+        final login = AccountLoginService(
+          vault,
+          (_, _) async => const CloudAccount('unused'),
+          webAuthenticators: {_cloud: TianyiConnector(http).authenticate},
+        );
+        final raw = LoginCredentials.fromBrowser(
+          _cloud,
+          cookies: [
+            'COOKIE_LOGIN_USER=one; COOKIE_LOGIN_USER=two; COOKIE_LOGIN_USER=three; COOKIE_LOGIN_USER=four',
+          ],
+        );
+        await expectLater(
+          login.submitWeb(_cloud, raw),
+          throwsA(isA<AppException>()),
+        );
+        expect(http.calls, hasLength(code == 'InvalidSessionKey' ? 3 : 1));
+        expect(vault.credential(_cloud)!.sameAs(previous), isTrue);
+      },
+    );
+  }
+
+  for (final timeout in [false, true]) {
+    test(
+      'A cancelled or timed-out alternate Tianyi validation cannot save a late session: timeout=$timeout',
+      () {
+        fakeAsync((time) {
+          final store = StateStore.memory();
+          final vault = Vault(store);
+          final previous = Credential('previous', {
+            'primary': 'COOKIE_LOGIN_USER=previous',
+          }, updatedAt: 1);
+          vault.putCredential(_cloud, previous);
+          time.flushMicrotasks();
+          final pending = Completer<HttpResult>();
+          var validations = 0;
+          final http = FakeHttp((request) {
+            validations++;
+            expect(request.uri.path, Uri.parse(_identity).path);
+            return validations == 1
+                ? jsonResponse({'errorCode': 'InvalidSessionKey'}, 400)
+                : pending.future;
+          });
+          final login = AccountLoginService(
+            vault,
+            (_, _) async => const CloudAccount('unused'),
+            webAuthenticators: {_cloud: TianyiConnector(http).authenticate},
+          );
+          final raw = LoginCredentials.fromBrowser(
+            _cloud,
+            cookies: ['COOKIE_LOGIN_USER=stale; COOKIE_LOGIN_USER=replacement'],
+          );
+          Object? failure;
+          login
+              .submitWeb(
+                _cloud,
+                raw,
+                validationTimeout: const Duration(seconds: 15),
+              )
+              .then<void>(
+                (_) => fail('Cancelled login must not succeed'),
+                onError: (Object error) {
+                  failure = error;
+                },
+              );
+          time.flushMicrotasks();
+          expect(validations, 2);
+          if (timeout) {
+            time.elapse(const Duration(seconds: 15));
+          } else {
+            login.invalidate(_cloud);
+          }
+          time.flushMicrotasks();
+          expect(failure, isA<AppException>());
+          pending.complete(
+            jsonResponse({
+              'res_code': 0,
+              'userId': 'late-user',
+              'loginName': 'late-name',
+            }),
+          );
+          time.flushMicrotasks();
+          expect(validations, 2);
+          expect(vault.credential(_cloud)!.sameAs(previous), isTrue);
+          store.dispose();
+        });
+      },
+    );
+  }
+
   test('Browser metadata never makes an incomplete Cookie a valid account', () {
     for (final value in ['', 'SSO_TOKEN=not-a-cloud-session']) {
       expect(

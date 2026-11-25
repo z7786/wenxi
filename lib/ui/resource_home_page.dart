@@ -12,6 +12,7 @@ import 'resource_search_bar.dart';
 import 'resource_preferences.dart';
 import 'resource_search_page.dart';
 import 'resource_content_details.dart';
+import 'search_announcement.dart';
 
 class ResourceHomePage extends StatefulWidget {
   const ResourceHomePage(
@@ -508,6 +509,27 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                                   ),
                                 ),
                               ),
+                            ),
+                            ListenableBuilder(
+                              listenable: widget.services.control,
+                              builder: (context, _) {
+                                final notice = widget
+                                    .services
+                                    .control
+                                    .config
+                                    .searchAnnouncement;
+                                if (notice == null) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Padding(
+                                  padding: const EdgeInsets.only(top: 12),
+                                  child: SearchAnnouncementBar(
+                                    notice: notice,
+                                    active: widget.active,
+                                    copyText: widget.services.copyText,
+                                  ),
+                                );
+                              },
                             ),
                             AnimatedBuilder(
                               animation: widget.services.resourceSearch.store,

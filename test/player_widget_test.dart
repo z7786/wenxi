@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:asterlink/data/playback_store.dart';
+import 'package:asterlink/data/external_player_history.dart';
 import 'dart:convert';
 import 'package:asterlink/playback/playback_state.dart';
 import 'package:asterlink/playback/subtitle_matching.dart';
@@ -40,6 +41,8 @@ class _WindowsPlayerDevice extends FakePlaybackDevice {
   _WindowsPlayerDevice() {
     supportsExternalPlayer = true;
   }
+  @override
+  TargetPlatform get targetPlatform => TargetPlatform.windows;
   @override
   final windowsExternalPlayer = WindowsExternalPlayer();
 }
@@ -1326,6 +1329,242 @@ void main() {
       );
       expect(find.text('未找到可播放此视频的第三方播放器'), findsOneWidget);
       expect(page.fixture.current.state.playing, isTrue);
+    },
+  );
+
+  testWidgets(
+    'Android chooses a default video app and can switch back to internal playback',
+    (tester) async {
+      final device = FakePlaybackDevice()..supportsExternalPlayer = true;
+      var selections = 0;
+      device.defaultExternalPlayerChoice = () async {
+        expect(find.byType(AlertDialog), findsNothing);
+        selections++;
+        return 'fixture.player/PlayerActivity';
+      };
+      final page = await render(tester, suppliedDevice: device);
+      final preferences = ExternalPlayerHistory(page.fixture.store);
+      await openMenuAction(
+        tester,
+        find.byKey(const Key('player-default-player')),
+      );
+      await tap(tester, find.byKey(const Key('default-player-external')));
+      expect(selections, 1);
+      expect(
+        preferences.defaultFor('android'),
+        'fixture.player/PlayerActivity',
+      );
+      expect(device.calls, isNot(contains('externalPlayer')));
+      expect(page.fixture.current.state.playing, isTrue);
+      await openMenuAction(
+        tester,
+        find.byKey(const Key('player-default-player')),
+      );
+      device.defaultExternalPlayerChoice = () async => null;
+      await tap(tester, find.byKey(const Key('default-player-external')));
+      expect(
+        preferences.defaultFor('android'),
+        'fixture.player/PlayerActivity',
+      );
+
+      device.externalPlayer = (_, _, _) async => true;
+      await openMenuAction(
+        tester,
+        find.byKey(const Key('player-external-player')),
+      );
+      expect(page.fixture.controller.playingExternally, isTrue);
+      await openMenuAction(
+        tester,
+        find.byKey(const Key('player-default-player')),
+      );
+      await tap(tester, find.byKey(const Key('default-player-internal')));
+      expect(preferences.defaultFor('android'), isEmpty);
+      expect(page.fixture.controller.playingExternally, isFalse);
+      expect(page.fixture.current.state.playing, isTrue);
+      expect(page.fixture.leases.values.single, 1);
+    },
+  );
+
+  for (final opened in [true, false]) {
+    testWidgets(
+      'Reopening video uses its saved Android component before starting internal audio: opened=$opened',
+      (tester) async {
+        final fixture = PlaybackFixture(
+          externalStreamFactory: _FixtureExternalStream.new,
+        );
+        await ExternalPlayerHistory(
+          fixture.store,
+        ).setDefault('android', 'fixture.player/PlayerActivity');
+        final device = FakePlaybackDevice()..supportsExternalPlayer = true;
+        device.externalPlayer = (url, title, _) async {
+          expect(device.openedPlayerComponent, 'fixture.player/PlayerActivity');
+          expect(url, startsWith('http://127.0.0.1:'));
+          expect(fixture.current.plays, 0);
+          expect(fixture.current.state.playing, isFalse);
+          return opened;
+        };
+        await render(tester, suppliedFixture: fixture, suppliedDevice: device);
+        expect(
+          device.calls.where((call) => call == 'externalPlayer'),
+          hasLength(1),
+        );
+        expect(fixture.controller.playingExternally, opened);
+        expect(fixture.current.state.playing, !opened);
+        expect(fixture.leases.values.single, opened ? 2 : 1);
+      },
+    );
+  }
+
+  testWidgets(
+    'Failed default player launch after backgrounding leaves internal playback paused',
+    (tester) async {
+      final fixture = PlaybackFixture(
+        externalStreamFactory: _FixtureExternalStream.new,
+      );
+      await ExternalPlayerHistory(
+        fixture.store,
+      ).setDefault('android', 'fixture.player/PlayerActivity');
+      final launching = Completer<bool>();
+      final device = FakePlaybackDevice()..supportsExternalPlayer = true;
+      device.externalPlayer = (_, _, _) => launching.future;
+      await render(
+        tester,
+        suppliedFixture: fixture,
+        suppliedDevice: device,
+        settle: false,
+      );
+      await tester.pumpAndSettle();
+      expect(device.calls, contains('externalPlayer'));
+      expect(fixture.current.state.playing, isFalse);
+      try {
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await tester.pump();
+        launching.complete(false);
+        await tester.pumpAndSettle();
+        expect(fixture.controller.playingExternally, isFalse);
+        expect(fixture.current.state.playing, isFalse);
+        expect(fixture.current.plays, 0);
+        expect(fixture.leases.values.single, 1);
+        expect(tester.takeException(), isNull);
+      } finally {
+        if (!launching.isCompleted) launching.complete(false);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+      }
+    },
+  );
+
+  testWidgets(
+    'Saved default video player still opens when the internal runtime fails',
+    (tester) async {
+      final fixture = PlaybackFixture(
+        initializePlayback: () async =>
+            throw const PlaybackRuntimeUnavailable(),
+        externalStreamFactory: _FixtureExternalStream.new,
+      );
+      await ExternalPlayerHistory(
+        fixture.store,
+      ).setDefault('android', 'fixture.player/PlayerActivity');
+      final device = FakePlaybackDevice()..supportsExternalPlayer = true;
+      device.externalPlayer = (url, _, _) async {
+        expect(fixture.controller.playbackRuntimeFailed, isTrue);
+        expect(fixture.backends, isEmpty);
+        expect(device.openedPlayerComponent, 'fixture.player/PlayerActivity');
+        expect(url, startsWith('http://127.0.0.1:'));
+        return true;
+      };
+      await render(
+        tester,
+        suppliedFixture: fixture,
+        suppliedDevice: device,
+        settle: false,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(
+        device.calls.where((call) => call == 'externalPlayer'),
+        hasLength(1),
+      );
+      expect(fixture.controller.playingExternally, isTrue);
+      expect(fixture.backends, isEmpty);
+      expect(fixture.leases.values.single, 1);
+    },
+  );
+
+  testWidgets(
+    'An unavailable default player reports the error and resumes internal video',
+    (tester) async {
+      final fixture = PlaybackFixture(
+        externalStreamFactory: _FixtureExternalStream.new,
+      );
+      await ExternalPlayerHistory(
+        fixture.store,
+      ).setDefault('android', 'missing.player/PlayerActivity');
+      final device = FakePlaybackDevice()..supportsExternalPlayer = true;
+      device.externalPlayer = (_, _, _) async =>
+          throw const AppException('默认播放器已卸载，请重新选择');
+      await render(tester, suppliedFixture: fixture, suppliedDevice: device);
+      expect(find.text('默认播放器已卸载，请重新选择'), findsOneWidget);
+      expect(fixture.controller.playingExternally, isFalse);
+      expect(fixture.current.state.playing, isTrue);
+    },
+  );
+
+  testWidgets(
+    'Windows saves a default executable, opens it on new video and can revert',
+    (tester) async {
+      final fixture = PlaybackFixture(
+        externalStreamFactory: _FixtureExternalStream.new,
+      );
+      await ExternalPlayerHistory(
+        fixture.store,
+      ).setDefault('windows', 'C:/Players/default.exe');
+      final device = _WindowsPlayerDevice();
+      device.externalPlayer = (_, _, _) async {
+        expect(
+          device.windowsExternalPlayer!.executable,
+          'C:/Players/default.exe',
+        );
+        expect(fixture.current.plays, 0);
+        return true;
+      };
+      var pickerCalls = 0;
+      await render(
+        tester,
+        size: const Size(1200, 760),
+        suppliedFixture: fixture,
+        suppliedDevice: device,
+        chooseExternalPlayer: () async {
+          pickerCalls++;
+          return XFile('C:/Players/replacement.exe');
+        },
+      );
+      expect(fixture.controller.playingExternally, isTrue);
+      expect(pickerCalls, 0);
+      await openMenuAction(
+        tester,
+        find.byKey(const Key('player-default-player')),
+      );
+      await tap(tester, find.byKey(const Key('default-player-internal')));
+      expect(
+        ExternalPlayerHistory(fixture.store).defaultFor('windows'),
+        isEmpty,
+      );
+      expect(fixture.current.state.playing, isTrue);
+      await openMenuAction(
+        tester,
+        find.byKey(const Key('player-default-player')),
+      );
+      await tap(tester, find.byKey(const Key('default-player-external')));
+      // The first successful launch also populated recent player history.
+      await tap(tester, find.text('选择其他播放器'));
+      expect(pickerCalls, 1);
+      expect(
+        ExternalPlayerHistory(fixture.store).defaultFor('windows'),
+        'C:/Players/replacement.exe',
+      );
+      expect(fixture.current.state.playing, isTrue);
     },
   );
 

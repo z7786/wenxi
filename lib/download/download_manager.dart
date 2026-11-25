@@ -2733,10 +2733,22 @@ class DownloadManager extends ChangeNotifier {
             profile: BaiduShareRoute.downloadProfile(fresh),
           )
           .toJson();
-      if (fresh.expectedSize <= 0 && previous.spec.expectedSize > 0) {
+      final updatePackage = previous.spec.appUpdateKey?.isNotEmpty == true;
+      if (updatePackage && previous.spec.expectedSize > 0) {
+        require(
+          fresh.expectedSize <= 0 ||
+              fresh.expectedSize == previous.spec.expectedSize,
+          '更新安装包大小与发布信息不一致，请重新检查更新',
+        );
+        spec['expectedSize'] = previous.spec.expectedSize;
+      } else if (fresh.expectedSize <= 0 && previous.spec.expectedSize > 0) {
         spec['expectedSize'] = previous.spec.expectedSize;
       }
-      if (fresh.checksumType?.isNotEmpty != true ||
+      // An update's published digest remains authoritative when a cloud
+      // resolver supplies its own file hash (often MD5) with a refreshed URL.
+      if (updatePackage &&
+              previous.spec.checksumType?.toLowerCase() == 'sha256' ||
+          fresh.checksumType?.isNotEmpty != true ||
           fresh.checksumValue?.isNotEmpty != true) {
         spec['checksumType'] = previous.spec.checksumType;
         spec['checksumValue'] = previous.spec.checksumValue;

@@ -246,6 +246,31 @@ class LoginCredentials {
     return pairs.entries.map((e) => '${e.key}=${e.value}').join('; ');
   }
 
+  static List<String> _tianyiBrowserCookies(List<String> values) {
+    final pairs = cookiePairs(mergeCookies(values));
+    String header(Map<String, String> entries) => entries.entries
+        .map((entry) => '${entry.key}=${entry.value}')
+        .join('; ');
+    final candidates = <String>{header(pairs)};
+    // WebView can return two same-name cookies with different paths/domains.
+    // Preserve the observed alternatives before generic first-name merging.
+    // Only the provider's identity response can choose and save a session.
+    for (final name in ['COOKIE_LOGIN_USER', 'LOGIN_USER']) {
+      for (final raw in values) {
+        for (final part in raw.split(';')) {
+          final entry = cookiePairs(part);
+          final value = entry[name];
+          if (value == null || value == pairs[name]) continue;
+          candidates.add(header({...pairs, name: value}));
+          if (candidates.length >= TianyiWebLogin.maxCookieCandidates) {
+            return candidates.toList();
+          }
+        }
+      }
+    }
+    return candidates.toList();
+  }
+
   static String fromBrowser(
     CloudPlatform platform, {
     Object? storage,
@@ -256,6 +281,7 @@ class LoginCredentials {
       final raw = TianyiWebLogin.encode(
         mergeCookies(cookies),
         captured['browserId'],
+        candidates: _tianyiBrowserCookies(cookies),
       );
       return plausible(platform, raw) ? raw : '';
     }
@@ -387,6 +413,7 @@ class LoginCredentials {
       value = TianyiWebLogin.encode(
         mergeCookies([TianyiWebLogin.cookie(value)]),
         TianyiWebLogin.decode(value)['browserId'],
+        candidates: TianyiWebLogin.cookieCandidates(value),
       );
       require(plausible(p, value), hint(p));
       return value;
