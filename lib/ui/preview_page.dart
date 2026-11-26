@@ -3,15 +3,13 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../app_services.dart';
 import '../core/operation_progress.dart';
 import '../data/http.dart';
 import '../data/resource_pool_preview.dart';
 import '../domain/models.dart';
 import '../download/image_preview_loader.dart';
-import '../preview/text_document.dart';
-import '../preview/text_preview_loader.dart';
+import '../preview/document_format.dart';
 import '../playback/playback_controller.dart';
 import '../playback/playback_sources.dart';
 import 'common.dart';
@@ -20,8 +18,7 @@ import 'baidu_download_prompt.dart';
 import 'operation_progress_view.dart';
 import 'player_page.dart';
 import 'uc_tv_authorization_page.dart';
-import 'text_preview.dart';
-import 'login_webview.dart';
+import 'document_download_preview.dart';
 
 class PreviewPage extends StatefulWidget {
   const PreviewPage(
@@ -54,19 +51,14 @@ class _PreviewPageState extends State<PreviewPage> {
   DownloadSpec? spec;
   PlaybackController? playback;
   Uint8List? image;
-  TextDocument? text;
   bool loading = true, adding = false;
   String error = '';
   late final kind = fileKind(widget.file.name);
-  late final office = isOfficeDocument(widget.file.name);
   late BrowseSession session = widget.session;
   late CloudFile file = widget.file;
   late List<CloudFile> playlist = widget.playlist;
   late Map<String, String> parentFolders = widget.parentFolders;
   bool preparingPool = false, poolError = false;
-  bool onlineConfirmed = false;
-  bool onlineWebError = false;
-  Future<WebViewEnvironment?>? onlineEnvironment;
   PoolPreviewTarget? initialPoolTarget;
   @override
   void initState() {
@@ -147,8 +139,11 @@ class _PreviewPageState extends State<PreviewPage> {
   }
 
   Future<void> _load() async {
-    if (!{FileKind.image, FileKind.text, FileKind.pdf}.contains(kind) &&
-        !office) {
+    if (documentFormat(file.name) != null) {
+      setState(() => loading = false);
+      return;
+    }
+    if (kind != FileKind.image) {
       setState(() => loading = false);
       return;
     }
@@ -161,22 +156,16 @@ class _PreviewPageState extends State<PreviewPage> {
         return;
       }
       spec = value;
-      if (kind == FileKind.image) {
-        image = await scope.run(
-          () => ImagePreviewLoader(widget.services.transfer).load(
-            value,
-            limit: _maxImagePreviewBytes,
-            connections: widget.services.settings.connectionsFor(
-              session.platform,
-              value.profile,
-            ),
+      image = await scope.run(
+        () => ImagePreviewLoader(widget.services.transfer).load(
+          value,
+          limit: _maxImagePreviewBytes,
+          connections: widget.services.settings.connectionsFor(
+            session.platform,
+            value.profile,
           ),
-        );
-      } else if (kind == FileKind.text) {
-        text = await scope.run(
-          () => TextPreviewLoader.remote(widget.services.transfer, value),
-        );
-      }
+        ),
+      );
       if (mounted) setState(() => loading = false);
     } catch (e) {
       if (mounted) {
@@ -281,31 +270,24 @@ class _PreviewPageState extends State<PreviewPage> {
         },
       );
     }
+    if (!preparingPool && !poolError && documentFormat(file.name) != null) {
+      return DocumentDownloadPreview(
+        services: widget.services,
+        session: session,
+        file: file,
+      );
+    }
     return PageFrame(
       title: widget.file.displayName,
       actions: [
         IconButton(
-          tooltip:
-              kind == FileKind.image ||
-                  kind == FileKind.text ||
-                  kind == FileKind.pdf ||
-                  office
-              ? '下载文件'
-              : '传输管理',
-          onPressed:
-              kind == FileKind.image ||
-                  kind == FileKind.text ||
-                  kind == FileKind.pdf ||
-                  office
+          tooltip: kind == FileKind.image ? '下载文件' : '传输管理',
+          onPressed: kind == FileKind.image
               ? (adding || loading || poolError ? null : _download)
               : widget.services.requestDownloadManager,
           icon: const Icon(CupertinoIcons.arrow_down_circle),
         ),
-        if (supportsDownloadLocationChoice &&
-            (kind == FileKind.image ||
-                kind == FileKind.text ||
-                kind == FileKind.pdf ||
-                office))
+        if (supportsDownloadLocationChoice && kind == FileKind.image)
           PopupMenuButton<String>(
             tooltip: '更多',
             enabled: !adding && !loading && !poolError,
@@ -386,10 +368,6 @@ class _PreviewPageState extends State<PreviewPage> {
                       ),
                     ),
                   )
-                : text != null
-                ? TextPreview(text!)
-                : (kind == FileKind.pdf || office) && spec != null
-                ? _onlinePreview(spec!)
                 : EmptyPanel(
                     widget.file.displayName,
                     '${formatBytes(widget.file.size)}\n此类型文件可下载后查看',
@@ -403,122 +381,6 @@ class _PreviewPageState extends State<PreviewPage> {
           ),
         ],
       ),
-    );
-  }
-
-  String get _onlineProvider =>
-      kind == FileKind.pdf ? 'Google 文档查看器' : 'Microsoft Office Online';
-
-  Uri? _onlineViewerUri(DownloadSpec source) {
-    final sourceUri = Uri.tryParse(source.url);
-    if (sourceUri == null ||
-        sourceUri.scheme != 'https' ||
-        sourceUri.host.isEmpty ||
-        sourceUri.userInfo.isNotEmpty ||
-        source.headers.isNotEmpty ||
-        source.networkPolicy != null) {
-      return null;
-    }
-    final uri = kind == FileKind.pdf
-        ? Uri.https('docs.google.com', '/gview', {
-            'embedded': '1',
-            'url': source.url,
-          })
-        : Uri.https('view.officeapps.live.com', '/op/view.aspx', {
-            'src': source.url,
-          });
-    return uri.toString().length > 8000 ? null : uri;
-  }
-
-  Widget _onlinePreview(DownloadSpec source) {
-    if (source.networkPolicy != null || source.headers.isNotEmpty) {
-      return EmptyPanel(
-        '此链接暂不支持在线预览',
-        source.networkPolicy != null
-            ? '此来源限制了下载地址权限，不能交给第三方查看器。'
-            : '此临时链接需要应用专用请求头，在线查看器无法访问。',
-        icon: CupertinoIcons.doc_text,
-        action: FilledButton.icon(
-          onPressed: adding ? null : _download,
-          icon: const Icon(CupertinoIcons.arrow_down, size: 17),
-          label: const Text('下载文件'),
-        ),
-      );
-    }
-    final uri = _onlineViewerUri(source);
-    if (uri == null) {
-      return EmptyPanel(
-        widget.file.displayName,
-        '临时链接过长或格式不受支持，请下载后查看',
-        icon: CupertinoIcons.doc_text,
-        action: FilledButton.icon(
-          onPressed: adding ? null : _download,
-          icon: const Icon(CupertinoIcons.arrow_down, size: 17),
-          label: const Text('下载文件'),
-        ),
-      );
-    }
-    if (!onlineConfirmed) {
-      return EmptyPanel(
-        '在线预览提示',
-        '此文件将通过 $_onlineProvider 打开。临时下载链接和文件内容会发送给第三方；仅继续预览非敏感文件，且链接需可直接访问。',
-        icon: CupertinoIcons.globe,
-        action: FilledButton(
-          key: const Key('online-preview-confirm'),
-          onPressed: () => setState(() {
-            onlineConfirmed = true;
-            onlineEnvironment = widget.services.webEnvironment();
-          }),
-          child: const Text('继续在线预览'),
-        ),
-      );
-    }
-    if (onlineWebError) {
-      return EmptyPanel(
-        '在线预览失败',
-        '$_onlineProvider 无法读取此临时链接，请下载文件后查看',
-        icon: CupertinoIcons.globe,
-        action: FilledButton.icon(
-          onPressed: adding ? null : _download,
-          icon: const Icon(CupertinoIcons.arrow_down, size: 17),
-          label: const Text('下载文件'),
-        ),
-      );
-    }
-    return FutureBuilder<WebViewEnvironment?>(
-      future: onlineEnvironment,
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          return EmptyPanel(
-            '网页组件不可用',
-            errorText(snapshot.error!),
-            icon: CupertinoIcons.globe,
-            action: FilledButton(
-              onPressed: adding ? null : _download,
-              child: const Text('下载文件'),
-            ),
-          );
-        }
-        if (snapshot.connectionState != ConnectionState.done) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        return InAppWebView(
-          key: const Key('online-preview-webview'),
-          webViewEnvironment: snapshot.data,
-          initialUrlRequest: URLRequest(url: WebUri(uri.toString())),
-          initialSettings: webSettings(desktopMode: true, isPopup: true),
-          onLoadStart: (_, _) {
-            if (mounted && onlineWebError) {
-              setState(() => onlineWebError = false);
-            }
-          },
-          onReceivedError: (_, request, _) {
-            if (request.isForMainFrame == true && mounted) {
-              setState(() => onlineWebError = true);
-            }
-          },
-        );
-      },
     );
   }
 }

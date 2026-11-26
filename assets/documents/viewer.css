@@ -1,0 +1,31 @@
+:root { color-scheme: light dark; --background: #f4f5f8; --surface: #fff; --text: #20242d; --muted: #687080; --line: #e3e6ed; --accent: #526ee4; }
+:root[data-theme=dark] { color-scheme: dark; --background: #15171e; --surface: #20232c; --text: #e4e6ed; --muted: #b0b6c4; --line: #363b48; --accent: #a2b2ff; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body { background: var(--background); color: var(--text); font: 15px/1.6 system-ui, sans-serif; }
+[hidden] { display: none !important; }
+#toolbar { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 8px; position: sticky; top: 0; z-index: 20; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--line); }
+button, select, input { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; min-height: 36px; padding: 4px 10px; }
+button { cursor: pointer; touch-action: manipulation; }
+button:disabled { opacity: .4; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input[type=number] { width: 72px; text-align: center; }
+#notice { padding: 8px 16px; color: var(--muted); background: var(--surface); font-size: 12px; }
+#error { padding: 32px 24px; text-align: center; }
+#content { overflow: auto; }
+.pdf-viewport { min-height: 300px; padding: 16px 12px 24px; overflow: auto; text-align: center; }
+.pdf-viewport canvas { display: block; margin: auto; background: #fff; box-shadow: 0 2px 8px #0002; }
+.docx-wrapper { padding: 16px 12px !important; background: transparent !important; }
+.docx-sheet { position: relative; margin: 0 auto 16px; flex: none; }
+.docx-sheet > section.docx { position: absolute; top: 0; left: 0; margin: 0 !important; transform-origin: 0 0; background: #fff; color: #20242d; box-shadow: 0 2px 8px #0002 !important; }
+.sheet-scroll { overflow: auto; padding: 12px; }
+table.sheet { border-collapse: separate; border-spacing: 0; font-size: 13px; background: var(--surface); }
+.sheet td, .sheet th { padding: 8px 10px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); min-width: 90px; max-width: 360px; overflow-wrap: anywhere; white-space: pre-wrap; vertical-align: top; }
+.sheet tr:first-child th { border-top: 1px solid var(--line); }
+.sheet td:first-child, .sheet th:first-child { border-left: 1px solid var(--line); }
+.sheet th { background: var(--background); font-weight: 500; }
+.sheet th:first-child { min-width: 50px; position: sticky; left: 0; }
+.empty { padding: 36px; text-align: center; color: var(--muted); }
+.presentation { height: calc(100vh - 62px); height: calc(100dvh - 62px); display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; }
+.presentation > .pptxjs-viewer { width: 100%; }
+@media (max-width: 380px) { #toolbar { gap: 6px; padding: 6px; font-size: 13px; } button { padding: 4px 8px; } }

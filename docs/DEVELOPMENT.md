@@ -20,6 +20,7 @@
 | 网盘协议与账号 | `lib/data/providers/`、`lib/data/cloud_repository.dart`、`lib/domain/auth.dart` | [链接识别](LINK-RECOGNITION.md)、[浏览器 UA](CLOUD-BROWSER-UA.md) |
 | 搜索与来源运行时 | `lib/data/resource_search.dart`、`lib/data/client_search_engine.dart`、`lib/data/sources/` | [资源搜索](RESOURCE-SEARCH.md)、[来源架构](REMOTE-SOURCE-ARCHITECTURE.md) |
 | 下载、上传、跨盘传输 | `lib/download/`、`lib/upload/`、`lib/transfer/`、`lib/data/uploads/` | [下载性能](DOWNLOAD-PERFORMANCE.md)、[文件夹上传](FOLDER-UPLOAD.md)、[跨盘传输](CROSS-DRIVE-TRANSFER.md) |
+| 文档预览 | `lib/preview/`、`lib/ui/document_preview.dart`、`lib/ui/document_download_preview.dart` | [本地文档预览](DOCUMENT-PREVIEW.md) |
 | 播放与投屏 | `lib/playback/`、`lib/ui/player_page.dart`、`lib/ui/player_theme.dart` | [播放恢复](PLAYER-RECOVERY.md)、[性能验收](PLAYER-PERFORMANCE-CHECKLIST.md)、[投屏](TV-CASTING.md) |
 | 平台能力 | `lib/platform/`、`android/app/src/main/`、`windows/runner/`、`ios/Runner/`、`macos/Runner/` | [构建](BUILDING.md)、[iOS](IOS-BUILD.md)、[macOS](MACOS-BUILD.md) |
 | 更新与诊断 | `lib/data/app_update_service.dart`、`lib/data/remote_control_service.dart`、`lib/diagnostics/` | [App 内更新](IN-APP-UPDATE.md)、[隐私](PRIVACY.md) |

@@ -17,6 +17,7 @@
 - [Android 后台下载](DOWNLOAD-BACKGROUND.md)
 - [设备互联与连接恢复](LAN-TRANSFER.md)
 - [下载与删除性能](DOWNLOAD-PERFORMANCE.md)
+- [下载后的本地文档预览](DOCUMENT-PREVIEW.md)
 - [文件夹上传](FOLDER-UPLOAD.md)
 - [跨盘传输](CROSS-DRIVE-TRANSFER.md)
 - [链接识别](LINK-RECOGNITION.md)

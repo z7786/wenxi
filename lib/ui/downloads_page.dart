@@ -9,6 +9,7 @@ import '../core/json.dart';
 import '../domain/downloads.dart';
 import '../domain/download_eta.dart';
 import '../domain/models.dart' show CloudPlatform;
+import '../preview/document_format.dart';
 import '../download/completed_files.dart';
 import '../platform/file_access.dart';
 import '../platform/completed_file_actions.dart';
@@ -29,7 +30,8 @@ import 'download_concurrency_dialog.dart';
 import 'download_completion_option.dart';
 import 'uc_tv_authorization_page.dart';
 import 'uc_video_download.dart';
-import 'text_preview.dart';
+import 'document_preview.dart';
+import 'document_download_preview.dart';
 
 enum _DownloadHelpAction { announcements, resources }
 
@@ -894,10 +896,15 @@ class _DownloadsPageState extends State<DownloadsPage>
               label: move ? '移动文件' : '复制文件',
               icon: move ? CupertinoIcons.folder : CupertinoIcons.doc_on_doc,
             ),
-        if (kind == FileKind.video || kind == FileKind.text)
+        if (kind == FileKind.video ||
+            documentFormat(task.spec.fileName) != null)
           AppMenuAction(
             value: 'open',
-            label: kind == FileKind.video ? '播放视频' : '预览文本 / 代码',
+            label: kind == FileKind.video
+                ? '播放视频'
+                : kind == FileKind.text
+                ? '预览文本 / 代码'
+                : '预览文档',
             icon: CupertinoIcons.play_rectangle,
           ),
         if (kind == FileKind.audio)
@@ -936,6 +943,12 @@ class _DownloadsPageState extends State<DownloadsPage>
               : '继续下载',
           icon: task.active ? CupertinoIcons.pause : CupertinoIcons.play,
           enabled: _authorizingDownload != id,
+        ),
+      if (!completed && documentFormat(task.spec.fileName) != null)
+        const AppMenuAction(
+          value: 'document-preview',
+          label: '下载并预览文档',
+          icon: CupertinoIcons.doc_text,
         ),
       if (canRecoverUcPlayable(task))
         const AppMenuAction(
@@ -1191,8 +1204,10 @@ class _DownloadsPageState extends State<DownloadsPage>
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? '播放视频'
-                              : fileKind(task.spec.fileName) == FileKind.text
-                              ? '预览文本'
+                              : documentFormat(task.spec.fileName) != null
+                              ? fileKind(task.spec.fileName) == FileKind.text
+                                    ? '预览文本'
+                                    : '预览文档'
                               : '打开文件'
                         : running
                         ? '暂停下载'
@@ -1204,7 +1219,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? CupertinoIcons.play_rectangle
-                              : fileKind(task.spec.fileName) == FileKind.text
+                              : documentFormat(task.spec.fileName) != null
                               ? CupertinoIcons.doc_text
                               : CupertinoIcons.folder
                         : running
@@ -1294,12 +1309,15 @@ class _DownloadsPageState extends State<DownloadsPage>
     final path = task.savedPath;
     if (path == null) return;
     final kind = fileKind(task.spec.fileName);
-    if (!reveal && kind == FileKind.text) {
+    if (!reveal && documentFormat(task.spec.fileName) != null) {
       await Navigator.push<void>(
         context,
         MaterialPageRoute(
-          builder: (_) =>
-              LocalTextPreviewPage(path: path, name: task.spec.fileName),
+          builder: (_) => LocalDocumentPreviewPage(
+            services: widget.services,
+            path: path,
+            name: task.spec.fileName,
+          ),
         ),
       );
       return;
@@ -1514,6 +1532,13 @@ class _DownloadsPageState extends State<DownloadsPage>
                           ),
                         ),
                       const Divider(),
+                      if (!task.terminal &&
+                          documentFormat(task.spec.fileName) != null)
+                        ListTile(
+                          leading: const Icon(CupertinoIcons.doc_text),
+                          title: const Text('下载并预览文档'),
+                          onTap: () => Navigator.pop(context, 'document-preview'),
+                        ),
                       if (task.status == DownloadStatus.completed &&
                           availability == FileAvailability.present) ...[
                         ListTile(
@@ -1523,12 +1548,15 @@ class _DownloadsPageState extends State<DownloadsPage>
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                                 ? '播放视频'
-                                : fileKind(task.spec.fileName) == FileKind.text
-                                ? '预览文本 / 代码'
+                                : documentFormat(task.spec.fileName) != null
+                                ? fileKind(task.spec.fileName) == FileKind.text
+                                      ? '预览文本 / 代码'
+                                      : '预览文档'
                                 : '打开文件',
                           ),
                           subtitle:
                               isDesktopPlatform &&
+                                  documentFormat(task.spec.fileName) == null &&
                                   !{
                                     FileKind.video,
                                     FileKind.text,
@@ -1545,10 +1573,11 @@ class _DownloadsPageState extends State<DownloadsPage>
                             onTap: () => Navigator.pop(context, 'play'),
                           ),
                         if (isDesktopPlatform &&
-                            {
-                              FileKind.video,
-                              FileKind.text,
-                            }.contains(fileKind(task.spec.fileName)))
+                            (documentFormat(task.spec.fileName) != null ||
+                                {
+                                  FileKind.video,
+                                  FileKind.text,
+                                }.contains(fileKind(task.spec.fileName))))
                           ListTile(
                             leading: const Icon(CupertinoIcons.folder_open),
                             title: const Text('打开所在文件夹'),
@@ -1743,6 +1772,16 @@ class _DownloadsPageState extends State<DownloadsPage>
         }
       case 'open':
         await _open(task);
+      case 'document-preview':
+        await Navigator.push<void>(
+          context,
+          MaterialPageRoute(
+            builder: (_) => DocumentDownloadPreview(
+              services: widget.services,
+              taskId: task.id,
+            ),
+          ),
+        );
       case 'play':
         await _open(task, play: true);
       case 'folder':

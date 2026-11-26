@@ -10,6 +10,7 @@
 | OpenList 驱动参考和适配 | AGPL-3.0，固定提交及对应说明见第三方声明 |
 | 网盘 SDK 参考 | 对应 Apache-2.0 许可保存在 `assets/licenses/` |
 | Flutter 插件与 media_kit | 保留 `vendor_plugins/` 原许可和本项目修改记录 |
+| PDF.js、docx-preview、SheetJS、PPTXjs | 固定版本和原许可保留于 `assets/documents/`、`assets/licenses/`；本地文档阅读适配见第三方声明 |
 | mpv、FFmpeg、ANGLE、NDK、字体等 | 各自许可适用，来源、固定版本和构建材料见第三方声明 |
 | 友盟 Android SDK | 供应商条款适用，通过 Gradle 获取；不以 AGPL 重新授权 |
 

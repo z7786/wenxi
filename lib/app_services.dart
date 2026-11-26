@@ -45,6 +45,7 @@ import 'domain/models.dart';
 import 'domain/browser_return.dart';
 import 'domain/settings.dart';
 import 'download/download_manager.dart';
+import 'preview/document_downloads.dart';
 import 'download/mobile_data_download_guard.dart';
 import 'download/transfer_activity.dart';
 import 'download/navigation_transfers.dart';
@@ -457,6 +458,8 @@ class AppServices extends ChangeNotifier {
   late final BackgroundRepository backgrounds;
   late final GopeedEngine engine;
   late final DownloadManager downloads;
+  // Optional viewer work is created only on demand, never during bootstrap.
+  late final documentDownloads = DocumentDownloads(downloads);
   late final MobileDataDownloadGuard mobileDataDownloads;
   late final UploadManager uploads;
   late final RapidTransferManager rapidTransfers;

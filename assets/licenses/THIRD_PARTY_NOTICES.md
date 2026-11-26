@@ -109,6 +109,18 @@ Gopeed AAR 附带 NDK 28.2.13676358 的 libc++_shared.so。LLVM 及附带组件�
 
 代码高亮使用 re_highlight 0.0.3（Reqable，MIT），源码：https://github.com/reqable/re-highlight；完整许可见 re_highlight-LICENSE.txt。中文 GBK 解码使用未修改的 enough_convert 1.7.1（MPL-2.0），对应源码：https://pub.dev/packages/enough_convert/versions/1.7.1；完整许可见 enough_convert-LICENSE.txt。脚本仅作为文本显示，不执行。
 
+## 本地文档预览
+
+PDF 阅读使用 Mozilla PDF.js 6.5.438 的 `pdfjs-dist` legacy build，来源：https://github.com/mozilla/pdf.js；原始 npm 包：https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-6.5.438.tgz。Apache-2.0 许可全文保留于 PDF.js-LICENSE.txt。未修改上游压缩脚本；配套 CMaps、标准字体、OpenJPEG/QCMS/WASM 和非 WASM 解码回退资源保留原许可于 assets/documents/vendor/cmaps、standard_fonts 和 wasm，其中包含 Foxit/BSD 等独立声明。未打包 QuickJS 文档脚本运行库。
+
+DOCX 阅读使用 docx-preview 0.4.1（https://github.com/VolodymyrBaydalka/docxjs，Apache-2.0），原许可见 docx-preview-LICENSE.txt；ZIP 读取使用 JSZip 3.10.1（https://github.com/Stuk/jszip，双许可 MIT 或 GPL-3.0-or-later，此处采用 MIT），完整双许可声明见 JSZip-LICENSE.txt。未修改上游渲染脚本，应用自有适宽样式、下载接入和禁用 HTML altChunks 设置保存在 assets/documents/viewer.mjs 与 viewer.css。
+
+表格阅读使用 SheetJS Community Edition 0.20.3，来源：https://git.sheetjs.com/sheetjs/sheetjs，固定脚本：https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js。Apache-2.0 许可见 SheetJS-LICENSE.txt；使用官方发布版本，未采用 npm 上旧版的 xlsx 包。应用自有 worker 和分页显示不执行宏或公式。
+
+PPTX 阅读使用 meshesha/PPTXjs 的 @meshesha/pptxjs 2.0.0，来源：https://github.com/meshesha/PPTXjs；MIT 许可见 PPTXjs-LICENSE.txt。未修改上游 UMD 阅读构建；其内置 fflate 0.8.2（https://github.com/101arrowz/fflate）的 MIT 版权声明另保留于 fflate-LICENSE.txt。应用只接入幻灯片阅读，不加载编辑和导出模块。
+
+安装包中各固定脚本、字体、解码资源的路径、大小和 SHA-256 见 assets/documents/vendor/manifest.json。PDF.js、docx-preview、JSZip 和 PPTXjs 的下载包核对 npm 发布的 integrity；SheetJS 的固定文件核对 manifest 哈希。对应自有 HTML/CSS/JavaScript 的修改按本项目许可提供，第三方组件沿用各自原许可。
+
 ## 远程来源脚本运行时
 
 后台下发搜索模块中的 JMESPath 使用 jmespath.js 0.16.0（https://github.com/jmespath/jmespath.js），Apache License 2.0。仅调整模块导出以适配受限的 ES 模块运行时；完整许可见 JMESPath-LICENSE.txt。

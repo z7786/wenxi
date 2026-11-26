@@ -61,6 +61,11 @@ flutter:
     - assets/navigation/
     - assets/licenses/
     - assets/lan/
+    - assets/documents/
+    - assets/documents/vendor/
+    - assets/documents/vendor/cmaps/
+    - assets/documents/vendor/standard_fonts/
+    - assets/documents/vendor/wasm/
     - assets/support/appreciation-code.png
 dependency_overrides:
   desktop_drop:
