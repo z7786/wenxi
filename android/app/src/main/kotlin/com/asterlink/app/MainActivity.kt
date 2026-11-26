@@ -47,7 +47,10 @@ class MainActivity : FlutterActivity() {
         host.bridge.externalPlayer.dismiss(this)
         host.analytics.pause(this)
         host.playback.detach(this)
-        if (host.bridge.activity === this) host.bridge.activity = null
+        if (host.bridge.activity === this) {
+            if (isFinishing) host.bridge.cancelPendingPicker()
+            host.bridge.activity = null
+        }
         super.onDestroy()
     }
     override fun onResume() {

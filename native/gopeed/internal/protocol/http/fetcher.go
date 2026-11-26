@@ -34,10 +34,19 @@ import (
 )
 
 const (
-	connectTimeout = 15 * time.Second
-	readTimeout    = 15 * time.Second
-	helpMinSize    = 1 * 1024 * 1024
+	connectTimeout     = 15 * time.Second
+	readTimeout        = 15 * time.Second
+	helpMinSize        = 1 * 1024 * 1024
+	readBufSize        = 65536
+	minSpeedLimitBurst = 1024
 )
+
+func speedLimitBurst(limit int64) int {
+	if limit <= 0 || limit >= readBufSize {
+		return readBufSize
+	}
+	return max(minSpeedLimitBurst, int(limit))
+}
 
 type RequestError struct {
 	Code       int
@@ -95,6 +104,11 @@ type Fetcher struct {
 	redirectURL  string
 	redirectLock sync.Mutex
 
+	transportLock sync.Mutex
+	transport     *http.Transport
+	roundTripper  http.RoundTripper
+	checkRedirect func(*http.Request, []*http.Request) error
+
 	file              *os.File
 	cancel            context.CancelFunc
 	eg                *errgroup.Group
@@ -127,12 +141,15 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request) error {
 	if err := base.ParseReqExtra[fhttp.ReqExtra](req); err != nil {
 		return err
 	}
-	f.meta.Req = req
+	if f.meta.Req != req {
+		f.meta.Req = req
+	}
 	httpReq, err := f.buildRequest(ctx, req)
 	if err != nil {
 		return err
 	}
 	client := f.buildClient()
+	defer client.CloseIdleConnections()
 	client.Timeout = 30 * time.Second
 	if err := waitForHost(ctx, httpReq.URL.Host); err != nil {
 		return err
@@ -308,17 +325,21 @@ func (f *Fetcher) Start() (err error) {
 		return err
 	}
 
+	f.helpLock.Lock()
 	if f.connections == nil {
 		f.connections = f.splitConnection()
 	}
 	f.expandPublicConnections()
+	connCount := len(f.connections)
+	f.helpLock.Unlock()
 	f.initializeReadable()
-	f.totalConnections.Store(int32(len(f.connections)))
+	f.totalConnections.Store(int32(connCount))
 	if limit := connectionLimit(f.meta.Opts.Extra.(*fhttp.OptsExtra)); limit > 0 {
-		f.totalConnections.Store(int32(min(len(f.connections), limit)))
+		f.totalConnections.Store(int32(min(connCount, limit)))
 	}
 	if limit := f.meta.Opts.Extra.(*fhttp.OptsExtra).SpeedLimit; limit > 0 {
-		f.rate = rate.NewLimiter(rate.Limit(limit), 8192)
+		burst := speedLimitBurst(limit)
+		f.rate = rate.NewLimiter(rate.Limit(limit), burst)
 	} else {
 		f.rate = nil
 	}
@@ -347,6 +368,15 @@ func (f *Fetcher) Close() (err error) {
 	if err = f.Pause(); err != nil {
 		return
 	}
+	f.transportLock.Lock()
+	transport := f.transport
+	f.transport = nil
+	f.roundTripper = nil
+	f.checkRedirect = nil
+	f.transportLock.Unlock()
+	if transport != nil {
+		transport.CloseIdleConnections()
+	}
 	f.closeOnce.Do(func() { close(f.closed) })
 	return
 }
@@ -356,8 +386,11 @@ func (f *Fetcher) Meta() *fetcher.FetcherMeta {
 }
 
 func (f *Fetcher) Stats() any {
-	statsConnections := make([]*fhttp.StatsConnection, 0)
-	for _, connection := range f.connections {
+	f.helpLock.Lock()
+	connections := append([]*connection(nil), f.connections...)
+	f.helpLock.Unlock()
+	statsConnections := make([]*fhttp.StatsConnection, 0, len(connections))
+	for _, connection := range connections {
 		connection.mu.RLock()
 		statsConnections = append(statsConnections, &fhttp.StatsConnection{
 			Downloaded: connection.Downloaded,
@@ -373,10 +406,13 @@ func (f *Fetcher) Stats() any {
 }
 
 func (f *Fetcher) Progress() fetcher.Progress {
+	f.helpLock.Lock()
+	connections := append([]*connection(nil), f.connections...)
+	f.helpLock.Unlock()
 	p := make(fetcher.Progress, 0)
-	if len(f.connections) > 0 {
+	if len(connections) > 0 {
 		total := int64(0)
-		for _, connection := range f.connections {
+		for _, connection := range connections {
 			connection.mu.RLock()
 			total += connection.Downloaded
 			connection.mu.RUnlock()
@@ -400,6 +436,12 @@ func (f *Fetcher) fetch() {
 	ctx, f.cancel = context.WithCancel(context.Background())
 	f.eg, _ = errgroup.WithContext(ctx)
 	f.stopped = make(chan struct{})
+	transport, roundTripper, checkRedirect := f.initClientResources()
+	f.transportLock.Lock()
+	f.transport = transport
+	f.roundTripper = roundTripper
+	f.checkRedirect = checkRedirect
+	f.transportLock.Unlock()
 	group, file, stopped := f.eg, f.file, f.stopped
 	f.helpLock.Lock()
 	f.tailChanged = make(chan struct{})
@@ -432,6 +474,16 @@ func (f *Fetcher) fetch() {
 
 	go func() {
 		defer close(stopped)
+		defer func() {
+			transport.CloseIdleConnections()
+			f.transportLock.Lock()
+			if f.transport == transport {
+				f.transport = nil
+				f.roundTripper = nil
+				f.checkRedirect = nil
+			}
+			f.transportLock.Unlock()
+		}()
 		err := group.Wait()
 		// error returned only if canceled, just return
 		if err != nil {
@@ -446,6 +498,7 @@ func (f *Fetcher) fetch() {
 		}
 
 		file.Close()
+		transport.CloseIdleConnections()
 		// Update file last modified time
 		if f.config.UseServerCtime && f.meta.Res.Files[0].Ctime != nil {
 			setft.SetFileTime(file.Name(), time.Now(), *f.meta.Res.Files[0].Ctime, *f.meta.Res.Files[0].Ctime)
@@ -471,11 +524,16 @@ func (f *Fetcher) run(index int, ctx context.Context, connectionSlots chan struc
 	// on one request must not hold every other range in a redirect lookup queue.
 	profile := f.meta.Opts.Extra.(*fhttp.OptsExtra).ConnectionProfile
 	cacheRedirect := profile != "aliyun" && profile != "xunlei" && f.sourceNetworkPolicy() == nil
+	readChunkSize := readBufSize
+	if f.rate != nil {
+		if burst := f.rate.Burst(); burst > 0 && burst < readChunkSize {
+			readChunkSize = burst
+		}
+	}
 	var (
 		client = f.buildClient()
-		buf    = make([]byte, 8192)
+		buf    = make([]byte, readChunkSize)
 	)
-	defer client.CloseIdleConnections()
 
 	downloadChunk := func() (err error) {
 		attempts := 0
@@ -628,7 +686,7 @@ func (f *Fetcher) run(index int, ctx context.Context, connectionSlots chan struc
 					return err
 				}
 				connection.setRetryState(false, attempts)
-				var reader io.Reader = NewTimeoutReader(resp.Body, readTimeout)
+				var reader io.Reader = resp.Body
 				if profile == "tianyi" {
 					expected := requestRemaining
 					if expected < 0 {
@@ -890,26 +948,55 @@ func (f *Fetcher) ConnectionCounts() (active, total int) {
 	return int(f.activeConnections.Load()), int(f.totalConnections.Load())
 }
 
-func (f *Fetcher) buildClient() *http.Client {
+func (f *Fetcher) initClientResources() (*http.Transport, http.RoundTripper, func(*http.Request, []*http.Request) error) {
+	f.helpLock.Lock()
+	connCount := len(f.connections)
+	f.helpLock.Unlock()
+	maxIdle := max(16, connCount)
+	idleConnTimeout := 10 * time.Second
+	if readTimeout > 2*time.Second {
+		idleConnTimeout = min(30*time.Second, readTimeout-2*time.Second)
+	}
 	transport := &http.Transport{
 		ResponseHeaderTimeout: readTimeout,
 		TLSHandshakeTimeout:   connectTimeout,
-		IdleConnTimeout:       30 * time.Second,
-		DialContext: (&net.Dialer{
+		IdleConnTimeout:       idleConnTimeout,
+		MaxIdleConns:          max(100, maxIdle*2),
+		MaxIdleConnsPerHost:   maxIdle,
+		DialContext: wrapDialReadTimeout((&net.Dialer{
 			Timeout: connectTimeout,
-		}).DialContext,
+		}).DialContext, readTimeout),
 		Proxy: f.ctl.GetProxy(f.meta.Req.Proxy),
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: f.meta.Req.SkipVerifyCert,
 		},
 	}
-	// Cookie handle
 	if policy := f.sourceNetworkPolicy(); policy != nil {
-		return sourceClient(transport, policy)
+		sc := sourceClient(transport, policy)
+		transport.DialContext = wrapDialReadTimeout(transport.DialContext, readTimeout)
+		return transport, sc.Transport, sc.CheckRedirect
+	}
+	return transport, transport, nil
+}
+
+func (f *Fetcher) buildClient() *http.Client {
+	f.transportLock.Lock()
+	rt := f.roundTripper
+	checkRedirect := f.checkRedirect
+	f.transportLock.Unlock()
+	if rt == nil {
+		_, rt, checkRedirect = f.initClientResources()
+	}
+	// Cookie handle
+	if checkRedirect != nil {
+		return &http.Client{
+			Transport:     rt,
+			CheckRedirect: checkRedirect,
+		}
 	}
 	jar, _ := cookiejar.New(nil)
 	return &http.Client{
-		Transport: transport,
+		Transport: rt,
 		Jar:       jar,
 	}
 }

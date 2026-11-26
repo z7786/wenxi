@@ -130,15 +130,21 @@ class WindowsSystemProxy {
     Future<WindowsProxyConfig> Function()? readConfig,
     Future<WindowsProxyConfig> Function(Uri, WindowsProxyConfig)? resolveAuto,
     DateTime Function()? clock,
+    Duration? configCacheTtl,
   }) : _readConfig = readConfig ?? _readCurrentUser,
        _resolveAuto = resolveAuto ?? _evaluateAuto,
-       _clock = clock ?? DateTime.now;
+       _clock = clock ?? DateTime.now,
+       _configCacheTtl =
+           configCacheTtl ??
+           (readConfig == null ? const Duration(seconds: 3) : Duration.zero);
 
   final Future<WindowsProxyConfig> Function() _readConfig;
   final Future<WindowsProxyConfig> Function(Uri, WindowsProxyConfig)
   _resolveAuto;
   final DateTime Function() _clock;
+  final Duration _configCacheTtl;
   Future<WindowsProxyConfig>? _reading;
+  (DateTime, WindowsProxyConfig)? _cachedConfig;
   final _auto =
       <
         (String, String, String, bool, String),
@@ -159,11 +165,20 @@ class WindowsSystemProxy {
   }
 
   Future<WindowsProxyRoute> resolve(Uri uri) async {
-    // Only simultaneous reads are shared. Changing the system proxy is visible
-    // to the next request, including an already open login dialog.
-    final config = await (_reading ??= _readConfig().whenComplete(
-      () => _reading = null,
-    ));
+    final readNow = _clock();
+    final WindowsProxyConfig config;
+    if (_configCacheTtl > Duration.zero &&
+        _cachedConfig != null &&
+        readNow.isBefore(_cachedConfig!.$1)) {
+      config = _cachedConfig!.$2;
+    } else {
+      config = await (_reading ??= _readConfig().whenComplete(
+        () => _reading = null,
+      ));
+      if (_configCacheTtl > Duration.zero) {
+        _cachedConfig = (_clock().add(_configCacheTtl), config);
+      }
+    }
     final manual = config.routeFor(uri);
     if (config.bypasses(uri)) {
       return const WindowsProxyRoute('DIRECT', 'bypass');
@@ -188,7 +203,16 @@ class WindowsSystemProxy {
     while (_auto.length >= 32) {
       _auto.remove(_auto.keys.first);
     }
-    final result = _resolveAutoRoute(uri, config, manual);
+    late final Future<WindowsProxyRoute> result;
+    result = _resolveAutoRoute(uri, config, manual).catchError((
+      Object error,
+      StackTrace stack,
+    ) {
+      if (identical(_auto[key]?.$2, result)) {
+        _auto.remove(key);
+      }
+      Error.throwWithStackTrace(error, stack);
+    });
     _auto[key] = (now.add(const Duration(seconds: 60)), result);
     return result;
   }

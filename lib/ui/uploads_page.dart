@@ -169,11 +169,13 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: Listenable.merge([
-      widget.services.uploads,
-      widget.services.rapidTransfers,
-      widget.services.store,
-    ]),
+    animation: widget.active
+        ? Listenable.merge([
+            widget.services.uploads,
+            widget.services.rapidTransfers,
+            widget.services.store,
+          ])
+        : const AlwaysStoppedAnimation<int>(0),
     builder: (context, _) {
       final all = widget.services.uploads.tasks;
       final cross = widget.services.rapidTransfers.tasks;

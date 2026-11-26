@@ -152,8 +152,11 @@ func (s *encryptedStorage) List(bucket string, out any) error {
 	return json.Unmarshal(data, out)
 }
 func (s *encryptedStorage) Pop(bucket, key string, out any) error {
-	return s.db.Update(func(tx *bbolt.Tx) error {
+	return s.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucket))
+		if b == nil {
+			return nil
+		}
 		data := b.Get([]byte(key))
 		if data == nil {
 			return nil

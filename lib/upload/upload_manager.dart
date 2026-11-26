@@ -89,7 +89,7 @@ class UploadManager extends ChangeNotifier {
               : '上次上传已中断，重新上传会从头开始；请先检查目标目录';
         }
         _tasks.add(t);
-        _fresh.add(t.id);
+        if (t.status != UploadStatus.completed) _fresh.add(t.id);
         // This also sanitizes old sessions and repairs outdated task formats.
         changed = changed || !equality.equals(value, t.toJson());
       } catch (e, stack) {
@@ -281,10 +281,17 @@ class UploadManager extends ChangeNotifier {
       _publishing = true;
       _pulse = (() async {
         try {
-          await foreground?.call();
-          await _save();
-        } catch (e) {
-          await stopAll(reason: '后台上传服务已中断，请返回应用后重新上传');
+          try {
+            await foreground?.call();
+          } catch (e) {
+            await stopAll(reason: '后台上传服务已中断，请返回应用后重新上传');
+            return;
+          }
+          try {
+            await _save();
+          } catch (e, s) {
+            DiagnosticLog.error('upload.heartbeat_save_failed', e, s);
+          }
         } finally {
           _publishing = false;
         }
@@ -809,7 +816,12 @@ class UploadManager extends ChangeNotifier {
       ))
         if (_runs[task.id] case final run?) run.done.future,
     ]);
-    _tasks.removeWhere((t) => t.status == UploadStatus.completed);
+    _tasks.removeWhere((t) {
+      if (t.status != UploadStatus.completed) return false;
+      _sources.remove(t.id);
+      _fresh.remove(t.id);
+      return true;
+    });
     await _save();
     notifyListeners();
   }

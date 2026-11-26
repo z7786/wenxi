@@ -15,6 +15,7 @@ import '../http.dart';
 import '../state_store.dart';
 import 'engine.dart';
 import 'http.dart';
+import 'native_http.dart';
 import 'password_web_flow.dart';
 import 'rule.dart';
 import 'server.dart';
@@ -1278,6 +1279,14 @@ class ParserRuleHub extends ChangeNotifier {
     'lastError': _lastError,
   };
 
+  static void _closeHttp(JsonHttp? client) {
+    if (client case final ParserRuleHttp dartHttp) {
+      dartHttp.close();
+    } else if (client case final NativeParserRuleHttp nativeHttp) {
+      nativeHttp.close();
+    }
+  }
+
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
@@ -1292,6 +1301,12 @@ class ParserRuleHub extends ChangeNotifier {
     await _passwordGate.run(() async {});
     await _grantGate.run(() async {});
     await _deviceGate.run(() async {});
+    _closeHttp(http);
+    if (!identical(engine.http, http)) _closeHttp(engine.http);
+    if (!identical(passwordDocumentHttp, http) &&
+        !identical(passwordDocumentHttp, engine.http)) {
+      _closeHttp(passwordDocumentHttp);
+    }
     dispose();
   }
 }

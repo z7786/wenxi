@@ -212,6 +212,7 @@ class PlaybackController extends ChangeNotifier {
   RequestScope? _scope;
   Timer? _saveTimer;
   Future<void>? _closeFuture;
+  Future<void>? _retiring;
   final _inflightLoads = <Future<void>>{};
   final _preferenceGate = AsyncGate();
   ExternalPlaybackStream? _externalStream;
@@ -483,7 +484,7 @@ class PlaybackController extends ChangeNotifier {
     _pipRevision++;
     _pipScope?.cancel();
     if (_pipSession != null) old?.pipBookmark = _pipSession!.state;
-    final retiredSelection = _selection?.key == entries[next].key
+    var retiredSelection = _selection?.key == entries[next].key
         ? null
         : _selection;
     if (_selection?.key != entries[next].key) {
@@ -532,13 +533,18 @@ class PlaybackController extends ChangeNotifier {
       stageStart = now;
     }
 
-    try {
+    final retiring = _chainRetirement(() async {
       await _stopSystemPip();
       await _stopExternalPlayback();
       await _stopCast(keepPlatform: continueCast != null);
       await _retire(old);
+    });
+    try {
+      await retiring;
       _independentBookmark = null;
-      await retiredSelection?.release();
+      final releasingSelection = retiredSelection;
+      retiredSelection = null;
+      await releasingSelection?.release();
       await _preferenceGate.run(() async {});
       finishStage('retireMs');
       if (closed || generation != _generation) return;
@@ -751,7 +757,7 @@ class PlaybackController extends ChangeNotifier {
           retain(source);
           unowned = source;
           _session = null;
-          await _retire(session);
+          await _chainRetirement(() => _retire(session));
           finishStage('fallbackRetireMs');
           if (closed || generation != _generation) return;
           require(session.nativeClosed, '播放器初始化未完成，请退出播放页后重试');
@@ -806,11 +812,19 @@ class PlaybackController extends ChangeNotifier {
       }
     } finally {
       if (warming != null) {
-        try {
-          await warming.close();
-        } catch (e, stack) {
-          DiagnosticLog.error('player.prepared_backend_close', e, stack);
-        }
+        final closingWarming = warming;
+        await _chainRetirement(() async {
+          try {
+            await closingWarming.close();
+          } catch (e, stack) {
+            DiagnosticLog.error('player.prepared_backend_close', e, stack);
+          }
+        });
+      }
+      if (retiredSelection != null) {
+        final releasingSelection = retiredSelection;
+        retiredSelection = null;
+        await releasingSelection.release();
       }
       if (unowned != null) await _releaseSafely(unowned);
       if (generation == _generation &&
@@ -1429,6 +1443,30 @@ class PlaybackController extends ChangeNotifier {
   Future<void> saveProgress() async {
     final session = _session;
     if (session != null) await _save(session);
+  }
+
+  Future<void> _chainRetirement(Future<void> Function() task) {
+    final previous = _retiring;
+    final current = () async {
+      if (previous != null) {
+        try {
+          await previous;
+        } catch (_) {}
+      }
+      await task();
+    }();
+    _retiring = current;
+    void clear() {
+      if (identical(_retiring, current)) _retiring = null;
+    }
+
+    unawaited(
+      current.then<void>(
+        (_) => clear(),
+        onError: (Object _, StackTrace _) => clear(),
+      ),
+    );
+    return current;
   }
 
   Future<void> _retire(_Session? session) async {
@@ -2079,7 +2117,7 @@ class PlaybackController extends ChangeNotifier {
     _discardPrepared();
     // The independent window has its own decoder. Its transport retains the
     // source while this original decoder releases buffers and native threads.
-    _trackAhead(_retire(session));
+    _trackAhead(_chainRetirement(() => _retire(session)));
     _changed();
   }
 
@@ -2113,10 +2151,12 @@ class PlaybackController extends ChangeNotifier {
     if (session != null) session.retirementSave ??= _save(session);
     final selection = _selection;
     _selection = null;
-    await _stopSystemPip();
-    await _stopExternalPlayback();
-    await _stopCast();
-    await _retire(session);
+    await _chainRetirement(() async {
+      await _stopSystemPip();
+      await _stopExternalPlayback();
+      await _stopCast();
+      await _retire(session);
+    });
     await selection?.release();
     // Late source resolutions still own cleanup leases, even after the route is gone.
     await Future.wait(_inflightLoads.toList());

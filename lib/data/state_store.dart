@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:collection/collection.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -20,13 +21,22 @@ Uint8List encodePlainState(Json data) {
   return _packPlainState(serialized);
 }
 
+final _plainStatePrefix = utf8.encode(
+  '{"format":"asterlink-state-v2","sha256":"',
+);
+final _plainStateMiddle = utf8.encode('","data":');
+const _plainStateSuffix = 0x7d;
+
 Uint8List _packPlainState(String serialized) {
-  final checksum = sha256.convert(utf8.encode(serialized)).toString();
-  return Uint8List.fromList(
-    utf8.encode(
-      '{"format":"asterlink-state-v2","sha256":"$checksum","data":$serialized}',
-    ),
-  );
+  final body = utf8.encode(serialized);
+  final checksum = sha256.convert(body).toString();
+  final builder = BytesBuilder(copy: false)
+    ..add(_plainStatePrefix)
+    ..add(checksum.codeUnits)
+    ..add(_plainStateMiddle)
+    ..add(body)
+    ..addByte(_plainStateSuffix);
+  return builder.takeBytes();
 }
 
 Json decodePlainState(Uint8List bytes) {
@@ -56,8 +66,16 @@ Object? _copyStateValue(Object? value) => switch (value) {
   _ => value,
 };
 
+const _accountStateKeys = [
+  'credentials',
+  'cloudAccounts',
+  'activeCloudAccounts',
+  'secrets',
+];
+
 typedef _EncodedChange = ({
   bool changed,
+  bool accountKeysChanged,
   Uint8List? bytes,
   int serializeMs,
   int packMs,
@@ -65,14 +83,18 @@ typedef _EncodedChange = ({
 
 _EncodedChange _encodeChange((bool, Json, Json, bool) args) {
   final timer = Stopwatch()..start();
-  final changed =
-      args.$4 || !const DeepCollectionEquality().equals(args.$2, args.$3);
+  const equality = DeepCollectionEquality();
+  final changed = args.$4 || !equality.equals(args.$2, args.$3);
+  final accountKeysChanged =
+      changed &&
+      _accountStateKeys.any((key) => !equality.equals(args.$2[key], args.$3[key]));
   final serialized = changed && args.$1 ? jsonEncode(args.$3) : '';
   final serializeMs = timer.elapsedMilliseconds;
   timer.reset();
   final bytes = changed && args.$1 ? _packPlainState(serialized) : null;
   return (
     changed: changed,
+    accountKeysChanged: accountKeysChanged,
     bytes: bytes,
     serializeMs: serializeMs,
     packMs: timer.elapsedMilliseconds,
@@ -109,6 +131,7 @@ class StateStore extends ChangeNotifier {
   Json _data;
   final _gate = AsyncGate();
   final _notificationZone = Zone.current;
+  int _accountExternalVersion = 0;
   Json get data => _data;
 
   static Future<StateStore> open(
@@ -346,14 +369,30 @@ class StateStore extends ChangeNotifier {
   factory StateStore.memory([Json? data]) =>
       StateStore._(null, asJson(jsonDecode(jsonEncode(data ?? {}))));
 
-  Future<T> change<T>(T Function(Json draft) edit, {String? recoveryPassword}) {
+  Future<T> change<T>(T Function(Json draft) edit, {String? recoveryPassword}) =>
+      _change(
+        (draft, _) => edit(draft),
+        recoveryPassword: recoveryPassword,
+        internalAccountWrite: false,
+      );
+
+  Future<T> _changeAccount<T>(
+    T Function(Json draft, void Function(void Function()) onCommit) edit,
+  ) => _change(edit, internalAccountWrite: true);
+
+  Future<T> _change<T>(
+    T Function(Json draft, void Function(void Function()) onCommit) edit, {
+    String? recoveryPassword,
+    required bool internalAccountWrite,
+  }) {
     final timer = Stopwatch()..start();
     return _gate.run(() async {
       final queueMs = timer.elapsedMilliseconds;
       // Copy containers without re-parsing every URL and torrent string on the
       // UI isolate. Failed edits still cannot mutate the committed snapshot.
       final draft = _copyStateValue(_data) as Json;
-      final result = edit(draft);
+      void Function()? commitHook;
+      final result = edit(draft, (callback) => commitHook = callback);
       draft['schema'] = 1;
       final args = (file != null, _data, draft, recoveryPassword != null);
       final encoded = file == null
@@ -361,7 +400,10 @@ class StateStore extends ChangeNotifier {
           : await compute(_encodeChange, args, debugLabel: 'state.commit');
       // Startup reconciliation and idle shutdown often leave the state unchanged.
       // No-op edits do not rewrite an unchanged snapshot.
-      if (!encoded.changed) return result;
+      if (!encoded.changed) {
+        commitHook?.call();
+        return result;
+      }
       if (file != null) {
         final protectedImport = recoveryPassword != null;
         final originals = <String, Uint8List?>{};
@@ -416,6 +458,10 @@ class StateStore extends ChangeNotifier {
         }
       }
       _data = draft;
+      if (!internalAccountWrite && encoded.accountKeysChanged) {
+        _accountExternalVersion++;
+      }
+      commitHook?.call();
       _notificationZone.run(notifyListeners);
       if (file != null && timer.elapsedMilliseconds >= 500) {
         DiagnosticLog.event(
@@ -488,6 +534,7 @@ class Vault implements CredentialStore {
   Vault(this.store);
   final StateStore store;
   final _accountScope = Object();
+  int _migratedVersion = -1;
 
   String? activeAccountId(CloudPlatform platform) =>
       activeIdIn(store.data, platform);
@@ -630,7 +677,32 @@ class Vault implements CredentialStore {
     draft['activeCloudAccounts'] = active;
   }
 
+  Future<T> _change<T>(
+    T Function(Json draft, void Function() ensureMigrated) edit,
+  ) {
+    if (!identical(store.runtimeType, StateStore)) {
+      return store.change((draft) => edit(draft, () => migrateDraft(draft)));
+    }
+    return store._changeAccount((draft, onCommit) {
+      var migrated = false;
+      void ensureMigrated() {
+        if (_migratedVersion == store._accountExternalVersion) return;
+        migrateDraft(draft);
+        migrated = true;
+      }
+
+      final result = edit(draft, ensureMigrated);
+      if (migrated) {
+        onCommit(() => _migratedVersion = store._accountExternalVersion);
+      }
+      return result;
+    });
+  }
+
   Future<void> initializeAccounts() {
+    final trackVersion = identical(store.runtimeType, StateStore);
+    final version = trackVersion ? store._accountExternalVersion : -1;
+    if (trackVersion && _migratedVersion == version) return Future.value();
     final saved = store.data;
     final accounts = saved.obj('cloudAccounts');
     final active = saved.obj('activeCloudAccounts');
@@ -649,9 +721,10 @@ class Vault implements CredentialStore {
             saved['activeCloudAccounts'] is Map) &&
         equality.equals(accounts, draft['cloudAccounts']) &&
         equality.equals(active, draft['activeCloudAccounts'])) {
+      if (trackVersion) _migratedVersion = version;
       return Future.value();
     }
-    return store.change(migrateDraft);
+    return _change((draft, ensureMigrated) => ensureMigrated());
   }
 
   static void activateDraft(Json draft, CloudPlatform platform, String? id) {
@@ -687,31 +760,32 @@ class Vault implements CredentialStore {
     if (activeIdIn(draft, platform) == id) activateDraft(draft, platform, id);
   }
 
-  Future<String> createAccount(CloudPlatform platform) => store.change((draft) {
-    migrateDraft(draft);
-    final id = newId();
-    _writeRecord(draft, platform, id, {
-      'name': '',
-      'nameIsCustom': false,
-      'secrets': <String, dynamic>{},
-    });
-    return id;
-  });
+  Future<String> createAccount(CloudPlatform platform) =>
+      _change((draft, ensureMigrated) {
+        ensureMigrated();
+        final id = newId();
+        _writeRecord(draft, platform, id, {
+          'name': '',
+          'nameIsCustom': false,
+          'secrets': <String, dynamic>{},
+        });
+        return id;
+      });
 
   Future<void> activate(
     CloudPlatform platform,
     String id, {
     bool Function()? canCommit,
-  }) => store.change((draft) {
+  }) => _change((draft, ensureMigrated) {
     require(canCommit?.call() ?? true, '登录已取消或账号发生变化');
-    migrateDraft(draft);
+    ensureMigrated();
     require(credentialIn(draft, platform, id) != null, '该账号已移除，请重新添加');
     activateDraft(draft, platform, id);
   });
 
   Future<void> renameAccount(CloudPlatform platform, String id, String name) =>
-      store.change((draft) {
-        migrateDraft(draft);
+      _change((draft, ensureMigrated) {
+        ensureMigrated();
         final record = draft.obj('cloudAccounts').obj(platform.key).obj(id);
         require(record.isNotEmpty, '该账号已移除');
         _writeRecord(draft, platform, id, {
@@ -733,8 +807,8 @@ class Vault implements CredentialStore {
       return false;
     }
     if (current.field('nickname') == name) return true;
-    return store.change((draft) {
-      migrateDraft(draft);
+    return _change((draft, ensureMigrated) {
+      ensureMigrated();
       final credential = credentialIn(draft, platform, id);
       if (credential == null || credential.updatedAt != revision) return false;
       final record = draft.obj('cloudAccounts').obj(platform.key).obj(id);
@@ -752,8 +826,8 @@ class Vault implements CredentialStore {
     CloudPlatform platform,
     String id, {
     bool onlyIfEmpty = false,
-  }) => store.change((draft) {
-    migrateDraft(draft);
+  }) => _change((draft, ensureMigrated) {
+    ensureMigrated();
     if (onlyIfEmpty && credentialIn(draft, platform, id) != null) return;
     final records = draft.obj('cloudAccounts').obj(platform.key)..remove(id);
     draft['cloudAccounts'] = {
@@ -814,8 +888,8 @@ class Vault implements CredentialStore {
     Credential credential,
   ) async {
     final owner = accountId(platform);
-    await store.change((draft) {
-      migrateDraft(draft);
+    await _change((draft, ensureMigrated) {
+      ensureMigrated();
       final id = owner ?? newId();
       final record = draft.obj('cloudAccounts').obj(platform.key).obj(id);
       require(owner == null || record.isNotEmpty, '该账号已移除');
@@ -835,9 +909,9 @@ class Vault implements CredentialStore {
     bool Function()? canCommit,
   }) {
     final owner = accountId(platform);
-    return store.change((draft) {
+    return _change((draft, ensureMigrated) {
       if (canCommit != null && !canCommit()) return false;
-      migrateDraft(draft);
+      ensureMigrated();
       final current = credentialIn(draft, platform, owner);
       if (expected == null ? current != null : !expected.sameAs(current)) {
         return false;
@@ -885,9 +959,9 @@ class Vault implements CredentialStore {
     Credential? expected,
     Credential replacement, {
     required bool Function() canCommit,
-  }) => store.change((draft) {
+  }) => _change((draft, ensureMigrated) {
     if (!canCommit()) return null;
-    migrateDraft(draft);
+    ensureMigrated();
     final current = credentialIn(draft, platform, pendingId);
     if (expected == null ? current != null : !expected.sameAs(current)) {
       return null;
@@ -957,8 +1031,8 @@ class Vault implements CredentialStore {
     String value,
   ) {
     final owner = accountId(platform);
-    return store.change((draft) {
-      migrateDraft(draft);
+    return _change((draft, ensureMigrated) {
+      ensureMigrated();
       final current = credentialIn(draft, platform, owner);
       if (owner == null || !expected.sameAs(current)) {
         return false;
@@ -999,8 +1073,8 @@ class Vault implements CredentialStore {
         .where((p) => accountSecret(p, key))
         .firstOrNull;
     final id = platform == null ? null : accountId(platform);
-    return store.change((draft) {
-      migrateDraft(draft);
+    return _change((draft, ensureMigrated) {
+      ensureMigrated();
       _putSecretDraft(draft, platform, id, key, value);
     });
   }

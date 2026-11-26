@@ -81,14 +81,20 @@ class ReadRetryScope {
     }
   }
 
+  static const _maxRetryAfter = Duration(seconds: 30);
+
   Duration? _retryAfter(String value) {
     final seconds = int.tryParse(value.trim());
-    if (seconds != null && seconds >= 0) return Duration(seconds: seconds);
+    if (seconds != null && seconds >= 0) {
+      final parsed = Duration(seconds: seconds);
+      return parsed > _maxRetryAfter ? _maxRetryAfter : parsed;
+    }
     try {
       final remaining = HttpDate.parse(
         value,
       ).difference(DateTime.now().toUtc());
-      return remaining.isNegative ? Duration.zero : remaining;
+      if (remaining.isNegative) return Duration.zero;
+      return remaining > _maxRetryAfter ? _maxRetryAfter : remaining;
     } catch (_) {
       return null;
     }

@@ -11,13 +11,15 @@ import 'text_document.dart';
 class TextPreviewLoader {
   static Future<TextDocument> remote(
     TransferHttp http,
-    DownloadSpec source,
-  ) async {
+    DownloadSpec source, {
+    Duration streamTimeout = const Duration(seconds: 15),
+  }) async {
     final cancel = CancelToken(), parent = RequestScope.current;
     if (parent?.isCancelled == true) cancel.cancel();
     parent?.whenCancel.then((_) {
       if (!cancel.isCancelled) cancel.cancel();
     });
+    final Uint8List bytes;
     try {
       final response = await http.stream(source.url, {
         ...http.headers(source.headers),
@@ -26,45 +28,49 @@ class TextPreviewLoader {
       final status = response.statusCode ?? 0;
       if (status == 416 &&
           response.headers.value('content-range') == 'bytes */0') {
-        return _decode(Uint8List(0), source.fileName);
-      }
-      if (status != 200 && status != 206) {
-        throw DownloadHttpException.response(response);
-      }
-      int? total;
-      if (status == 206) {
-        final range = RegExp(
-          r'^bytes 0-(\d+)/(\d+)$',
-        ).firstMatch(response.headers.value('content-range') ?? '');
-        require(range != null, '服务器返回的文本范围无效');
-        total = int.parse(range![2]!);
-        require(
-          int.parse(range[1]!) == (total - 1).clamp(0, TextDocument.maxBytes),
-          '服务器返回的文本范围不完整',
-        );
+        bytes = Uint8List(0);
       } else {
-        total = int.tryParse(response.headers.value('content-length') ?? '');
-      }
-      final data = BytesBuilder(copy: false);
-      await for (final chunk in response.data!.stream) {
-        RequestScope.checkpoint();
-        final take = (TextDocument.maxBytes + 1 - data.length).clamp(
-          0,
-          chunk.length,
+        if (status != 200 && status != 206) {
+          throw DownloadHttpException.response(response);
+        }
+        int? total;
+        if (status == 206) {
+          final range = RegExp(
+            r'^bytes 0-(\d+)/(\d+)$',
+          ).firstMatch(response.headers.value('content-range') ?? '');
+          require(range != null, '服务器返回的文本范围无效');
+          total = int.parse(range![2]!);
+          require(
+            int.parse(range[1]!) == (total - 1).clamp(0, TextDocument.maxBytes),
+            '服务器返回的文本范围不完整',
+          );
+        } else {
+          total = int.tryParse(response.headers.value('content-length') ?? '');
+        }
+        final data = BytesBuilder(copy: false);
+        await for (final chunk in response.data!.stream.timeout(
+          streamTimeout,
+        )) {
+          RequestScope.checkpoint();
+          final take = (TextDocument.maxBytes + 1 - data.length).clamp(
+            0,
+            chunk.length,
+          );
+          data.add(Uint8List.sublistView(chunk, 0, take));
+          if (data.length > TextDocument.maxBytes) break;
+        }
+        require(
+          total == null ||
+              data.length == total ||
+              data.length > TextDocument.maxBytes,
+          '文本内容读取不完整，请重试',
         );
-        data.add(Uint8List.sublistView(chunk, 0, take));
-        if (data.length > TextDocument.maxBytes) break;
+        bytes = data.takeBytes();
       }
-      require(
-        total == null ||
-            data.length == total ||
-            data.length > TextDocument.maxBytes,
-        '文本内容读取不完整，请重试',
-      );
-      return _decode(data.takeBytes(), source.fileName);
     } finally {
       cancel.cancel();
     }
+    return _decode(bytes, source.fileName);
   }
 
   static Future<TextDocument> local(

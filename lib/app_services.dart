@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -475,8 +476,11 @@ class AppServices extends ChangeNotifier {
   final accounts = <CloudPlatform, CloudAccount>{},
       accountErrors = <CloudPlatform, String>{};
   final accountLoading = <CloudPlatform>{},
-      _revisions = <CloudPlatform, (String?, int?)>{};
+      _revisions = <CloudPlatform, (String?, int?)>{},
+      _accountDisplay = <CloudPlatform, (String, String, bool)>{};
   final accountNeedsLogin = <CloudPlatform>{};
+  Object? _cloudListPreferences;
+  bool _cloudListInitialized = false;
   final sharedText = ValueNotifier<String?>(null);
   final downloadNavigation = ValueNotifier<int>(0);
   final browserReturn = ValueNotifier<BrowserReturnTarget?>(null);
@@ -570,6 +574,7 @@ class AppServices extends ChangeNotifier {
   );
   String? migrationError;
   bool _closed = false;
+  Future<void>? _closing;
   final _playbackCleanups = <Future<void>>{};
 
   /// Returning from a player should restore its caller immediately, while
@@ -677,6 +682,7 @@ class AppServices extends ChangeNotifier {
       await lock.close();
       throw const AppException('文析助手已在运行，请打开已有窗口');
     }
+    AppServices? result;
     try {
       DiagnosticLog.event('app.state_read_start');
       final store = await StateStore.open(data);
@@ -688,7 +694,7 @@ class AppServices extends ChangeNotifier {
           'tasks': (store.data['tasks'] as List? ?? []).length,
         },
       );
-      final result = AppServices(
+      result = AppServices(
         store: store,
         dataDirectory: data,
         cacheDirectory: cache,
@@ -711,7 +717,20 @@ class AppServices extends ChangeNotifier {
       return result;
     } catch (error, stack) {
       DiagnosticLog.error('app.initialize_failed', error, stack);
-      await lock.close();
+      if (result != null) {
+        try {
+          await result.close();
+        } catch (closeError, closeStack) {
+          DiagnosticLog.error(
+            'app.close_after_init_failed',
+            closeError,
+            closeStack,
+          );
+        }
+      }
+      try {
+        await lock.close();
+      } catch (_) {}
       rethrow;
     }
   }
@@ -877,9 +896,36 @@ class AppServices extends ChangeNotifier {
           vault.credentialFor(CloudPlatform.webdav, profile.id)!,
       ]);
     }
+    var changed = false;
+    final prefs = store.data['cloudListPreferences'];
+    if (!_cloudListInitialized ||
+        !const DeepCollectionEquality().equals(_cloudListPreferences, prefs)) {
+      _cloudListInitialized = true;
+      _cloudListPreferences = prefs;
+      changed = true;
+    }
+    final rawAccounts = store.data['cloudAccounts'];
+    final allAccounts = rawAccounts is Map ? rawAccounts : null;
     for (final platform in CloudPlatform.values) {
       final credential = vault.credential(platform),
-          revision = (vault.activeAccountId(platform), credential?.updatedAt);
+          activeId = vault.activeAccountId(platform),
+          revision = (activeId, credential?.updatedAt);
+      final platformAccounts = allAccounts?[platform.key];
+      final record = activeId != null && platformAccounts is Map
+          ? platformAccounts[activeId]
+          : null;
+      final customName = credential != null && record is Map
+          ? Vault.customAccountName(asJson(record), credential)
+          : '';
+      final display = (
+        customName,
+        credential?.field('nickname') ?? '',
+        LoginCredentials.stored(platform, credential),
+      );
+      if (_accountDisplay[platform] != display) {
+        _accountDisplay[platform] = display;
+        changed = true;
+      }
       if (_revisions.containsKey(platform) &&
           _revisions[platform] == revision) {
         if ({
@@ -888,16 +934,21 @@ class AppServices extends ChangeNotifier {
               CloudPlatform.xunlei,
             }.contains(platform) &&
             credential?.field('autoLoginBlocked') == '1') {
-          accounts.remove(platform);
-          accountNeedsLogin.add(platform);
-          accountErrors[platform] = switch (platform) {
+          final message = switch (platform) {
             CloudPlatform.pan123 => Pan123Connector.autoLoginFailureMessage,
             CloudPlatform.xunlei => XunleiConnector.autoLoginFailureMessage,
             _ => TianyiConnector.autoLoginFailureMessage,
           };
+          if (accounts.remove(platform) != null) changed = true;
+          if (accountNeedsLogin.add(platform)) changed = true;
+          if (accountErrors[platform] != message) {
+            accountErrors[platform] = message;
+            changed = true;
+          }
         }
         continue;
       }
+      changed = true;
       _revisions[platform] = revision;
       accounts.remove(platform);
       accountErrors.remove(platform);
@@ -906,7 +957,7 @@ class AppServices extends ChangeNotifier {
         unawaited(refreshAccount(platform));
       }
     }
-    notifyListeners();
+    if (changed) notifyListeners();
   }
 
   Future<void> refreshAccount(CloudPlatform platform) async {
@@ -1207,8 +1258,11 @@ class AppServices extends ChangeNotifier {
     'pendingDownloadRemovals':
         (store.data['downloadRemovals'] as List? ?? []).length,
   };
-  Future<void> close() async {
+  Future<void> close() => _closing ??= _close();
+
+  Future<void> _close() async {
     if (_closed) return;
+    _closed = true;
     await FloatingPlaybackManager.maybeOf(store)?.close();
     if (platformFeatures) await WindowsPlayerComponents.shared.close();
     resourceSearch.dispose();
@@ -1232,12 +1286,15 @@ class AppServices extends ChangeNotifier {
     final dav = cloud.connector(CloudPlatform.webdav);
     if (dav is WebDavConnector) await dav.close();
     cleanups.progress.close();
-    _closed = true;
     clipboard.dispose();
     externalOpens.dispose();
     if (platformFeatures && (isDesktopPlatform || Platform.isIOS)) {
       windowsExternalOpenChannel.setMethodCallHandler(null);
     }
+    if (platformFeatures && Platform.isAndroid) {
+      nativeChannel.setMethodCallHandler(null);
+    }
+    sharedText.dispose();
     downloadNavigation.dispose();
     browserReturn.dispose();
     browserReturnNavigation.dispose();

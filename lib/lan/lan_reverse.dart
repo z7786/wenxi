@@ -406,6 +406,7 @@ class _LanReverseWorker {
           'headers': headers,
         }),
       );
+      final jobIdBytes = ascii.encode(job.id);
       var seq = 0, sent = 0;
       await for (final chunk in response.timeout(_reverseTimeout)) {
         for (
@@ -418,7 +419,7 @@ class _LanReverseWorker {
           sent += count;
           if (length >= 0 && sent > length) throw const _LanConnectionError();
           final frame = Uint8List(_reverseHeaderBytes + count);
-          frame.setRange(0, 32, ascii.encode(job.id));
+          frame.setRange(0, 32, jobIdBytes);
           ByteData.sublistView(frame, 32, 36).setUint32(0, seq);
           frame.setRange(_reverseHeaderBytes, frame.length, chunk, offset);
           job.sequence = seq++;
@@ -529,9 +530,10 @@ extension _LanReverse on LanService {
     final session = _authorize(request, remote);
     final paired = _peerSessions[session.id];
     require(paired != null && paired.expires.isAfter(clock()), '请先完成双向配对');
-    final localAddress = Uri.parse(
-      'http://${request.headers.value(HttpHeaders.hostHeader)}',
-    ).host;
+    final localAddress = _parseLanHostHeader(
+      request.headers.value(HttpHeaders.hostHeader),
+    );
+    require(localAddress != null, '无效的设备地址');
     final socket = await WebSocketTransformer.upgrade(
       request,
       compression: CompressionOptions.compressionOff,
@@ -544,7 +546,7 @@ extension _LanReverse on LanService {
     }
     _reverseChannels.remove(session.id)?.close();
     _reverseChannels[session.id] = _serviceZone.run(
-      () => _LanReverseChannel(this, session, socket, localAddress),
+      () => _LanReverseChannel(this, session, socket, localAddress!),
     );
   }
 

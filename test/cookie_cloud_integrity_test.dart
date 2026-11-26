@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/providers/quark.dart';
 import 'package:asterlink/data/providers/uc.dart';
+import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'support.dart';
@@ -341,5 +343,42 @@ void main() {
     );
     expect(spec.checksumType, 'md5');
     expect(spec.checksumValue, _digest);
+  });
+
+  test('Concurrent UC cookie refreshes share a single refresh gate', () async {
+    final store = StateStore.memory();
+    final vault = Vault(store);
+    final initial = Credential('uc', {
+      'primary': '__pus=keep; __puus=expired',
+      'ucSessionRefreshedAt': '$_now',
+    }, updatedAt: 7);
+    await vault.putCredential(CloudPlatform.uc, initial);
+    final refreshEntered = Completer<void>();
+    final refreshRelease = Completer<void>();
+    var refreshCalls = 0;
+    final http = FakeHttp((r) async {
+      if (r.uri.path.endsWith('/config')) {
+        refreshCalls++;
+        if (!refreshEntered.isCompleted) refreshEntered.complete();
+        await refreshRelease.future;
+        return HttpResult(200, '{"status":200,"code":0,"data":{}}', {
+          'set-cookie': ['__puus=fresh; Path=/'],
+        });
+      }
+      if ((r.headers['Cookie'] ?? '').contains('__puus=expired')) {
+        return const HttpResult(401, '{"status":401,"code":31001}');
+      }
+      return ok({'list': []});
+    });
+    final uc = UcConnector(http, store: vault, now: () => _now);
+    final pending = Future.wait([
+      uc.list(_session, '0', initial),
+      uc.list(_session, '0', initial),
+    ]);
+    await refreshEntered.future;
+    refreshRelease.complete();
+    await pending;
+    expect(refreshCalls, 1);
+    expect(vault.credential(CloudPlatform.uc)!.primary, contains('__puus=fresh'));
   });
 }

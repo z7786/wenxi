@@ -5,11 +5,11 @@ import 'dart:convert';
 class LogRedactor {
   static const hidden = '[已隐藏]';
   static final _secretKey = RegExp(
-    r'cookie|authorization|password|passwd|passcode|token|secret|credential|capability|parserstate|x-parser-job-key|extract|提取码|访问码|密码|口令|skey|signature|sign$|kps$|^vcode$|service_?ticket|headers|body|filename|savedpath|destination|sharetext|bduss|__puus|__pus|^pwd$|access_?code|access_?pass|login_user|sessionkey|^primary$|^secondary$|^epd$|^username$|^passport$|^mobile$|^paramid$|^lt$|^reqid$|validate|^cp$|^pb$',
+    r'cookie|authorization|password|passwd|passcode|token|secret|credential|capability|parserstate|x-parser-job-key|extract|提取码|访问码|密码|口令|skey|signature|sign$|kps$|^vcode$|service_?ticket|headers|body|filename|savedpath|destination|sharetext|bduss|__puus|__pus|^pwd$|access_?code|access_?pass|login_user|sessionkey|^primary$|^secondary$|^epd$|^username$|^passport$|^mobile$|^paramid$|^lt$|^reqid$|validate|^cp$|^pb$|ctfile_session|phpdisk_info|ylogin|rmkey|os_sso_sid|ud_id|openid|^seid$',
     caseSensitive: false,
   );
   static final _url = RegExp(
-    r'''\b(?:https?|wss?|content|file|magnet|data)[:][^\s<>"']+''',
+    r'''\b(?:https?|wss?|content|file|magnet|data|ed2k|ftp|rtsp|rtmp)[:][^\s<>"']+''',
     caseSensitive: false,
   );
   static final _header = RegExp(
@@ -17,9 +17,28 @@ class LogRedactor {
     caseSensitive: false,
   );
   static final _pair = RegExp(
-    r'''((?:[\w.-]*(?:token|secret|password|passwd|passcode|credential|capability|parserstate|x-parser-job-key|skey|signature|cookie|access_?pass|kps|service_?ticket)[\w.-]*|sign|vcode|BDUSS|STOKEN|__puus|__pus|pwd|access_?code|LOGIN_USER|sessionKey|primary|secondary|epd|username|passport|mobile|paramid|lt|reqid|validate|validateCode|smsValidateCode|cp|pb|提取码|访问码|密码|口令)["']?\s*[=:：]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]\r\n]+)''',
+    r'''((?:[\w.-]*(?:token|secret|password|passwd|passcode|credential|capability|parserstate|x-parser-job-key|skey|signature|cookie|access_?pass|kps|service_?ticket)[\w.-]*|sign|vcode|BDUSS|STOKEN|__puus|__pus|pwd|access_?code|LOGIN_USER|sessionKey|primary|secondary|epd|username|passport|mobile|paramid|lt|reqid|validate|validateCode|smsValidateCode|cp|pb|ctfile_session|phpdisk_info|ylogin|rmkey|os_sso_sid|ud_id|openid|\bseid|提取码|访问码|密码|口令)["']?\s*[=:：]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]\r\n]+)''',
     caseSensitive: false,
   );
+  static final _controlChars = RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]');
+  static final _encryptedBlob = RegExp(r'\{(?:NRP|RSA)\}[A-Za-z0-9+/=]+');
+  static final _spacedPasscode = RegExp(
+    r'((?:提取码|访问码|密码|口令)\s+)[A-Za-z0-9_-]+',
+  );
+  static final _authScheme = RegExp(
+    r'\b(?:Bearer|Basic)\s+[A-Za-z0-9+/=_~.-]+',
+    caseSensitive: false,
+  );
+  static final _windowsPath = RegExp(r'''\b[A-Za-z]:[\\/][^\r\n"'<>]*''');
+  static final _uncPath = RegExp(r'''\\\\[^\r\n"'<> ]+\\[^\r\n"'<>]*''');
+  static final _unixPath = RegExp(
+    r'''/(?:storage|sdcard|data|home|Users|tmp|mnt|private|var|Volumes)/[^\r\n"'<>]*''',
+  );
+  static final _email = RegExp(
+    r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b',
+  );
+  static final _chinaPhone = RegExp(r'\b1[3-9]\d{9}\b');
+  static final _ipv4 = RegExp(r'\b(?:\d{1,3}\.){3}\d{1,3}\b');
 
   static String text(Object? value, {int limit = 12000}) {
     var input = '$value';
@@ -28,36 +47,19 @@ class LogRedactor {
     final inputLimit = limit > 48000 ? 64000 : 48000;
     if (input.length > inputLimit) input = input.substring(0, inputLimit);
     input = input
-        .replaceAll(RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'), '')
+        .replaceAll(_controlChars, '')
         .replaceAll(_header, '凭据: $hidden')
         .replaceAll(_url, '[链接已隐藏]')
-        .replaceAll(RegExp(r'\{(?:NRP|RSA)\}[A-Za-z0-9+/=]+'), hidden)
+        .replaceAll(_encryptedBlob, hidden)
         .replaceAllMapped(_pair, (match) => '${match[1]}$hidden')
-        .replaceAllMapped(
-          RegExp(r'((?:提取码|访问码|密码|口令)\s+)[A-Za-z0-9_-]+'),
-          (match) => '${match[1]}$hidden',
-        )
-        .replaceAll(
-          RegExp(
-            r'\b(?:Bearer|Basic)\s+[A-Za-z0-9+/=_-]+',
-            caseSensitive: false,
-          ),
-          hidden,
-        )
-        .replaceAll(RegExp(r'''\b[A-Za-z]:[\\/][^\r\n"'<>]*'''), '[本地路径已隐藏]')
-        .replaceAll(RegExp(r'''\\\\[^\r\n"'<> ]+\\[^\r\n"'<>]*'''), '[本地路径已隐藏]')
-        .replaceAll(
-          RegExp(
-            r'''/(?:storage|sdcard|data|home|Users|tmp|mnt|private|var|Volumes)/[^\r\n"'<>]*''',
-          ),
-          '[本地路径已隐藏]',
-        )
-        .replaceAll(
-          RegExp(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
-          '[邮箱已隐藏]',
-        )
-        .replaceAll(RegExp(r'\b1[3-9]\d{9}\b'), '[手机号已隐藏]')
-        .replaceAll(RegExp(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'), '[IP 已隐藏]');
+        .replaceAllMapped(_spacedPasscode, (match) => '${match[1]}$hidden')
+        .replaceAll(_authScheme, hidden)
+        .replaceAll(_windowsPath, '[本地路径已隐藏]')
+        .replaceAll(_uncPath, '[本地路径已隐藏]')
+        .replaceAll(_unixPath, '[本地路径已隐藏]')
+        .replaceAll(_email, '[邮箱已隐藏]')
+        .replaceAll(_chinaPhone, '[手机号已隐藏]')
+        .replaceAll(_ipv4, '[IP 已隐藏]');
     return input.length <= limit ? input : '${input.substring(0, limit)}…[已截断]';
   }
 

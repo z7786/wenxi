@@ -114,6 +114,14 @@ class WeiyunConnector extends PersonalCloudConnector {
     sessions.gate.run(() async {
       sessions.checkpoint(session);
       if (rejected != null && session.credential.primary != rejected) return;
+      if (rejected == null) {
+        final checked = int.tryParse(session.field('csrfCheckedAt'));
+        if ((_cookies(session)['wyctoken'] ?? '').isNotEmpty &&
+            checked != null &&
+            sessions.now() - checked < 300000) {
+          return;
+        }
+      }
       if (!await _touch(session)) {
         final cookies = _cookies(session);
         if (tokenInfo(cookies).integer('token_type') != 1 ||

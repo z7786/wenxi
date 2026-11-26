@@ -71,6 +71,7 @@ class TianyiConnector extends CloudConnector {
   static const _autoFailed = AccountLoginRequired(autoLoginFailureMessage);
   static const _accountChanged = AccountLoginRequired('天翼账号已变化，请重新登录');
   final _refreshing = <int, (Credential, Future<Credential>)>{};
+  final _accessTokenGate = AsyncGate();
   ({String cookie, int? revision, String token})? _accessToken;
   final _zoneKey = Object();
   _TianyiSession get _session => Zone.current[_zoneKey] as _TianyiSession;
@@ -458,63 +459,69 @@ class TianyiConnector extends CloudConnector {
     }
   }
 
-  Future<String> _getAccessToken() async {
+  Future<String> _getAccessToken({String? rejectedToken}) async {
     _checkpoint();
-    final cached = _accessToken;
-    if (cached != null &&
+    bool usable(({String cookie, int? revision, String token})? cached) =>
+        cached != null &&
         cached.cookie == _session.cookie &&
-        cached.revision == _session.owner?.updatedAt) {
-      return cached.token;
-    }
-    for (var attempt = 0; ; attempt++) {
-      final info = await _api(_familySessionPath);
-      final sessionKey = info.str('sessionKey');
-      require(
-        info['sessionKey'] is String &&
-            sessionKey.isNotEmpty &&
-            sessionKey.length <= 4096 &&
-            !RegExp(r'[\x00-\x20\x7f-\x9f]').hasMatch(sessionKey),
-        '天翼未返回有效登录会话，请重新登录',
-      );
-      final timestamp = '${DateTime.now().millisecondsSinceEpoch}';
-      final Json result;
-      try {
-        result = await _api(
-          _familyTokenPath,
-          params: {'sessionKey': sessionKey},
-          extraHeaders: {
-            'AppKey': _familyAppKey,
-            'Timestamp': timestamp,
-            'Signature': _accessSignature({
-              'sessionKey': sessionKey,
-              'AppKey': _familyAppKey,
-              'Timestamp': timestamp,
-            }),
-          },
-          // A renewed Cookie needs a fresh sessionKey before another exchange.
-          renewSession: false,
-        );
-      } on _TianyiSessionExpired {
+        cached.revision == _session.owner?.updatedAt &&
+        cached.token != rejectedToken;
+    if (usable(_accessToken)) return _accessToken!.token;
+    return RequestScope.cancellable(
+      _accessTokenGate.run(() async {
         _checkpoint();
-        if (attempt > 0) rethrow;
-        continue;
-      }
-      _checkpoint();
-      final token = result.str('accessToken');
-      require(
-        result['accessToken'] is String &&
-            token.isNotEmpty &&
-            token.length <= 8192 &&
-            !RegExp(r'[\x00-\x20\x7f-\x9f]').hasMatch(token),
-        '天翼未返回有效访问授权，请重新登录后重试',
-      );
-      _accessToken = (
-        cookie: _session.cookie,
-        revision: _session.owner?.updatedAt,
-        token: token,
-      );
-      return token;
-    }
+        if (usable(_accessToken)) return _accessToken!.token;
+        for (var attempt = 0; ; attempt++) {
+          final info = await _api(_familySessionPath);
+          final sessionKey = info.str('sessionKey');
+          require(
+            info['sessionKey'] is String &&
+                sessionKey.isNotEmpty &&
+                sessionKey.length <= 4096 &&
+                !RegExp(r'[\x00-\x20\x7f-\x9f]').hasMatch(sessionKey),
+            '天翼未返回有效登录会话，请重新登录',
+          );
+          final timestamp = '${DateTime.now().millisecondsSinceEpoch}';
+          final Json result;
+          try {
+            result = await _api(
+              _familyTokenPath,
+              params: {'sessionKey': sessionKey},
+              extraHeaders: {
+                'AppKey': _familyAppKey,
+                'Timestamp': timestamp,
+                'Signature': _accessSignature({
+                  'sessionKey': sessionKey,
+                  'AppKey': _familyAppKey,
+                  'Timestamp': timestamp,
+                }),
+              },
+              // A renewed Cookie needs a fresh sessionKey before another exchange.
+              renewSession: false,
+            );
+          } on _TianyiSessionExpired {
+            _checkpoint();
+            if (attempt > 0) rethrow;
+            continue;
+          }
+          _checkpoint();
+          final token = result.str('accessToken');
+          require(
+            result['accessToken'] is String &&
+                token.isNotEmpty &&
+                token.length <= 8192 &&
+                !RegExp(r'[\x00-\x20\x7f-\x9f]').hasMatch(token),
+            '天翼未返回有效访问授权，请重新登录后重试',
+          );
+          _accessToken = (
+            cookie: _session.cookie,
+            revision: _session.owner?.updatedAt,
+            token: token,
+          );
+          return token;
+        }
+      }),
+    );
   }
 
   // Family cloud and the mobile website use the same signed token protocol.
@@ -523,8 +530,9 @@ class TianyiConnector extends CloudConnector {
     Map<String, Object?> params, {
     bool family = false,
   }) async {
+    String? rejectedToken;
     for (var attempt = 0; ; attempt++) {
-      final token = await _getAccessToken();
+      final token = await _getAccessToken(rejectedToken: rejectedToken);
       _checkpoint();
       final timestamp = '${DateTime.now().millisecondsSinceEpoch}';
       final response = await http.request(
@@ -555,6 +563,7 @@ class TianyiConnector extends CloudConnector {
       } on _TianyiSessionExpired {
         // A concurrent request may already have replaced this expired token.
         if (_accessToken?.token == token) _accessToken = null;
+        rejectedToken = token;
         if (attempt > 0) {
           throw AccountLoginRequired(
             family ? '天翼家庭云授权已失效，请重新登录' : '天翼下载授权已失效，请重新登录',
@@ -657,6 +666,11 @@ class TianyiConnector extends CloudConnector {
       if (current.primary != owner.primary &&
           current.field('autoLoginBlocked') != '1') {
         return current;
+      }
+      if (error is HttpRequestFailure ||
+          error is! AppException ||
+          RequestScope.current?.isCancelled == true) {
+        rethrow;
       }
       await _blockAutoLogin(current, error, stack, stage: 'password');
       _owner(owner);

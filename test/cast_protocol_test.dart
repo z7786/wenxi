@@ -920,4 +920,31 @@ void main() {
       expect(InternetAddress(Uri.parse(tv.media).host).isLoopback, isFalse);
     },
   );
+
+  test(
+    'close aborts an in-flight hanging poll immediately and bounds teardown Stop',
+    () async {
+      final tv = TestTv();
+      await tv.start();
+      addTearDown(tv.close);
+      final session = await sessionFor(tv);
+      final pollBarrier = Completer<void>();
+      final stopBarrier = Completer<void>();
+      addTearDown(() {
+        if (!pollBarrier.isCompleted) pollBarrier.complete();
+        if (!stopBarrier.isCompleted) stopBarrier.complete();
+      });
+      tv.barriers['GetPositionInfo'] = pollBarrier.future;
+      tv.barriers['Stop'] = stopBarrier.future;
+      final polling = session.refresh();
+      await castEventually(() => tv.events.last == 'GetPositionInfo');
+      final watch = Stopwatch()..start();
+      await session.close().timeout(const Duration(seconds: 5));
+      watch.stop();
+      expect(watch.elapsed, lessThan(const Duration(seconds: 4)));
+      pollBarrier.complete();
+      stopBarrier.complete();
+      await polling;
+    },
+  );
 }

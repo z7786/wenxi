@@ -361,7 +361,8 @@ class ExternalPlaybackStream {
         }, onError: (Object _) {}),
       );
       final outgoing = await peer.wait(
-        opening.timeout(const Duration(seconds: 35)),
+        opening,
+        timeout: const Duration(seconds: 35),
       );
       _requests.add(outgoing);
       peer.upstream = outgoing;
@@ -398,12 +399,8 @@ class ExternalPlaybackStream {
           }, onError: (Object _) {}),
         );
         response = await peer.wait(
-          receiving.timeout(
-            const Duration(seconds: 20),
-            onTimeout: () {
-              throw TimeoutException('External video response timeout');
-            },
-          ),
+          receiving,
+          timeout: const Duration(seconds: 20),
         );
       } catch (_) {
         outgoing.abort();
@@ -867,26 +864,59 @@ class _RelayPeer {
   final bool head;
   late final StreamSubscription<List<int>> subscription;
   final headers = _RelayHeaders();
-  final _cancelled = Completer<void>();
+  void Function()? _abortWait;
   HttpClientRequest? upstream;
   StreamIterator<List<int>>? body;
   bool cancelled = false, finished = false, headersSent = false;
   int statusCode = HttpStatus.ok, contentLength = -1, bytesSent = 0;
-  Future<T> wait<T>(Future<T> operation) {
+
+  // Keep a single cancellation callback instead of retaining a Future.any
+  // listener for every chunk until a long-running HTTP response ends.
+  Future<T> wait<T>(Future<T> operation, {Duration? timeout}) {
     if (cancelled) {
       operation.ignore();
       return Future.error(_RelayCancelled());
     }
-    return Future.any([
-      operation,
-      _cancelled.future.then<T>((_) => throw _RelayCancelled()),
-    ]);
+    final result = Completer<T>();
+    Timer? timer;
+    void abort() {
+      timer?.cancel();
+      if (!result.isCompleted) result.completeError(_RelayCancelled());
+    }
+
+    if (timeout != null) {
+      timer = Timer(timeout, () {
+        if (identical(_abortWait, abort)) _abortWait = null;
+        if (!result.isCompleted) {
+          result.completeError(
+            TimeoutException('External video relay timeout', timeout),
+          );
+        }
+      });
+    }
+    _abortWait = abort;
+    unawaited(
+      operation.then<void>(
+        (value) {
+          timer?.cancel();
+          if (identical(_abortWait, abort)) _abortWait = null;
+          if (!result.isCompleted) result.complete(value);
+        },
+        onError: (Object error, StackTrace stack) {
+          timer?.cancel();
+          if (identical(_abortWait, abort)) _abortWait = null;
+          if (!result.isCompleted) result.completeError(error, stack);
+        },
+      ),
+    );
+    return result.future;
   }
 
   void cancel() {
     if (cancelled) return;
     cancelled = true;
-    _cancelled.complete();
+    _abortWait?.call();
+    _abortWait = null;
     upstream?.abort();
     unawaited(body?.cancel().catchError((Object _) {}) ?? Future<void>.value());
     socket.destroy();
@@ -925,9 +955,9 @@ class _RelayPeer {
     }
   }
 
-  Future<void> flush() {
+  Future<void> flush() async {
     _sendHeaders();
-    return wait(socket.flush().timeout(const Duration(seconds: 20)));
+    await wait(socket.flush(), timeout: const Duration(seconds: 20));
   }
 
   Future<void> close() async {

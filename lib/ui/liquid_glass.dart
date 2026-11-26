@@ -70,9 +70,7 @@ class _LiquidGlassSurfaceState extends State<LiquidGlassSurface> {
         TickerMode.valuesOf(context).enabled &&
         !MediaQuery.highContrastOf(context) &&
         !appearance.glassLowPower &&
-        appearance.glassStyle == GlassStyle.clear &&
-        widget.refractionHeight > 0 &&
-        widget.refractionAmount > 0;
+        appearance.glassStyle == GlassStyle.clear;
     if (!_shaderWanted) {
       _shader?.dispose();
       _shader = null;

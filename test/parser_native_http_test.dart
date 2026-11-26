@@ -49,6 +49,19 @@ class _Native extends NativeTransport {
   Future<void> dispose() async {}
 }
 
+class _TransientVersionNative extends _Native {
+  _TransientVersionNative(this.shouldFailVersion);
+  final bool Function() shouldFailVersion;
+  @override
+  Future<Object?> call(String method, [Json args = const {}]) async {
+    if (method == 'version' && shouldFailVersion()) {
+      calls.add((method, args));
+      throw TimeoutException('cold start timeout');
+    }
+    return super.call(method, args);
+  }
+}
+
 class _Fallback extends JsonHttp {
   int calls = 0;
   @override
@@ -127,6 +140,26 @@ void main() {
       await http.get('https://parser.example/list');
       expect(native.calls.map((e) => e.$1), ['version']);
       expect(fallback.calls, 2);
+    },
+  );
+
+  test(
+    'transient version check error does not permanently disable native HTTP/2',
+    () async {
+      var failVersion = true;
+      final native = _TransientVersionNative(() => failVersion);
+      final fallback = _Fallback();
+      final http = NativeParserRuleHttp(native, fallback: fallback);
+      await http.get('https://parser.example/first');
+      expect(fallback.calls, 1);
+      failVersion = false;
+      final second = await http.get('https://parser.example/second');
+      expect(second.status, 403);
+      expect(fallback.calls, 1);
+      expect(
+        native.calls.where((e) => e.$1 == 'version'),
+        hasLength(2),
+      );
     },
   );
 

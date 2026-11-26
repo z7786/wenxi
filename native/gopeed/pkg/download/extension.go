@@ -62,7 +62,14 @@ func (d *Downloader) InstallExtensionByFolder(path string, devMode bool) (*Exten
 	}
 
 	// if extension is not installed, add it to the list, otherwise update it
-	installedExt := d.getExtension(ext.Identity)
+	d.tasksLock.Lock()
+	var installedExt *Extension
+	for _, e := range d.extensions {
+		if e.Identity == ext.Identity {
+			installedExt = e
+			break
+		}
+	}
 	if installedExt == nil {
 		ext.CreatedAt = time.Now()
 		ext.UpdatedAt = ext.CreatedAt
@@ -71,6 +78,7 @@ func (d *Downloader) InstallExtensionByFolder(path string, devMode bool) (*Exten
 	} else {
 		installedExt.update(ext)
 	}
+	d.tasksLock.Unlock()
 	if err = d.storage.Put(bucketExtension, installedExt.Identity, installedExt); err != nil {
 		return nil, err
 	}
@@ -149,12 +157,16 @@ func (d *Downloader) DeleteExtension(identity string) error {
 		}
 	}
 	// remove from extensions
+	d.tasksLock.Lock()
 	for i, e := range d.extensions {
 		if e.Identity == identity {
-			d.extensions = append(d.extensions[:i], d.extensions[i+1:]...)
+			copy(d.extensions[i:], d.extensions[i+1:])
+			d.extensions[len(d.extensions)-1] = nil
+			d.extensions = d.extensions[:len(d.extensions)-1]
 			break
 		}
 	}
+	d.tasksLock.Unlock()
 	if err = d.storage.Delete(bucketExtension, identity); err != nil {
 		return err
 	}
@@ -165,7 +177,11 @@ func (d *Downloader) DeleteExtension(identity string) error {
 }
 
 func (d *Downloader) GetExtensions() []*Extension {
-	return d.extensions
+	d.tasksLock.RLock()
+	defer d.tasksLock.RUnlock()
+	extensions := make([]*Extension, len(d.extensions))
+	copy(extensions, d.extensions)
+	return extensions
 }
 
 func (d *Downloader) GetExtension(identity string) (*Extension, error) {
@@ -177,6 +193,8 @@ func (d *Downloader) GetExtension(identity string) (*Extension, error) {
 }
 
 func (d *Downloader) getExtension(identity string) *Extension {
+	d.tasksLock.RLock()
+	defer d.tasksLock.RUnlock()
 	for _, ext := range d.extensions {
 		if ext.Identity == identity {
 			return ext
@@ -316,12 +334,16 @@ func (d *Downloader) triggerOnDone(task *Task) {
 }
 
 func doTrigger[T any](d *Downloader, event ActivationEvent, req *base.Request, ctx T, handler func(ext *Extension, gopeed *Instance, ctx T)) error {
+	extensions := d.GetExtensions()
+	if len(extensions) == 0 {
+		return nil
+	}
 	// init extension global object
 	gopeed := &Instance{
 		Events: make(InstanceEvents),
 	}
 	var err error
-	for _, ext := range d.extensions {
+	for _, ext := range extensions {
 		if ext.Disabled {
 			continue
 		}

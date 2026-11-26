@@ -52,6 +52,7 @@ class XunleiConnector extends CloudConnector {
   passwordLogin;
   final Duration mutationDelay;
   final _refreshGate = AsyncGate();
+  final _captchaGate = AsyncGate();
   @override
   CloudPlatform get platform => CloudPlatform.xunlei;
   static const base = 'https://api-pan.xunlei.com';
@@ -180,18 +181,23 @@ class XunleiConnector extends CloudConnector {
       final error = j.str('error');
       final captchaRejected =
           error == 'captcha_invalid' || error == 'captcha_required';
-      if ((r.status == 401 || error == 'unauthenticated') &&
-          attempt < 2 &&
-          (a.access != sentAccess ||
-              await refresh(a, passwordOnly: refreshed))) {
-        refreshed = true;
-        await refreshCaptcha(a, action);
-        continue;
+      if ((r.status == 401 || error == 'unauthenticated') && attempt < 2) {
+        final alreadyRefreshed = a.access != sentAccess;
+        if (alreadyRefreshed || await refresh(a, passwordOnly: refreshed)) {
+          refreshed = true;
+          await refreshCaptcha(
+            a,
+            action,
+            rejectedCaptcha: alreadyRefreshed ? sentCaptcha : null,
+          );
+          continue;
+        }
       }
       if (captchaRejected &&
           !captchaRefreshed &&
           attempt < 2 &&
-          (a.captcha != sentCaptcha || await refreshCaptcha(a, action))) {
+          (a.captcha != sentCaptcha ||
+              await refreshCaptcha(a, action, rejectedCaptcha: sentCaptcha))) {
         captchaRefreshed = true;
         continue;
       }
@@ -388,70 +394,80 @@ class XunleiConnector extends CloudConnector {
     checkpoint(a);
   }
 
-  Future<bool> refreshCaptcha(XunleiSession a, String action) async {
-    checkpoint(a);
-    final sent = a.credential;
-    final web = webCredential(sent);
-    if (!web &&
-        (a.clientId != XunleiProtocol.clientId ||
-            a.version != XunleiProtocol.version)) {
-      return false;
-    }
-    final timestamp = '${DateTime.now().millisecondsSinceEpoch}';
-    try {
-      final response = await http.postJson(
-        '${XunleiProtocol.authBase}/v1/shield/captcha/init',
-        {
-          'client_id': a.clientId,
-          'device_id': a.device,
-          'action': action,
-          'captcha_token': a.captcha,
-          if (!web)
-            'redirect_uri': 'xlaccsdk01://xunlei.com/callback?state=harbor',
-          'meta': {
-            'client_version': a.version,
-            'package_name': web
-                ? XunleiProtocol.webPackageName
-                : XunleiProtocol.packageName,
-            'timestamp': timestamp,
-            'captcha_sign': web
-                ? XunleiProtocol.webCaptchaSign(a.device, timestamp)
-                : XunleiProtocol.captchaSign(a.device, timestamp),
-            'user_id': XunleiProtocol.jwt(
-              a.access,
-            ).str('sub').ifEmpty(a.credential.field('userId')),
-          },
-        },
-        {
-          'User-Agent': web
-              ? WebLoginTarget.desktopUserAgent
-              : XunleiProtocol.appUa,
-          if (web) 'Origin': 'https://pan.xunlei.com',
-          if (web) 'Referer': 'https://pan.xunlei.com/',
-          'Accept': 'application/json;charset=UTF-8',
-          'X-Client-Id': a.clientId,
-          'X-Device-Id': a.device,
-          'X-Client-Version': a.version,
-        },
-      );
-      checkpoint(a);
-      if (!sent.sameAs(a.credential)) return a.captcha.isNotEmpty;
-      XunleiLoginService.checkAvailable(response);
-      final token = response.json.str('captcha_token');
-      if (!response.successful ||
-          token.isEmpty ||
-          token == 'null' ||
-          response.json.str('url').isNotEmpty) {
-        return false;
-      }
-      a.captcha = token;
-      await persist(a);
-      return true;
-    } on AppException catch (error) {
-      checkpoint(a);
-      if (error is HttpRequestFailure) rethrow;
-      return false;
-    }
+  Future<bool> refreshCaptcha(
+    XunleiSession a,
+    String action, {
+    String? rejectedCaptcha,
+  }) {
+    final sentCaptcha = rejectedCaptcha ?? a.captcha;
+    return RequestScope.cancellable(
+      _captchaGate.run(() async {
+        checkpoint(a);
+        if (a.captcha != sentCaptcha && a.captcha.isNotEmpty) return true;
+        final sent = a.credential;
+        final web = webCredential(sent);
+        if (!web &&
+            (a.clientId != XunleiProtocol.clientId ||
+                a.version != XunleiProtocol.version)) {
+          return false;
+        }
+        final timestamp = '${DateTime.now().millisecondsSinceEpoch}';
+        try {
+          final response = await http.postJson(
+            '${XunleiProtocol.authBase}/v1/shield/captcha/init',
+            {
+              'client_id': a.clientId,
+              'device_id': a.device,
+              'action': action,
+              'captcha_token': a.captcha,
+              if (!web)
+                'redirect_uri': 'xlaccsdk01://xunlei.com/callback?state=harbor',
+              'meta': {
+                'client_version': a.version,
+                'package_name': web
+                    ? XunleiProtocol.webPackageName
+                    : XunleiProtocol.packageName,
+                'timestamp': timestamp,
+                'captcha_sign': web
+                    ? XunleiProtocol.webCaptchaSign(a.device, timestamp)
+                    : XunleiProtocol.captchaSign(a.device, timestamp),
+                'user_id': XunleiProtocol.jwt(
+                  a.access,
+                ).str('sub').ifEmpty(a.credential.field('userId')),
+              },
+            },
+            {
+              'User-Agent': web
+                  ? WebLoginTarget.desktopUserAgent
+                  : XunleiProtocol.appUa,
+              if (web) 'Origin': 'https://pan.xunlei.com',
+              if (web) 'Referer': 'https://pan.xunlei.com/',
+              'Accept': 'application/json;charset=UTF-8',
+              'X-Client-Id': a.clientId,
+              'X-Device-Id': a.device,
+              'X-Client-Version': a.version,
+            },
+          );
+          checkpoint(a);
+          if (!sent.sameAs(a.credential)) return a.captcha.isNotEmpty;
+          XunleiLoginService.checkAvailable(response);
+          final token = response.json.str('captcha_token');
+          if (!response.successful ||
+              token.isEmpty ||
+              token == 'null' ||
+              response.json.str('url').isNotEmpty) {
+            return false;
+          }
+          a.captcha = token;
+          await persist(a);
+          return true;
+        } on AppException catch (error) {
+          checkpoint(a);
+          if (error is HttpRequestFailure) rethrow;
+          return false;
+        }
+      }),
+    );
   }
 
   @override

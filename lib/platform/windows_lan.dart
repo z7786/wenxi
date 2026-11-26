@@ -8,6 +8,7 @@ import 'package:ffi/ffi.dart';
 
 import '../core/json.dart';
 import 'executable_path.dart';
+import 'windows_actions.dart';
 
 Future<int?> windowsLanInterface() async {
   if (!Platform.isWindows) return null;
@@ -71,13 +72,16 @@ try {
   exit \$process.ExitCode
 } catch { exit 1 }
 ''';
-  final result = await Process.run('powershell.exe', [
-    '-NoProfile',
-    '-NonInteractive',
-    '-WindowStyle',
-    'Hidden',
-    '-EncodedCommand',
-    _encodedScript(elevation),
-  ]);
+  final result = await Process.run(
+    windowsSystemExecutable(r'System32\WindowsPowerShell\v1.0\powershell.exe'),
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-WindowStyle',
+      'Hidden',
+      '-EncodedCommand',
+      _encodedScript(elevation),
+    ],
+  );
   require(result.exitCode == 0, '未能允许局域网连接，请完成 Windows 权限确认后重试');
 }

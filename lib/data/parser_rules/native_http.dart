@@ -18,17 +18,30 @@ class NativeParserRuleHttp extends JsonHttp {
   Future<bool>? _capability;
   static int _sequence = 0;
 
-  Future<bool> _supported() => _capability ??= () async {
-    try {
-      final version = asJson(
-        await transport.call('version').timeout(const Duration(seconds: 5)),
-      );
-      return version['parserHttp2'] == true;
-    } catch (_) {
-      // No site request has been sent, so the old transport is safe here.
-      return false;
+  void close({bool force = false}) {
+    if (fallback case final ParserRuleHttp http) {
+      http.close(force: force);
     }
-  }();
+  }
+
+  Future<bool> _supported() {
+    final cached = _capability;
+    if (cached != null) return cached;
+    late final Future<bool> pending;
+    pending = (() async {
+      try {
+        final version = asJson(
+          await transport.call('version').timeout(const Duration(seconds: 5)),
+        );
+        return version['parserHttp2'] == true;
+      } catch (_) {
+        if (identical(_capability, pending)) _capability = null;
+        // No site request has been sent, so the old transport is safe here.
+        return false;
+      }
+    })();
+    return _capability = pending;
+  }
 
   @override
   Future<HttpResult> request(

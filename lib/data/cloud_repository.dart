@@ -674,20 +674,22 @@ class CloudRepository {
       session,
       await provider.openShare(link!, account),
     );
-    final parents = <String, List<CloudFile>>{};
+    final parents = <String, Map<(String, bool), CloudFile>>{};
     final selected = <CloudFile>[];
     for (final file in files) {
       final parent = file.parentId == session.rootId
           ? native.rootId
           : file.parentId;
-      final entries = parents[parent] ??= await provider.list(
-        native,
-        parent,
-        account,
-      );
-      final fresh = entries
-          .where((f) => f.id == file.id && f.isDirectory == file.isDirectory)
-          .firstOrNull;
+      var entries = parents[parent];
+      if (entries == null) {
+        final listed = await provider.list(native, parent, account);
+        entries = <(String, bool), CloudFile>{};
+        for (final entry in listed) {
+          entries.putIfAbsent((entry.id, entry.isDirectory), () => entry);
+        }
+        parents[parent] = entries;
+      }
+      final fresh = entries[(file.id, file.isDirectory)];
       require(
         fresh != null && (file.size <= 0 || fresh.size == file.size),
         '分享文件已变化，请切换常规解析后再转存',

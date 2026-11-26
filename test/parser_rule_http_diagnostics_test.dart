@@ -46,12 +46,13 @@ class _Request implements HttpClientRequest {
   bool followRedirects = true;
   @override
   int maxRedirects = 5;
+  bool aborted = false;
   Object? failure;
   HttpClientResponse response = _Response(Stream.value([123, 125]));
   @override
   void add(List<int> data) {}
   @override
-  void abort([Object? exception, StackTrace? stackTrace]) {}
+  void abort([Object? exception, StackTrace? stackTrace]) => aborted = true;
   @override
   Future<HttpClientResponse> close() async {
     if (failure case final Object error) throw error;
@@ -65,19 +66,23 @@ class _Request implements HttpClientRequest {
 class _Client implements HttpClient {
   @override
   Duration? connectionTimeout;
+  @override
+  Duration idleTimeout = const Duration(seconds: 15);
   Object? failure;
+  Future<HttpClientRequest> Function(String method, Uri url)? onOpenUrl;
   int opens = 0;
   bool closed = false;
   final request = _Request();
   @override
   Future<HttpClientRequest> openUrl(String method, Uri url) async {
     opens++;
+    if (onOpenUrl case final handler?) return handler(method, url);
     if (failure case final Object error) throw error;
     return request;
   }
 
   @override
-  void close({bool force = false}) => closed = force;
+  void close({bool force = false}) => closed = true;
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
@@ -85,14 +90,20 @@ class _Client implements HttpClient {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const secretUrl = 'https://parser.example/api?token=private-query';
-  Future<void> request(_Client client) => HttpOverrides.runZoned(() async {
-    await ParserRuleHttp().request(
-      'POST',
-      secretUrl,
-      body: {'password': 'private-body'},
-      headers: {'Cookie': 'private-cookie'},
-    );
-  }, createHttpClient: (_) => client);
+  Future<void> request(_Client client, {ParserRuleHttp? transport}) =>
+      HttpOverrides.runZoned(() async {
+        final http = transport ?? ParserRuleHttp();
+        try {
+          await http.request(
+            'POST',
+            secretUrl,
+            body: {'password': 'private-body'},
+            headers: {'Cookie': 'private-cookie'},
+          );
+        } finally {
+          if (transport == null) http.close(force: true);
+        }
+      }, createHttpClient: (_) => client);
 
   test(
     'Network failures record stage and category without secrets or POST replay',
@@ -140,8 +151,9 @@ void main() {
         } else {
           client.request.response = _Response(Stream.error(error));
         }
+        final transport = ParserRuleHttp();
         await expectLater(
-          request(client),
+          request(client, transport: transport),
           throwsA(
             isA<ParserRuleError>().having(
               (e) => e.code,
@@ -161,6 +173,8 @@ void main() {
         if (kind == 'connection_reset') expect(fields['osCode'], 10054);
         expect(client.opens, 1);
         expect(client.closed, true);
+        expect(client.request.aborted, phase != 'connect');
+        transport.close(force: true);
       }
       final exported = log.exportFiles().values.join('\n');
       for (final secret in [
@@ -200,6 +214,99 @@ void main() {
         log.entries().where((e) => e.event == 'parser.upstream.network_failed'),
         isEmpty,
       );
+    },
+  );
+
+  test(
+    'HttpOverrides creates per-request clients and closes them without pinning',
+    () async {
+      var created = 0;
+      final clients = <_Client>[];
+      final transport = ParserRuleHttp();
+      await HttpOverrides.runZoned(() async {
+        final first = await transport.get('https://parser.example/first');
+        final second = await transport.get('https://parser.example/second');
+        expect(first.status, 200);
+        expect(second.status, 200);
+      }, createHttpClient: (_) {
+        created++;
+        final client = _Client();
+        clients.add(client);
+        return client;
+      });
+      expect(created, 2);
+      expect(clients.every((c) => c.opens == 1 && c.closed), isTrue);
+      transport.close(force: true);
+    },
+  );
+
+  test('Pooled HttpClient is reused across requests until closed', () async {
+    var created = 0;
+    final client = _Client();
+    final transport = ParserRuleHttp(
+      clientFactory: () {
+        created++;
+        return client;
+      },
+    );
+    final first = await transport.get('https://parser.example/first');
+    client.request.response = _Response(Stream.value([123, 125]));
+    final second = await transport.get('https://parser.example/second');
+    expect(first.status, 200);
+    expect(second.status, 200);
+    expect(created, 1);
+    expect(client.opens, 2);
+    expect(client.closed, false);
+    transport.close(force: true);
+    expect(client.closed, true);
+  });
+
+  test(
+    'Connect timeout aborts late openUrl request without unhandled errors',
+    () async {
+      final pendingOpen = Completer<HttpClientRequest>();
+      final lateRequest = _Request();
+      final client = _Client()..onOpenUrl = (_, _) => pendingOpen.future;
+      final transport = ParserRuleHttp(
+        clientFactory: () => client,
+        connectTimeout: const Duration(milliseconds: 20),
+      );
+      addTearDown(() => transport.close(force: true));
+      await expectLater(
+        transport.get('https://parser.example/slow-connect'),
+        throwsA(
+          isA<ParserRuleError>().having((e) => e.code, 'code', 'RULE_NETWORK'),
+        ),
+      );
+      pendingOpen.complete(lateRequest);
+      await Future<void>.delayed(Duration.zero);
+      expect(lateRequest.aborted, isTrue);
+    },
+  );
+
+  test(
+    'Connect cancellation aborts late openUrl request without unhandled errors',
+    () async {
+      final pendingOpen = Completer<HttpClientRequest>();
+      final lateRequest = _Request();
+      final client = _Client()..onOpenUrl = (_, _) => pendingOpen.future;
+      final transport = ParserRuleHttp(clientFactory: () => client);
+      addTearDown(() => transport.close(force: true));
+      final scope = RequestScope();
+      final future = scope.run(
+        () => transport.get('https://parser.example/cancel-connect'),
+      );
+      await Future<void>.delayed(Duration.zero);
+      scope.cancel();
+      await expectLater(
+        future,
+        throwsA(
+          isA<AppException>().having((e) => e.message, 'message', '请求已取消'),
+        ),
+      );
+      pendingOpen.complete(lateRequest);
+      await Future<void>.delayed(Duration.zero);
+      expect(lateRequest.aborted, isTrue);
     },
   );
 }

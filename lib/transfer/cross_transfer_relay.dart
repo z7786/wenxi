@@ -319,13 +319,10 @@ class CrossTransferRelay {
             '-',
             '',
           );
-          final otherHash = switch (algorithm) {
-            'sha1' => sha1,
-            'sha256' => sha256,
-            _ => null,
-          };
-          final otherResult = _DigestSink();
-          final otherInput = otherHash?.startChunkedConversion(otherResult);
+          final sha256Result = algorithm == 'sha256' ? _DigestSink() : null;
+          final sha256Input = sha256Result == null
+              ? null
+              : sha256.startChunkedConversion(sha256Result);
           var received = 0, checked = 0;
           onProgress(0, total);
           await for (final chunk in response.data!.stream.timeout(
@@ -337,7 +334,7 @@ class CrossTransferRelay {
             await writer.writeFrom(chunk);
             md5Input.add(chunk);
             sha1Input.add(chunk);
-            otherInput?.add(chunk);
+            sha256Input?.add(chunk);
             onProgress(received, total);
             if (received - checked >= 32 * 1024 * 1024) {
               await _space(downloadId, (total - received).clamp(0, total));
@@ -354,7 +351,7 @@ class CrossTransferRelay {
           require(received > 0 || file.size == 0, '下载返回空文件');
           md5Input.close();
           sha1Input.close();
-          otherInput?.close();
+          sha256Input?.close();
           digest = md5Result.value!.toString();
           sha1Digest = sha1Result.value!.toString();
           final trusted =
@@ -363,11 +360,15 @@ class CrossTransferRelay {
                   ? contentMd5(currentSpec.checksumValue)
                   : null);
           require(trusted == null || trusted == digest, '文件校验失败，请重新传输');
+          final otherDigest = switch (algorithm) {
+            'sha1' => sha1Digest,
+            'sha256' => sha256Result!.value.toString(),
+            _ => null,
+          };
           require(
-            otherHash == null ||
+            otherDigest == null ||
                 currentSpec.checksumValue?.isNotEmpty != true ||
-                otherResult.value.toString() ==
-                    currentSpec.checksumValue!.toLowerCase(),
+                otherDigest == currentSpec.checksumValue!.toLowerCase(),
             '文件校验失败，请重新传输',
           );
           onProgress(received, received);

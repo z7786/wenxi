@@ -286,7 +286,7 @@ class PlaybackStreamProxy {
   int _reusedBytes = 0;
   final _streamWatch = Stopwatch();
   int? _firstUpstreamByteMs, _firstPlayerByteMs;
-  _Segment? _metadataPreemption;
+  _Segment? _preemption;
   Future<void>? _closing;
   int get length => _length;
   int get cachedBytes => _cachedBytes;
@@ -1125,9 +1125,8 @@ class PlaybackStreamProxy {
       final segment = waiting.first;
       if (_active >= _budget ||
           !_makeRoom(segment.size, evictAhead: segment.demanders.isNotEmpty)) {
-        if (_metadataPreemption == null &&
-            segment.demanders.any((r) => r.metadata)) {
-          final victim = _segments.values
+        if (_preemption == null && segment.demanders.isNotEmpty) {
+          final candidates = _segments.values
               .where(
                 (s) =>
                     s.started &&
@@ -1135,9 +1134,19 @@ class PlaybackStreamProxy {
                     s.bytes == null &&
                     s.demanders.isEmpty,
               )
-              .firstOrNull;
-          if (victim != null) {
-            _metadataPreemption = victim;
+              .toList();
+          if (candidates.isNotEmpty) {
+            candidates.sort((a, b) {
+              final unowned = (a.owners.isEmpty ? 0 : 1).compareTo(
+                b.owners.isEmpty ? 0 : 1,
+              );
+              if (unowned != 0) return unowned;
+              return (b.index - _cursor).abs().compareTo(
+                (a.index - _cursor).abs(),
+              );
+            });
+            final victim = candidates.first;
+            _preemption = victim;
             for (final owner in victim.owners.toList()) {
               owner.pending.removeWhere((_, value) => identical(value, victim));
             }
@@ -1295,7 +1304,7 @@ class PlaybackStreamProxy {
     } finally {
       if (reserved) _reservedBytes -= segment.size;
       segment.request = null;
-      if (identical(_metadataPreemption, segment)) _metadataPreemption = null;
+      if (identical(_preemption, segment)) _preemption = null;
       _active--;
       _pump();
     }
@@ -1333,18 +1342,24 @@ class PlaybackStreamProxy {
         return;
       }
       final (start, end) = range;
-      request.response.statusCode = value == null
+      final statusCode = value == null
           ? HttpStatus.ok
           : HttpStatus.partialContent;
-      request.response.headers.set(HttpHeaders.contentTypeHeader, _contentType);
-      request.response.contentLength = end - start + 1;
-      if (value != null) {
+      if (request.method == 'HEAD') {
+        request.response.statusCode = statusCode;
         request.response.headers.set(
-          HttpHeaders.contentRangeHeader,
-          'bytes $start-$end/$_length',
+          HttpHeaders.contentTypeHeader,
+          _contentType,
         );
+        request.response.contentLength = end - start + 1;
+        if (value != null) {
+          request.response.headers.set(
+            HttpHeaders.contentRangeHeader,
+            'bytes $start-$end/$_length',
+          );
+        }
+        return;
       }
-      if (request.method == 'HEAD') return;
       final mediaFirst = start ~/ chunkBytes;
       final metadata =
           end - start + 1 <= math.min(64 * 1024, 2 * chunkBytes) &&
@@ -1367,9 +1382,9 @@ class PlaybackStreamProxy {
       final last = plan.last;
       final seeking = _seekPending;
       final interrupted = _seekReadInterrupted;
-      _seekPending = false;
-      _seekReadInterrupted = false;
       if (!metadata) {
+        _seekPending = false;
+        _seekReadInterrupted = false;
         final previous = _lastMediaFirst, beforePrevious = _previousMediaFirst;
         if (!seeking &&
             previous != null &&
@@ -1410,7 +1425,7 @@ class PlaybackStreamProxy {
       }
       // A paused seek gets one bounded preview window, only when the native
       // player needs new bytes. Cached seeks do not resume old prefetch work.
-      if (seeking && _paused) {
+      if (!metadata && seeking && _paused) {
         _pausedAllowance = math.min(connections, maxCacheBytes ~/ chunkBytes);
       }
       if (!metadata) _cursor = start;
@@ -1429,7 +1444,9 @@ class PlaybackStreamProxy {
       // socket backpressure. Listen to the underlying peer close immediately
       // so abandoned reads release their ranges and connection/cache budget.
       request.response.persistentConnection = false;
-      final output = socket = await request.response.detachSocket();
+      final output = socket = await request.response.detachSocket(
+        writeHeaders: false,
+      );
       void disconnected() {
         _cancelReader(current, keepPartial: true);
         _pump();
@@ -1459,7 +1476,24 @@ class PlaybackStreamProxy {
           );
           current.check();
           final next = math.min(to, available);
-          sent = true;
+          if (!sent) {
+            sent = true;
+            final reason = statusCode == HttpStatus.ok
+                ? 'OK'
+                : 'Partial Content';
+            final header = StringBuffer(
+              'HTTP/1.1 $statusCode $reason\r\n'
+              'Accept-Ranges: bytes\r\n'
+              'Cache-Control: no-store\r\n'
+              'Content-Type: $_contentType\r\n'
+              'Content-Length: ${end - start + 1}\r\n',
+            );
+            if (value != null) {
+              header.write('Content-Range: bytes $start-$end/$_length\r\n');
+            }
+            header.write('Connection: close\r\n\r\n');
+            output.add(latin1.encode(header.toString()));
+          }
           output.add(Uint8List.sublistView(demanded.buffer!, cursor, next));
           await current.wait(output.flush());
           current.check();
@@ -1473,7 +1507,7 @@ class PlaybackStreamProxy {
             _pump();
           }
         }
-        _releaseSegment(current, index);
+        _releaseSegment(current, index, keepPartial: index == last);
       }
       complete = true;
     } catch (error) {
@@ -1485,11 +1519,28 @@ class PlaybackStreamProxy {
           error is PlaybackFailure) {
         onFailure?.call(error);
       }
-      if (!sent && socket == null) {
-        try {
-          request.response.statusCode = HttpStatus.badGateway;
-          request.response.contentLength = 0;
-        } catch (_) {}
+      if (!sent) {
+        if (socket != null) {
+          if (!_closed && reader?.stopped != true) {
+            try {
+              sent = true;
+              socket.add(
+                latin1.encode(
+                  'HTTP/1.1 502 Bad Gateway\r\n'
+                  'Content-Length: 0\r\n'
+                  'Connection: close\r\n\r\n',
+                ),
+              );
+              await socket.flush().timeout(const Duration(seconds: 2));
+              complete = true;
+            } catch (_) {}
+          }
+        } else {
+          try {
+            request.response.statusCode = HttpStatus.badGateway;
+            request.response.contentLength = 0;
+          } catch (_) {}
+        }
       }
     } finally {
       if (reader != null) _cancelReader(reader, keepPartial: true);
