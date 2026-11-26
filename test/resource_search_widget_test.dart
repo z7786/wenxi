@@ -17,6 +17,7 @@ import 'package:asterlink/data/resource_search_api.dart';
 import 'package:asterlink/data/resource_link_checks.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/appearance.dart';
 import 'package:asterlink/domain/background.dart';
 import 'package:asterlink/domain/settings.dart';
@@ -28,6 +29,7 @@ import 'package:asterlink/ui/app_theme.dart';
 import 'package:asterlink/ui/browser_page.dart';
 import 'package:asterlink/ui/common.dart' show PlatformMark;
 import 'package:asterlink/ui/preview_page.dart';
+import 'package:asterlink/ui/document_download_preview.dart';
 import 'package:asterlink/ui/resource_search_page.dart';
 import 'package:asterlink/ui/resource_home_page.dart';
 import 'package:asterlink/ui/search_security_dialog.dart';
@@ -2077,6 +2079,49 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  Future<void> expectDocumentDownload(
+    WidgetTester tester,
+    AppServices services, {
+    required String shareId,
+    required String fileId,
+  }) async {
+    // The download queue uses real filesystem I/O as well as frame timers.
+    for (var attempt = 0; attempt < 100; attempt++) {
+      if (services.downloads.tasks.isNotEmpty &&
+          services.downloads.tasks.single.status == DownloadStatus.failed &&
+          find
+              .byKey(const Key('document-download-control'))
+              .evaluate()
+              .isNotEmpty) {
+        break;
+      }
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+    expect(find.byType(DocumentDownloadPreview), findsOneWidget);
+    expect(services.downloads.tasks, hasLength(1));
+    final task = services.downloads.tasks.single;
+    final origin = DownloadOrigin.fromJson(task.spec.source!);
+    expect(origin.session.platform, CloudPlatform.quark);
+    expect(origin.session.mode, BrowseMode.share);
+    expect(origin.session.rootId, shareId);
+    expect(origin.file.id, fileId);
+    expect(task.spec.fileName, 'Python 学习指南.pdf');
+    // This connector deliberately rejects downloads. The resulting task must
+    // remain available for retry, rather than loading an online viewer.
+    expect(task.status, DownloadStatus.failed);
+    expect(
+      find.byTooltip('重试下载'),
+      findsOneWidget,
+      reason: tester
+          .widgetList<Text>(find.byType(Text))
+          .map((t) => t.data)
+          .join('; '),
+    );
+  }
+
   Future<(SearchApiFixture, _SearchShareConnector)> openOriginalBrowser(
     WidgetTester tester,
   ) async {
@@ -2095,6 +2140,9 @@ void main() {
     tester,
   ) async {
     final (api, connector) = await openOriginalBrowser(tester);
+    final services = tester
+        .widget<BrowserPage>(find.byType(BrowserPage))
+        .services;
     api.resolve = (_, _, _) => Future.error(StateError('转存服务暂时不可用'));
     await tester.tap(find.text('Python 学习指南.pdf'));
     await settlePreview(tester);
@@ -2102,6 +2150,7 @@ void main() {
     expect(find.byKey(const Key('pool-preview-original')), findsNothing);
     expect(find.text('使用原链接预览'), findsNothing);
     expect(connector.downloadCalls, 0);
+    expect(services.downloads.tasks, isEmpty);
     expect(api.openCalls, hasLength(1));
     expect(connector.opened!.shareId, 'books');
     api.resolve = (hit, _, selection) async =>
@@ -2116,7 +2165,12 @@ void main() {
     expect(api.openCalls, hasLength(2));
     expect(connector.opened!.shareId, 'poolnew');
     expect(find.text('暂未完成资源准备'), findsNothing);
-    expect(find.text('下载文件'), findsOneWidget);
+    await expectDocumentDownload(
+      tester,
+      services,
+      shareId: 'poolnew',
+      fileId: 'newbook',
+    );
     expect(tester.takeException(), isNull);
   });
 
@@ -2124,6 +2178,9 @@ void main() {
     'failed transfer offers retry and return without original preview',
     (tester) async {
       final (api, connector) = await openOriginalBrowser(tester);
+      final services = tester
+          .widget<BrowserPage>(find.byType(BrowserPage))
+          .services;
       api.resolve = (hit, _, _) async => ResourceSearchOpenResult(
         hit: hit,
         mode: 'original',
@@ -2138,16 +2195,9 @@ void main() {
       expect(find.byKey(const Key('pool-preview-original')), findsNothing);
       expect(find.text('使用原链接预览'), findsNothing);
       expect(find.text('下载文件'), findsNothing);
-      expect(
-        tester
-            .widget<IconButton>(
-              find.byWidgetPredicate(
-                (widget) => widget is IconButton && widget.tooltip == '下载文件',
-              ),
-            )
-            .onPressed,
-        isNull,
-      );
+      expect(find.byType(DocumentDownloadPreview), findsNothing);
+      expect(services.downloads.tasks, isEmpty);
+      expect(find.byTooltip('传输管理'), findsOneWidget);
       expect(connector.downloadCalls, 0);
       expect(api.openCalls, hasLength(1));
       expect(connector.opened!.shareId, 'books');
@@ -2222,16 +2272,9 @@ void main() {
         expect(find.byKey(const Key('pool-preview-original')), findsNothing);
         expect(find.text('使用原链接预览'), findsNothing);
         expect(find.text('下载文件'), findsNothing);
-        expect(
-          tester
-              .widget<IconButton>(
-                find.byWidgetPredicate(
-                  (widget) => widget is IconButton && widget.tooltip == '下载文件',
-                ),
-              )
-              .onPressed,
-          isNull,
-        );
+        expect(find.byType(DocumentDownloadPreview), findsNothing);
+        expect(services.downloads.tasks, isEmpty);
+        expect(find.byTooltip('传输管理'), findsOneWidget);
         expect(connector.downloadCalls, 0);
         expect(connector.opened!.shareId, 'books');
         expect(api.openCalls, hasLength(attempt + 1));
@@ -2253,6 +2296,9 @@ void main() {
       tester,
     ) async {
       final (api, connector) = await openOriginalBrowser(tester);
+      final services = tester
+          .widget<BrowserPage>(find.byType(BrowserPage))
+          .services;
       api.resolve = (hit, _, _) async => ResourceSearchOpenResult(
         hit: hit,
         mode: 'original',
@@ -2265,7 +2311,12 @@ void main() {
       expect(find.text('号池暂不可用，使用原链接预览'), findsNothing);
       expect(find.byKey(const Key('pool-preview-original')), findsNothing);
       expect(find.text('暂未完成资源准备'), findsNothing);
-      expect(find.text('下载文件'), findsOneWidget);
+      await expectDocumentDownload(
+        tester,
+        services,
+        shareId: 'books',
+        fileId: 'book',
+      );
       expect(api.openCalls, hasLength(1));
       expect(connector.opened!.shareId, 'books');
       expect(connector.opened!.passcode, 'aB12');

@@ -40,7 +40,7 @@ CSP 阻止外部网络、iframe、媒体和文档脚本；PDF 不渲染活动注
 相关回归入口：
 
 ```powershell
-py -3 tool/verify.py test test/document_server_test.dart test/document_downloads_test.dart test/document_preview_widget_test.dart test/image_preview_page_test.dart test/windows_downloads_test.dart --concurrency 1
+py -3 tool/verify.py test test/document_server_test.dart test/document_downloads_test.dart test/document_preview_widget_test.dart test/image_preview_page_test.dart test/windows_downloads_test.dart test/resource_search_widget_test.dart --concurrency 1
 ```
 
 回归覆盖任务复用、账号与版本隔离、暂停/重试、退出后继续下载、文件丢失/变化/权限、HTTP 范围、SAF 句柄关闭、阅读失败、菜单和窄屏/宽屏。JavaScript 应运行语法检查并用合成 PDF、DOCX、XLSX、PPTX 样本检查实际排版、分页、主题和外部网络阻断；自动 widget 测试的假 WebView 不能代替渲染验证。Android 真机另验旧版 System WebView、密码输入、文档打开/返回、长文档内存、下载目录权限和覆盖升级。
