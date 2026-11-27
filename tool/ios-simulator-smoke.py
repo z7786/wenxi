@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-from smoke_report import read_report
+from smoke_report import read_report, select_ios_runtime
 
 root = Path(__file__).resolve().parent.parent
 local = root / '.local'
@@ -17,7 +17,10 @@ def sim(*args, **kwargs):
 
 
 runtimes = json.loads(sim('list', 'runtimes', '--json'))['runtimes']
-runtime = next(item for item in reversed(runtimes) if item.get('isAvailable') and 'iOS' in item['name'])
+sdk_version = subprocess.check_output(
+    ['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'], text=True, timeout=30).strip()
+runtime = select_ios_runtime(runtimes, sdk_version)
+print('Simulator runtime: ' + runtime['name'] + '; Xcode SDK: ' + sdk_version, flush=True)
 available = json.loads(sim('list', 'devices', 'available', '--json'))['devices']
 checks = [
     'startup', 'quickjs', 'download', 'coordinatedFileSave', 'freeSpace', 'playback',

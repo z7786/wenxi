@@ -24,6 +24,7 @@ import 'download_concurrency_dialog.dart';
 import 'contact_author_dialog.dart';
 import 'link_opening_page.dart';
 import 'player_components_page.dart';
+import 'about_dialog.dart';
 
 class MinePage extends StatelessWidget {
   const MinePage(this.services, {super.key, this.linkLauncher});
@@ -745,6 +746,13 @@ class MinePage extends StatelessWidget {
     title: '帮助与诊断',
     summary: '使用帮助、日志、项目地址与联系作者',
     children: [
+      _tile(
+        context,
+        CupertinoIcons.info_circle,
+        '关于文析助手',
+        '版本信息与项目说明',
+        () => showWenxiAbout(context, services.control),
+      ),
       _tile(
         context,
         CupertinoIcons.question_circle,

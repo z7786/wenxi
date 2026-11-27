@@ -37,7 +37,6 @@ import 'ui/search_security_dialog.dart';
 import 'ui/announcements_page.dart';
 import 'ui/device_link_page.dart';
 import 'ui/donate_page.dart';
-import 'ui/about_dialog.dart';
 import 'ui/download_shutdown_prompt.dart';
 import 'ui/guest_download_prompt.dart';
 import 'ui/mobile_data_download_prompt.dart';
@@ -934,8 +933,6 @@ class _MainShellState extends State<MainShell>
         await _clearDownloads();
       case 'clear-failed':
         await _clearDownloads(failedOnly: true);
-      case 'about':
-        await showWenxiAbout(context, widget.services.control);
       case 'donate':
         await Navigator.push<void>(
           context,
@@ -1057,14 +1054,7 @@ class _MainShellState extends State<MainShell>
         icon: CupertinoIcons.exclamationmark_circle,
       ),
     ],
-    _ => const [
-      AppMenuAction(value: 'donate', label: '打赏作者', icon: CupertinoIcons.gift),
-      AppMenuAction(
-        value: 'about',
-        label: '关于文析助手',
-        icon: CupertinoIcons.info_circle,
-      ),
-    ],
+    _ => const [],
   };
   Widget _navigation(BuildContext context, {required bool rail}) =>
       AppNavigation(
@@ -1160,6 +1150,13 @@ class _MainShellState extends State<MainShell>
                           child: selected == 0
                               ? AnnouncementButton(
                                   widget.services.announcements,
+                                )
+                              : selected == 4
+                              ? IconButton(
+                                  key: const Key('mine-donate'),
+                                  tooltip: '打赏作者',
+                                  onPressed: () => _menu('donate'),
+                                  icon: const Icon(CupertinoIcons.gift),
                                 )
                               : AppPopupMenuButton<String>(
                                   tooltip: '更多操作',

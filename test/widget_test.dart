@@ -1425,11 +1425,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('下载保存目录'), findsOneWidget);
     expect(find.text('HTTP 下载连接数'), findsNothing);
-    await tester.tap(find.byTooltip('更多操作'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('打赏作者'));
+    expect(find.byTooltip('更多操作'), findsNothing);
+    await tester.tap(find.byTooltip('打赏作者'));
     await tester.pumpAndSettle();
     expect(find.text('谢谢你的支持'), findsOneWidget);
+    expect(find.text('如果软件帮助到了您，可以给我一点支持吗( •ᴗ• )ﾉ♡'), findsOneWidget);
     expect(find.text('保存赞赏码'), findsOneWidget);
     expect(find.bySemanticsLabel('微信赞赏码'), findsOneWidget);
     expect(tester.takeException(), isNull);

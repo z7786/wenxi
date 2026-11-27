@@ -11,6 +11,20 @@ spec.loader.exec_module(smoke_report)
 
 
 class SmokeReportTest(unittest.TestCase):
+    def test_runtime_matches_xcode_sdk_instead_of_last_installed_version(self):
+        runtimes = [
+            {'name': 'iOS 18.5', 'version': '18.5', 'isAvailable': True},
+            {'name': 'iOS 26.2', 'version': '26.2', 'isAvailable': True},
+        ]
+        self.assertEqual(smoke_report.select_ios_runtime(runtimes, '18.5'), runtimes[0])
+        self.assertEqual(smoke_report.select_ios_runtime(list(reversed(runtimes)), '26.2'), runtimes[1])
+
+    def test_missing_matching_runtime_fails_before_booting_an_incompatible_one(self):
+        with self.assertRaises(RuntimeError):
+            smoke_report.select_ios_runtime(
+                [{'name': 'iOS 26.2', 'version': '26.2', 'isAvailable': True},
+                 {'name': 'iOS 18.5', 'version': '18.5', 'isAvailable': False}], '18.5')
+
     def test_report_is_not_ready_until_the_write_finishes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'ios-smoke.json'

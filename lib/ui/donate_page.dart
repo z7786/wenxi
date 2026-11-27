@@ -64,7 +64,10 @@ class _DonatePageState extends State<DonatePage> {
               child: Image.asset(_codeAsset, semanticLabel: '微信赞赏码'),
             ),
             const SizedBox(height: 18),
-            const Text('微信扫一扫，或保存图片后从相册识别。', textAlign: TextAlign.center),
+            const Text(
+              '如果软件帮助到了您，可以给我一点支持吗( •ᴗ• )ﾉ♡',
+              textAlign: TextAlign.center,
+            ),
             const SizedBox(height: 8),
             Text('自愿赞赏，感谢每一份心意。', style: TextStyle(color: secondary(context))),
           ],
