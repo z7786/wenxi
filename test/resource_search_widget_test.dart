@@ -1298,7 +1298,8 @@ void main() {
     expect(find.byKey(const Key('resource-priority-settings')), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('navigation-4')));
     await tester.pumpAndSettle();
-    expect(find.byTooltip('更多操作'), findsOneWidget);
+    expect(find.byTooltip('更多操作'), findsNothing);
+    expect(find.byTooltip('打赏作者'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('navigation-1')));
     await tester.pumpAndSettle();
     expect(find.byTooltip('更多操作'), findsNothing);
