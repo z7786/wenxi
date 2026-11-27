@@ -2085,6 +2085,10 @@ void main() {
     required String shareId,
     required String fileId,
   }) async {
+    expect(find.byType(DocumentDownloadPreview), findsOneWidget);
+    expect(services.downloads.tasks, isEmpty);
+    await tester.tap(find.byKey(const Key('document-download-confirm')));
+    await tester.pump();
     // The download queue uses real filesystem I/O as well as frame timers.
     for (var attempt = 0; attempt < 100; attempt++) {
       if (services.downloads.tasks.isNotEmpty &&

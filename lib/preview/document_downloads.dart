@@ -80,6 +80,12 @@ class DocumentDownloads {
     DownloadOrigin origin,
     Future<String?> Function() create,
   ) async {
+    return await find(origin) ?? await create();
+  }
+
+  /// Inspect matching downloads without creating, resuming or retrying a task.
+  /// Opening a preview is not authorization to start a new download.
+  Future<String?> find(DownloadOrigin origin) async {
     final candidates = downloads.tasks
         .where((task) => matches(task, origin))
         .toList();
@@ -91,7 +97,8 @@ class DocumentDownloads {
       inaccessible |= state == FileAvailability.inaccessible;
       if (state == FileAvailability.present &&
           current?.status == DownloadStatus.completed &&
-          current?.savedPath == task.savedPath) {
+          current?.savedPath == task.savedPath &&
+          matches(current!, origin)) {
         return task.id;
       }
     }
@@ -102,6 +109,6 @@ class DocumentDownloads {
       }
     }
     require(!inaccessible, '已下载的文档无法访问，请先检查保存目录权限');
-    return create();
+    return null;
   }
 }

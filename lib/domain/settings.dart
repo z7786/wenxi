@@ -61,6 +61,7 @@ class AppSettings {
     this.quarkAuthenticatedDirectDownload = false,
     this.hideGuestDownloadNotice = false,
     this.hideBaiduDownloadNotice = false,
+    this.baiduDownloadNoticeRead = false,
     this.warnOnMobileDataDownload = true,
   });
   final String theme;
@@ -96,6 +97,7 @@ class AppSettings {
   final bool quarkAuthenticatedDirectDownload;
   final bool hideGuestDownloadNotice;
   final bool hideBaiduDownloadNotice;
+  final bool baiduDownloadNoticeRead;
   final bool warnOnMobileDataDownload;
   static const profiles = {
     'github': ('GitHub', 8),
@@ -196,6 +198,7 @@ class AppSettings {
     'quarkAuthenticatedDirectDownload': quarkAuthenticatedDirectDownload,
     'hideGuestDownloadNotice': hideGuestDownloadNotice,
     'hideBaiduDownloadNotice': hideBaiduDownloadNotice,
+    'baiduDownloadNoticeRead': baiduDownloadNoticeRead,
     'warnOnMobileDataDownload': warnOnMobileDataDownload,
   };
   factory AppSettings.fromJson(Json j) => AppSettings(
@@ -263,6 +266,7 @@ class AppSettings {
     ),
     hideGuestDownloadNotice: j.boolean('hideGuestDownloadNotice', false),
     hideBaiduDownloadNotice: j.boolean('hideBaiduDownloadNotice', false),
+    baiduDownloadNoticeRead: j.boolean('baiduDownloadNoticeRead', false),
     warnOnMobileDataDownload: j.boolean('warnOnMobileDataDownload', true),
   );
   AppSettings update(Json fields) =>

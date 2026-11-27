@@ -63,6 +63,7 @@ jobs:
           flutter test --no-pub tool/login_web_scripts_test.dart --reporter expanded
           node --test tool/remote-control-editor.test.cjs
           node --test tool/tests/lan-browser.test.cjs
+          node --test tool/tests/document-viewer.test.cjs
       - name: Test the native download core
         working-directory: native/gopeed
         env:

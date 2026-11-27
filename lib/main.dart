@@ -98,6 +98,7 @@ Future<void> _initializeRuntime() async {
                 size: Size(1100, 780),
                 minimumSize: appWindowMinimumSize,
                 center: true,
+                skipTaskbar: false,
               ),
             )
             .then((_) async {
@@ -650,6 +651,7 @@ class _MainShellState extends State<MainShell>
       await _windowVisibility.run(() async {
         if (!mounted || _exiting) return;
         await windowManager.setPreventClose(true);
+        await _keepTaskbarEntry();
         await trayManager.setIcon(
           Platform.isMacOS ? 'assets/icons/app.png' : 'assets/icons/app.ico',
         );
@@ -676,10 +678,21 @@ class _MainShellState extends State<MainShell>
     await windowManager.hide();
   });
 
+  Future<void> _keepTaskbarEntry() async {
+    if (!Platform.isWindows) return;
+    try {
+      await windowManager.setSkipTaskbar(false);
+    } catch (error, stack) {
+      DiagnosticLog.error('app.taskbar_entry_failed', error, stack);
+    }
+  }
+
   Future<void> _showWindow() => _windowVisibility.run(() async {
     if (!mounted || _exiting) return;
     // show() restores only minimized windows, preserving maximized/PiP bounds.
     await windowManager.show();
+    if (!mounted || _exiting) return;
+    await _keepTaskbarEntry();
     if (!mounted || _exiting) return;
     await windowManager.focus();
   });

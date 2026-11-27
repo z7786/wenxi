@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
@@ -11,6 +12,7 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/download/transfer_http.dart';
+import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/ui/document_download_preview.dart';
 import 'package:asterlink/ui/document_preview.dart';
 import 'package:asterlink/ui/downloads_page.dart';
@@ -210,14 +212,139 @@ void main() {
     );
   }
 
+  Future<void> confirmDownload(WidgetTester tester) async {
+    await pumpUntil(
+      tester,
+      () => find
+          .byKey(const Key('document-download-confirm'))
+          .evaluate()
+          .isNotEmpty,
+    );
+    expect(services.downloads.tasks, isEmpty);
+    expect(connector.prepared, 0);
+    expect(native.begins, isEmpty);
+    await tester.tap(find.byKey(const Key('document-download-confirm')));
+    await tester.pump();
+  }
+
+  documentTest('opening and leaving a document never starts a download', (
+    tester,
+  ) async {
+    await setup(tester);
+    await tester.pumpWidget(
+      MaterialApp(home: PreviewPage(services, session, file('report.pdf'))),
+    );
+    await tester.pump();
+    await pumpUntil(tester, () => find.text('下载并预览').evaluate().isNotEmpty);
+    await tester.pump(const Duration(seconds: 2));
+    expect(services.downloads.tasks, isEmpty);
+    expect(connector.prepared, 0);
+    expect(native.begins, isEmpty);
+    expect(web.views, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(services.downloads.tasks, isEmpty);
+  });
+
+  documentTest('cancelling the download location never enqueues a document', (
+    tester,
+  ) async {
+    await setup(tester);
+    await services.updateSettings({'askDownloadDestination': true});
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      await tester.pumpWidget(
+        MaterialApp(home: PreviewPage(services, session, file('report.pdf'))),
+      );
+      await tester.pump();
+      await confirmDownload(tester);
+      // The preparation spinner remains behind the location dialog; wait for
+      // that dialog rather than waiting for all animations to stop.
+      await pumpUntil(tester, () => find.text('下载保存位置').evaluate().isNotEmpty);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('下载保存位置'), findsOneWidget);
+      await tester.tap(find.text('取消'));
+      await pumpUntil(
+        tester,
+        () => find.textContaining('已取消下载').evaluate().isNotEmpty,
+      );
+      expect(services.downloads.tasks, isEmpty);
+      expect(connector.prepared, 0);
+      expect(native.begins, isEmpty);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
   documentTest(
-    'remote document preview downloads once, saves, and displays the local viewer',
+    'reopening a failed document observes its error without retrying it',
+    (tester) async {
+      await setup(tester);
+      files.failSave = true;
+      final document = file('report.pdf');
+      final id = (await tester.runAsync(
+        () => services.downloads.enqueue(
+          services.cloud.planDownload(session, document),
+        ),
+      ))!;
+      await pumpUntil(
+        tester,
+        () => services.downloads.task(id)?.status == DownloadStatus.failed,
+      );
+      final begins = native.begins.length;
+      await tester.pumpWidget(
+        MaterialApp(home: PreviewPage(services, session, document)),
+      );
+      await tester.pump();
+      await pumpUntil(tester, () => find.text('文档下载失败').evaluate().isNotEmpty);
+      await tester.pump(const Duration(seconds: 2));
+      expect(services.downloads.task(id)?.status, DownloadStatus.failed);
+      expect(native.begins, hasLength(begins));
+      expect(services.downloads.tasks, hasLength(1));
+    },
+  );
+
+  documentTest(
+    'missing completed document asks before downloading a replacement',
+    (tester) async {
+      await setup(tester);
+      final document = file('report.pdf');
+      final id = (await tester.runAsync(
+        () => services.downloads.enqueue(
+          services.cloud.planDownload(session, document),
+        ),
+      ))!;
+      await pumpUntil(
+        tester,
+        () => services.downloads.task(id)?.status == DownloadStatus.completed,
+      );
+      files.availability[services.downloads.task(id)!.savedPath!] =
+          FileAvailability.missing;
+      await tester.pumpWidget(
+        MaterialApp(home: PreviewPage(services, session, document)),
+      );
+      await tester.pump();
+      await pumpUntil(tester, () => find.text('下载并预览').evaluate().isNotEmpty);
+      expect(services.downloads.tasks, hasLength(1));
+      expect(connector.prepared, 1);
+      expect(web.views, isEmpty);
+      await tester.tap(find.byKey(const Key('document-download-confirm')));
+      await tester.pump();
+      await pumpUntil(tester, () => web.views.isNotEmpty);
+      expect(services.downloads.tasks, hasLength(2));
+      expect(connector.prepared, 2);
+    },
+  );
+
+  documentTest(
+    'remote document downloads after confirmation and then reuses its local file',
     (tester) async {
       await setup(tester);
       await tester.pumpWidget(
         MaterialApp(home: PreviewPage(services, session, file('report.pdf'))),
       );
       await tester.pump();
+      await confirmDownload(tester);
       await pumpUntil(tester, () => web.views.isNotEmpty);
       web.ready();
       await tester.pump();
@@ -261,6 +388,7 @@ void main() {
         MaterialApp(home: PreviewPage(services, session, file('report.pdf'))),
       );
       await tester.pump();
+      await confirmDownload(tester);
       await pumpUntil(tester, () => native.begins.isNotEmpty);
       expect(find.text('下载完成后自动预览'), findsOneWidget);
       await tester.tap(find.byKey(const Key('document-download-control')));
@@ -292,7 +420,7 @@ void main() {
   );
 
   documentTest(
-    'previewing an existing paused task resumes it without adding a duplicate',
+    'previewing a paused task keeps it paused until continue is explicitly tapped',
     (tester) async {
       await setup(tester, finished: false);
       final document = file('report.pdf');
@@ -308,6 +436,12 @@ void main() {
         MaterialApp(home: PreviewPage(services, session, document)),
       );
       await tester.pump();
+      await pumpUntil(tester, () => find.text('下载已暂停').evaluate().isNotEmpty);
+      await tester.pump(const Duration(seconds: 2));
+      expect(services.downloads.task(id)?.status, DownloadStatus.paused);
+      expect(web.views, isEmpty);
+      expect(services.downloads.tasks, hasLength(1));
+      await tester.tap(find.byKey(const Key('document-download-control')));
       await pumpUntil(tester, () => web.views.isNotEmpty);
       expect(services.downloads.tasks, hasLength(1));
       expect(services.downloads.tasks.single.id, id);
@@ -324,6 +458,7 @@ void main() {
         MaterialApp(home: PreviewPage(services, session, file('report.pdf'))),
       );
       await tester.pump();
+      await confirmDownload(tester);
       await pumpUntil(
         tester,
         () => services.downloads.tasks.any(
@@ -348,6 +483,7 @@ void main() {
         MaterialApp(home: PreviewPage(services, session, file('report.pdf'))),
       );
       await tester.pump();
+      await confirmDownload(tester);
       await pumpUntil(tester, () => native.begins.isNotEmpty);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
@@ -370,6 +506,7 @@ void main() {
         MaterialApp(home: PreviewPage(services, session, file('notes.txt'))),
       );
       await tester.pump();
+      await confirmDownload(tester);
       await pumpUntil(
         tester,
         () => find.byType(TextPreview).evaluate().isNotEmpty,
@@ -394,6 +531,7 @@ void main() {
         MaterialApp(home: PreviewPage(services, session, file('report.pdf'))),
       );
       await tester.pump();
+      await confirmDownload(tester);
       await pumpUntil(tester, () => find.text('用其他应用打开').evaluate().isNotEmpty);
       expect(find.text('暂时无法预览'), findsOneWidget);
       expect(services.downloads.tasks.single.status, DownloadStatus.completed);
@@ -450,6 +588,7 @@ void main() {
         MaterialApp(home: PreviewPage(services, session, file('report.pdf'))),
       );
       await tester.pump();
+      await confirmDownload(tester);
       await pumpUntil(
         tester,
         () => find.byType(LocalDocumentPreviewPage).evaluate().isNotEmpty,
@@ -496,6 +635,7 @@ void main() {
           ),
         );
         await tester.pump();
+        await confirmDownload(tester);
         await pumpUntil(
           tester,
           () => find

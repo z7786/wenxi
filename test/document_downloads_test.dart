@@ -135,6 +135,24 @@ void main() {
     return DocumentDownloads(manager);
   }
 
+  test('lookup of an undownloaded document does not create a task', () async {
+    final docs = await setup([]);
+    expect(await docs.find(_origin()), null);
+    expect(manager.tasks, isEmpty);
+  });
+  test(
+    'read-only lookup leaves failed and paused downloads unchanged',
+    () async {
+      final docs = await setup([
+        _task('failed', _origin(account: 'a'), status: DownloadStatus.failed),
+        _task('paused', _origin()),
+      ]);
+      expect(await docs.find(_origin(account: 'a')), 'failed');
+      expect(await docs.find(_origin()), 'paused');
+      expect(manager.task('failed')?.status, DownloadStatus.failed);
+      expect(manager.task('paused')?.status, DownloadStatus.paused);
+    },
+  );
   test(
     'saved readable document is reused ahead of unfinished duplicate',
     () async {
@@ -189,6 +207,7 @@ void main() {
 
       final a = docs.resolve(_origin(), create: create);
       final b = docs.resolve(_origin(), create: create);
+      await until(() => created == 1);
       expect(created, 1);
       gate.complete(null);
       expect(await a, null);

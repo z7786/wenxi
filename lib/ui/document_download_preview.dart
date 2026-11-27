@@ -45,12 +45,12 @@ class _DocumentDownloadPreviewState extends State<DocumentDownloadPreview> {
   void initState() {
     super.initState();
     widget.services.downloads.addListener(_changed);
-    // Confirmation/directory dialogs require the navigator to be laid out.
+    // Inspect existing downloads first; only the explicit button starts work.
     WidgetsBinding.instance.addPostFrameCallback((_) => _start());
   }
 
-  Future<void> _start() async {
-    if (!mounted) return;
+  Future<void> _start({bool download = false}) async {
+    if (!mounted || download && _preparing) return;
     setState(() {
       _preparing = true;
       _error = '';
@@ -62,43 +62,47 @@ class _DocumentDownloadPreviewState extends State<DocumentDownloadPreview> {
           widget.session!,
           widget.file!,
         );
+        final origin = DownloadOrigin.fromJson(source.source!);
         _id = await _scope.run(
-          () => widget.services.documentDownloads.resolve(
-            DownloadOrigin.fromJson(source.source!),
-            create: () async {
-              RequestScope.checkpoint();
-              if (!mounted ||
-                  !await confirmBaiduDownload(
-                    context,
-                    widget.services,
-                    widget.session!.platform,
-                    session: widget.session,
-                  ) ||
-                  !mounted) {
-                return null;
-              }
-              final location = await chooseDownloadLocation(
-                context,
-                widget.services,
-              );
-              if (location == null || !mounted) return null;
-              return widget.services.downloads.enqueue(
-                source,
-                location: location,
-              );
-            },
-          ),
+          () => download
+              ? widget.services.documentDownloads.resolve(
+                  origin,
+                  create: () async {
+                    RequestScope.checkpoint();
+                    if (!mounted ||
+                        !await confirmBaiduDownload(
+                          context,
+                          widget.services,
+                          widget.session!.platform,
+                          session: widget.session,
+                        ) ||
+                        !mounted) {
+                      return null;
+                    }
+                    final location = await chooseDownloadLocation(
+                      context,
+                      widget.services,
+                    );
+                    if (location == null || !mounted) return null;
+                    return widget.services.downloads.enqueue(
+                      source,
+                      location: location,
+                    );
+                  },
+                )
+              : widget.services.documentDownloads.find(origin),
         );
       }
       if (!mounted) return;
       final task = _task;
-      if (task != null && !task.active && !task.terminal) {
+      if (download && task != null && !task.active && !task.terminal) {
         await _scope.run(() => widget.services.downloads.resume(task.id));
         if (!mounted) return;
       }
       setState(() {
         _preparing = false;
-        if (_id == null) _error = '已取消下载，可重新开始预览';
+        if (download && _id == null) _error = '已取消下载，可重新开始预览';
+        if (_id != null && task == null) _error = '下载任务已移除，请返回文件列表';
       });
       _changed();
     } on DownloadConfirmationCancelled {
@@ -186,7 +190,7 @@ class _DocumentDownloadPreviewState extends State<DocumentDownloadPreview> {
     if (_preparing) return;
     _id = null;
     _path = null;
-    await _start();
+    await _start(download: true);
   }
 
   @override
@@ -231,6 +235,28 @@ class _DocumentDownloadPreviewState extends State<DocumentDownloadPreview> {
                   const CircularProgressIndicator(),
                   const SizedBox(height: 16),
                   const Text('正在准备文档预览…'),
+                ] else if (task == null && _error.isEmpty) ...[
+                  Text(
+                    '下载后预览文档',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    '此文档尚未下载。确认下载后，将保存文件并自动打开预览。',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: secondary(context)),
+                  ),
+                  if (widget.file?.size case final size? when size > 0) ...[
+                    const SizedBox(height: 8),
+                    Text(formatBytes(size)),
+                  ],
+                  const SizedBox(height: 20),
+                  FilledButton.icon(
+                    key: const Key('document-download-confirm'),
+                    onPressed: () => _start(download: true),
+                    icon: const Icon(CupertinoIcons.arrow_down, size: 17),
+                    label: const Text('下载并预览'),
+                  ),
                 ] else if (task != null && !task.terminal) ...[
                   Text(
                     task.status == DownloadStatus.failed
@@ -273,7 +299,6 @@ class _DocumentDownloadPreviewState extends State<DocumentDownloadPreview> {
                   const Text('正在读取文档…'),
                 ],
                 if (_error.isNotEmpty ||
-                    !_preparing && task == null ||
                     task?.status == DownloadStatus.cancelled) ...[
                   Text(
                     _error.isEmpty ? '下载任务已移除，请重新开始预览' : _error,

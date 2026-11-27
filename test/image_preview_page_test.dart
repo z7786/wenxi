@@ -281,6 +281,9 @@ void main() {
             ),
           ),
         );
+        await tester.pumpAndSettle();
+        expect(services.downloads.tasks, isEmpty);
+        await tester.tap(find.byKey(const Key('document-download-confirm')));
         for (
           var i = 0;
           i < 200 && find.byType(TextPreview).evaluate().isEmpty;
@@ -328,6 +331,9 @@ void main() {
               ),
             ),
           );
+          await tester.pumpAndSettle();
+          expect(services.downloads.tasks, isEmpty);
+          await tester.tap(find.byKey(const Key('document-download-confirm')));
           for (
             var i = 0;
             i < 200 && find.text('用其他应用打开').evaluate().isEmpty;
@@ -403,6 +409,23 @@ void main() {
           ),
         ),
       );
+      for (
+        var i = 0;
+        i < 100 &&
+            find
+                .byKey(const Key('document-download-confirm'))
+                .evaluate()
+                .isEmpty;
+        i++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      expect(services.downloads.tasks, isEmpty);
+      expect(connector.preparedFile, null);
+      await tester.tap(find.byKey(const Key('document-download-confirm')));
       for (
         var i = 0;
         i < 200 && find.byType(TextPreview).evaluate().isEmpty;

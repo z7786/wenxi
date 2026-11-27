@@ -618,7 +618,7 @@ class MinePage extends StatelessWidget {
                 : Platform.isMacOS
                 ? '最小化窗口与自动休眠保护'
                 : Platform.isWindows
-                ? '最小化到托盘与自动休眠保护'
+                ? '最小化窗口与自动休眠保护'
                 : '锁屏下载、通知与系统后台设置',
             () => Navigator.push<void>(
               context,
