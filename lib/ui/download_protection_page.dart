@@ -175,7 +175,7 @@ class _DownloadProtectionPageState extends State<DownloadProtectionPage>
               Text(
                 widget.platform.operatingSystem == 'macos'
                     ? '最小化窗口后下载和上传会继续。传输期间请保持应用运行，屏幕仍可自动熄灭。'
-                    : '点击最小化按钮可收起到系统托盘，下载和上传会继续。单击托盘图标恢复窗口，右键可退出。关闭窗口时也可选择“后台传输”。屏幕仍可自动熄灭。',
+                    : '最小化后保留任务栏图标，下载和上传会继续。点击任务栏或托盘图标可恢复窗口；关闭窗口并选择“后台传输”后才收起到托盘。屏幕仍可自动熄灭。',
                 style: TextStyle(color: secondary(context), height: 1.6),
               ),
             ] else ...[

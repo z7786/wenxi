@@ -43,6 +43,19 @@ class DownloadStorage(private val context: Context) {
             ?.let { File(it.canonicalPath.substringBefore("/Android/")) }
     }
 
+    internal fun documentDirectory(uri: Uri): Pair<File, File>? {
+        if (uri.authority != "com.android.externalstorage.documents" || !DocumentsContract.isTreeUri(uri)) return null
+        val id = DocumentsContract.getTreeDocumentId(uri)
+        if (!id.contains(':')) return null
+        val path = id.substringAfter(':')
+        val segments = path.split('/')
+        if (path.isEmpty() || segments.size > 64 || segments.any {
+                it.isEmpty() || it == "." || it == ".." || it.contains('\\') || it.contains('\u0000')
+            }) return null
+        val root = documentRoot(uri)?.canonicalFile ?: return null
+        return root to File(root, path)
+    }
+
     fun plan(cache: File, destination: String?): Map<String, Any> {
         val uri = destination?.takeIf { it.isNotBlank() }?.let(Uri::parse)
         val path = uri?.toString() ?: Environment.getExternalStorageDirectory().absolutePath

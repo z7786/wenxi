@@ -10,9 +10,13 @@ import '../data/http.dart';
 import '../diagnostics/app_log.dart';
 import '../domain/models.dart';
 import '../domain/rapid_transfer.dart';
+import '../domain/settings.dart';
 import '../domain/uploads.dart';
+import '../download/download_request.dart';
 import '../download/space_budget.dart';
 import '../download/transfer_http.dart';
+import '../platform/native_engine.dart';
+import 'cross_transfer_download.dart';
 
 class _DigestSink implements Sink<Digest> {
   Digest? value;
@@ -29,13 +33,20 @@ class CrossTransferRelay {
     required this.http,
     required this.cache,
     this.availableSpace,
+    this.engine,
+    this.settings,
   });
   final CloudRepository cloud;
   final TransferHttp http;
   final Directory cache;
   final Future<int> Function(String path)? availableSpace;
+  final GopeedEngine? engine;
+  final AppSettings Function()? settings;
   Future<void>? _initialization;
   Iterable<String>? _retainedTaskIds;
+  late final _spaceBudget = SpaceBudget(
+    () async => await availableSpace?.call(cache.path) ?? -1,
+  );
 
   void retainTasks(Iterable<String> ids) => _retainedTaskIds = List.of(ids);
 
@@ -64,11 +75,44 @@ class CrossTransferRelay {
     await directory.delete(recursive: true);
   }
 
-  Future<void> clearTask(String taskId) => _delete(_taskDirectory(taskId));
-  Future<void> clearEntry(String taskId, String entryId) async {
-    await _delete(_entryDirectory(taskId, entryId));
+  String _downloadId(Directory directory) =>
+      'cross-${_key('${p.basename(p.dirname(directory.path))}:${p.basename(directory.path)}')}';
+
+  Future<void> _discardDownload(Directory directory) async {
+    final native = engine;
+    if (native == null ||
+        !await File(p.join(directory.path, 'download.json')).exists()) {
+      return;
+    }
+    final id = _downloadId(directory);
+    await native.remove(id);
+    final engineDirectory = await native.checkedTaskDirectory(id);
+    if (engineDirectory != null) await engineDirectory.delete(recursive: true);
+  }
+
+  Future<void> clearTask(String taskId) async {
     final directory = _taskDirectory(taskId);
-    if (await directory.exists() && await directory.list().isEmpty) {
+    if (await directory.exists()) {
+      await for (final entry in directory.list(followLinks: false)) {
+        if (entry is Directory) await _discardDownload(entry);
+      }
+    }
+    await _delete(directory);
+  }
+
+  Future<void> clearEntry(String taskId, String entryId) async {
+    final entry = _entryDirectory(taskId, entryId);
+    await _discardDownload(entry);
+    await _delete(entry);
+    // Another file in this batch may create its cache after an emptiness check.
+    // Remove the parent directory only after all file workers have settled.
+  }
+
+  /// Call only after all file workers in this batch have settled.
+  Future<void> clearEmptyTask(String taskId) async {
+    final directory = _taskDirectory(taskId);
+    if (await directory.exists() &&
+        await directory.list(followLinks: false).isEmpty) {
       await _delete(directory);
     }
   }
@@ -81,6 +125,9 @@ class CrossTransferRelay {
         if (item is Directory &&
             p.basename(item.path).startsWith('relay-') &&
             (retained == null || !retained.contains(p.basename(item.path)))) {
+          await for (final entry in item.list(followLinks: false)) {
+            if (entry is Directory) await _discardDownload(entry);
+          }
           await _delete(item);
         }
       }
@@ -89,12 +136,8 @@ class CrossTransferRelay {
     }
   }
 
-  Future<void> _space(int remaining) async {
-    if (availableSpace == null) return;
-    final free = await availableSpace!(cache.path);
-    if (free >= 0 && free < remaining + 32 * 1024 * 1024) {
-      throw const DownloadSpaceException();
-    }
+  Future<void> _space(String id, int remaining) async {
+    await _spaceBudget.reserve(id, remaining);
     RequestScope.checkpoint();
   }
 
@@ -105,6 +148,7 @@ class CrossTransferRelay {
     required String entryId,
     required String? expectedMd5,
     required void Function(int received, int total) onProgress,
+    void Function()? onVerifying,
     required Future<T> Function(UploadFile file, String md5) upload,
   }) async {
     RequestScope.checkpoint();
@@ -114,12 +158,15 @@ class CrossTransferRelay {
     await directory.create(recursive: true);
     final payload = File(p.join(directory.path, 'payload'));
     final metadata = File(p.join(directory.path, 'verified.json'));
+    final checkpoint = File(p.join(directory.path, 'download.json'));
+    final downloadId = _downloadId(directory);
     DownloadSpec? spec;
     var digest = '', sha1Digest = '';
-    var ready = false, uploaded = false;
+    var ready = false, uploaded = false, retainPartial = false;
     try {
       if (await metadata.exists() && await payload.exists()) {
         try {
+          onVerifying?.call();
           final saved = asJson(jsonDecode(await metadata.readAsString()));
           require(
             await FileSystemEntity.type(payload.path, followLinks: false) ==
@@ -159,8 +206,60 @@ class CrossTransferRelay {
           onProgress(length, length);
         } catch (_) {
           RequestScope.checkpoint();
+          await _discardDownload(directory);
+          if (await checkpoint.exists()) await checkpoint.delete();
           await metadata.delete();
         }
+      }
+      if (!ready && engine != null) {
+        spec = await DownloadRequestContext(
+          id: downloadId,
+          retries: (settings?.call() ?? const AppSettings()).retries,
+        ).run(() => cloud.prepareTransfer(source, file));
+        spec =
+            await CrossTransferDownload(
+              engine: engine!,
+              http: http,
+              settings: settings ?? () => const AppSettings(),
+              checkSpace: (remaining) => _space(downloadId, remaining),
+            ).download(
+              id: downloadId,
+              sourceKey: _key(
+                encoded([
+                  source.platform.key,
+                  source.accountId,
+                  file.id,
+                  file.name,
+                  file.size,
+                  file.modifiedAt,
+                ]),
+              ),
+              spec: spec!,
+              payload: payload,
+              checkpoint: checkpoint,
+              expectedSize: source.platform.exactFileSize ? file.size : 0,
+              onProgress: onProgress,
+              refresh: (previous) async {
+                final refreshed = await cloud.refresh(previous);
+                spec = refreshed;
+                await cloud.cleanups.release(previous.cleanup);
+                await cloud.cleanups.ready(previous.cleanup);
+                return refreshed;
+              },
+            );
+        onVerifying?.call();
+        final hashes = await _hashPayload(payload, spec!, expectedMd5);
+        digest = hashes.$1;
+        sha1Digest = hashes.$2;
+        await metadata.writeAsString(
+          jsonEncode({
+            'size': await payload.length(),
+            'md5': digest,
+            'sha1': sha1Digest,
+          }),
+          flush: true,
+        );
+        ready = true;
       }
       for (var attempt = 0; !ready; attempt++) {
         final cancel = CancelToken();
@@ -170,9 +269,15 @@ class CrossTransferRelay {
         RandomAccessFile? writer;
         try {
           RequestScope.checkpoint();
-          spec ??= await cloud.prepareTransfer(source, file);
+          final currentSpec = spec ??= await cloud.prepareTransfer(
+            source,
+            file,
+          );
           RequestScope.checkpoint();
-          final response = await http.streamDownload(spec, cancel: cancel);
+          final response = await http.streamDownload(
+            currentSpec,
+            cancel: cancel,
+          );
           if (response.statusCode != 200) {
             throw DownloadHttpException.response(response);
           }
@@ -180,7 +285,9 @@ class CrossTransferRelay {
               response.headers.value('content-type')?.toLowerCase() ?? '';
           require(
             !type.contains('mpegurl') &&
-                !Uri.parse(spec.url).path.toLowerCase().endsWith('.m3u8'),
+                !Uri.parse(
+                  currentSpec.url,
+                ).path.toLowerCase().endsWith('.m3u8'),
             '来源返回视频播放列表，无法按原文件跨盘传输',
           );
           require(
@@ -188,8 +295,8 @@ class CrossTransferRelay {
                 RegExp(r'\.html?$', caseSensitive: false).hasMatch(file.name),
             '下载返回登录页面，请重新登录来源网盘',
           );
-          final expected = spec.expectedSize > 0
-              ? spec.expectedSize
+          final expected = currentSpec.expectedSize > 0
+              ? currentSpec.expectedSize
               : source.platform.exactFileSize
               ? file.size
               : 0;
@@ -202,13 +309,13 @@ class CrossTransferRelay {
             '下载内容与所选文件大小不一致',
           );
           final total = length ?? expected;
-          await _space(total);
+          await _space(downloadId, total);
           writer = await payload.open(mode: FileMode.write);
           final md5Result = _DigestSink();
           final md5Input = md5.startChunkedConversion(md5Result);
           final sha1Result = _DigestSink();
           final sha1Input = sha1.startChunkedConversion(sha1Result);
-          final algorithm = spec.checksumType?.toLowerCase().replaceAll(
+          final algorithm = currentSpec.checksumType?.toLowerCase().replaceAll(
             '-',
             '',
           );
@@ -233,7 +340,7 @@ class CrossTransferRelay {
             otherInput?.add(chunk);
             onProgress(received, total);
             if (received - checked >= 32 * 1024 * 1024) {
-              await _space((total - received).clamp(0, total));
+              await _space(downloadId, (total - received).clamp(0, total));
               checked = received;
             }
           }
@@ -252,13 +359,15 @@ class CrossTransferRelay {
           sha1Digest = sha1Result.value!.toString();
           final trusted =
               contentMd5(expectedMd5) ??
-              (algorithm == 'md5' ? contentMd5(spec.checksumValue) : null);
+              (algorithm == 'md5'
+                  ? contentMd5(currentSpec.checksumValue)
+                  : null);
           require(trusted == null || trusted == digest, '文件校验失败，请重新传输');
           require(
             otherHash == null ||
-                spec.checksumValue?.isNotEmpty != true ||
+                currentSpec.checksumValue?.isNotEmpty != true ||
                 otherResult.value.toString() ==
-                    spec.checksumValue!.toLowerCase(),
+                    currentSpec.checksumValue!.toLowerCase(),
             '文件校验失败，请重新传输',
           );
           onProgress(received, received);
@@ -287,6 +396,7 @@ class CrossTransferRelay {
         }
       }
       final size = await payload.length();
+      _spaceBudget.release(downloadId);
       RequestScope.checkpoint();
       final result = await upload(
         UploadFile(
@@ -299,7 +409,19 @@ class CrossTransferRelay {
       );
       uploaded = true;
       return result;
+    } catch (error) {
+      retainPartial =
+          engine != null &&
+          !ready &&
+          (RequestScope.current?.isCancelled == true ||
+              error is DownloadRetryExhausted ||
+              error is DownloadNetworkException ||
+              error is DownloadHttpException ||
+              error is DownloadSpaceException ||
+              retryableDownloadError(error));
+      rethrow;
     } finally {
+      _spaceBudget.release(downloadId);
       // Cleanup must run even inside a cancelled account/request scope.
       try {
         await RequestScope().run(() async {
@@ -308,11 +430,53 @@ class CrossTransferRelay {
         }, inheritGuard: false);
       } finally {
         try {
-          if (!ready || uploaded) await clearEntry(taskId, entryId);
+          if ((!ready && !retainPartial) || uploaded) {
+            await clearEntry(taskId, entryId);
+          }
         } catch (e, s) {
           DiagnosticLog.error('cross_transfer.cache_cleanup', e, s);
         }
       }
     }
+  }
+
+  Future<(String, String)> _hashPayload(
+    File payload,
+    DownloadSpec spec,
+    String? expectedMd5,
+  ) async {
+    final md5Result = _DigestSink(), sha1Result = _DigestSink();
+    final md5Input = md5.startChunkedConversion(md5Result),
+        sha1Input = sha1.startChunkedConversion(sha1Result);
+    final algorithm = spec.checksumType?.toLowerCase().replaceAll('-', '');
+    final otherResult = _DigestSink();
+    final otherInput = algorithm == 'sha256'
+        ? sha256.startChunkedConversion(otherResult)
+        : null;
+    await for (final bytes in payload.openRead()) {
+      RequestScope.checkpoint();
+      md5Input.add(bytes);
+      sha1Input.add(bytes);
+      otherInput?.add(bytes);
+    }
+    md5Input.close();
+    sha1Input.close();
+    otherInput?.close();
+    final digest = md5Result.value.toString(),
+        sha1Digest = sha1Result.value.toString();
+    final trusted =
+        contentMd5(expectedMd5) ??
+        (algorithm == 'md5' ? contentMd5(spec.checksumValue) : null);
+    require(trusted == null || trusted == digest, '文件校验失败，请重新传输');
+    final other = algorithm == 'sha1'
+        ? sha1Digest
+        : otherResult.value?.toString();
+    require(
+      other == null ||
+          spec.checksumValue?.isNotEmpty != true ||
+          other == spec.checksumValue!.toLowerCase(),
+      '文件校验失败，请重新传输',
+    );
+    return (digest, sha1Digest);
   }
 }

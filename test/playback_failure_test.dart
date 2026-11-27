@@ -5,7 +5,6 @@ void main() {
   for (final message in [
     'amediacodec: java.lang.IllegalStateException: Invalid to call at Released state; only valid in executing state',
     'amediacodec: java.lang.IllegalStateException: flush() is valid only at Executing states; currently at Released state',
-    'hevc_mediacodec: Failed to dequeue output buffer (status=-542398533)',
     'h264_mediacodec: Invalid to call in Uninitialized state',
     'AMediaCodec: state=Released',
   ]) {
@@ -22,6 +21,7 @@ void main() {
   for (final message in [
     'hevc_mediacodec: Both surface and native_window are NULL',
     'hevc_mediacodec: Failed to dequeue output buffer (status=-11)',
+    'hevc_mediacodec: Failed to dequeue output buffer (status=-542398533)',
     'hevc_mediacodec: Failed to flush codec',
     'hevc: Could not find ref with POC 120',
     'Error decoding frame; continuing with the next frame',

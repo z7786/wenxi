@@ -70,6 +70,23 @@ void main() {
     },
   );
   testWidgets(
+    'Windows distinguishes taskbar minimization from explicit background transfer',
+    (tester) async {
+      final platform = _Platform(operatingSystem: 'windows')
+        ..desktop = true
+        ..running = true;
+      await tester.pumpWidget(
+        MaterialApp(home: DownloadProtectionPage(platform: platform)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('最小化后保留任务栏图标'), findsOneWidget);
+      expect(find.textContaining('选择“后台传输”后才收起到托盘'), findsOneWidget);
+      expect(find.textContaining('最小化按钮可收起到系统托盘'), findsNothing);
+      expect(find.text('下载保活运行中 · 自动休眠保护已开启'), findsOneWidget);
+      expect(platform.opened, isEmpty);
+    },
+  );
+  testWidgets(
     'Android reports startup keepalive independently of active downloads and denied notifications',
     (tester) async {
       final platform = _Platform()..keepAlive = true;

@@ -6,6 +6,7 @@ import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/settings.dart';
 import 'state_store.dart';
+import 'classified_backup.dart';
 import 'http.dart';
 import 'cloud_favorites.dart';
 import 'backgrounds.dart';
@@ -130,35 +131,25 @@ class BackupRepository {
   BackupRepository(this.store, {this.backgrounds});
   final StateStore store;
   final BackgroundRepository? backgrounds;
-  Future<Uint8List> create(
-    String password, {
-    bool includeBackgroundImages = false,
-  }) async {
-    final credentials = store.data.obj('credentials'),
-        secrets = store.data.obj('secrets');
-    final vault = Vault(store);
+  Future<Uint8List> create(String password) async {
+    require(password.isEmpty || password.length >= 6, '备份密码至少需要 6 位');
+    final snapshot = StateStore.memory(store.data);
+    final credentials = snapshot.data.obj('credentials'),
+        secrets = snapshot.data.obj('secrets');
+    final vault = Vault(snapshot);
     final profiles = [
       for (final p in CloudPlatform.values) ...vault.profiles(p),
     ];
-    final settings = AppSettings.fromJson(store.data.obj('settings')).toJson()
-      ..remove('destination');
+    final settings = AppSettings.fromJson(
+      snapshot.data.obj('settings'),
+    ).toJson()..remove('destination');
     final background = BackgroundSettings.fromJson(settings.obj('background'));
-    final images = includeBackgroundImages && background.hasImage
-        ? await backgrounds?.exportImages(background)
-        : null;
-    require(
-      !includeBackgroundImages || !background.hasImage || images != null,
-      '当前环境无法备份背景图片',
-    );
-    if (images == null) {
-      settings['background'] = background.withoutImages().toJson();
-    }
-    final bytes = await compute(encodePlainBackup, {
+    settings['background'] = background.withoutImages().toJson();
+    final payload = <String, dynamic>{
       'schema': 1,
       'package': 'com.asterlink.app',
       'createdAt': DateTime.now().millisecondsSinceEpoch,
       'settings': settings,
-      'backgroundImages': ?images,
       'credentials': [
         for (final p in CloudPlatform.values)
           if (credentials[p.key] != null)
@@ -194,25 +185,25 @@ class BackupRepository {
         for (final account in profiles)
           if (account.active) account.platform.key: account.id,
       },
-      'cloudFavorites': store.data.list('cloudFavorites'),
+      'cloudFavorites': snapshot.data.list('cloudFavorites'),
+      'cloudFavoriteFolders': snapshot.data.list('cloudFavoriteFolders'),
       'cloudFavoriteSort': CloudFavoriteSort.fromName(
-        store.data.str('cloudFavoriteSort'),
+        snapshot.data.str('cloudFavoriteSort'),
       ).name,
-    });
-    require(bytes.length <= 16 * 1024 * 1024, '备份文件过大，请取消携带背景图后重试');
+    };
+    final bytes = password.isEmpty
+        ? await compute(encodePlainBackup, payload)
+        : await compute(encryptBackup, (payload, password));
+    require(bytes.length <= 16 * 1024 * 1024, '备份文件过大，请使用分类备份减少内容');
     return bytes;
   }
 
-  /// Exported v2 backups are plain data; v1 imports still accept their password.
+  /// An empty password exports plain v2; a password exports authenticated v1.
   Future<bool> exportTo(
     String password,
-    Future<bool> Function(Uint8List bytes) save, {
-    bool includeBackgroundImages = false,
-  }) async {
-    final bytes = await create(
-      password,
-      includeBackgroundImages: includeBackgroundImages,
-    );
+    Future<bool> Function(Uint8List bytes) save,
+  ) async {
+    final bytes = await create(password);
     RequestScope.checkpoint();
     if (!await save(bytes)) return false;
     return true;
@@ -220,6 +211,18 @@ class BackupRepository {
 
   Future<int> restore(Uint8List bytes, String password) async {
     final payload = await compute(decryptBackup, (bytes, password));
+    if (payload.containsKey('classifiedVersion')) {
+      final classified = ClassifiedBackupRepository(
+        store,
+        backgrounds: backgrounds,
+      );
+      final preview = await classified.preview(bytes, password);
+      final result = await classified.restore(
+        preview,
+        categories: preview.categories,
+      );
+      return result.accounts;
+    }
     // Parse everything before the single commit. Wrong password/partial payloads
     // cannot leave a half-restored set of credentials and settings.
     final credentials = <String, dynamic>{};
@@ -379,6 +382,7 @@ class BackupRepository {
             }
           }
           require(merged.length <= 2000, '合并后收藏超过 2000 项，请先清理收藏');
+          CloudFavorites.mergeFolders(draft, payload);
           draft['cloudFavorites'] = merged.values.toList();
           if (payload.containsKey('cloudFavoriteSort')) {
             draft['cloudFavoriteSort'] = CloudFavoriteSort.fromName(

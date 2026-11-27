@@ -13,6 +13,7 @@ class RemoteControlConfig {
   const RemoteControlConfig({
     this.revision = 0,
     this.announcement,
+    this.searchAnnouncement,
     this.clouds = const {},
     this.updates = const {},
     this.helpUrl,
@@ -24,6 +25,7 @@ class RemoteControlConfig {
   static const maxBytes = 256 * 1024;
   final int revision;
   final RemoteAnnouncement? announcement;
+  final SearchAnnouncement? searchAnnouncement;
   final Map<CloudPlatform, CloudControl> clouds;
   final Map<String, RemoteUpdate> updates;
   final Uri? helpUrl;
@@ -46,6 +48,8 @@ class RemoteControlConfig {
   Json toJson() => {
     'schema': 1,
     'revision': revision,
+    if (searchAnnouncement case final notice?)
+      'searchAnnouncement': notice.toJson(),
     if (announcement case final notice?)
       'announcement': {
         'enabled': true,
@@ -79,6 +83,9 @@ class RemoteControlConfig {
               'inAppDownloadUrl': update.inAppDownloadUrl.toString(),
             if (update.inAppPasscode.isNotEmpty)
               'inAppPasscode': update.inAppPasscode,
+            if (update.packageSha256.isNotEmpty)
+              'packageSha256': update.packageSha256,
+            if (update.packageSize > 0) 'packageSize': update.packageSize,
             'notes': update.notes,
             if (update.expiresAt != null)
               'expiresAt': update.expiresAt!.toUtc().toIso8601String(),
@@ -97,6 +104,37 @@ class CloudControl {
   final DateTime? expiresAt;
   String reason(CloudPlatform platform) =>
       message.isNotEmpty ? message : '${platform.label}暂时停用，请稍后再试';
+}
+
+/// A passive notice on the search home, independent of startup reminders.
+class SearchAnnouncement {
+  const SearchAnnouncement({
+    required this.title,
+    this.content = '',
+    this.buttonText = '',
+    this.buttonUrl,
+    this.startsAt,
+    this.expiresAt,
+  });
+  final String title, content, buttonText;
+  final Uri? buttonUrl;
+  final DateTime? startsAt, expiresAt;
+
+  bool isActive(DateTime now) =>
+      (startsAt == null || !now.isBefore(startsAt!)) &&
+      (expiresAt == null || now.isBefore(expiresAt!));
+
+  Json toJson() => {
+    'enabled': true,
+    'title': title,
+    'content': content,
+    if (buttonUrl != null) ...{
+      'buttonText': buttonText,
+      'buttonUrl': buttonUrl.toString(),
+    },
+    if (startsAt != null) 'startsAt': startsAt!.toUtc().toIso8601String(),
+    if (expiresAt != null) 'expiresAt': expiresAt!.toUtc().toIso8601String(),
+  };
 }
 
 class RemoteAnnouncement {
@@ -133,12 +171,16 @@ class RemoteUpdate {
     this.releaseKey,
     this.inAppDownloadUrl,
     this.inAppPasscode = '',
+    this.packageSha256 = '',
+    this.packageSize = 0,
   });
   final String version, notes;
   final int build;
   final Uri downloadUrl;
   final Uri? inAppDownloadUrl;
   final String inAppPasscode;
+  final String packageSha256;
+  final int packageSize;
   Uri get appDownloadUrl => inAppDownloadUrl ?? downloadUrl;
   final bool force;
   final DateTime? expiresAt;

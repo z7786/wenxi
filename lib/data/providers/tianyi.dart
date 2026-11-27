@@ -37,13 +37,15 @@ class TianyiConnector extends CloudConnector {
     String parent,
     RapidTransferFile file,
     Credential credential,
-  ) => _run(credential, () => _rapidTransfer(session, parent, file, credential));
+  ) =>
+      _run(credential, () => _rapidTransfer(session, parent, file, credential));
   TianyiConnector(
     this.http, {
     this.store,
     this.passwordLogin,
     this.taskDelay = const Duration(milliseconds: 800),
     this.maxTaskPolls = 60,
+    this.loginQuotaTimeout = const Duration(seconds: 3),
   });
 
   final JsonHttp http;
@@ -52,6 +54,7 @@ class TianyiConnector extends CloudConnector {
   passwordLogin;
   final Duration taskDelay;
   final int maxTaskPolls;
+  final Duration loginQuotaTimeout;
   static const origin = 'https://cloud.189.cn';
   static const _openOrigin = 'https://api.cloud.189.cn';
   static const _h5Origin = 'https://h5.cloud.189.cn';
@@ -690,6 +693,31 @@ class TianyiConnector extends CloudConnector {
     return info;
   }
 
+  Future<Json> _loginIdentity(Credential candidate) async {
+    final candidates = <String>{
+      _session.cookie,
+      ...TianyiWebLogin.cookieCandidates(candidate.field('cookieCandidates')),
+    }.take(TianyiWebLogin.maxCookieCandidates).toList();
+    for (final (index, cookie) in candidates.indexed) {
+      _checkpoint();
+      _session.cookie = cookie;
+      try {
+        return await _identity();
+      } on _TianyiSessionExpired {
+        _checkpoint();
+        if (index == candidates.length - 1) rethrow;
+        DiagnosticLog.event(
+          'tianyi.login_session_candidate_rejected',
+          fields: {
+            'candidateIndex': index,
+            'candidateCount': candidates.length,
+          },
+        );
+      }
+    }
+    throw const _TianyiSessionExpired();
+  }
+
   String _nickname(Json info) => info
       .obj('userExtResp')
       .str('nickName')
@@ -715,10 +743,34 @@ class TianyiConnector extends CloudConnector {
   Future<LoginResult> authenticate(Credential credential) => _run(
     credential,
     () async {
-      final identity = await _identity(), nickname = _nickname(identity);
+      final identity = await _loginIdentity(credential),
+          nickname = _nickname(identity);
       CloudAccount account;
       try {
-        account = await _quota(nickname);
+        // Quota is optional once identity has succeeded. Use a child scope so
+        // timing out this request cannot cancel the validated login itself.
+        final quotaScope = RequestScope();
+        final parent = RequestScope.current;
+        var quotaFinished = false;
+        unawaited(
+          parent?.whenCancel.then((_) {
+            if (!quotaFinished) quotaScope.cancel();
+          }),
+        );
+        try {
+          account = await quotaScope
+              .run(() => RequestScope.cancellable(_quota(nickname)))
+              .timeout(
+                loginQuotaTimeout,
+                onTimeout: () {
+                  quotaScope.cancel();
+                  throw const AppException('天翼容量读取超时');
+                },
+              );
+        } finally {
+          quotaFinished = true;
+          quotaScope.cancel();
+        }
       } on AccountLoginRequired {
         rethrow;
       } on AppException {
@@ -727,7 +779,9 @@ class TianyiConnector extends CloudConnector {
         account = CloudAccount(nickname);
       }
       return LoginResult(
-        credential.withFields({
+        Credential(credential.label, {
+          for (final entry in credential.fields.entries)
+            if (entry.key != 'cookieCandidates') entry.key: entry.value,
           'primary': _session.cookie,
           'browserId': _session.browserId,
           'userId': identity.str('userId').trim(),

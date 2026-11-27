@@ -13,6 +13,24 @@ import 'support.dart';
 
 void main() {
   test(
+    'Shared and link-local IPv4 addresses participate in bounded discovery',
+    () {
+      final targets = lanUnicastTargets([
+        '100.64.12.5',
+        '169.254.12.6',
+        '100.128.12.5',
+        'fe80::1',
+      ]).map((address) => address.address).toList();
+      expect(targets, hasLength(506));
+      expect(targets, contains('100.64.12.254'));
+      expect(targets, contains('169.254.12.1'));
+      expect(targets, isNot(contains('100.64.12.5')));
+      expect(targets, isNot(contains('169.254.12.6')));
+      expect(targets.every(isLanAddress), isTrue);
+    },
+  );
+
+  test(
     'iOS unicast targets cover local subnets without broadcast or duplicate addresses',
     () {
       final targets = lanUnicastTargets([

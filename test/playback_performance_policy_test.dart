@@ -136,6 +136,47 @@ void main() {
   );
 
   test(
+    'Phone orientations share a source-bounded texture without losing detail',
+    () {
+      const screen = Size(904, 407), rotated = Size(407, 904);
+      for (final source in const [
+        Size(3840, 1632),
+        Size(3840, 2160),
+        Size(2160, 3840),
+        Size(1280, 720),
+      ]) {
+        for (final fit in [BoxFit.contain, BoxFit.cover]) {
+          for (final zoom in [.75, 1.0, 2.0]) {
+            for (final quality in [.75, 1.0]) {
+              Size render(Size viewport, {bool stable = false}) =>
+                  playbackRenderSize(
+                    source: source,
+                    viewport: viewport,
+                    pixelRatio: 3,
+                    fit: fit,
+                    scale: zoom,
+                    quality: quality,
+                    stableOrientation: stable,
+                  )!;
+              final shared = render(screen, stable: true);
+              expect(render(rotated, stable: true), shared);
+              for (final viewport in [screen, rotated]) {
+                final ordinary = render(viewport);
+                expect(shared.width, greaterThanOrEqualTo(ordinary.width));
+                expect(shared.height, greaterThanOrEqualTo(ordinary.height));
+              }
+              expect(shared.width, lessThanOrEqualTo(source.width));
+              expect(shared.height, lessThanOrEqualTo(source.height));
+              expect(shared.width.toInt().isEven, isTrue);
+              expect(shared.height.toInt().isEven, isTrue);
+            }
+          }
+        }
+      }
+    },
+  );
+
+  test(
     'Only sustained drop rates downgrade, once, with reset-safe counters',
     () {
       final policy = PlaybackDropPolicy();
@@ -153,8 +194,42 @@ void main() {
       expect(sample(30, 0), isFalse); // native counter reset
       expect(sample(40, 40, eligible: false), isFalse);
       expect(sample(50, 80), isFalse);
-      expect(sample(60, 120), isTrue);
-      expect(sample(70, 200), isFalse);
+      expect(
+        sample(60, 120),
+        isFalse,
+      ); // two full eligible windows after resume
+      expect(sample(70, 200), isTrue);
+      expect(sample(80, 280), isFalse);
+    },
+  );
+  test(
+    'Recovery requires sustained stability and does not count paused time',
+    () {
+      final policy = PlaybackDropPolicy();
+      bool sample(int second, int drops, {bool eligible = true}) =>
+          policy.observe(
+            elapsed: Duration(seconds: second),
+            drops: drops,
+            fps: 60,
+            eligible: eligible,
+          );
+      sample(0, 0);
+      sample(10, 40);
+      expect(sample(20, 80), isTrue);
+      for (var s = 30; s <= 70; s += 10) {
+        expect(sample(s, 80), isFalse);
+      }
+      sample(80, 80, eligible: false);
+      sample(180, 80);
+      for (var s = 190; s < 240; s += 10) {
+        expect(sample(s, 80), isFalse);
+      }
+      expect(sample(240, 80), isTrue);
+      expect(policy.downgraded, isFalse);
+      expect(sample(250, 120), isFalse);
+      expect(sample(260, 160), isFalse);
+      expect(sample(270, 200), isTrue);
+      expect(policy.downgraded, isTrue);
     },
   );
 }

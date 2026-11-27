@@ -1,4 +1,4 @@
-import 'package:asterlink/data/providers/baidu_link_service.dart';
+import 'package:asterlink/data/providers/baidu_resolved_link.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';

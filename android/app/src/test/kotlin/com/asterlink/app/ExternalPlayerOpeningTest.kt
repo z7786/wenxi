@@ -64,7 +64,9 @@ class ExternalPlayerOpeningTest {
     @Test fun onlyExportedEnabledThirdPartyPlayersAreOfferedAndDuplicateActivitiesCollapse() {
         val hidden = player("hidden.player").apply { activityInfo.exported = false }
         val disabled = player("disabled.player").apply { activityInfo.enabled = false }
-        installed(player(context.packageName), player("vlc.player"), player("vlc.player", "Alias"), hidden, disabled)
+        val disabledApp = player("disabled.app").apply { activityInfo.applicationInfo.enabled = false }
+        val protected = player("protected.player").apply { activityInfo.permission = "fixture.player.PRIVATE" }
+        installed(player(context.packageName), player("vlc.player"), player("vlc.player", "Alias"), hidden, disabled, disabledApp, protected)
         val targets = opening.targets(opening.prepare(video, "movie.mp4", 0))
         assertEquals(listOf("vlc.player"), targets.map { it.activityInfo.packageName })
     }
@@ -86,6 +88,29 @@ class ExternalPlayerOpeningTest {
         assertEquals(43210, intent.getIntExtra("position", -1))
         assertEquals(43210L, intent.getLongExtra("extra_start_time", -1))
         assertEquals(listOf(true to null), results)
+    }
+
+    @Test fun manualSelectionIsSessionScopedAndRequiredAgainAfterLaunching() {
+        installed(player("fixture.player"))
+        opening.open(video, "movie.mp4", 43210, session = "current-session") { opened, error -> results.add(opened to error) }
+        val chooser = ShadowAlertDialog.getLatestAlertDialog()
+        opening.dismiss(session = "old-session")
+        assertTrue(chooser.isShowing)
+        assertNull(shadowOf(activity).nextStartedActivity)
+        chooser.listView.performItemClick(null, 0, 0)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(true to null, results.single())
+        assertNotNull(shadowOf(activity).nextStartedActivity)
+
+        results.clear()
+        opening.open(video, "movie.mp4", 43210, session = "current-session") { opened, error -> results.add(opened to error) }
+        assertTrue(ShadowAlertDialog.getLatestAlertDialog().isShowing)
+        assertTrue(results.isEmpty())
+        assertNull(shadowOf(activity).nextStartedActivity)
+        opening.dismiss(session = "current-session")
+        shadowOf(Looper.getMainLooper()).idle()
+        opening.dismiss()
+        assertEquals(listOf(false to null), results)
     }
 
     @Test fun cancellingOrDestroyingTheChooserCompletesOnceWithoutLaunchingAnyApp() {

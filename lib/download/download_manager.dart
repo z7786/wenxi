@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'package:collection/collection.dart';
@@ -16,6 +15,7 @@ import '../domain/auth.dart';
 import '../domain/baidu_share_route.dart';
 import '../domain/bt_sources.dart';
 import '../domain/downloads.dart';
+import '../domain/download_destination.dart';
 import '../domain/ed2k.dart';
 import '../domain/file_types.dart';
 import '../domain/models.dart';
@@ -26,9 +26,12 @@ import '../platform/file_access.dart';
 import '../platform/completed_file_transfer.dart';
 import '../platform/android_download_file.dart';
 import '../platform/native_engine.dart';
+import '../platform/storage_path.dart';
 import '../lan/lan_download_route.dart';
 import 'hls.dart';
 import 'download_activity.dart';
+import 'download_task_index.dart';
+import 'download_deletion_progress.dart';
 import 'download_request.dart';
 import 'download_playback_cache.dart';
 import 'space_budget.dart';
@@ -38,6 +41,16 @@ import 'baidu_transfer_recovery.dart';
 import 'aliyun_transfer_recovery.dart';
 
 class _Stopped implements Exception {}
+
+const _legacyChecksumFailure = '文件校验失败，请删除此任务后重新下载';
+const _checksumFailure = '文件校验失败，点击重试将重新下载';
+
+class _ChecksumMismatch extends AppException {
+  const _ChecksumMismatch() : super(_checksumFailure);
+}
+
+bool _isChecksumFailure(String message) =>
+    message == _legacyChecksumFailure || message == _checksumFailure;
 
 class _RecoverBaidu implements Exception {
   const _RecoverBaidu(this.action);
@@ -59,59 +72,6 @@ String _aliyunAccountGroup(DownloadSpec spec) {
 
 class _GuestDownloadBatch {
   bool notified = false;
-}
-
-class _DeletionProgress {
-  _DeletionProgress(this.total);
-
-  final int total;
-  int processed = 0, succeeded = 0, failed = 0, skipped = 0;
-  bool cancelled = false;
-  OperationStage _activity = OperationStage.waitDownloadOperation;
-  final _clock = Stopwatch()..start();
-  int _lastReport = -100000;
-  Timer? _pending;
-
-  void report({OperationStage? activity, bool force = false}) {
-    if (activity != null) _activity = activity;
-    final remaining = 100000 - (_clock.elapsedMicroseconds - _lastReport);
-    if (force || remaining <= 0) {
-      _publish();
-    } else {
-      // Keep a fast item visible even when the next file or record save stalls.
-      _pending ??= Timer(Duration(microseconds: remaining), _publish);
-    }
-  }
-
-  void processedItem({int succeeded = 0, int failed = 0, int skipped = 0}) {
-    processed++;
-    this.succeeded += succeeded;
-    this.failed += failed;
-    this.skipped += skipped;
-    report();
-  }
-
-  void confirm({int succeeded = 0, int failed = 0}) {
-    this.succeeded += succeeded;
-    this.failed += failed;
-    report(force: true);
-  }
-
-  void _publish() {
-    _pending?.cancel();
-    _pending = null;
-    _lastReport = _clock.elapsedMicroseconds;
-    OperationProgress.reportItems((
-      processed: processed,
-      total: total,
-      succeeded: succeeded,
-      failed: failed,
-      skipped: skipped,
-      activity: _activity,
-    ));
-  }
-
-  void finish() => _publish();
 }
 
 class _Run {
@@ -152,56 +112,6 @@ class _Run {
   }
 }
 
-class _DownloadTasks extends MapBase<String, DownloadTask> {
-  final _entries = <String, DownloadTask>{};
-  List<String>? _orderedIds;
-
-  @override
-  DownloadTask? operator [](Object? key) => _entries[key];
-
-  @override
-  void operator []=(String key, DownloadTask value) {
-    if (_entries[key]?.createdAt != value.createdAt) _orderedIds = null;
-    _entries[key] = value;
-  }
-
-  @override
-  Iterable<String> get keys => _entries.keys;
-
-  @override
-  Iterable<DownloadTask> get values => _entries.values;
-
-  @override
-  int get length => _entries.length;
-
-  @override
-  bool containsKey(Object? key) => _entries.containsKey(key);
-
-  @override
-  DownloadTask? remove(Object? key) {
-    final removed = _entries.remove(key);
-    if (removed != null) _orderedIds = null;
-    return removed;
-  }
-
-  @override
-  void clear() {
-    _entries.clear();
-    _orderedIds = null;
-  }
-
-  List<DownloadTask> get ordered {
-    final ids = _orderedIds ??=
-        (_entries.values.toList()
-              ..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
-            .map((task) => task.id)
-            .toList(growable: false);
-    // Return a fresh snapshot containing the latest progress. Callers can
-    // filter or sort it without changing the manager's cached order.
-    return [for (final id in ids) _entries[id]!];
-  }
-}
-
 class DownloadManager extends ChangeNotifier {
   DownloadManager({
     required this.store,
@@ -238,7 +148,7 @@ class DownloadManager extends ChangeNotifier {
   final Stopwatch Function() transferClock;
   final Future<void> Function(DownloadActivity activity)? foreground;
   late final SpaceBudget space;
-  final _tasks = _DownloadTasks();
+  final _tasks = DownloadTaskIndex();
   final _running = <String, _Run>{};
   final _unsettledRuns = <_Run>{};
   final _controls = <String, AsyncGate>{};
@@ -631,6 +541,7 @@ class DownloadManager extends ChangeNotifier {
       });
 
   Future<void> _persist({
+    DownloadDestinationSelection? downloadLocation,
     Json addedTorrents = const {},
     Json cacheRoots = const {},
     bool changeDestination = false,
@@ -659,10 +570,13 @@ class DownloadManager extends ChangeNotifier {
           ...cacheRoots,
         }..removeWhere((_, value) => value == null);
       }
-      if (changeDestination) {
-        draft['settings'] = AppSettings.fromJson(
-          draft.obj('settings'),
-        ).update({'destination': destination}).toJson();
+      downloadLocation?.remember(draft);
+      if (changeDestination || downloadLocation?.makeDefault == true) {
+        draft['settings'] = AppSettings.fromJson(draft.obj('settings')).update({
+          'destination': changeDestination
+              ? destination
+              : downloadLocation!.path,
+        }).toJson();
       }
       if (completedDownload != null) {
         draft['completedCacheRemovals'] = <String>{
@@ -748,8 +662,17 @@ class DownloadManager extends ChangeNotifier {
     );
   }
 
-  Future<String> enqueue(DownloadSpec spec, {int? connections}) async =>
-      (await enqueueAll([spec], connections: connections)).single;
+  Future<String> enqueue(
+    DownloadSpec spec, {
+    int? connections,
+    String? destination,
+    DownloadDestinationSelection? location,
+  }) async => (await enqueueAll(
+    [spec],
+    connections: connections,
+    destination: destination,
+    location: location,
+  )).single;
 
   bool _usesInternet(DownloadSpec spec) =>
       spec.profile != 'lan' || spec.platform != null;
@@ -784,6 +707,7 @@ class DownloadManager extends ChangeNotifier {
   Future<List<String>> enqueueAll(
     List<DownloadSpec> specs, {
     String? destination,
+    DownloadDestinationSelection? location,
     int? connections,
   }) async {
     require(specs.isNotEmpty && specs.length <= 10000, '请选择 1–10000 个文件');
@@ -798,6 +722,7 @@ class DownloadManager extends ChangeNotifier {
     return _enqueueAll(
       selected,
       destination: destination,
+      location: location,
       connections: connections,
     );
   }
@@ -805,6 +730,7 @@ class DownloadManager extends ChangeNotifier {
   Future<List<String>> _enqueueAll(
     List<DownloadSpec> specs, {
     String? destination,
+    DownloadDestinationSelection? location,
     int? connections,
   }) => _pumpGate.run(() async {
     require(!_closing, '应用正在退出');
@@ -822,7 +748,9 @@ class DownloadManager extends ChangeNotifier {
                 profile: connections,
             },
           );
-    final target = destination ?? options.destination;
+    final target = location != null
+        ? location.path
+        : destination ?? options.destination;
     final cacheRoot = await files.downloadCacheRoot(target);
     final tasks = <DownloadTask>[];
     final ed2kIdentities = <String>{
@@ -897,6 +825,7 @@ class DownloadManager extends ChangeNotifier {
     }
     try {
       await _persist(
+        downloadLocation: location,
         cacheRoots: {
           if (cacheRoot != null)
             for (final task in tasks) task.id: cacheRoot,
@@ -971,8 +900,9 @@ class DownloadManager extends ChangeNotifier {
 
   Future<List<String>> enqueueTorrent(
     TorrentInfo info,
-    List<int> selected,
-  ) async {
+    List<int> selected, {
+    DownloadDestinationSelection? location,
+  }) async {
     final indices = selected.toSet().toList()..sort();
     require(
       indices.isNotEmpty &&
@@ -981,83 +911,88 @@ class DownloadManager extends ChangeNotifier {
       '每次请选择 1–$maxTorrentFiles 个文件',
     );
     if (confirmDownload != null) await _confirmDownload();
-    return _enqueueTorrent(info, indices);
+    return _enqueueTorrent(info, indices, location: location);
   }
 
-  Future<List<String>> _enqueueTorrent(TorrentInfo info, List<int> indices) =>
-      _pumpGate.run(() async {
+  Future<List<String>> _enqueueTorrent(
+    TorrentInfo info,
+    List<int> indices, {
+    DownloadDestinationSelection? location,
+  }) => _pumpGate.run(() async {
+    require(!_closing, '应用正在退出');
+    RequestScope.checkpoint();
+    final selectedIndices = indices.toSet();
+    require(
+      !_tasks.values.any(
+        (t) =>
+            !t.terminal &&
+            t.spec.torrent?.str('hash') == info.hash &&
+            selectedIndices.contains(t.spec.torrent!.integer('index')),
+      ),
+      '选中的文件已有下载任务，请在下载页继续',
+    );
+    final tasks = <DownloadTask>[], options = settings;
+    final target = location != null ? location.path : options.destination;
+    final cacheRoot = await files.downloadCacheRoot(target);
+    for (final index in indices) {
+      if (tasks.isNotEmpty && tasks.length % 128 == 0) {
+        await RequestScope.wait(Duration.zero);
         require(!_closing, '应用正在退出');
-        RequestScope.checkpoint();
-        final selectedIndices = indices.toSet();
-        require(
-          !_tasks.values.any(
-            (t) =>
-                !t.terminal &&
-                t.spec.torrent?.str('hash') == info.hash &&
-                selectedIndices.contains(t.spec.torrent!.integer('index')),
+      }
+      final file = info.files[index], id = newId();
+      tasks.add(
+        DownloadTask(
+          id: id,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+          spec: DownloadSpec(
+            url: info.magnet,
+            fileName: safeFileName(file.name),
+            relativePath: safeRelativePath(file.directory),
+            expectedSize: file.size,
+            torrent: {
+              'hash': info.hash,
+              'index': file.index,
+              'path': file.path,
+            },
           ),
-          '选中的文件已有下载任务，请在下载页继续',
-        );
-        final tasks = <DownloadTask>[], options = settings;
-        final cacheRoot = await files.downloadCacheRoot(options.destination);
-        for (final index in indices) {
-          if (tasks.isNotEmpty && tasks.length % 128 == 0) {
-            await RequestScope.wait(Duration.zero);
-            require(!_closing, '应用正在退出');
-          }
-          final file = info.files[index], id = newId();
-          tasks.add(
-            DownloadTask(
-              id: id,
-              createdAt: DateTime.now().millisecondsSinceEpoch,
-              spec: DownloadSpec(
-                url: info.magnet,
-                fileName: safeFileName(file.name),
-                relativePath: safeRelativePath(file.directory),
-                expectedSize: file.size,
-                torrent: {
-                  'hash': info.hash,
-                  'index': file.index,
-                  'path': file.path,
-                },
-              ),
-              total: file.size,
-              connections: 80,
-              retries: options.retries,
-              speedLimit: options.speedLimit,
-              destination: options.destination,
-              directOutput: files.directDownloads,
-            ),
-          );
-        }
-        RequestScope.checkpoint();
-        for (final task in tasks) {
-          _tasks[task.id] = task;
-        }
-        try {
-          await _persist(
-            cacheRoots: {
-              if (cacheRoot != null)
-                for (final task in tasks) task.id: cacheRoot,
-            },
-            addedTorrents: {
-              info.hash: {
-                'data': info.data,
-                'name': info.name,
-                'pieceLength': info.pieceLength,
-              },
-            },
-          );
-        } catch (_) {
-          for (final task in tasks) {
-            _tasks.remove(task.id);
-          }
-          rethrow;
-        }
-        notifyListeners();
-        _schedule();
-        return tasks.map((task) => task.id).toList();
-      });
+          total: file.size,
+          connections: 80,
+          retries: options.retries,
+          speedLimit: options.speedLimit,
+          destination: target,
+          directOutput: files.directDownloads,
+        ),
+      );
+    }
+    RequestScope.checkpoint();
+    for (final task in tasks) {
+      _tasks[task.id] = task;
+    }
+    try {
+      await _persist(
+        downloadLocation: location,
+        cacheRoots: {
+          if (cacheRoot != null)
+            for (final task in tasks) task.id: cacheRoot,
+        },
+        addedTorrents: {
+          info.hash: {
+            'data': info.data,
+            'name': info.name,
+            'pieceLength': info.pieceLength,
+          },
+        },
+      );
+    } catch (_) {
+      for (final task in tasks) {
+        _tasks.remove(task.id);
+      }
+      rethrow;
+    }
+    notifyListeners();
+    _schedule();
+    return tasks.map((task) => task.id).toList();
+  });
 
   void _schedule() {
     if (_closing || _pausingAll != null) return;
@@ -1343,6 +1278,13 @@ class DownloadManager extends ChangeNotifier {
       'error': '',
       'recoveryAction': DownloadRecoveryAction.none.name,
       'phase': '',
+      // Older versions retained a completed native checkpoint after a digest
+      // mismatch. Retrying must not verify those same damaged bytes again.
+      if (_isChecksumFailure(current.error)) ...{
+        'identity': const RemoteIdentity(0, null, null).toJson(),
+        'payloadReady': false,
+        'downloaded': 0,
+      },
     });
     _schedule();
   });
@@ -1480,6 +1422,11 @@ class DownloadManager extends ChangeNotifier {
           if (action == DownloadBatchAction.resume) ...{
             'error': '',
             'recoveryAction': DownloadRecoveryAction.none.name,
+            if (_isChecksumFailure(task.error)) ...{
+              'identity': const RemoteIdentity(0, null, null).toJson(),
+              'payloadReady': false,
+              'downloaded': 0,
+            },
           },
         });
       }
@@ -1606,10 +1553,10 @@ class DownloadManager extends ChangeNotifier {
 
   Future<T> _trackDeletion<T>(
     int total,
-    Future<T> Function(_DeletionProgress progress) action, {
+    Future<T> Function(DownloadDeletionProgress progress) action, {
     required bool deleteFiles,
   }) {
-    final progress = _DeletionProgress(total);
+    final progress = DownloadDeletionProgress(total);
     return OperationProgress.step<T>(
       deleteFiles
           ? OperationStage.deleteDownloads
@@ -1636,7 +1583,7 @@ class DownloadManager extends ChangeNotifier {
   Future<DownloadBatchResult> _deleteBatch(
     List<String> selected,
     bool deleteFiles,
-    _DeletionProgress progress,
+    DownloadDeletionProgress progress,
   ) async {
     final succeeded = <String>[], skipped = <String>[];
     final failed = <String, Object>{};
@@ -1723,7 +1670,7 @@ class DownloadManager extends ChangeNotifier {
   Future<bool?> _deleteTask(
     String id, {
     required bool deleteFile,
-    required _DeletionProgress progress,
+    required DownloadDeletionProgress progress,
   }) => _control(id, () async {
     if (_closing || RequestScope.current?.isCancelled == true) return null;
     _interrupted.remove(id);
@@ -1948,7 +1895,7 @@ class DownloadManager extends ChangeNotifier {
   Future<DownloadBatchResult?> _deleteIdleRecords(
     List<String> ids, {
     bool deleteFiles = false,
-    required _DeletionProgress progress,
+    required DownloadDeletionProgress progress,
   }) async {
     bool idle() => ids.every((id) {
       final task = _tasks[id];
@@ -2401,7 +2348,8 @@ class DownloadManager extends ChangeNotifier {
         run.storage.target.id,
         () => run.storage.target.path,
       );
-      if (_tasks[id]!.spec.needsPreparation) {
+      final preparedNow = _tasks[id]!.spec.needsPreparation;
+      if (preparedNow) {
         await _prepareSource(id, run);
       }
       _notifyGuestDownload(id);
@@ -2423,8 +2371,9 @@ class DownloadManager extends ChangeNotifier {
         }
       }
       if (output == null) {
-        if (LanDownloadRoute.owns(_tasks[id]!.spec)) {
-          // Rebuild the local listener only when network data is needed. A
+        if (LanDownloadRoute.owns(_tasks[id]!.spec) ||
+            !preparedNow && _tasks[id]!.spec.platform == CloudPlatform.webdav) {
+          // Rebuild local download listeners only when network data is needed. A
           // completed payload can still be verified/exported with LAN off.
           await _prepareSource(id, run);
         }
@@ -2501,7 +2450,7 @@ class DownloadManager extends ChangeNotifier {
         final task = _tasks[id]!;
         completedSpec = task.spec;
         final verifyClock = Stopwatch()..start();
-        if (task.hls.isEmpty) await _verify(output, task.spec, run);
+        if (task.hls.isEmpty) await _verify(id, output, task.spec, run);
         final verifyMs = verifyClock.elapsedMilliseconds;
         run.check();
         final length = await output.length();
@@ -2635,6 +2584,12 @@ class DownloadManager extends ChangeNotifier {
         await _update(id, {
           'status': run.stopped || e is _Stopped ? 'paused' : 'failed',
           'error': message,
+          // Keep the failed payload for inspection until the user retries.
+          // Its identity must no longer authorize native breakpoint reuse.
+          if (e is _ChecksumMismatch) ...{
+            'identity': const RemoteIdentity(0, null, null).toJson(),
+            'payloadReady': false,
+          },
           'recoveryAction': !run.stopped && e is UcTvAuthorizationRequired
               ? DownloadRecoveryAction.ucAuthorization.name
               : DownloadRecoveryAction.none.name,
@@ -2778,10 +2733,22 @@ class DownloadManager extends ChangeNotifier {
             profile: BaiduShareRoute.downloadProfile(fresh),
           )
           .toJson();
-      if (fresh.expectedSize <= 0 && previous.spec.expectedSize > 0) {
+      final updatePackage = previous.spec.appUpdateKey?.isNotEmpty == true;
+      if (updatePackage && previous.spec.expectedSize > 0) {
+        require(
+          fresh.expectedSize <= 0 ||
+              fresh.expectedSize == previous.spec.expectedSize,
+          '更新安装包大小与发布信息不一致，请重新检查更新',
+        );
+        spec['expectedSize'] = previous.spec.expectedSize;
+      } else if (fresh.expectedSize <= 0 && previous.spec.expectedSize > 0) {
         spec['expectedSize'] = previous.spec.expectedSize;
       }
-      if (fresh.checksumType?.isNotEmpty != true ||
+      // An update's published digest remains authoritative when a cloud
+      // resolver supplies its own file hash (often MD5) with a refreshed URL.
+      if (updatePackage &&
+              previous.spec.checksumType?.toLowerCase() == 'sha256' ||
+          fresh.checksumType?.isNotEmpty != true ||
           fresh.checksumValue?.isNotEmpty != true) {
         spec['checksumType'] = previous.spec.checksumType;
         spec['checksumValue'] = previous.spec.checksumValue;
@@ -3167,10 +3134,10 @@ class DownloadManager extends ChangeNotifier {
             '下载目标已失效',
           );
         } else {
-          final parent = await engine.taskDirectory(id).resolveSymbolicLinks();
+          final parent = await resolveStoragePath(engine.taskDirectory(id));
           require(
             await file.exists() &&
-                p.equals(p.dirname(await file.resolveSymbolicLinks()), parent),
+                p.equals(p.dirname(await resolveStoragePath(file)), parent),
             '下载结果路径无效',
           );
         }
@@ -3341,9 +3308,9 @@ class DownloadManager extends ChangeNotifier {
         if (target != null) {
           require(state.str('path') == target.path, 'ED2K 下载目标已失效');
         } else {
-          final root = await engine.taskDirectory(id).resolveSymbolicLinks();
+          final root = await resolveStoragePath(engine.taskDirectory(id));
           require(
-            p.isWithin(root, await file.resolveSymbolicLinks()),
+            p.isWithin(root, await resolveStoragePath(file)),
             'ED2K 下载路径无效',
           );
         }
@@ -3437,10 +3404,10 @@ class DownloadManager extends ChangeNotifier {
         }
         final file = File(state.str('path')),
             directory = engine.taskDirectory(id);
-        final root = await directory.resolveSymbolicLinks();
+        final root = await resolveStoragePath(directory);
         require(
           await file.exists() &&
-              p.isWithin(root, await file.resolveSymbolicLinks()) &&
+              p.isWithin(root, await resolveStoragePath(file)) &&
               await file.length() == task.total,
           'BT 下载结果不完整或路径无效',
         );
@@ -3463,7 +3430,12 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
-  Future<void> _verify(File file, DownloadSpec spec, _Run run) async {
+  Future<void> _verify(
+    String id,
+    File file,
+    DownloadSpec spec,
+    _Run run,
+  ) async {
     if (spec.checksumValue?.isNotEmpty != true) return;
     final algorithm = spec.checksumType?.toLowerCase().replaceAll('-', '');
     final hash = switch (algorithm) {
@@ -3487,10 +3459,26 @@ class DownloadManager extends ChangeNotifier {
                 .first)
             .toString();
     run.check();
-    require(
-      digest.toLowerCase() == spec.checksumValue!.toLowerCase(),
-      '文件校验失败，请删除此任务后重新下载',
-    );
+    if (digest.toLowerCase() != spec.checksumValue!.toLowerCase()) {
+      DiagnosticLog.event(
+        'download.checksum_mismatch',
+        fields: {
+          'ref': DiagnosticLog.reference(id),
+          'profile': spec.profile,
+          'algorithm': algorithm,
+          'expectedBytes': spec.expectedSize,
+          'actualBytes': await file.length(),
+          // Fingerprints correlate repeat failures without logging content
+          // identifiers, filenames, credentials or signed download URLs.
+          'expectedDigestRef': DiagnosticLog.reference(
+            spec.checksumValue!.toLowerCase(),
+          ),
+          'actualDigestRef': DiagnosticLog.reference(digest),
+        },
+      );
+      run.check();
+      throw const _ChecksumMismatch();
+    }
   }
 
   Future<File> _hls(String id, _Run run) async {

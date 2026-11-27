@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -202,6 +203,29 @@ class PublicFilesTest(unittest.TestCase):
         self.assertEqual((target / 'keep.txt').read_text(encoding='utf-8'), 'keep')
 
 
+class ReleaseTargetsTest(unittest.TestCase):
+    def test_manual_android_target_keeps_checks_and_original_default_targets(self):
+        workflow = (ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8')
+        self.assertRegex(workflow, r'options:\s+- all\s+- android\s+- android-windows')
+        expression = re.search(r'\s+target: \$\{\{ fromJSON\((.*?)\) \}\}', workflow).group(1)
+        for value, expected in [
+            ('android', ['android']),
+            ('android-windows', ['android', 'windows']),
+            ('all', ['android', 'windows', 'windows-arm64']),
+            ('', ['android', 'windows', 'windows-arm64']),
+        ]:
+            # Evaluate the actual matrix choices, including tag/no-input fallback.
+            selected = None
+            for option, payload in re.findall(r"inputs.targets == '([^']+)' && '([^']+)'", expression):
+                if value == option:
+                    selected = json.loads(payload)
+                    break
+            if selected is None:
+                selected = json.loads(re.search(r"\|\| '([^']+)'$", expression).group(1))
+            self.assertEqual(selected, expected)
+        self.assertIn('needs: [tag, checks]', workflow)
+
+
 class ReleaseFilesTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -376,6 +400,27 @@ class SigningSettingsTest(unittest.TestCase):
         self.assertEqual(json.loads((local / 'cloud-command.defines.json').read_text()),
                          files['cloud-command.defines.json'])
         self.assertNotIn('fixture-quark', (local / 'build-config.json').read_text())
+
+    def test_retired_baidu_config_is_ignored_with_other_client_settings(self):
+        files = {
+            'baidu-api.defines.json': {'ASTERLINK_BAIDU_API_ACCESS_KEY': 'retired-secret'},
+            'cloud-command.defines.json': {
+                'ASTERLINK_QUARK_COMMAND_KEY': 'fixture-quark',
+                'ASTERLINK_UC_COMMAND_KEY': 'fixture-uc',
+            },
+        }
+        settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': json.dumps(files)})
+        local = self.root / '.local'
+        self.assertFalse((local / 'baidu-api.defines.json').exists())
+        self.assertEqual(json.loads((local / 'cloud-command.defines.json').read_text()),
+                         files['cloud-command.defines.json'])
+        self.assertNotIn('retired-secret', (local / 'build-config.json').read_text())
+
+    def test_only_retired_baidu_config_can_build_without_recreating_it(self):
+        files = {'baidu-api.defines.json': {'ASTERLINK_BAIDU_API_URL': 'https://retired.invalid'}}
+        settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': json.dumps(files)})
+        self.assertTrue((self.root / '.local/build-config.json').exists())
+        self.assertFalse((self.root / '.local/baidu-api.defines.json').exists())
 
     def test_unknown_files_fields_and_non_string_values_are_rejected_before_writing(self):
         invalid = [

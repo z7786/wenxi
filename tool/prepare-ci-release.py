@@ -8,10 +8,6 @@ import re
 
 
 CLIENT_DEFINE_FILES = {
-    'baidu-api.defines.json': {
-        'ASTERLINK_BAIDU_API_ACCESS_KEY', 'ASTERLINK_BAIDU_API_PUBLIC_KEY',
-        'ASTERLINK_BAIDU_API_URL', 'ASTERLINK_BAIDU_RELAY_API_URL',
-    },
     'cloud-command.defines.json': {'ASTERLINK_QUARK_COMMAND_KEY', 'ASTERLINK_UC_COMMAND_KEY'},
     'parser-hub.defines.json': {
         'ASTERLINK_PARSER_HUB_URL', 'ASTERLINK_PARSER_HUB_KEY',
@@ -27,11 +23,16 @@ def client_defines(local, raw):
         files = json.loads(raw)
     except (ValueError, TypeError) as error:
         raise ValueError('Invalid client build configuration JSON') from error
-    if not isinstance(files, dict) or not files or set(files) - CLIENT_DEFINE_FILES.keys():
+    if not isinstance(files, dict) or not files:
+        raise ValueError('Unexpected client build configuration files')
+    # Existing Actions secrets may retain this retired entry. Ignore it rather
+    # than writing credentials into builds or requiring a secret migration.
+    files.pop('baidu-api.defines.json', None)
+    if set(files) - CLIENT_DEFINE_FILES.keys():
         raise ValueError('Unexpected client build configuration files')
     for name, values in files.items():
         allowed = CLIENT_DEFINE_FILES[name]
-        required = allowed - {'ASTERLINK_PARSER_RULES_BACKUP_URL', 'ASTERLINK_BAIDU_RELAY_API_URL'}
+        required = allowed - {'ASTERLINK_PARSER_RULES_BACKUP_URL'}
         if (not isinstance(values, dict) or not required <= values.keys() or
                 values.keys() - allowed or any(not isinstance(value, str) for value in values.values())):
             raise ValueError('Invalid client build configuration fields')

@@ -2,12 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io' hide Cookie;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/data/cloud_browser_ua.dart';
+import 'package:asterlink/data/providers/tianyi.dart';
 import 'package:asterlink/data/providers/guangya_login.dart';
 import 'package:asterlink/data/providers/ctfile.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
@@ -92,14 +95,16 @@ class _Cookies extends PlatformCookieManager {
   final pending = <PlatformInAppWebViewController, Completer<List<Cookie>>>{};
   final reads = <PlatformInAppWebViewController, int>{};
   final values = <String, List<Cookie>>{};
+  final pendingUrls = <String, Completer<List<Cookie>>>{};
   int deleteAllCalls = 0;
+  Completer<bool>? pendingCleanup;
   bool failRead = false;
   bool failClear = false;
   @override
   Future<bool> deleteAllCookies() async {
     deleteAllCalls++;
     if (failClear) throw StateError('Fixture cookie cleanup failed');
-    return true;
+    return pendingCleanup?.future ?? true;
   }
 
   @override
@@ -111,7 +116,8 @@ class _Cookies extends PlatformCookieManager {
     if (webViewController == null) return [];
     reads.update(webViewController, (count) => count + 1, ifAbsent: () => 1);
     if (failRead) throw StateError('Cookie: private-read-secret');
-    return await pending[webViewController]?.future ??
+    return await pendingUrls[url.toString()]?.future ??
+        await pending[webViewController]?.future ??
         values[url.toString()] ??
         [];
   }
@@ -223,15 +229,37 @@ class _TianyiController extends _Controller {
   WebUri url = WebUri('https://cloud.189.cn/web/login.html');
   String browserId = 'private-bound-browser-id';
   final scripts = <String>[];
+  Completer<dynamic>? pendingBootstrap;
+  Completer<dynamic>? pendingLayout;
+  Completer<dynamic>? pendingBinding;
+  int loads = 0;
   @override
   Future<WebUri?> getUrl() async => url;
+  @override
+  Future<void> loadUrl({
+    required URLRequest urlRequest,
+    @Deprecated('Use allowingReadAccessTo instead')
+    Uri? iosAllowingReadAccessTo,
+    WebUri? allowingReadAccessTo,
+  }) async {
+    loads++;
+    url = urlRequest.url!;
+  }
+
   @override
   Future<dynamic> evaluateJavascript({
     required String source,
     ContentWorld? contentWorld,
   }) async {
     scripts.add(source);
+    if (source == desktopLoginViewportScript && pendingLayout != null) {
+      return pendingLayout!.future;
+    }
+    if (source == TianyiWebLogin.bootstrapScript && pendingBootstrap != null) {
+      return pendingBootstrap!.future;
+    }
     if (source == TianyiWebLogin.readScript) {
+      if (pendingBinding != null) return pendingBinding!.future;
       if (navigateDuringRead) url = WebUri('https://untrusted.invalid/');
       return jsonEncode({'browserId': browserId});
     }
@@ -280,9 +308,25 @@ class _PasswordController extends _StorageController {
   }
 }
 
+class _WebViewFeatures extends PlatformWebViewFeature {
+  _WebViewFeatures()
+    : super.implementation(const PlatformWebViewFeatureCreationParams());
+  bool documentStartSupported = true;
+  int checks = 0;
+  @override
+  Future<bool> isFeatureSupported(WebViewFeature feature) async {
+    expect(feature, WebViewFeature.DOCUMENT_START_SCRIPT);
+    checks++;
+    return documentStartSupported;
+  }
+}
+
 class _Platform extends InAppWebViewPlatform {
   final cookies = _Cookies();
+  final features = _WebViewFeatures();
   final views = <_View>[];
+  @override
+  PlatformWebViewFeature createPlatformWebViewFeatureStatic() => features;
   @override
   PlatformCookieManager createPlatformCookieManager(
     PlatformCookieManagerCreationParams params,
@@ -316,14 +360,6 @@ void main() {
         userAgent: target.userAgent,
         desktopMode: target.desktopMode,
       );
-      if (target.platform == CloudPlatform.tianyi) {
-        expect(browser.userAgent, contains('Mobile'));
-        expect(browser.preferredContentMode, UserPreferredContentMode.MOBILE);
-        expect(browser.loadWithOverviewMode, isFalse);
-        expect(Uri.parse(target.url).host, 'm.cloud.189.cn');
-        expect(Uri.parse(target.url).path, '/udb/udb_login.jsp');
-        continue;
-      }
       expect(browser.userAgent, contains('Windows NT'));
       expect(browser.userAgent, isNot(contains('Android')));
       expect(browser.userAgent, isNot(contains('Mobile')));
@@ -347,9 +383,13 @@ void main() {
     platform.cookies.pending.clear();
     platform.cookies.reads.clear();
     platform.cookies.values.clear();
+    platform.cookies.pendingUrls.clear();
     platform.cookies.deleteAllCalls = 0;
+    platform.cookies.pendingCleanup = null;
     platform.cookies.failRead = false;
     platform.cookies.failClear = false;
+    platform.features.documentStartSupported = true;
+    platform.features.checks = 0;
     directory = Directory.systemTemp.createTempSync('asterlink-web-log-test-');
     services = _Services(directory);
     log = DiagnosticLog.open(null);
@@ -668,29 +708,57 @@ void main() {
   );
 
   testWidgets(
-    'Tianyi mobile login keeps the official viewport through navigation and popups',
+    'Tianyi official parent keeps one browser identity and allows the SSO iframe to open SMS',
     (tester) async {
       await openLogin(tester, CloudPlatform.tianyi);
       final native = _TianyiController(410);
       final (view, web) = attach(410, instance: native);
-      expect(view.params.initialUrlRequest!.url!.host, 'm.cloud.189.cn');
+      expect(view.params.initialUrlRequest!.url!.host, 'cloud.189.cn');
+      expect(view.params.initialUrlRequest!.url!.path, '/web/login.html');
       expect(
         view.params.initialSettings!.preferredContentMode,
-        UserPreferredContentMode.MOBILE,
+        UserPreferredContentMode.DESKTOP,
       );
       expect(
         view.params.initialSettings!.userAgent,
-        WebLoginTarget.mobileUserAgent,
+        services.cloud.browserUa.selected(CloudPlatform.tianyi),
       );
       expect(
         view.params.initialUserScripts!.any(
           (script) => script.source == desktopLoginViewportScript,
         ),
-        isFalse,
+        isTrue,
       );
+      final form = view.params.initialUserScripts!.singleWhere(
+        (script) => script.source == TianyiWebLogin.formScript,
+      );
+      expect(form.forMainFrameOnly, isFalse);
+      expect(form.allowedOriginRules, {'https://open.e.189.cn'});
+      final binding = view.params.initialUserScripts!.singleWhere(
+        (script) => script.source == TianyiWebLogin.bootstrapScript,
+      );
+      expect(binding.forMainFrameOnly, isTrue);
+      final touch = view.params.initialUserScripts!.where(
+        (script) => script.source == TianyiWebLogin.touchScript,
+      );
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        expect(
+          touch.single.injectionTime,
+          UserScriptInjectionTime.AT_DOCUMENT_START,
+        );
+        expect(touch.single.forMainFrameOnly, isFalse);
+        expect(touch.single.allowedOriginRules, {'https://open.e.189.cn'});
+      } else {
+        expect(touch, isEmpty);
+      }
+      expect(
+        view.params.initialSettings!.incognito,
+        defaultTargetPlatform != TargetPlatform.android,
+      );
+      expect(platform.cookies.deleteAllCalls, 1);
       view.params.onLoadStop!(web, native.url);
       await tester.pump();
-      expect(native.scripts, isNot(contains(desktopLoginViewportScript)));
+      expect(native.scripts, contains(desktopLoginViewportScript));
       expect(
         await view.params.onCreateWindow!(
           web,
@@ -706,20 +774,35 @@ void main() {
       final popup = platform.views.last;
       expect(
         popup.params.initialSettings!.preferredContentMode,
-        UserPreferredContentMode.MOBILE,
+        UserPreferredContentMode.DESKTOP,
       );
       expect(
         popup.params.initialSettings!.userAgent,
-        WebLoginTarget.mobileUserAgent,
+        view.params.initialSettings!.userAgent,
       );
+      expect(
+        popup.params.initialSettings!.incognito,
+        defaultTargetPlatform == TargetPlatform.windows,
+      );
+      expect(platform.cookies.deleteAllCalls, 1);
       expect(
         popup.params.initialUserScripts!.any(
           (script) => script.source == desktopLoginViewportScript,
         ),
-        isFalse,
+        isTrue,
+      );
+      expect(
+        popup.params.initialUserScripts!.any(
+          (script) => script.source == TianyiWebLogin.touchScript,
+        ),
+        defaultTargetPlatform == TargetPlatform.android,
       );
       await tester.pumpWidget(const SizedBox.shrink());
     },
+    variant: const TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.windows,
+    }),
   );
 
   for (final cloud in [
@@ -899,6 +982,401 @@ void main() {
   );
 
   testWidgets(
+    'Tianyi Android SMS handoff waits for the portal cookie and keeps its browser identity',
+    (tester) async {
+      const cloud = CloudPlatform.tianyi;
+      var validations = 0;
+      String? loginUa;
+      final http = FakeHttp((request) {
+        expect(request.uri.host, 'cloud.189.cn');
+        expect(request.headers['User-Agent'], loginUa);
+        expect(
+          request.headers['Cookie'],
+          'COOKIE_LOGIN_USER=private-portal-sms',
+        );
+        if (request.uri.path.endsWith('/getUserInfoForPortal.action')) {
+          validations++;
+          return jsonResponse({
+            'res_code': 0,
+            'userId': 'fixture-sms-user',
+            'loginName': 'fixture-sms-name',
+          });
+        }
+        if (request.uri.path.endsWith('/getUserSizeInfo.action')) {
+          return jsonResponse({
+            'res_code': 0,
+            'cloudCapacityInfo': {'totalSize': 100, 'usedSize': 30},
+          });
+        }
+        throw StateError('Unexpected Tianyi route');
+      });
+      services.login.webAuthenticators[cloud] = TianyiConnector(
+        BrowserUaJsonHttp(http, services.cloud.browserUa, cloud),
+      ).authenticate;
+      await openLogin(tester, cloud);
+      final native = _TianyiController(442)
+        ..url = WebUri(
+          'https://open.e.189.cn/api/logbox/separate/web/index.html',
+        )
+        ..browserId = '';
+      final (view, web) = attach(442, instance: native);
+      loginUa = view.params.initialSettings!.userAgent;
+      platform.cookies.values['https://m.cloud.189.cn/'] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-mobile-only',
+          isHttpOnly: true,
+        ),
+      ];
+      platform.cookies.values['https://h5.cloud.189.cn/'] = [
+        Cookie(name: 'LOGIN_USER', value: 'private-h5-only', isHttpOnly: true),
+      ];
+      platform.cookies.values['https://cloud.189.cn/web/'] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-web-path-only',
+          path: '/web',
+        ),
+      ];
+      await detect(tester);
+      expect(validations, 0);
+      expect(http.calls, isEmpty);
+      expect(services.vault.credential(cloud), isNull);
+      const landing = 'https://cloud.189.cn/web/redirect.html';
+      expect(
+        await view.params.shouldOverrideUrlLoading!(
+          web,
+          NavigationAction(
+            request: URLRequest(url: WebUri(landing)),
+            isForMainFrame: true,
+          ),
+        ),
+        NavigationActionPolicy.ALLOW,
+      );
+      native.url = WebUri(landing);
+      platform
+          .cookies
+          .values['https://cloud.189.cn/api/open/user/getUserInfoForPortal.action'] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-portal-sms',
+          isHttpOnly: true,
+        ),
+      ];
+      await detect(tester);
+      expect(validations, 1);
+      expect(find.byType(WebLoginPage), findsNothing);
+      final credential = services.vault.credential(cloud)!;
+      expect(credential.primary, 'COOKIE_LOGIN_USER=private-portal-sms');
+      expect(credential.field(CloudBrowserUa.credentialField), loginUa);
+      expect(
+        log.entries().map((entry) => entry.detail).join(),
+        isNot(contains('private-')),
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
+    'Tianyi Android sends continuous gestures to the native login WebView',
+    (tester) async {
+      await openLogin(tester, CloudPlatform.tianyi);
+      final (view, _) = attach(455, instance: _TianyiController(455));
+      final recognizers = view.params.gestureRecognizers;
+      expect(recognizers, isNotNull);
+      final gesture = recognizers!.single.constructor();
+      expect(gesture, isA<EagerGestureRecognizer>());
+      gesture.dispose();
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
+    'Tianyi reports unsupported cross-frame injection without blocking login',
+    (tester) async {
+      platform.features.documentStartSupported = false;
+      await openLogin(tester, CloudPlatform.tianyi);
+      attach(458, instance: _TianyiController(458));
+      expect(platform.features.checks, 1);
+      expect(
+        find.text('系统网页组件版本较旧，若滑块无法拖动，请更新 Android System WebView 或切换账号密码登录'),
+        findsOneWidget,
+      );
+      expect(find.byType(InAppWebView), findsOneWidget);
+      expect(find.text('检测登录'), findsOneWidget);
+      await detect(tester);
+      expect(services.vault.credential(CloudPlatform.tianyi), isNull);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
+    'Tianyi refresh discards a late binding before validating the new portal',
+    (tester) async {
+      const cloud = CloudPlatform.tianyi;
+      var validations = 0;
+      services.login.webAuthenticators[cloud] = (credential) async {
+        validations++;
+        expect(credential.field('browserId'), 'private-fresh-browser-id');
+        expect(credential.primary, 'COOKIE_LOGIN_USER=private-fresh-session');
+        return LoginResult(credential, const CloudAccount('天翼测试'));
+      };
+      await openLogin(tester, cloud);
+      final lateBinding = Completer<dynamic>();
+      final native = _TianyiController(459)..pendingBinding = lateBinding;
+      attach(459, instance: native);
+      await detect(tester);
+      expect(find.text('正在检测登录信息…'), findsOneWidget);
+      await tester.tap(find.byTooltip('刷新网页'));
+      await tester.pump();
+      expect(native.loads, 1);
+      native.pendingBinding = null;
+      native.browserId = 'private-fresh-browser-id';
+      await tester.runAsync(() async {
+        lateBinding.complete(
+          jsonEncode({'browserId': 'private-stale-browser-id'}),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      });
+      await tester.pump();
+      expect(validations, 0);
+      platform.cookies.values[TianyiWebLogin.identityUrl] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-fresh-session',
+          isHttpOnly: true,
+        ),
+      ];
+      await detect(tester);
+      expect(validations, 1);
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
+    'Tianyi restarting the official parent cancels a late old validation',
+    (tester) async {
+      const cloud = CloudPlatform.tianyi;
+      final oldValidation = Completer<LoginResult>();
+      var validations = 0;
+      services.login.webAuthenticators[cloud] = (credential) async {
+        validations++;
+        if (validations == 1) return oldValidation.future;
+        expect(credential.field('browserId'), 'private-fresh-browser-id');
+        return LoginResult(credential, const CloudAccount('天翼测试'));
+      };
+      await openLogin(tester, cloud);
+      final native = _TianyiController(460);
+      final (view, web) = attach(460, instance: native);
+      platform.cookies.values[TianyiWebLogin.identityUrl] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-old-session',
+          isHttpOnly: true,
+        ),
+      ];
+      await detect(tester);
+      expect(validations, 1);
+      view.params.onLoadStart!(web, WebUri(TianyiWebLogin.loginUrl));
+      await tester.pump();
+      await tester.runAsync(() async {
+        oldValidation.complete(
+          LoginResult(
+            Credential('old', {
+              'primary': 'COOKIE_LOGIN_USER=private-old-session',
+            }),
+            const CloudAccount('旧登录'),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      });
+      await tester.pump();
+      expect(services.vault.credential(cloud), isNull);
+      expect(find.byType(WebLoginPage), findsOneWidget);
+      native.browserId = 'private-fresh-browser-id';
+      platform.cookies.values[TianyiWebLogin.identityUrl] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-fresh-session',
+          isHttpOnly: true,
+        ),
+      ];
+      await detect(tester);
+      expect(validations, 2);
+      expect(
+        services.vault.credential(cloud)?.primary,
+        'COOKIE_LOGIN_USER=private-fresh-session',
+      );
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
+    'Tianyi validates native cookies immediately when its observed binding is already retained',
+    (tester) async {
+      const cloud = CloudPlatform.tianyi;
+      var validations = 0;
+      services.login.webAuthenticators[cloud] = (credential) async {
+        validations++;
+        expect(credential.field('browserId'), 'private-bound-browser-id');
+        expect(credential.primary, 'COOKIE_LOGIN_USER=private-native-ready');
+        return LoginResult(credential, const CloudAccount('天翼测试'));
+      };
+      await openLogin(tester, cloud);
+      final native = _TianyiController(456);
+      attach(456, instance: native);
+      await detect(tester);
+      expect(validations, 0);
+      final stalledScript = Completer<dynamic>();
+      native.pendingBootstrap = stalledScript;
+      platform.cookies.values[TianyiWebLogin.identityUrl] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-native-ready',
+          isHttpOnly: true,
+        ),
+      ];
+      try {
+        await tester.runAsync(() async {
+          await tester.tap(find.text('检测登录'));
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+        });
+        await tester.pumpAndSettle();
+        expect(validations, 1);
+        expect(services.vault.credential(cloud), isNotNull);
+        expect(find.byType(WebLoginPage), findsNothing);
+      } finally {
+        stalledScript.complete(null);
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pumpWidget(const SizedBox());
+      }
+      expect(tester.takeException(), isNull);
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
+    'Tianyi native detection runs while the load-stop layout script is stalled',
+    (tester) async {
+      const cloud = CloudPlatform.tianyi;
+      var validations = 0;
+      services.login.webAuthenticators[cloud] = (credential) async {
+        validations++;
+        return LoginResult(credential, const CloudAccount('天翼测试'));
+      };
+      await openLogin(tester, cloud);
+      final native = _TianyiController(457);
+      final (view, web) = attach(457, instance: native);
+      await detect(tester);
+      final layout = Completer<dynamic>();
+      native.pendingLayout = layout;
+      native.url = WebUri('https://cloud.189.cn/web/main');
+      platform.cookies.values[TianyiWebLogin.identityUrl] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-load-stop-ready',
+          isHttpOnly: true,
+        ),
+      ];
+      try {
+        await tester.runAsync(() async {
+          view.params.onLoadStop!(web, native.url);
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+        });
+        await tester.pumpAndSettle();
+        expect(validations, 1);
+        expect(find.byType(WebLoginPage), findsNothing);
+      } finally {
+        layout.complete(null);
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pumpWidget(const SizedBox());
+      }
+      expect(tester.takeException(), isNull);
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
+    'Tianyi Android detects a valid HttpOnly session behind a stale same-name cookie',
+    (tester) async {
+      const cloud = CloudPlatform.tianyi;
+      final observed = <String>[];
+      String? ua;
+      final http = FakeHttp((request) {
+        expect(request.headers['User-Agent'], ua);
+        if (request.uri.path.endsWith('/getUserInfoForPortal.action')) {
+          observed.add(request.headers['Cookie']!);
+          if (observed.last == 'COOKIE_LOGIN_USER=private-stale') {
+            return jsonResponse({'errorCode': 'InvalidSessionKey'}, 400);
+          }
+          expect(observed.last, 'COOKIE_LOGIN_USER=private-valid');
+          return jsonResponse({
+            'res_code': 0,
+            'userId': 'fixture-user',
+            'loginName': 'fixture-name',
+          });
+        }
+        return jsonResponse({
+          'res_code': 0,
+          'cloudCapacityInfo': {'totalSize': 100, 'usedSize': 30},
+        });
+      });
+      services.login.webAuthenticators[cloud] = TianyiConnector(
+        BrowserUaJsonHttp(http, services.cloud.browserUa, cloud),
+      ).authenticate;
+      await openLogin(tester, cloud);
+      final native = _TianyiController(449)
+        ..url = WebUri('https://cloud.189.cn/web/main');
+      final (view, _) = attach(449, instance: native);
+      ua = view.params.initialSettings!.userAgent;
+      platform.cookies.values[TianyiWebLogin.identityUrl] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-stale',
+          path: '/api',
+          isHttpOnly: true,
+        ),
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-valid',
+          path: '/',
+          isHttpOnly: true,
+        ),
+      ];
+      await detect(tester);
+      expect(observed, [
+        'COOKIE_LOGIN_USER=private-stale',
+        'COOKIE_LOGIN_USER=private-valid',
+      ]);
+      final saved = services.vault.credential(cloud)!;
+      expect(saved.primary, 'COOKIE_LOGIN_USER=private-valid');
+      expect(saved.fields.containsKey('cookieCandidates'), isFalse);
+      final diagnostics = log.entries().map((entry) => entry.detail).join();
+      expect(diagnostics, contains('session_candidates_captured'));
+      expect(diagnostics, isNot(contains('private-')));
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: const TargetPlatformVariant({TargetPlatform.android}),
+  );
+
+  testWidgets(
     'Tianyi detects the account API cookie while the mobile page stays open',
     (tester) async {
       services.login.webAuthenticators[CloudPlatform
@@ -935,12 +1413,158 @@ void main() {
     },
   );
 
+  testWidgets('Tianyi finishes login when the cookie cleanup callback hangs', (
+    tester,
+  ) async {
+    services.login.webAuthenticators[CloudPlatform.tianyi] =
+        (credential) async =>
+            LoginResult(credential, const CloudAccount('天翼测试'));
+    await openLogin(tester, CloudPlatform.tianyi);
+    attach(337, instance: _TianyiController(337));
+    final cleanup = Completer<bool>();
+    platform.cookies.pendingCleanup = cleanup;
+    platform
+        .cookies
+        .values['https://cloud.189.cn/api/open/user/getUserInfoForPortal.action'] = [
+      Cookie(name: 'COOKIE_LOGIN_USER', value: 'private-cleanup-session'),
+    ];
+    await tester.runAsync(() async {
+      await tester.tap(find.text('检测登录'));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump();
+    expect(services.vault.credential(CloudPlatform.tianyi), isNotNull);
+    expect(find.byType(WebLoginPage), findsOneWidget);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(seconds: 3)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(WebLoginPage), findsNothing);
+    expect(
+      log.entries().any(
+        (entry) => entry.event == 'web_login.cookie_cleanup_failed',
+      ),
+      isTrue,
+    );
+    cleanup.complete(true);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'Tianyi reports stalled verification and enables another detection',
+    (tester) async {
+      final answer = Completer<LoginResult>();
+      var calls = 0;
+      services.login.webAuthenticators[CloudPlatform.tianyi] = (credential) {
+        calls++;
+        return calls == 1
+            ? answer.future
+            : Future.value(LoginResult(credential, const CloudAccount('天翼重试')));
+      };
+      await openLogin(tester, CloudPlatform.tianyi);
+      attach(338, instance: _TianyiController(338));
+      platform
+          .cookies
+          .values['https://cloud.189.cn/api/open/user/getUserInfoForPortal.action'] = [
+        Cookie(
+          name: 'COOKIE_LOGIN_USER',
+          value: 'private-verification-session',
+        ),
+      ];
+      await tester.runAsync(() async {
+        await tester.tap(find.text('检测登录'));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      });
+      await tester.pump();
+      expect(calls, 1);
+      expect(find.text('正在验证登录信息…'), findsOneWidget);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(seconds: 15)),
+      );
+      await tester.pump();
+      expect(find.text('登录验证超时，请检查网络后点击“检测登录”重试'), findsOneWidget);
+      expect(services.vault.credential(CloudPlatform.tianyi), isNull);
+      final button = tester.widget<TextButton>(
+        find.widgetWithText(TextButton, '检测登录'),
+      );
+      expect(button.onPressed, isNotNull);
+      await detect(tester);
+      expect(calls, 2);
+      expect(find.byType(WebLoginPage), findsNothing);
+      await tester.runAsync(() async {
+        answer.complete(
+          LoginResult(
+            Credential('late', {'primary': 'COOKIE_LOGIN_USER=late'}),
+            const CloudAccount('late'),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      await tester.pump();
+      expect(
+        services.vault.credential(CloudPlatform.tianyi)!.primary,
+        'COOKIE_LOGIN_USER=private-verification-session',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'Tianyi can log in when a page script and an unrelated cookie read hang',
+    (tester) async {
+      services.login.webAuthenticators[CloudPlatform.tianyi] =
+          (credential) async =>
+              LoginResult(credential, const CloudAccount('天翼测试'));
+      await openLogin(tester, CloudPlatform.tianyi);
+      final native = _TianyiController(339);
+      final (_, web) = attach(339, instance: native);
+      final cookies = Completer<List<Cookie>>();
+      final script = Completer<dynamic>();
+      native.pendingBootstrap = script;
+      platform.cookies.pendingUrls['https://h5.cloud.189.cn/'] = cookies;
+      platform
+          .cookies
+          .values['https://cloud.189.cn/api/open/user/getUserInfoForPortal.action'] = [
+        Cookie(name: 'COOKIE_LOGIN_USER', value: 'private-parallel-cookie'),
+      ];
+      await tester.runAsync(() async {
+        await tester.tap(find.text('检测登录'));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      expect(platform.cookies.reads[web.platform], greaterThan(1));
+      await tester.runAsync(
+        () => until(
+          () => log.entries().any(
+            (entry) => entry.event == 'web_login.close_requested',
+          ),
+          timeout: const Duration(seconds: 8),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(
+        services.vault.credential(CloudPlatform.tianyi)!.primary,
+        'COOKIE_LOGIN_USER=private-parallel-cookie',
+      );
+      await tester.runAsync(() async {
+        script.complete(null);
+        cookies.complete([]);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   for (final landing in [
     'https://cloud.189.cn/web/redirect.html',
     'https://h5.cloud.189.cn/home.html',
   ]) {
     testWidgets(
-      'Tianyi validates before the mobile promotion redirect: $landing',
+      'Tianyi finishes the official landing before validating its portal cookie: $landing',
       (tester) async {
         services.login.webAuthenticators[CloudPlatform
             .tianyi] = (credential) async {
@@ -950,13 +1574,13 @@ void main() {
         await openLogin(tester, CloudPlatform.tianyi);
         final native = _TianyiController(440)
           ..url = WebUri(
-            'https://open.e.189.cn/api/logbox/separate/wap/index.html',
+            'https://open.e.189.cn/api/logbox/separate/web/index.html',
           )
           ..browserId = '';
         final (view, web) = attach(440, instance: native);
         expect(
           view.params.initialUserScripts!.any(
-            (script) => script.source == TianyiWebLogin.mobileFormScript,
+            (script) => script.source == TianyiWebLogin.formScript,
           ),
           true,
         );
@@ -980,7 +1604,7 @@ void main() {
           await navigate(landing, main: false),
           NavigationActionPolicy.ALLOW,
         );
-        platform.cookies.values['https://m.cloud.189.cn/'] = [
+        platform.cookies.values[TianyiWebLogin.identityUrl] = [
           Cookie(
             name: 'COOKIE_LOGIN_USER',
             value: 'private-mobile-login',
@@ -988,7 +1612,9 @@ void main() {
           ),
         ];
         await tester.runAsync(() async {
-          expect(await navigate(landing), NavigationActionPolicy.CANCEL);
+          expect(await navigate(landing), NavigationActionPolicy.ALLOW);
+          native.url = WebUri(landing);
+          view.params.onLoadStop!(web, native.url);
           await Future<void>.delayed(const Duration(milliseconds: 30));
         });
         await tester.pumpAndSettle();
@@ -1019,7 +1645,7 @@ void main() {
     await openLogin(tester, CloudPlatform.tianyi);
     final native = _TianyiController(
       441,
-    )..url = WebUri('https://open.e.189.cn/api/logbox/separate/wap/index.html');
+    )..url = WebUri('https://open.e.189.cn/api/logbox/separate/web/index.html');
     final (view, web) = attach(441, instance: native);
     await tester.runAsync(() async {
       expect(
@@ -1032,13 +1658,14 @@ void main() {
             isForMainFrame: true,
           ),
         ),
-        NavigationActionPolicy.CANCEL,
+        NavigationActionPolicy.ALLOW,
       );
       await Future<void>.delayed(const Duration(milliseconds: 30));
     });
     await tester.pumpAndSettle();
     expect(services.vault.credential(CloudPlatform.tianyi), isNull);
     expect(find.byType(WebLoginPage), findsOneWidget);
+    await detect(tester);
     expect(find.text('天翼登录尚未完成，请在网页完成验证码或安全验证后再检测'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
@@ -1418,7 +2045,7 @@ void main() {
       expect(view.params.initialSettings!.saveFormData, isFalse);
       expect(
         view.params.initialSettings!.userAgent,
-        WebLoginTarget.desktopUserAgent,
+        services.cloud.browserUa.selected(CloudPlatform.ctfile),
       );
       expect(view.params.initialUserScripts!.single.forMainFrameOnly, isTrue);
       final native = _CtfileController(301, challenge);
@@ -1546,7 +2173,7 @@ void main() {
       final view = platform.views.last;
       expect(
         view.params.initialSettings!.userAgent,
-        WebLoginTarget.desktopUserAgent,
+        services.cloud.browserUa.selected(CloudPlatform.guangya),
       );
       expect(
         view.params.initialSettings!.preferredContentMode,
@@ -1649,7 +2276,8 @@ void main() {
           final (main, controller) = attach(401);
           final expectedAgent = mobile
               ? WebLoginTarget.mobileUserAgent
-              : WebLoginTarget.desktopUserAgent;
+              : services.cloud.browserUa.selected(CloudPlatform.aliyun);
+          if (!mobile) expect(CloudBrowserUa.pooled(expectedAgent), isTrue);
           final expectedMode = mobile
               ? UserPreferredContentMode.MOBILE
               : UserPreferredContentMode.DESKTOP;

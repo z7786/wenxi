@@ -11,12 +11,129 @@ import 'support.dart';
 
 class _RealHttp extends HttpOverrides {}
 
+Future<({int width, int height, int top, int bottom})> _subtitleBounds(
+  MediaKitBackend backend,
+  String label,
+) async {
+  final clean = (await backend.screenshot())!;
+  final styled = (await backend.screenshot(includeSubtitles: true))!;
+  final output = Platform.environment['ASTERLINK_SUBTITLE_SCREENSHOTS'];
+  if (output != null) {
+    await Directory(output).create(recursive: true);
+    await File('$output/$label.png').writeAsBytes(styled);
+  }
+  final cleanCodec = await ui.instantiateImageCodec(clean);
+  final styledCodec = await ui.instantiateImageCodec(styled);
+  final a = (await cleanCodec.getNextFrame()).image;
+  final b = (await styledCodec.getNextFrame()).image;
+  try {
+    final before = (await a.toByteData())!.buffer.asUint8List();
+    final after = (await b.toByteData())!.buffer.asUint8List();
+    var left = b.width, right = -1, top = b.height, bottom = -1;
+    for (var i = 0; i + 3 < after.length; i += 4) {
+      if (before[i] == after[i] &&
+          before[i + 1] == after[i + 1] &&
+          before[i + 2] == after[i + 2]) {
+        continue;
+      }
+      final x = (i ~/ 4) % b.width, y = (i ~/ 4) ~/ b.width;
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+    }
+    expect(
+      right,
+      greaterThanOrEqualTo(left),
+      reason: 'Subtitle must be visible',
+    );
+    return (
+      width: right - left + 1,
+      height: bottom - top + 1,
+      top: top,
+      bottom: bottom,
+    );
+  } finally {
+    a.dispose();
+    b.dispose();
+    cleanCodec.dispose();
+    styledCodec.dispose();
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final library = [
     Platform.environment['ASTERLINK_MPV_LIBRARY'],
     '.local/player-test/libmpv/libmpv-2.dll',
   ].whereType<String>().where((path) => File(path).existsSync()).firstOrNull;
+
+  for (final format in ['ass', 'pgs', 'sample']) {
+    test(
+      'Embedded $format subtitles resize and move while paused, then restore',
+      () async {
+        MediaKit.ensureInitialized(libmpv: library);
+        final player = Player(
+          configuration: const PlayerConfiguration(libass: true, vo: 'null'),
+        );
+        final backend = MediaKitBackend(video: false, player: player);
+        addTearDown(backend.close);
+        final native = player.platform as NativePlayer;
+        await native.setProperty('ao', 'null');
+        await native.setProperty('vid', 'auto');
+        await native.setProperty('hwdec', 'no');
+        final source = DownloadSpec(
+          url: File('test/fixtures/player-$format.mkv').absolute.path,
+          fileName: 'player-$format.mkv',
+        );
+        await backend.open(source, Duration.zero);
+        await backend.setSubtitlePresentation(size: 22, height: 180, bottom: 0);
+        await backend.play();
+        await until(() => player.state.position.inMilliseconds >= 1200);
+        await backend.pause();
+        expect(player.state.track.subtitle.id, isNot('no'));
+        expect(player.state.track.subtitle.uri, isFalse);
+        final position = player.state.position;
+        final initial = await _subtitleBounds(backend, '$format-initial');
+        await backend.setSubtitlePresentation(size: 33, height: 180, bottom: 0);
+        final larger = await _subtitleBounds(backend, '$format-larger');
+        expect(larger.height, greaterThan(initial.height * 1.25));
+        await backend.setSubtitlePresentation(
+          size: 33,
+          height: 180,
+          bottom: .2,
+        );
+        final raised = await _subtitleBounds(backend, '$format-raised');
+        expect(raised.bottom, lessThan(larger.bottom - 20));
+        expect(raised.height, closeTo(larger.height, 2));
+        expect(raised.width, closeTo(larger.width, 2));
+        await backend.setSubtitlePresentation(size: 22, height: 180, bottom: 0);
+        expect(await _subtitleBounds(backend, '$format-restored'), initial);
+        expect(player.state.position, position);
+        expect(player.state.playing, isFalse);
+        // A new media open must not disable overrides behind the presentation
+        // cache, including when the chosen size and position stay unchanged.
+        await backend.setSubtitlePresentation(
+          size: 33,
+          height: 180,
+          bottom: .2,
+        );
+        await backend.open(source, Duration.zero);
+        await backend.setSubtitlePresentation(
+          size: 33,
+          height: 180,
+          bottom: .2,
+        );
+        await backend.play();
+        await until(() => player.state.position.inMilliseconds >= 1200);
+        await backend.pause();
+        expect(await _subtitleBounds(backend, '$format-reopened'), raised);
+      },
+      skip: library == null
+          ? 'Requires the pinned Windows libmpv runtime.'
+          : false,
+    );
+  }
 
   test(
     'Windows runtime decodes and renders embedded PGS bitmap subtitles',

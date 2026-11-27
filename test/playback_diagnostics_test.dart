@@ -128,7 +128,9 @@ void main() {
   test(
     'Initialization errors identify the failing phase and decoder fallback',
     () async {
-      fixture.configureBackend = (backend) => backend..failOpen = true;
+      fixture.configureBackend = (backend) => backend
+        ..describeVideo()
+        ..failOpen = true;
       await fixture.controller.start();
       expect(errors('player.hardware_fallback'), hasLength(1));
       final failure = errors('player.load_failed').single;
@@ -226,7 +228,9 @@ void main() {
     'Turning off recording also suppresses playback failure entries',
     () async {
       log.setEnabled(false);
-      fixture.configureBackend = (backend) => backend..failOpen = true;
+      fixture.configureBackend = (backend) => backend
+        ..describeVideo()
+        ..failOpen = true;
       await fixture.controller.start();
       expect(fixture.controller.error, isNotEmpty);
       expect(log.entries(errorsOnly: true), isEmpty);

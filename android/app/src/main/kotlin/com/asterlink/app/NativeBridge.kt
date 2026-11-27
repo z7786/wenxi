@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import com.asterlink.app.download.DownloadDirectoryException
 import com.asterlink.app.download.DownloadFileSaver
 import com.asterlink.app.download.DownloadStorage
 import com.asterlink.app.download.DownloadTargetStore
@@ -136,7 +137,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             return
         }
         if (call.method == "clientEnvironment") {
-            result.success(ClientEnvironment.read(context))
+            result.success(ClientEnvironment.read(activity ?: context))
             return
         }
         if (call.method == "downloadNetwork") {
@@ -247,8 +248,8 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             lanFiles.pick(activity, result)
             return
         }
-        if (call.method == "lanScanQr") {
-            lanQrScanner.scan(result)
+        if (call.method == "lanScanQr" || call.method == "scanQr") {
+            lanQrScanner.scan(result, parseShare = call.method == "scanQr")
             return
         }
         if (call.method == "openFile" || call.method == "shareFile") {
@@ -401,7 +402,11 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
                     "legacySnapshot" -> "旧版数据读取失败，原文件已保留，可稍后重试导入"
                     "gopeed" -> if (error is EngineKeyStore.Unavailable) error.message else "下载组件操作失败，请重试并检查下载目录"
                     "deleteFile" -> "文件未能删除，请检查目录权限后重试"
-                    "saveFile" -> if (error.message == "保存已暂停") "保存已暂停" else "无法保存下载文件，请检查存储空间和目录权限"
+                    "saveFile" -> when {
+                        error is DownloadDirectoryException -> error.message
+                        error.message == "保存已暂停" -> "保存已暂停"
+                        else -> "无法保存下载文件，请检查存储空间和目录权限"
+                    }
                     "inspectDownloadTarget", "openDownloadTarget", "downloadTargetIo", "verifyDownloadTarget", "finishDownloadTarget", "releaseDownloadTarget", "discardDownloadTarget", "forgetDownloadTarget" ->
                         error.message ?: "无法访问下载目标，请检查存储空间和目录权限"
                     else -> "下载组件操作失败，请重试并检查下载目录"

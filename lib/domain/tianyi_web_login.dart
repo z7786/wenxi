@@ -2,8 +2,19 @@ import 'dart:convert';
 import '../core/json.dart';
 
 class TianyiWebLogin {
-  static const loginUrl =
-      'https://m.cloud.189.cn/udb/udb_login.jsp?pageId=1&pageKey=normal&clientType=wap&redirectURL=https%3A%2F%2Fcloud.189.cn%2Fweb%2Fredirect.html';
+  // The official parent creates the browser fingerprint and passes it to the
+  // SSO iframe. Opening the portal API directly skips that initialization.
+  static const loginUrl = 'https://cloud.189.cn/web/login.html';
+
+  static const identityUrl =
+      'https://cloud.189.cn/api/open/user/getUserInfoForPortal.action';
+  // Only scopes which can actually send cookies to the portal identity API.
+  // The WAP callback and /web path can hold unrelated same-name sessions.
+  static const cookieUrls = [
+    identityUrl,
+    'https://cloud.189.cn/api/',
+    'https://cloud.189.cn/',
+  ];
 
   static const origins = {
     'https://cloud.189.cn',
@@ -58,35 +69,147 @@ class TianyiWebLogin {
       ? value
       : '';
 
-  static String encode(String cookie, Object? browser) {
+  static const maxCookieCandidates = 3;
+
+  static List<String> cookieCandidates(Object? raw) {
+    final result = <String>{};
+    final values = decode(raw)['cookieCandidates'];
+    if (values is! List) return const [];
+    for (final value in values.take(maxCookieCandidates)) {
+      if (value is! String ||
+          value.length > 16384 ||
+          RegExp(r'[\x00-\x1f\x7f-\x9f]').hasMatch(value) ||
+          !RegExp(
+            r'(?:^|;)\s*(?:COOKIE_LOGIN_USER|LOGIN_USER)=[^;\s]+',
+          ).hasMatch(value)) {
+        continue;
+      }
+      result.add(value.trim());
+    }
+    return result.toList();
+  }
+
+  static String encode(
+    String cookie,
+    Object? browser, {
+    List<String> candidates = const [],
+  }) {
     final id = browserId(browser);
-    return id.isEmpty
+    final headers = cookieCandidates({'cookieCandidates': candidates});
+    return id.isEmpty && headers.length < 2
         ? cookie
-        : jsonEncode({'cookie': cookie, 'browserId': id});
+        : jsonEncode({
+            'cookie': cookie,
+            if (id.isNotEmpty) 'browserId': id,
+            if (headers.length > 1) 'cookieCandidates': headers,
+          });
   }
 
   static Map<String, String> fields(String raw) => {
     'primary': cookie(raw),
     if (browserId(decode(raw)['browserId']).isNotEmpty)
       'browserId': browserId(decode(raw)['browserId']),
+    if (cookieCandidates(raw).length > 1)
+      'cookieCandidates': jsonEncode({
+        'cookieCandidates': cookieCandidates(raw),
+      }),
   };
 
-  static const mobileFormScript = r'''(() => {
-    if (window.top !== window || location.origin !== 'https://open.e.189.cn' ||
-        location.pathname !== '/api/logbox/separate/wap/index.html' || window.__asterTianyiForm) return;
+  static const formScript = r'''(() => {
+    if (location.origin !== 'https://open.e.189.cn' ||
+        location.pathname !== '/api/logbox/separate/web/index.html' ||
+        new URL(location.href).searchParams.get('appId') !== 'cloud' || window.__asterTianyiForm) return;
+    if (window.top !== window) {
+      try {
+        const parent = new URL(document.referrer);
+        if (window.parent !== window.top || parent.origin !== 'https://cloud.189.cn' ||
+            parent.username || parent.password) return;
+      } catch (_) { return; }
+    }
     window.__asterTianyiForm = true;
-    let observer;
+    let observer, accountSelected = false;
+    const visible = el => el && el.getClientRects().length && !el.disabled;
     const select = () => {
-      const button = [...document.querySelectorAll('a,button,[role="button"]')].find(el =>
-        ['其它方式登录', '其他方式登录'].includes(el.textContent?.trim()) && el.getClientRects().length && !el.disabled);
-      if (!button) return;
-      observer?.disconnect();
-      button.click();
+      const sms = document.getElementById('j-jump-sms');
+      if (visible(sms)) {
+        observer.disconnect();
+        sms.click();
+        return;
+      }
+      const account = document.getElementById('tab-pw');
+      if (!accountSelected && visible(account)) {
+        accountSelected = true;
+        account.click();
+      }
     };
     observer = new MutationObserver(select);
     observer.observe(document, {childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden']});
     select();
     setTimeout(() => observer.disconnect(), 15000);
+  })()''';
+
+  // The portal needs its desktop identity, but its captcha then listens only
+  // for mouse drags. Relay the user's real single-finger drag to those handlers.
+  // Do not change the browser fingerprint, solve or submit the challenge.
+  static const touchScript = r'''(() => {
+    if (location.origin !== 'https://open.e.189.cn' ||
+        location.pathname !== '/api/logbox/separate/web/index.html' ||
+        new URL(location.href).searchParams.get('appId') !== 'cloud' ||
+        !navigator.maxTouchPoints || !window.MouseEvent || window.__asterTianyiTouch ||
+        /(phone|pad|pod|iPhone|iPod|ios|iPad|Android|Mobile|BlackBerry|IEMobile|MQQBrowser|JUC|Fennec|wOSBrowser|BrowserNG|WebOS|Symbian|Windows Phone)/i.test(navigator.userAgent)) return;
+    if (window.top !== window) {
+      try {
+        const parent = new URL(document.referrer);
+        if (window.parent !== window.top || parent.origin !== 'https://cloud.189.cn' ||
+            parent.username || parent.password) return;
+      } catch (_) { return; }
+    }
+    window.__asterTianyiTouch = true;
+    let active = null;
+    const style = () => {
+      if (!document.head || document.getElementById('aster-tianyi-captcha-touch')) return;
+      const node = document.createElement('style');
+      node.id = 'aster-tianyi-captcha-touch';
+      node.textContent = '#j__21cn_ecaptch_slider,#j__21cn_ecaptch_jigsaw{touch-action:none!important}';
+      document.head.appendChild(node);
+    };
+    const mouse = (element, type, touch) => element.dispatchEvent(new MouseEvent(type, {
+      bubbles: true, cancelable: true, view: window,
+      clientX: touch.clientX, clientY: touch.clientY,
+      screenX: touch.screenX, screenY: touch.screenY,
+      button: 0, buttons: type === 'mouseup' ? 0 : 1,
+    }));
+    const cancel = () => {
+      const previous = active;
+      active = null;
+      if (previous?.element.isConnected) document.getElementById('j__21cn_ecaptch_refresh')?.click();
+    };
+    style();
+    if (!document.head) document.addEventListener('DOMContentLoaded', style, {once: true});
+    document.addEventListener('touchstart', event => {
+      if (active || event.touches.length !== 1) { cancel(); return; }
+      const element = event.target?.closest?.('#j__21cn_ecaptch_slider,#j__21cn_ecaptch_jigsaw');
+      if (!element || !['j__21cn_ecaptch_slider', 'j__21cn_ecaptch_jigsaw'].includes(element.id) ||
+          element.ownerDocument !== document) return;
+      style();
+      active = {element, id: event.touches[0].identifier};
+      if (event.cancelable) event.preventDefault();
+      mouse(element, 'mousedown', event.touches[0]);
+    }, {capture: true, passive: false});
+    const move = (event, type) => {
+      if (!active) return;
+      if (!active.element.isConnected) { active = null; return; }
+      if (event.touches.length > 1) { cancel(); return; }
+      const touch = Array.from(event.changedTouches).find(touch => touch.identifier === active.id);
+      if (!touch) return;
+      const element = active.element;
+      if (type === 'mouseup') active = null;
+      if (event.cancelable) event.preventDefault();
+      mouse(element, type, touch);
+    };
+    document.addEventListener('touchmove', event => move(event, 'mousemove'), {capture: true, passive: false});
+    document.addEventListener('touchend', event => move(event, 'mouseup'), {capture: true, passive: false});
+    document.addEventListener('touchcancel', cancel, {capture: true, passive: false});
   })()''';
 
   // The official login iframe and account API share a browser fingerprint.

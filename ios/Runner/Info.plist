@@ -80,7 +80,7 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
-	<string>扫描二维码以连接设备或登录网盘</string>
+	<string>扫描分享二维码、连接设备或登录网盘</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>将视频截图保存到相册</string>
 	<key>NSPhotoLibraryUsageDescription</key>

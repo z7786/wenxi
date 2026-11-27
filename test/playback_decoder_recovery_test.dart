@@ -9,11 +9,7 @@ void main() {
   late PlaybackFixture f;
   setUp(() => f = PlaybackFixture(renewable: true));
   tearDown(() => f.controller.close());
-  const failure = PlaybackFailure(
-    'decoder stopped',
-    PlaybackFailureKind.decoder,
-    decoderUnavailable: true,
-  );
+  const failure = PlaybackFailure('decoder stopped', PlaybackFailureKind.decoder);
   void fail() => f.current
     ..failure = failure
     ..fail();

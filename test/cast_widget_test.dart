@@ -10,6 +10,7 @@ import 'package:asterlink/playback/playback_state.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/playback/cast/cast_discovery.dart';
 import 'package:asterlink/playback/cast/cast_session.dart';
+import 'package:asterlink/playback/cast/cast_network.dart';
 import 'package:asterlink/playback/cast/dlna.dart';
 import 'package:asterlink/ui/player_page.dart';
 import 'player_support.dart';
@@ -54,10 +55,24 @@ class _Session extends CastSession {
   _Session(super.device, super.source);
   PlayerState value = const PlayerState();
   bool cleaned = false;
+  Object? startFailure;
   Future<void>? barrier;
   final commands = <String>[];
   void disableSeek() {
     seekSupported = false;
+    notifyListeners();
+  }
+
+  void reportMuted(bool value) {
+    muteSupported = true;
+    muted = value;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> setMuted(bool value) async {
+    commands.add('Mute:$value');
+    muted = value;
     notifyListeners();
   }
 
@@ -86,6 +101,7 @@ class _Session extends CastSession {
     notifyListeners();
     await barrier;
     require(!cleaned, '投屏已取消');
+    if (startFailure case final failure?) throw failure;
     commands.add('Play');
     connected = volumeSupported = true;
     value = value.copyWith(
@@ -153,6 +169,7 @@ void main() {
     double scale = 1,
     Future<void>? barrier,
     bool television = false,
+    Object? startFailure,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -163,7 +180,9 @@ void main() {
     final discovery = _Discovery(), sessions = <_Session>[];
     final fixture = PlaybackFixture(
       castSessionFactory: (device, source) {
-        final session = _Session(device, source)..barrier = barrier;
+        final session = _Session(device, source)
+          ..barrier = barrier
+          ..startFailure = startFailure;
         sessions.add(session);
         return session;
       },
@@ -238,6 +257,31 @@ void main() {
     await tester.tap(tile);
     await tester.pumpAndSettle();
   }
+
+  testWidgets('local relay bind errors identify the phone and allow retry', (
+    tester,
+  ) async {
+    final result = await render(
+      tester,
+      startFailure: CastNetworkException(
+        'bind',
+        const SocketException(
+          'Cannot assign requested address',
+          osError: OSError('Cannot assign requested address', 99),
+        ),
+      ),
+    );
+    await open(tester);
+    await connect(tester);
+    expect(find.text('无法启动本机投屏服务，请检查网络状态后重试'), findsOneWidget);
+    expect(result.fixture.controller.connectingCast, isFalse);
+    expect(result.fixture.controller.casting, isFalse);
+    expect(result.fixture.controller.state.playing, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+    result.fixture.store.dispose();
+  });
 
   Future<void> capture(WidgetTester tester, String name) async {
     if (Platform.environment['ASTERLINK_CAST_CAPTURE'] != '1') return;
@@ -314,6 +358,37 @@ void main() {
     await tester.tap(pause);
     await tester.pumpAndSettle();
     expect(page.sessions.single.commands.last, 'Pause');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('TV mute control is visible and changes the remote mute state', (
+    tester,
+  ) async {
+    final page = await render(tester, size: const Size(320, 640), scale: 1.5);
+    await open(tester);
+    await connect(tester);
+    page.sessions.single.reportMuted(true);
+    await tester.pumpAndSettle();
+    final button = find.byKey(const Key('cast-mute'));
+    await tester.scrollUntilVisible(
+      button,
+      180,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const Key('player-cast-panel')),
+            matching: find.byType(Scrollable),
+          )
+          .last,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('电视已静音'), findsOneWidget);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(page.sessions.single.commands.last, 'Mute:false');
+    expect(find.text('电视音量 35%'), findsOneWidget);
+    expect(find.byTooltip('电视静音'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
     await tester.pumpAndSettle();
@@ -503,10 +578,12 @@ void main() {
       page.discovery.notifyListeners();
       await tester.pumpAndSettle();
       final devices = find.byKey(const Key('cast-device-test-tv'));
-      final scrollable = find.descendant(
-        of: find.byKey(const Key('player-cast-panel')),
-        matching: find.byType(Scrollable),
-      ).first;
+      final scrollable = find
+          .descendant(
+            of: find.byKey(const Key('player-cast-panel')),
+            matching: find.byType(Scrollable),
+          )
+          .first;
       await tester.scrollUntilVisible(devices, 120, scrollable: scrollable);
       expect(devices, findsOneWidget);
       final button = find.byKey(const Key('cast-reconnect'));

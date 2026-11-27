@@ -44,7 +44,7 @@ import 'ui/mobile_data_download_prompt.dart';
 import 'ui/player_page.dart';
 import 'ui/floating_playback_host.dart';
 import 'playback/floating_playback.dart';
-import 'playback/windows_player_components.dart';
+import 'playback/playback_runtime.dart';
 import 'ui/independent_player_app.dart';
 import 'playback/independent_player_window.dart';
 import 'platform/external_open.dart';
@@ -52,9 +52,11 @@ import 'playback/external_playback.dart';
 import 'platform/windows_pip.dart';
 import 'platform/windows_window_theme.dart';
 import 'platform/desktop_platform.dart';
+import 'platform/windows_clipboard_keys.dart';
 
 void main(List<String> arguments) {
   WidgetsFlutterBinding.ensureInitialized();
+  installWindowsClipboardKeys();
   if (arguments.length == 2 && arguments.first == independentPlayerArgument) {
     runApp(IndependentPlayerApp(endpoint: arguments[1]));
     return;
@@ -85,36 +87,53 @@ void main(List<String> arguments) {
 
 Future<void> _initializeRuntime() async {
   await DiagnosticRuntime.start();
-  await initializeMediaRuntime();
   if (isDesktopPlatform) {
-    await windowManager.ensureInitialized();
-    unawaited(
-      windowManager.waitUntilReadyToShow(
-        const WindowOptions(
-          title: '文析助手',
-          size: Size(1100, 780),
-          minimumSize: appWindowMinimumSize,
-          center: true,
-        ),
-        () async {
-          await windowManager.show();
-          await windowManager.focus();
-        },
-      ),
-    );
+    try {
+      await windowManager.ensureInitialized();
+      unawaited(
+        windowManager
+            .waitUntilReadyToShow(
+              const WindowOptions(
+                title: '文析助手',
+                size: Size(1100, 780),
+                minimumSize: appWindowMinimumSize,
+                center: true,
+                skipTaskbar: false,
+              ),
+            )
+            .then((_) async {
+              await windowManager.show();
+              await windowManager.focus();
+            })
+            .catchError((Object error, StackTrace stack) {
+              DiagnosticLog.error('window.presentation_failed', error, stack);
+            }),
+      );
+    } catch (error, stack) {
+      // The native runner owns the main window; optional window settings
+      // cannot prevent account restoration, parsing or downloads.
+      DiagnosticLog.error('window.initialize_failed', error, stack);
+    }
   }
 }
 
 class AppBootstrap extends StatefulWidget {
-  const AppBootstrap({super.key, this.initializeRuntime, this.servicesLoader});
+  const AppBootstrap({
+    super.key,
+    this.initializeRuntime,
+    this.servicesLoader,
+    this.playbackRuntime,
+  });
   final Future<void> Function()? initializeRuntime;
   final Future<AppServices> Function()? servicesLoader;
+  final PlaybackRuntime? playbackRuntime;
   @override
   State<AppBootstrap> createState() => _BootstrapState();
 }
 
 class _BootstrapState extends State<AppBootstrap> {
   bool _runtimeInitialized = false;
+  bool _playbackPreloadStarted = false;
   late Future<AppServices> services = _startServices();
   Future<AppServices> _startServices() {
     final pending = loadServices();
@@ -150,7 +169,16 @@ class _BootstrapState extends State<AppBootstrap> {
         'app.runtime_ready',
         fields: {'elapsedMs': startup.elapsedMilliseconds},
       );
-      return await (widget.servicesLoader ?? AppServices.open)();
+      final result = await (widget.servicesLoader ?? AppServices.open)();
+      if (!_playbackPreloadStarted) {
+        _playbackPreloadStarted = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            (widget.playbackRuntime ?? PlaybackRuntime.shared).preload();
+          }
+        });
+      }
+      return result;
     } catch (error, stack) {
       DiagnosticLog.error(
         _runtimeInitialized ? 'app.services_failed' : 'app.bootstrap_failed',
@@ -623,6 +651,7 @@ class _MainShellState extends State<MainShell>
       await _windowVisibility.run(() async {
         if (!mounted || _exiting) return;
         await windowManager.setPreventClose(true);
+        await _keepTaskbarEntry();
         await trayManager.setIcon(
           Platform.isMacOS ? 'assets/icons/app.png' : 'assets/icons/app.ico',
         );
@@ -639,42 +668,34 @@ class _MainShellState extends State<MainShell>
         );
         trayReady = true;
       });
-      // Also handles a minimize that happened while the tray was starting.
-      onWindowMinimize();
     } catch (error, stack) {
       DiagnosticLog.error('app.tray_init_failed', error, stack);
     }
   }
 
-  Future<void> _hideToTray({bool minimizedOnly = false}) =>
-      _windowVisibility.run(() async {
-        if (!mounted || !trayReady || _exiting) return;
-        if (minimizedOnly) {
-          if (closing || !await windowManager.isMinimized()) return;
-          if (!mounted || closing || _exiting) return;
-        }
-        await windowManager.hide();
-      });
+  Future<void> _hideToTray() => _windowVisibility.run(() async {
+    if (!mounted || !trayReady || _exiting) return;
+    await windowManager.hide();
+  });
+
+  Future<void> _keepTaskbarEntry() async {
+    if (!Platform.isWindows) return;
+    try {
+      await windowManager.setSkipTaskbar(false);
+    } catch (error, stack) {
+      DiagnosticLog.error('app.taskbar_entry_failed', error, stack);
+    }
+  }
 
   Future<void> _showWindow() => _windowVisibility.run(() async {
     if (!mounted || _exiting) return;
     // show() restores only minimized windows, preserving maximized/PiP bounds.
     await windowManager.show();
     if (!mounted || _exiting) return;
+    await _keepTaskbarEntry();
+    if (!mounted || _exiting) return;
     await windowManager.focus();
   });
-
-  @override
-  void onWindowMinimize() {
-    unawaited(
-      _hideToTray(minimizedOnly: true).catchError((
-        Object error,
-        StackTrace stack,
-      ) {
-        DiagnosticLog.error('app.tray_hide_failed', error, stack);
-      }),
-    );
-  }
 
   @override
   void onTrayIconMouseDown() {
@@ -933,14 +954,48 @@ class _MainShellState extends State<MainShell>
           await widget.services.rapidTransfers.clearCompleted();
         });
       case 'clear-failed-uploads':
-        if (await confirm(
-              context,
-              '清理失败传输',
-              '删除未完成且已停止的跨盘传输记录，并清理对应的已下载中转文件？目标网盘中已完成的文件会保留。',
-            ) &&
-            mounted) {
-          await busy(context, widget.services.rapidTransfers.clearFailed);
-        }
+        await _clearFailedCrossTransfers();
+    }
+  }
+
+  Future<void> _clearFailedCrossTransfers() async {
+    final manager = widget.services.rapidTransfers;
+    final ids = manager.tasks
+        .where((t) => !t.active && t.canRetry)
+        .map((t) => t.id)
+        .toList(growable: false);
+    if (ids.isEmpty) {
+      message(context, '暂无可清理的失败跨盘传输');
+      return;
+    }
+    if (!await confirm(
+          context,
+          '清理失败跨盘传输',
+          '将清理当前 ${ids.length} 个已停止且未完成的跨盘任务及中转缓存，清理后无法继续这些任务。目标网盘中已完成的文件会保留。',
+          action: '清理',
+          destructive: true,
+        ) ||
+        !mounted) {
+      return;
+    }
+    final result = await busy(
+      context,
+      () => manager.clearFailed(ids: ids),
+      label: '正在清理失败跨盘传输…',
+    );
+    if (!mounted || result == null) return;
+    if (result.failed.isNotEmpty) {
+      message(
+        context,
+        '已清理 ${result.succeeded.length} 条记录，${result.failed.length} 条暂未清理：${errorText(result.failed.values.first)}',
+      );
+    } else if (result.succeeded.isEmpty) {
+      message(context, '任务状态已变化，暂无可清理的失败跨盘传输');
+    } else {
+      message(
+        context,
+        '已清理 ${result.succeeded.length} 条失败跨盘传输${result.skipped.isNotEmpty ? '，状态变化的 ${result.skipped.length} 条已跳过' : ''}',
+      );
     }
   }
 
@@ -1050,6 +1105,12 @@ class _MainShellState extends State<MainShell>
             child: Builder(
               builder: (context) {
                 final rail = constraints.maxWidth >= 820;
+                final mobileTablet =
+                    const {
+                      TargetPlatform.android,
+                      TargetPlatform.iOS,
+                    }.contains(Theme.of(context).platform) &&
+                    MediaQuery.sizeOf(context).shortestSide >= 600;
                 final desktopHeader =
                     (selected == 0 || selected == 4) &&
                     Theme.of(context).platform == TargetPlatform.windows;
@@ -1114,7 +1175,11 @@ class _MainShellState extends State<MainShell>
                     bottom: rail,
                     child: Center(
                       child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 1120),
+                        constraints: BoxConstraints(
+                          maxWidth: mobileTablet && selected == 0
+                              ? double.infinity
+                              : 1120,
+                        ),
                         child: Column(
                           children: [
                             RemoteControlPrompts(

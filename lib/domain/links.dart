@@ -8,7 +8,12 @@ import 'c139_passcode.dart';
 
 class LinkParser {
   static const _tail = r'''[^\s<>"'，。；！、【】《》「」“”‘’\u3000\u200b]+''';
-  static final _urls = RegExp('https?://$_tail', caseSensitive: false);
+  static final _urls = RegExp(
+    r'https?\\?://'
+    '$_tail',
+    caseSensitive: false,
+  );
+  static final _escapedScheme = RegExp(r'^(https?)\\://', caseSensitive: false);
   static final _knownHosts = {
     ...CloudPlatform.values.expand((p) => p.hosts),
     ...UnsupportedCloudPlatform.values.expand((p) => p.hosts),
@@ -58,6 +63,11 @@ class LinkParser {
 
   static String normalize(String input) {
     var value = LinkObfuscation.cleanUrl(input.trim());
+    // Markdown can escape the scheme colon; preserve all other URL bytes.
+    value = value.replaceFirstMapped(
+      _escapedScheme,
+      (match) => '${match[1]}://',
+    );
     require(value.isNotEmpty, '请输入链接');
     require(!RegExp(r'[\x00-\x20\x7f]').hasMatch(value), '链接包含空格或控制字符');
     if (!RegExp(r'^[A-Za-z][A-Za-z0-9+.-]*://').hasMatch(value)) {
@@ -131,7 +141,8 @@ class LinkParser {
                 platform == CloudPlatform.ctfile ||
                 platform == CloudPlatform.aliyun ||
                 platform == CloudPlatform.tianyi ||
-                platform == CloudPlatform.feijipan) &&
+                platform == CloudPlatform.feijipan ||
+                platform == CloudPlatform.pikpak) &&
             raw.contains('](')) {
           raw = raw.substring(0, raw.indexOf(']('));
           url = normalize(raw);
@@ -174,7 +185,8 @@ class LinkParser {
             if (platform == CloudPlatform.ctfile ||
                 platform == CloudPlatform.feijipan ||
                 platform == CloudPlatform.aliyun ||
-                platform == CloudPlatform.tianyi) {
+                platform == CloudPlatform.tianyi ||
+                platform == CloudPlatform.pikpak) {
               raw = raw.replaceFirst(RegExp(r'[(（]+$'), '');
             }
             url = normalize(raw);
@@ -538,6 +550,7 @@ class LinkParser {
     }
     final parts = _parts(uri);
     return switch (platform) {
+      CloudPlatform.webdav => null,
       CloudPlatform.github =>
         GitHubLink.parse(uri) == null ? null : '${uri.host}${uri.path}',
       CloudPlatform.pikpak => _pathId(parts, r'^/s/([A-Za-z0-9_-]+)'),

@@ -7,9 +7,11 @@ import '../core/json.dart';
 import '../data/cloud_repository.dart';
 import '../data/http.dart';
 import '../data/state_store.dart';
+import '../data/uploads/upload_concurrency.dart';
 import '../diagnostics/app_log.dart';
 import '../domain/models.dart';
 import '../domain/uploads.dart';
+import '../domain/settings.dart';
 import '../download/download_activity.dart';
 import 'upload_task.dart';
 import 'upload_folder.dart';
@@ -20,18 +22,40 @@ class UploadManager extends ChangeNotifier {
     required this.store,
     required this.cloud,
     this.foreground,
+    this.concurrent = 2,
+    this.concurrencyProvider,
+    UploadWorkLimiter? fileSlots,
     UploadSources? sources,
-  }) : sources = sources ?? UploadSources();
+  }) : sources = sources ?? UploadSources(),
+       _sharedFileSlots = fileSlots;
   final StateStore store;
   final CloudRepository cloud;
   final UploadSources sources;
   final Future<void> Function()? foreground;
+  final int concurrent;
+  final int Function()? concurrencyProvider;
+  final UploadWorkLimiter? _sharedFileSlots;
+  int get maxConcurrent => (concurrencyProvider?.call() ?? concurrent).clamp(
+    1,
+    AppSettings.maxConcurrentCrossTransfers,
+  );
+  late final _fileSlots = _sharedFileSlots ?? UploadWorkLimiter(maxConcurrent);
+
+  void settingsChanged() {
+    _fileSlots.limit = maxConcurrent;
+    if (_closing) return;
+    if (_wake?.isCompleted == false) _wake!.complete();
+    _schedule();
+    notifyListeners();
+  }
+
   final _zone = Zone.current, _writes = AsyncGate(), _commands = AsyncGate();
   final _tasks = <UploadTask>[], _sources = <String, XFile>{};
   final _fresh = <String>{};
   final completions = StreamController<UploadTask>.broadcast(sync: true);
-  RequestScope? _scope;
+  final _runs = <String, _UploadRun>{};
   Future<void>? _runner;
+  Completer<void>? _wake;
   Future<void>? _pulse;
   Timer? _heartbeat;
   bool _closing = false, _initialized = false, _publishing = false;
@@ -213,7 +237,7 @@ class UploadManager extends ChangeNotifier {
       (s, t) =>
           s + (t.phase == UploadPhase.preparing && !t.isFolder ? 0 : t.sent),
     );
-    final speed = current?.speed ?? 0;
+    final speed = active.fold(0, (sum, task) => sum + task.speed);
     return DownloadActivity(
       active: active.length,
       progress: total > 0 ? (sent * 100 ~/ total).clamp(0, 100) : -1,
@@ -235,9 +259,11 @@ class UploadManager extends ChangeNotifier {
   }
 
   void _schedule() {
-    if (_closing ||
-        _runner != null ||
-        !_tasks.any((t) => t.status == UploadStatus.pending)) {
+    if (_closing || !_tasks.any((t) => t.status == UploadStatus.pending)) {
+      return;
+    }
+    if (_runner != null) {
+      if (_wake?.isCompleted == false) _wake!.complete();
       return;
     }
     _runner = _zone.run(_drain);
@@ -267,28 +293,50 @@ class UploadManager extends ChangeNotifier {
     });
     try {
       while (!_closing) {
-        final next = _tasks
-            .where((t) => t.status == UploadStatus.pending)
-            .firstOrNull;
-        if (next == null) break;
-        try {
-          await foreground?.call();
-        } catch (e) {
-          await stopAll(reason: '后台传输服务无法启动，请返回应用后重试');
-          break;
+        while (!_closing && _runs.length < maxConcurrent) {
+          final next = _tasks
+              .where(
+                (t) =>
+                    t.status == UploadStatus.pending &&
+                    !_runs.containsKey(t.id),
+              )
+              .firstOrNull;
+          if (next == null) break;
+          try {
+            await foreground?.call();
+          } catch (e) {
+            await stopAll(reason: '后台传输服务无法启动，请返回应用后重试');
+            break;
+          }
+          if (_closing || next.status != UploadStatus.pending) continue;
+          if (_runs.length >= maxConcurrent) break;
+          final run = _UploadRun();
+          _runs[next.id] = run;
+          _background(
+            _run(next, run).whenComplete(() {
+              _runs.remove(next.id);
+              run.done.complete();
+            }),
+          );
         }
-        if (_closing || next.status != UploadStatus.pending) continue;
-        await _run(next);
+        if (_runs.isEmpty) break;
+        final wake = _wake = Completer<void>();
+        await Future.any([
+          ..._runs.values.map((run) => run.done.future),
+          wake.future,
+        ]);
+        _wake = null;
       }
     } finally {
+      await Future.wait(_runs.values.map((run) => run.done.future));
       _heartbeat?.cancel();
       _heartbeat = null;
       await foreground?.call();
     }
   }
 
-  Future<void> _run(UploadTask t) async {
-    final scope = _scope = RequestScope();
+  Future<void> _run(UploadTask t, _UploadRun run) async {
+    final scope = run.scope;
     t.status = UploadStatus.running;
     t.phase = UploadPhase.preparing;
     t.sent = t.folder?.completedBytes ?? 0;
@@ -347,42 +395,45 @@ class UploadManager extends ChangeNotifier {
             'upload.file.start',
             fields: {'platform': t.session.platform.key, 'bytes': t.size},
           );
-          final result = await cloud.upload(
-            t.session,
-            t.parent,
-            UploadFile(
-              name: t.name,
-              size: t.size,
-              mimeType: t.mimeType,
-              modifiedAt: DateTime.fromMillisecondsSinceEpoch(t.modifiedAt),
-              read: file.openRead,
-              validate: validate,
+          final result = await _fileSlots.run(
+            () => cloud.upload(
+              t.session,
+              t.parent,
+              UploadFile(
+                name: t.name,
+                size: t.size,
+                mimeType: t.mimeType,
+                modifiedAt: DateTime.fromMillisecondsSinceEpoch(t.modifiedAt),
+                read: file.openRead,
+                validate: validate,
+              ),
+              onProgress: (p) {
+                guard();
+                final now = watch.elapsedMilliseconds,
+                    changed = t.phase != p.phase;
+                if (changed) {
+                  sampledAt = now;
+                  sampledSent = p.sent;
+                  t.speed = 0;
+                }
+                t.phase = p.phase;
+                t.sent = p.sent.clamp(0, t.size);
+                if (p.phase == UploadPhase.uploading &&
+                    now - sampledAt >= 500) {
+                  t.speed =
+                      ((p.sent - sampledSent).clamp(0, t.size) *
+                      1000 ~/
+                      (now - sampledAt));
+                  sampledAt = now;
+                  sampledSent = p.sent;
+                }
+                if (changed || now - lastPaint >= 150) {
+                  lastPaint = now;
+                  notifyListeners();
+                }
+                if (changed) _background(_save());
+              },
             ),
-            onProgress: (p) {
-              guard();
-              final now = watch.elapsedMilliseconds,
-                  changed = t.phase != p.phase;
-              if (changed) {
-                sampledAt = now;
-                sampledSent = p.sent;
-                t.speed = 0;
-              }
-              t.phase = p.phase;
-              t.sent = p.sent.clamp(0, t.size);
-              if (p.phase == UploadPhase.uploading && now - sampledAt >= 500) {
-                t.speed =
-                    ((p.sent - sampledSent).clamp(0, t.size) *
-                    1000 ~/
-                    (now - sampledAt));
-                sampledAt = now;
-                sampledSent = p.sent;
-              }
-              if (changed || now - lastPaint >= 150) {
-                lastPaint = now;
-                notifyListeners();
-              }
-              if (changed) _background(_save());
-            },
           );
           guard();
           t.fileId = result.id;
@@ -416,7 +467,6 @@ class UploadManager extends ChangeNotifier {
       );
     } finally {
       t.speed = 0;
-      _scope = null;
       await _save();
       notifyListeners();
       // A cancelled commit may still have reached the provider. Refresh rather
@@ -442,9 +492,20 @@ class UploadManager extends ChangeNotifier {
     await RequestScope.guarded(() async {
       await sources.validateFolder(folder);
       checkpoint();
-      final listings = <String, List<CloudFile>>{};
-      Future<List<CloudFile>> listing(String parent) async =>
-          listings[parent] ??= List.of(await cloud.list(task.session, parent));
+      final listings = <String, Future<List<CloudFile>>>{};
+      Future<List<CloudFile>> listing(String parent) async {
+        final request = listings.putIfAbsent(
+          parent,
+          () async => List.of(await cloud.list(task.session, parent)),
+        );
+        try {
+          return await request;
+        } catch (_) {
+          if (identical(listings[parent], request)) listings.remove(parent);
+          rethrow;
+        }
+      }
+
       final resolved = <String, String>{};
       final directoryWatch = Stopwatch()..start();
       var savedAt = 0, unsavedDirectories = 0;
@@ -506,10 +567,8 @@ class UploadManager extends ChangeNotifier {
       }
       if (unsavedDirectories > 0) await _save();
 
-      var completedBytes = folder.completedBytes;
       for (final file in folder.files) {
         checkpoint();
-        folder.currentItem = '${folder.name}/${file.relativePath}';
         final parent = resolved[file.directory]!;
         if (file.completed) {
           // Saved progress must still refer to the same remote file. Never
@@ -525,16 +584,66 @@ class UploadManager extends ChangeNotifier {
             ),
             '已完成的目标文件已移走，请检查网盘后重新选择',
           );
-          continue;
         }
-        task.phase = UploadPhase.preparing;
-        task.sent = completedBytes;
-        task.speed = 0;
-        notifyListeners();
-        await sources.validate(file);
+      }
+
+      final pending = folder.files.where((file) => !file.completed).toList();
+      final progress = <UploadFolderFile, UploadProgress>{};
+      final rates = <UploadFolderFile, _UploadRate>{};
+      final watch = Stopwatch()..start();
+      var lastPaint = 0;
+      var completedBytes = folder.completedBytes, next = 0;
+      final scope = RequestScope(), parentScope = RequestScope.current;
+      var settled = false;
+      Object? failure;
+      StackTrace? failureStack;
+      var failedItem = '';
+      unawaited(
+        parentScope?.whenCancel.then((_) {
+          if (!settled) scope.cancel();
+        }),
+      );
+
+      void paint({bool force = false}) {
+        final uploading = progress.values.any(
+          (p) => p.phase == UploadPhase.uploading,
+        );
+        final phase = uploading
+            ? UploadPhase.uploading
+            : progress.isNotEmpty &&
+                  progress.values.every((p) => p.phase == UploadPhase.finishing)
+            ? UploadPhase.finishing
+            : UploadPhase.preparing;
+        final sent =
+            completedBytes +
+            progress.entries.fold<int>(
+              0,
+              (sum, entry) =>
+                  sum +
+                  (entry.value.phase == UploadPhase.preparing
+                      ? 0
+                      : entry.value.sent.clamp(0, entry.key.size)),
+            );
+        final now = watch.elapsedMilliseconds, changed = task.phase != phase;
+        task.phase = phase;
+        task.sent = sent.clamp(0, task.size);
+        task.speed = rates.values.fold(0, (sum, rate) => sum + rate.speed);
+        folder.currentItem = progress.isEmpty
+            ? ''
+            : '${folder.name}/${progress.keys.first.relativePath}';
+        if (force || changed || now - lastPaint >= 150) {
+          lastPaint = now;
+          notifyListeners();
+        }
+      }
+
+      Future<void> upload(UploadFolderFile file) async {
+        final parent = resolved[file.directory]!;
         checkpoint();
-        final watch = Stopwatch()..start();
-        var sampledAt = 0, sampledSent = 0, lastPaint = 0;
+        RequestScope.checkpoint();
+        progress[file] = UploadProgress(UploadPhase.preparing, 0, file.size);
+        paint(force: true);
+        await sources.validate(file);
         final result = await cloud.upload(
           task.session,
           parent,
@@ -546,44 +655,78 @@ class UploadManager extends ChangeNotifier {
             read: (start, end) => sources.read(file, start, end),
             validate: () => sources.validate(file),
           ),
+          onSaved: (result) async {
+            require(result.id.isNotEmpty, '文件已提交但网盘未返回标识，请检查目标目录');
+            // Keep acknowledged files when a sibling fails or cancellation
+            // arrives after the provider response. Retry only unfinished files.
+            folder.completeFile(file, result.id);
+            completedBytes += file.size;
+            progress.remove(file);
+            rates.remove(file);
+            await _save();
+          },
           onProgress: (p) {
             checkpoint();
-            final now = watch.elapsedMilliseconds;
-            final changed = task.phase != p.phase;
-            if (changed) {
-              sampledAt = now;
-              sampledSent = p.sent;
-              task.speed = 0;
-            }
-            task.phase = p.phase;
-            task.sent =
-                completedBytes +
-                (p.phase == UploadPhase.preparing
-                    ? 0
-                    : p.sent.clamp(0, file.size));
-            if (p.phase == UploadPhase.uploading && now - sampledAt >= 500) {
-              task.speed =
-                  ((p.sent - sampledSent).clamp(0, file.size) *
-                  1000 ~/
-                  (now - sampledAt));
-              sampledAt = now;
-              sampledSent = p.sent;
-            }
-            if (changed || now - lastPaint >= 150) {
-              lastPaint = now;
-              notifyListeners();
-            }
+            RequestScope.checkpoint();
+            progress[file] = p;
+            rates
+                .putIfAbsent(file, _UploadRate.new)
+                .update(p, watch.elapsedMilliseconds);
+            paint();
           },
         );
         checkpoint();
         require(result.id.isNotEmpty, '文件已提交但网盘未返回标识，请检查目标目录');
-        folder.completeFile(file, result.id);
-        completedBytes += file.size;
-        task.sent = completedBytes;
+        paint(force: true);
+      }
+
+      Future<void> worker() async {
+        UploadFolderFile? current;
+        try {
+          while (next < pending.length) {
+            RequestScope.checkpoint();
+            final file = pending[next++];
+            current = file;
+            await _fileSlots.run(() => upload(file));
+          }
+        } catch (error, stack) {
+          if (failure == null) {
+            failure = error;
+            failureStack = stack;
+            failedItem = current == null
+                ? folder.name
+                : '${folder.name}/${current.relativePath}';
+          }
+          scope.cancel();
+        }
+      }
+
+      try {
+        await scope.run(
+          () => RequestScope.guarded(
+            () => Future.wait([
+              for (
+                var i = 0;
+                i <
+                    pending.length.clamp(
+                      0,
+                      AppSettings.maxConcurrentCrossTransfers,
+                    );
+                i++
+              )
+                worker(),
+            ]),
+            () => require(parentScope?.isCancelled != true, '请求已取消'),
+          ),
+        );
+        if (failure != null) {
+          folder.currentItem = failedItem;
+          Error.throwWithStackTrace(failure!, failureStack!);
+        }
+        checkpoint();
+      } finally {
+        settled = true;
         task.speed = 0;
-        listings[parent]?.add(result);
-        await _save();
-        notifyListeners();
       }
       folder.currentItem = '';
     }, checkpoint);
@@ -598,7 +741,7 @@ class UploadManager extends ChangeNotifier {
         ? '已取消文件夹上传；已完成的文件保留，继续时只上传未完成文件'
         : '已取消；已提交的文件可能仍在网盘处理中';
     t.speed = 0;
-    if (running) _scope?.cancel();
+    if (running) _runs[id]?.scope.cancel();
     await _save();
     notifyListeners();
   }
@@ -609,7 +752,9 @@ class UploadManager extends ChangeNotifier {
       t.error = '$reason${t.isFolder ? '；可继续未完成的文件' : '，重新上传将从头开始'}';
       t.speed = 0;
     }
-    _scope?.cancel();
+    for (final run in _runs.values) {
+      run.scope.cancel();
+    }
     await _save();
     notifyListeners();
   }
@@ -619,7 +764,8 @@ class UploadManager extends ChangeNotifier {
     final t = task(id);
     if (t == null || !t.canRetry) return;
     // Wait for a cancelled request to settle before sending another file.
-    if (_scope?.token.isCancelled == true) await _runner;
+    final previous = _runs[id];
+    if (previous != null) await previous.done.future;
     require(cloud.sessionCredential(t.session) != null, '请重新登录原上传账号后重试');
     require(
       !_tasks.any(
@@ -648,6 +794,7 @@ class UploadManager extends ChangeNotifier {
   Future<void> remove(String id) async {
     final t = task(id);
     require(t == null || !t.active, '请先取消上传');
+    await _runs[id]?.done.future;
     _tasks.remove(t);
     _sources.remove(id);
     _fresh.remove(id);
@@ -656,6 +803,12 @@ class UploadManager extends ChangeNotifier {
   }
 
   Future<void> clearCompleted() async {
+    await Future.wait([
+      for (final task in _tasks.where(
+        (t) => t.status == UploadStatus.completed,
+      ))
+        if (_runs[task.id] case final run?) run.done.future,
+    ]);
     _tasks.removeWhere((t) => t.status == UploadStatus.completed);
     await _save();
     notifyListeners();
@@ -672,5 +825,36 @@ class UploadManager extends ChangeNotifier {
     await _pulse;
     await _save();
     await completions.close();
+  }
+}
+
+class _UploadRun {
+  final scope = RequestScope();
+  final done = Completer<void>();
+}
+
+/// Sample each file separately: an instant save or acknowledged existing block
+/// must not become upload traffic while another folder file is still sending.
+class _UploadRate {
+  UploadPhase? _phase;
+  int _sampledAt = 0, _sampledSent = 0, speed = 0;
+
+  void update(UploadProgress progress, int milliseconds) {
+    if (_phase != progress.phase) {
+      _phase = progress.phase;
+      _sampledAt = milliseconds;
+      _sampledSent = progress.sent;
+      speed = 0;
+    }
+    if (progress.phase != UploadPhase.uploading) {
+      speed = 0;
+    } else if (milliseconds - _sampledAt >= 500) {
+      speed =
+          (progress.sent - _sampledSent).clamp(0, progress.total) *
+          1000 ~/
+          (milliseconds - _sampledAt);
+      _sampledAt = milliseconds;
+      _sampledSent = progress.sent;
+    }
   }
 }

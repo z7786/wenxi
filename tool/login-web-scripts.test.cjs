@@ -186,10 +186,10 @@ test('desktop viewport stays wide and zoomable after a provider rewrites it', ()
   assert.equal(nested.content, 'width=device-width');
 });
 
-function viewportScene(hostname, hash = '#/oauth/login', protocol = 'https:') {
+function viewportScene(hostname, hash = '#/oauth/login', protocol = 'https:', pathname = '/') {
   const tags = [{name: 'viewport', content: 'width=1100,user-scalable=no'}];
   const attributes = new Set(), listeners = new Map();
-  const location = {protocol, hostname, hash, pathname: '/'};
+  const location = {protocol, hostname, hash, pathname, origin: `${protocol}//${hostname}`};
   const document = {
     head: {
       querySelectorAll: () => tags.filter(tag => tag.name === 'viewport'),
@@ -230,6 +230,37 @@ test('Guangya layout is limited to its trusted HTTPS login route', () => {
   }
   assert.equal(viewportScene('www.guangyapan.com', '#/oauth/login', 'http:').tags[0].content,
     'width=1100,user-scalable=no');
+});
+
+test('Tianyi portal form stays within a 400px zoomable viewport on phones', () => {
+  const route = '/api/logbox/separate/web/index.html';
+  const page = viewportScene('open.e.189.cn', '', 'https:', route);
+  assert.ok(page.tags[0].content.includes('width=400'));
+  assert.ok(page.tags[0].content.includes('user-scalable=yes'));
+  assert.ok(!page.tags[0].content.includes('initial-scale=1'));
+  page.location.pathname = '/other'; page.change();
+  assert.ok(page.tags[0].content.includes('width=1280'));
+  for (const host of ['open.e.189.cn.invalid', 'cloud.189.cn', 'www.alipan.com']) {
+    assert.ok(viewportScene(host, '', 'https:', route).tags[0].content.includes('width=1280'));
+  }
+});
+
+test('Tianyi official parent keeps its form visible and restores file-list layout', () => {
+  const page = viewportScene('cloud.189.cn', '', 'https:', '/web/login.html');
+  assert.ok(page.tags[0].content.includes('width=400'));
+  assert.ok(page.tags[0].content.includes('user-scalable=yes'));
+  assert.ok(page.attributes.has('data-aster-tianyi-login'));
+  assert.equal(page.tags.filter(tag => tag.id === 'aster-tianyi-login-layout').length, 1);
+  page.change();
+  assert.equal(page.tags.filter(tag => tag.id === 'aster-tianyi-login-layout').length, 1);
+  page.location.pathname = '/web/main/file/folder/-11'; page.change();
+  assert.ok(page.tags[0].content.includes('width=1280'));
+  assert.equal(page.attributes.has('data-aster-tianyi-login'), false);
+  for (const host of ['cloud.189.cn.invalid', 'm.cloud.189.cn', 'open.e.189.cn']) {
+    const other = viewportScene(host, '', 'https:', '/web/login.html');
+    assert.ok(other.tags[0].content.includes('width=1280'));
+    assert.equal(other.attributes.has('data-aster-tianyi-login'), false);
+  }
 });
 
 function storageScene({local = {}, session = {}, cookie = '', origin = 'https://www.ilanzou.com'} = {}) {
@@ -671,47 +702,174 @@ test('Tianyi ignores unrelated requests, frames and unsafe browser identifiers',
   assert.deepEqual(page.read(), {browserId: ''});
 });
 
-function tianyiMobileForm({origin = 'https://open.e.189.cn', pathname = '/api/logbox/separate/wap/index.html', nested = false} = {}) {
+function tianyiPortalForm({origin = 'https://open.e.189.cn', pathname = '/api/logbox/separate/web/index.html', appId = 'cloud', nested = false, referrer = '', direct = true} = {}) {
   const window = {};
   window.top = nested ? {} : window;
-  const nodes = [], timers = [], observers = [];
+  window.parent = direct ? window.top : {};
+  const nodes = new Map(), timers = [], observers = [];
   class Observer {
     constructor(fn) { this.fn = fn; this.closed = false; observers.push(this); }
     observe() {}
     disconnect() { this.closed = true; }
   }
-  const context = vm.createContext({window, location: {origin, pathname}, document: {querySelectorAll: () => nodes}, MutationObserver: Observer, setTimeout: (fn, delay) => timers.push({fn, delay})});
-  const run = () => vm.runInContext(scripts.tianyi.mobileForm, context);
+  const context = vm.createContext({window, location: {origin, pathname, href: `${origin}${pathname}?appId=${appId}`}, URL, document: {referrer, getElementById: id => nodes.get(id)}, MutationObserver: Observer, setTimeout: (fn, delay) => timers.push({fn, delay})});
+  const run = () => vm.runInContext(scripts.tianyi.form, context);
   return {nodes, timers, observers, run};
 }
 
-test('Tianyi mobile entry opens the account form once without submitting login or SMS', () => {
-  const page = tianyiMobileForm();
-  let modeClicks = 0, submissions = 0;
-  page.nodes.push({textContent: '登录', getClientRects: () => [1], click: () => submissions++});
-  page.nodes.push({textContent: '获取验证码', getClientRects: () => [1], click: () => submissions++});
+test('Tianyi portal entry opens the SMS form once without submitting login or requesting codes', () => {
+  const page = tianyiPortalForm();
+  let accountClicks = 0, smsClicks = 0, submissions = 0;
+  page.nodes.set('j-login', {getClientRects: () => [1], click: () => submissions++});
+  page.nodes.set('j-msg-verifyCode', {getClientRects: () => [1], click: () => submissions++});
+  page.nodes.set('j-agreement-box', {getClientRects: () => [1], click: () => submissions++});
+  page.nodes.set('tab-pw', {getClientRects: () => [1], click: () => accountClicks++});
+  page.nodes.set('j-jump-sms', {getClientRects: () => accountClicks ? [1] : [], click: () => smsClicks++});
   page.run();
+  assert.equal(accountClicks, 1);
+  assert.equal(smsClicks, 0);
   assert.equal(submissions, 0);
-  page.nodes.push({textContent: '其它方式登录', getClientRects: () => [1], click: () => modeClicks++});
   page.observers[0].fn();
-  assert.equal(modeClicks, 1);
+  assert.equal(smsClicks, 1);
   assert.equal(page.observers[0].closed, true);
   page.run();
-  assert.equal(modeClicks, 1);
+  assert.equal(accountClicks, 1);
+  assert.equal(smsClicks, 1);
   assert.equal(submissions, 0);
   assert.equal(page.timers[0].delay, 15000);
   page.timers[0].fn();
 });
 
-test('Tianyi mobile form selection stays within its official top-level login page', () => {
-  for (const options of [{origin: 'https://open.e.189.cn.attacker.invalid'}, {origin: 'http://open.e.189.cn'}, {pathname: '/api/logbox/separate/web/index.html'}, {nested: true}]) {
-    const page = tianyiMobileForm(options);
+test('Tianyi official login iframe opens SMS while retaining the parent portal session', () => {
+  const page = tianyiPortalForm({nested: true, referrer: 'https://cloud.189.cn/'});
+  let accountClicks = 0, smsClicks = 0, submissions = 0;
+  page.nodes.set('tab-pw', {getClientRects: () => [1], click: () => accountClicks++});
+  page.nodes.set('j-jump-sms', {getClientRects: () => accountClicks ? [1] : [], click: () => smsClicks++});
+  for (const id of ['j-login', 'j-msg-verifyCode', 'j-agreement-box']) {
+    page.nodes.set(id, {getClientRects: () => [1], click: () => submissions++});
+  }
+  page.run();
+  assert.equal(accountClicks, 1);
+  page.observers[0].fn();
+  assert.equal(smsClicks, 1);
+  assert.equal(submissions, 0);
+  page.run();
+  assert.equal(accountClicks, 1);
+  assert.equal(smsClicks, 1);
+});
+
+test('Tianyi SMS form selection stays within the official cloud portal login page', () => {
+  for (const options of [{origin: 'https://open.e.189.cn.attacker.invalid'}, {origin: 'http://open.e.189.cn'}, {pathname: '/api/logbox/separate/wap/index.html'}, {appId: 'another-app'}, {nested: true}, {nested: true, referrer: 'https://cloud.189.cn.attacker.invalid/'}, {nested: true, referrer: 'http://cloud.189.cn/'}, {nested: true, referrer: 'https://cloud.189.cn:444/'}, {nested: true, referrer: 'https://user@cloud.189.cn/'}, {nested: true, referrer: 'https://cloud.189.cn/', direct: false}]) {
+    const page = tianyiPortalForm(options);
     page.run();
     assert.equal(page.observers.length, 0);
   }
-  const page = tianyiMobileForm();
+  const page = tianyiPortalForm();
   let clicks = 0;
-  page.nodes.push({textContent: '其它方式登录', getClientRects: () => [], click: () => clicks++});
+  page.nodes.set('tab-pw', {getClientRects: () => [], click: () => clicks++});
+  page.nodes.set('j-jump-sms', {getClientRects: () => [1], disabled: true, click: () => clicks++});
   page.run();
   assert.equal(clicks, 0);
+});
+
+function tianyiTouchScene({origin = 'https://open.e.189.cn', pathname = '/api/logbox/separate/web/index.html', appId = 'cloud', nested = true, referrer = 'https://cloud.189.cn/web/login.html', direct = true, mobile = false, touch = true} = {}) {
+  const listeners = new Map(), mouse = [], styles = [];
+  const document = {
+    referrer,
+    head: {appendChild: node => styles.push(node)},
+    createElement: () => ({style: {}}),
+    getElementById: id => nodes.get(id) ?? styles.find(node => node.id === id),
+    addEventListener: (type, callback, options) => {
+      const callbacks = listeners.get(type) ?? [];
+      callbacks.push({callback, options}); listeners.set(type, callbacks);
+    },
+  };
+  const nodes = new Map();
+  function node(id) {
+    const value = {id, isConnected: true, ownerDocument: document, style: {}, closest: () => value,
+      dispatchEvent: event => { mouse.push({id, type: event.type, x: event.clientX, y: event.clientY, buttons: event.buttons}); },
+      click: () => mouse.push({id, type: 'click'}),
+    };
+    nodes.set(id, value); return value;
+  }
+  const slider = node('j__21cn_ecaptch_slider'), piece = node('j__21cn_ecaptch_jigsaw');
+  const refresh = node('j__21cn_ecaptch_refresh'), input = node('phone');
+  class MouseEvent { constructor(type, options) { Object.assign(this, {type}, options); } }
+  const window = {MouseEvent};
+  window.top = nested ? {} : window; window.parent = direct ? window.top : {};
+  const navigator = {userAgent: mobile ? 'Mozilla/5.0 (Linux; Android 13) Chrome/131 Mobile Safari/537.36' : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131 Safari/537.36', maxTouchPoints: touch ? 5 : 0};
+  const context = vm.createContext({window, navigator, document, location: {origin, pathname, href: `${origin}${pathname}?appId=${appId}`}, URL, MouseEvent});
+  const run = () => vm.runInContext(scripts.tianyi.touch ?? '', context);
+  const point = (x, y = 40, identifier = 7) => ({identifier, clientX: x, clientY: y, pageX: x + 20, pageY: y + 80, screenX: x, screenY: y});
+  function send(type, target, {x = 40, y = 50, count = 1, identifier = 7} = {}) {
+    const changed = [point(x, y, identifier)];
+    const event = {type, target, changedTouches: changed, touches: /end|cancel/.test(type) ? [] : Array.from({length: count}, (_, i) => point(x, y, identifier + i)), cancelable: true, prevented: false, preventDefault() { this.prevented = true; }};
+    for (const {callback} of listeners.get(type) ?? []) callback(event);
+    return event;
+  }
+  run();
+  return {run, listeners, mouse, styles, slider, piece, refresh, input, send};
+}
+
+test('Tianyi desktop captcha follows the actual touch position through drag and release', () => {
+  for (const handle of ['slider', 'piece']) {
+    const page = tianyiTouchScene();
+    assert.equal(page.send('touchstart', page[handle], {x: 45, y: 65}).prevented, true);
+    page.send('touchmove', page.input, {x: 143, y: 68});
+    page.send('touchend', page.input, {x: 146, y: 68});
+    assert.deepEqual(page.mouse.map(event => [event.type, event.x, event.y, event.buttons]), [['mousedown', 45, 65, 1], ['mousemove', 143, 68, 1], ['mouseup', 146, 68, 0]]);
+    page.send('touchend', page.input);
+    assert.equal(page.mouse.length, 3);
+    page.run();
+    assert.equal(page.listeners.get('touchstart').length, 1);
+    assert.equal(page.styles.length, 1);
+    assert.match(page.styles[0].textContent, /touch-action\s*:\s*none/);
+    for (const type of ['touchstart', 'touchmove', 'touchend']) {
+      assert.equal(page.listeners.get(type)[0].options.passive, false);
+    }
+  }
+});
+
+test('Tianyi touch cancellation resets the challenge without submitting a partial drag', () => {
+  for (const interruption of ['touchcancel', 'multi-touch']) {
+    const page = tianyiTouchScene();
+    page.send('touchstart', page.slider);
+    page.send('touchmove', page.slider, {x: 120});
+    if (interruption === 'touchcancel') page.send('touchcancel', page.slider);
+    else page.send('touchstart', page.slider, {count: 2});
+    page.send('touchend', page.slider);
+    assert.deepEqual(page.mouse.map(event => event.type), ['mousedown', 'mousemove', 'click']);
+    assert.equal(page.mouse.at(-1).id, page.refresh.id);
+    page.send('touchstart', page.slider);
+    page.send('touchend', page.slider);
+    assert.deepEqual(page.mouse.slice(-2).map(event => event.type), ['mousedown', 'mouseup']);
+  }
+});
+
+test('Tianyi touch adapter leaves form fields, native mobile handlers and unrelated pages alone', () => {
+  const page = tianyiTouchScene();
+  assert.equal(page.send('touchstart', page.input).prevented, false);
+  page.send('touchmove', page.input); page.send('touchend', page.input);
+  assert.deepEqual(page.mouse, []);
+  for (const options of [{mobile: true}, {touch: false}, {origin: 'http://open.e.189.cn'}, {origin: 'https://open.e.189.cn:444'}, {origin: 'https://open.e.189.cn.attacker.invalid'}, {pathname: '/api/logbox/separate/wap/index.html'}, {appId: 'another-app'}, {referrer: 'https://cloud.189.cn.attacker.invalid/'}, {referrer: 'https://cloud.189.cn:444/'}, {referrer: 'https://user@cloud.189.cn/'}, {direct: false}]) {
+    const other = tianyiTouchScene(options);
+    other.send('touchstart', other.slider); other.send('touchmove', other.slider); other.send('touchend', other.slider);
+    assert.equal(other.listeners.size, 0);
+    assert.equal(other.styles.length, 0);
+    assert.deepEqual(other.mouse, []);
+  }
+});
+
+test('Tianyi touch adapter ignores other fingers and a removed captcha handle', () => {
+  const page = tianyiTouchScene();
+  page.send('touchstart', page.slider, {identifier: 2});
+  page.send('touchmove', page.slider, {identifier: 3});
+  page.send('touchend', page.slider, {identifier: 3});
+  assert.deepEqual(page.mouse.map(event => event.type), ['mousedown']);
+  page.send('touchend', page.slider, {identifier: 2});
+  assert.deepEqual(page.mouse.map(event => event.type), ['mousedown', 'mouseup']);
+  page.send('touchstart', page.piece);
+  page.piece.isConnected = false;
+  page.send('touchmove', page.slider); page.send('touchend', page.slider);
+  assert.deepEqual(page.mouse.map(event => event.type), ['mousedown', 'mouseup', 'mousedown']);
 });

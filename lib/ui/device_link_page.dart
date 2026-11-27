@@ -14,6 +14,7 @@ import '../lan/lan_qr.dart';
 import '../lan/lan_service.dart';
 import '../platform/qr_scanner.dart';
 import 'common.dart';
+import 'lan_browser_panel.dart';
 
 class DeviceLinkPage extends StatefulWidget {
   const DeviceLinkPage(
@@ -253,7 +254,7 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
                     key: const Key('lan-file-share-link'),
                     leading: const Icon(CupertinoIcons.qrcode),
                     title: const Text('生成分享链接 / 二维码'),
-                    subtitle: const Text('无需连接设备，单个文件可用浏览器接收'),
+                    subtitle: const Text('文件和文件夹都可用浏览器接收'),
                     onTap: () => Navigator.pop(context, (peer: null)),
                   ),
                   const SizedBox(height: 12),
@@ -1012,6 +1013,23 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
             padding: const EdgeInsets.all(16),
             children: [
               _status(),
+              if (lan.running && _address.isNotEmpty)
+                LanBrowserPanel(widget.services, address: _address),
+              if (!lan.running &&
+                  lan.browserReceiver?.records.isNotEmpty == true)
+                _card(
+                  TextButton.icon(
+                    key: const Key('lan-browser-receipts'),
+                    onPressed: () => Navigator.push<void>(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => LanBrowserReceiptsPage(widget.services),
+                      ),
+                    ),
+                    icon: const Icon(CupertinoIcons.arrow_down_doc, size: 18),
+                    label: const Text('查看网页接收记录'),
+                  ),
+                ),
               if (defaultTargetPlatform == TargetPlatform.iOS)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
@@ -1633,7 +1651,7 @@ class _LanSharePageState extends State<_LanSharePage> {
                     '网络连接已断开，请恢复局域网连接后返回刷新设备地址。',
                     textAlign: TextAlign.center,
                   )
-                else if (share.manifest.singleFile && !share.draining) ...[
+                else if (!share.draining) ...[
                   Center(
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 244),
@@ -1672,7 +1690,7 @@ class _LanSharePageState extends State<_LanSharePage> {
                         Text(
                           share.manifest.singleFile
                               ? '文件分享链接'
-                              : '分享链接 · 用文析助手接收',
+                              : '文件夹分享链接 · 浏览器可下载 ZIP',
                           style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
                         const SizedBox(height: 8),

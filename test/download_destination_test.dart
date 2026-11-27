@@ -6,14 +6,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
+import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
+import 'package:asterlink/domain/download_destination.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/download/download_manager.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'support.dart';
+import 'storage_path_support.dart';
+import 'torrent_test.dart' show testTorrent;
 
 const _spec = DownloadSpec(
   url: 'https://example.invalid/destination-test',
@@ -138,6 +142,229 @@ void main() {
     );
     await root.delete(recursive: true);
   });
+
+  test(
+    'Quark planned download saves an apostrophe on disk and after restart',
+    () async {
+      const raw = '[第15話 Φ&#39;s VS χ].mkv';
+      const local = "[第15話 Φ's VS χ].mkv";
+      final transport = FakeHttp();
+      final repository = CloudRepository(
+        transport,
+        Vault(store),
+        CleanupOutbox(store, transport),
+      );
+      final plan = repository.planDownload(
+        const BrowseSession(
+          platform: CloudPlatform.quark,
+          mode: BrowseMode.share,
+          title: 'fixture',
+          rootId: '0',
+        ),
+        const CloudFile(
+          id: 'episode-15',
+          name: raw,
+          displayName: local,
+          size: 4,
+        ),
+      );
+      final id = await manager.enqueue(
+        plan.copyWith(url: _spec.url, relativePath: "A's & B"),
+        location: DownloadDestinationSelection(target.path),
+      );
+      await completed(id);
+      final saved = File(manager.task(id)!.savedPath!);
+      expect(saved.path, p.join(target.path, "A's & B", local));
+      expect(await saved.readAsBytes(), native.content);
+      expect(await File(p.join(target.path, "A's & B", raw)).exists(), isFalse);
+      await close();
+      await open();
+      final restored = manager.task(id)!;
+      expect(restored.spec.fileName, local);
+      expect(restored.spec.source!['file']['name'], raw);
+      expect(restored.savedPath, saved.path);
+      expect(await File(restored.savedPath!).readAsBytes(), native.content);
+    },
+  );
+
+  test(
+    'ImDisk final-path query failure still downloads, saves and removes cache',
+    () async {
+      final paths = UnsupportedFinalPaths(root.path);
+      await paths.run(() async {
+        await manager.changeDestination(target.path);
+        final id = await manager.enqueue(_spec);
+        await until(
+          () =>
+              manager.activeCount == 0 &&
+              (manager.task(id)!.status == DownloadStatus.completed ||
+                  manager.task(id)!.status == DownloadStatus.failed),
+        );
+        expect(
+          manager.task(id)!.status,
+          DownloadStatus.completed,
+          reason: manager.task(id)!.error,
+        );
+        final saved = File(manager.task(id)!.savedPath!);
+        expect(p.isWithin(target.path, saved.path), isTrue);
+        expect(
+          await saved.openRead().expand((b) => b).toList(),
+          native.content,
+        );
+        expect(await manager.engine.taskDirectory(id).exists(), isFalse);
+      });
+      expect(paths.attempts, isNotEmpty);
+    },
+    skip: !Platform.isWindows,
+  );
+
+  test(
+    'batch location is captured once and survives defaults, restart and retry',
+    () async {
+      native.finish = false;
+      await manager.changeDestination(defaults.path);
+      final ids = await manager.enqueueAll([
+        _spec,
+        _spec.copyWith(fileName: 'second.bin'),
+      ], location: DownloadDestinationSelection(target.path));
+      await until(() => native.begins.isNotEmpty);
+      await manager.pauseAll();
+      await manager.changeDestination(p.join(root.path, 'later'));
+      await close();
+      await open();
+      for (final id in ids) {
+        expect(manager.task(id)!.destination, target.path);
+        expect(manager.task(id)!.spec.relativePath, p.join('文件夹', '子目录'));
+      }
+      expect(DownloadDestinationSelection.recent(store.data), [target.path]);
+      native.finish = true;
+      for (final id in ids) {
+        await manager.resume(id);
+        await completed(id);
+        expect(p.isWithin(target.path, manager.task(id)!.savedPath!), isTrue);
+      }
+    },
+  );
+
+  test(
+    'explicit system location overrides custom default without changing it',
+    () async {
+      await manager.changeDestination(target.path);
+      final id = await manager.enqueue(
+        _spec,
+        location: const DownloadDestinationSelection(null),
+      );
+      await completed(id);
+      expect(manager.task(id)!.destination, isNull);
+      expect(p.isWithin(defaults.path, manager.task(id)!.savedPath!), isTrue);
+      expect(manager.settings.destination, target.path);
+    },
+  );
+
+  for (final torrent in [false, true]) {
+    test(
+      'failed ${torrent ? "BT" : "HTTP"} enqueue keeps preferences and queue',
+      () async {
+        await close();
+        store = await StateStore.open(
+          Directory(p.join(root.path, 'state')),
+          testKey: Uint8List(32),
+        );
+        await store.put('settings', {'destination': defaults.path});
+        await open();
+        final blocked = Directory('${store.file!.path}.tmp');
+        await blocked.create();
+        try {
+          final location = DownloadDestinationSelection(
+            target.path,
+            makeDefault: true,
+          );
+          await expectLater(
+            torrent
+                ? manager.enqueueTorrent(testTorrent, [
+                    0,
+                    1,
+                  ], location: location)
+                : manager.enqueueAll([_spec], location: location),
+            throwsA(isA<FileSystemException>()),
+          );
+          expect(manager.tasks, isEmpty);
+          expect(native.begins, isEmpty);
+          expect(manager.settings.destination, defaults.path);
+          expect(DownloadDestinationSelection.recent(store.data), isEmpty);
+          final reopened = await StateStore.open(
+            store.file!.parent,
+            testKey: Uint8List(32),
+          );
+          expect(reopened.data.list('tasks'), isEmpty);
+          expect(
+            reopened.data.obj('settings').str('destination'),
+            defaults.path,
+          );
+          expect(DownloadDestinationSelection.recent(reopened.data), isEmpty);
+          reopened.dispose();
+        } finally {
+          await blocked.delete();
+        }
+      },
+    );
+  }
+
+  test(
+    'make default affects future tasks and retains older task destinations',
+    () async {
+      final older = await manager.enqueue(_spec);
+      await completed(older);
+      final id = await manager.enqueue(
+        _spec,
+        location: DownloadDestinationSelection(target.path, makeDefault: true),
+      );
+      await completed(id);
+      expect(manager.settings.destination, target.path);
+      expect(manager.task(older)!.destination, isNull);
+      final next = await manager.enqueue(_spec.copyWith(fileName: 'next.bin'));
+      await completed(next);
+      expect(manager.task(next)!.destination, target.path);
+      expect(DownloadDestinationSelection.recent(store.data), [target.path]);
+    },
+  );
+
+  test(
+    'BT batch captures the requested directory and its relative structure',
+    () async {
+      native.finish = false;
+      final ids = await manager.enqueueTorrent(
+        testTorrent,
+        [0, 1],
+        location: DownloadDestinationSelection(target.path, makeDefault: true),
+      );
+      await manager.pauseAll();
+      expect(ids, hasLength(2));
+      expect(manager.settings.destination, target.path);
+      for (final id in ids) {
+        expect(manager.task(id)!.destination, target.path);
+        expect(manager.task(id)!.spec.relativePath, '合集');
+        expect(
+          manager.engine.taskCacheRoot(id).path,
+          p.join(target.path, '.asterlink-cache'),
+        );
+      }
+    },
+  );
+
+  test(
+    'a removed configured destination is recreated on the next download',
+    () async {
+      await manager.changeDestination(target.path);
+      await target.create(recursive: true);
+      await target.delete(recursive: true);
+      final id = await manager.enqueue(_spec);
+      await completed(id);
+      final saved = File(manager.task(id)!.savedPath!);
+      expect(p.isWithin(target.path, saved.path), isTrue);
+      expect(await saved.readAsBytes(), native.content);
+    },
+  );
 
   test(
     'new payload and exported file both follow the chosen directory',

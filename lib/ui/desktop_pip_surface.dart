@@ -1,8 +1,15 @@
 import 'dart:async';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 import 'pip_resize_handles.dart';
+
+typedef DesktopPipProgress = ({
+  bool playing,
+  Duration position,
+  Duration duration,
+});
 
 /// Controls overlay the full video viewport and disappear when left idle.
 class DesktopPipSurface extends StatefulWidget {
@@ -19,8 +26,10 @@ class DesktopPipSurface extends StatefulWidget {
     required this.onClose,
     this.onRestore,
     this.onPin,
+    this.progress,
   });
   final Widget video;
+  final ValueListenable<DesktopPipProgress>? progress;
   final bool playing;
   final Duration position, duration;
   final VoidCallback onToggle, onDrag, onClose;
@@ -80,9 +89,57 @@ class _DesktopPipSurfaceState extends State<DesktopPipSurface> {
     },
   );
 
+  Widget _transport(DesktopPipProgress progress) {
+    final duration = progress.duration.inMilliseconds.toDouble();
+    return ColoredBox(
+      color: Colors.black54,
+      child: SizedBox(
+        height: 40,
+        child: Row(
+          children: [
+            _button(
+              progress.playing ? '暂停' : '播放',
+              progress.playing
+                  ? CupertinoIcons.pause_fill
+                  : CupertinoIcons.play_fill,
+              widget.onToggle,
+              key: const Key('player-pip-toggle'),
+            ),
+            Expanded(
+              child: Slider(
+                key: const Key('player-pip-seek'),
+                value: (_preview ?? progress.position.inMilliseconds.toDouble())
+                    .clamp(0, duration > 0 ? duration : 1),
+                max: duration > 0 ? duration : 1,
+                onChangeStart: duration > 0
+                    ? (_) {
+                        _seeking = true;
+                        _timer?.cancel();
+                      }
+                    : null,
+                onChanged: duration > 0
+                    ? (value) => setState(() => _preview = value)
+                    : null,
+                onChangeEnd: duration > 0
+                    ? (value) {
+                        setState(() {
+                          _seeking = false;
+                          _preview = null;
+                        });
+                        widget.onSeek(Duration(milliseconds: value.round()));
+                        _scheduleHide();
+                      }
+                    : null,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final duration = widget.duration.inMilliseconds.toDouble();
     return MediaQuery.withNoTextScaling(
       child: MouseRegion(
         onEnter: (_) => _show(),
@@ -136,56 +193,16 @@ class _DesktopPipSurfaceState extends State<DesktopPipSurface> {
                   left: 6,
                   right: 6,
                   bottom: 6,
-                  child: ColoredBox(
-                    color: Colors.black54,
-                    child: SizedBox(
-                      height: 40,
-                      child: Row(
-                        children: [
-                          _button(
-                            widget.playing ? '暂停' : '播放',
-                            widget.playing
-                                ? CupertinoIcons.pause_fill
-                                : CupertinoIcons.play_fill,
-                            widget.onToggle,
-                            key: const Key('player-pip-toggle'),
-                          ),
-                          Expanded(
-                            child: Slider(
-                              key: const Key('player-pip-seek'),
-                              value:
-                                  (_preview ??
-                                          widget.position.inMilliseconds
-                                              .toDouble())
-                                      .clamp(0, duration > 0 ? duration : 1),
-                              max: duration > 0 ? duration : 1,
-                              onChangeStart: duration > 0
-                                  ? (_) {
-                                      _seeking = true;
-                                      _timer?.cancel();
-                                    }
-                                  : null,
-                              onChanged: duration > 0
-                                  ? (value) => setState(() => _preview = value)
-                                  : null,
-                              onChangeEnd: duration > 0
-                                  ? (value) {
-                                      setState(() {
-                                        _seeking = false;
-                                        _preview = null;
-                                      });
-                                      widget.onSeek(
-                                        Duration(milliseconds: value.round()),
-                                      );
-                                      _scheduleHide();
-                                    }
-                                  : null,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                  child: widget.progress == null
+                      ? _transport((
+                          playing: widget.playing,
+                          position: widget.position,
+                          duration: widget.duration,
+                        ))
+                      : ValueListenableBuilder<DesktopPipProgress>(
+                          valueListenable: widget.progress!,
+                          builder: (_, progress, _) => _transport(progress),
+                        ),
                 ),
               ],
               Positioned.fill(

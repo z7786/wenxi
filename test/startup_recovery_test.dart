@@ -3,14 +3,20 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/backup.dart';
+import 'package:asterlink/data/backgrounds.dart';
+import 'package:asterlink/data/classified_backup.dart';
 import 'package:asterlink/data/startup_recovery.dart';
 import 'package:asterlink/data/state_key.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/background.dart';
+import 'package:asterlink/domain/settings.dart';
+import 'background_support.dart';
 import 'support.dart';
 
 void main() {
@@ -64,6 +70,54 @@ void main() {
     failure = StateRecoveryRequired(directory, StateRecoveryCause.missingKey);
   });
   tearDown(() async => directory.delete(recursive: true));
+
+  test(
+    'startup recovery accepts classified settings without copying background assets',
+    () async {
+      final source = StateStore.memory(),
+          root = await Directory.systemTemp.createTemp(
+            'startup-backup-source-',
+          );
+      addTearDown(() => root.delete(recursive: true));
+      final images = BackgroundRepository(
+        root,
+        current: () =>
+            AppSettings.fromJson(source.data.obj('settings')).background,
+      );
+      final draft = images.beginDraft();
+      final picture = await images.importFile(
+        XFile.fromData(await backgroundFixture(width: 32, height: 48)),
+        draft,
+      );
+      await source.put('settings', {
+        'theme': 'Dark',
+        'background': BackgroundSettings(day: picture).toJson(),
+      });
+      await images.endDraft(draft);
+      final bytes =
+          await ClassifiedBackupRepository(source, backgrounds: images).create(
+            categories: {BackupCategory.settings, BackupCategory.appearance},
+          );
+      final result = await recovery().restore(bytes, '');
+      final reopened = await open();
+      expect(
+        AppSettings.fromJson(reopened.data.obj('settings')).background.hasImage,
+        isFalse,
+      );
+      expect(
+        await File('${directory.path}/backgrounds/${picture.id}').exists(),
+        isFalse,
+      );
+      expect(reopened.data.containsKey('backupUndo'), isFalse);
+      expect(await result.archive.exists(), isTrue);
+      for (final entry in original.entries) {
+        expect(
+          await File('${result.archive.path}/${entry.key}').readAsBytes(),
+          entry.value,
+        );
+      }
+    },
+  );
 
   Future<void> expectOriginals() async {
     for (final entry in original.entries) {

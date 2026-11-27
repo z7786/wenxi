@@ -45,12 +45,14 @@ class AppSettings {
     this.fontScalePercent = 100,
     this.threads = 64,
     this.concurrent = 3,
+    this.crossTransferConcurrent = 3,
     this.retries = defaultDownloadRetries,
     this.speedLimit = 0,
     this.btUploadLimit = 512 * 1024,
     this.threadOverrides = const {},
     this.githubAcceleration = const GitHubAcceleration(),
     this.destination,
+    this.askDownloadDestination = false,
     this.browserView = 'list',
     this.browserDisplays = const {},
     this.clipboardRecognition = true,
@@ -59,6 +61,7 @@ class AppSettings {
     this.quarkAuthenticatedDirectDownload = false,
     this.hideGuestDownloadNotice = false,
     this.hideBaiduDownloadNotice = false,
+    this.baiduDownloadNoticeRead = false,
     this.warnOnMobileDataDownload = true,
   });
   final String theme;
@@ -71,11 +74,18 @@ class AppSettings {
   static const minFontScalePercent = 80;
   static const maxFontScalePercent = 180;
   static const maxConcurrentDownloads = 32;
+  static const maxConcurrentCrossTransfers = 8;
+  static const quarkDirectConnectionPolicyVersion = 1;
+  static bool needsQuarkDirectConnectionMigration(Json settings) =>
+      settings.integer('quarkDirectConnectionPolicy') <
+      quarkDirectConnectionPolicyVersion;
   final int threads, concurrent, retries, speedLimit;
+  final int crossTransferConcurrent;
   final int btUploadLimit;
   final Map<String, int> threadOverrides;
   final GitHubAcceleration githubAcceleration;
   final String? destination;
+  final bool askDownloadDestination;
   final String browserView;
   final Map<String, BrowserDisplaySettings> browserDisplays;
   BrowserDisplaySettings browserDisplayFor(CloudPlatform platform) =>
@@ -87,9 +97,11 @@ class AppSettings {
   final bool quarkAuthenticatedDirectDownload;
   final bool hideGuestDownloadNotice;
   final bool hideBaiduDownloadNotice;
+  final bool baiduDownloadNoticeRead;
   final bool warnOnMobileDataDownload;
   static const profiles = {
     'github': ('GitHub', 8),
+    'webdav': ('WebDAV', 8),
     'pikpak': ('PikPak网盘', 8),
     'feijipan': ('小飞机网盘', 8),
     'ctfile': ('城通网盘', 8),
@@ -99,7 +111,7 @@ class AppSettings {
     'quark_route_1': ('夸克 · 直链', 512),
     'quark_route_2': ('夸克 · 快传', 64),
     'uc': ('UC网盘', 512),
-    'xunlei': ('迅雷网盘', 64),
+    'xunlei': ('迅雷网盘', 8),
     'pan123': ('123网盘', 64),
     'guangya': ('光鸭云盘', 64),
     'aliyun': ('阿里云盘', 8),
@@ -114,6 +126,7 @@ class AppSettings {
       profile == 'baidu_preview' || profiles.containsKey(profile)
       ? profile
       : switch (platform) {
+          CloudPlatform.webdav => 'webdav',
           CloudPlatform.github => 'github',
           CloudPlatform.pikpak => 'pikpak',
           CloudPlatform.feijipan => 'feijipan',
@@ -162,14 +175,17 @@ class AppSettings {
     'fontScalePercent': fontScalePercent,
     'threads': threads,
     'concurrent': concurrent,
+    'crossTransferConcurrent': crossTransferConcurrent,
     'retries': retries,
     'downloadRetryPolicy': 1,
     'speedLimit': speedLimit,
     'btUploadLimit': btUploadLimit,
     'downloadThreadOverrides': threadOverrides,
+    'quarkDirectConnectionPolicy': quarkDirectConnectionPolicyVersion,
     'githubAcceleration': githubAcceleration.toJson(),
     'githubAccelerationPolicy': 1,
     'destination': destination,
+    'askDownloadDestination': askDownloadDestination,
     'browserView': browserView,
     'browserDisplays': {
       for (final entry in browserDisplays.entries)
@@ -182,6 +198,7 @@ class AppSettings {
     'quarkAuthenticatedDirectDownload': quarkAuthenticatedDirectDownload,
     'hideGuestDownloadNotice': hideGuestDownloadNotice,
     'hideBaiduDownloadNotice': hideBaiduDownloadNotice,
+    'baiduDownloadNoticeRead': baiduDownloadNoticeRead,
     'warnOnMobileDataDownload': warnOnMobileDataDownload,
   };
   factory AppSettings.fromJson(Json j) => AppSettings(
@@ -199,6 +216,9 @@ class AppSettings {
         .clamp(minFontScalePercent, maxFontScalePercent),
     threads: j.integer('threads', 64).clamp(1, 512),
     concurrent: j.integer('concurrent', 3).clamp(1, maxConcurrentDownloads),
+    crossTransferConcurrent: j
+        .integer('crossTransferConcurrent', 3)
+        .clamp(1, maxConcurrentCrossTransfers),
     // Adopt the former default once; later explicit choices persist.
     retries:
         j.integer('downloadRetryPolicy') < 1 &&
@@ -212,8 +232,12 @@ class AppSettings {
         .integer('btUploadLimit', 512 * 1024)
         .clamp(0, 10000000 * 1024),
     threadOverrides: {
+      // Adopt 512 once for legacy direct-link choices, including global
+      // inheritance. The saved policy version preserves later manual changes.
       for (final e in j.obj('downloadThreadOverrides').entries)
-        if (profiles.containsKey(e.key))
+        if (profiles.containsKey(e.key) &&
+            (e.key != 'quark_route_1' ||
+                !needsQuarkDirectConnectionMigration(j)))
           e.key: (int.tryParse('${e.value}') ?? 0).clamp(0, 512),
     },
     githubAcceleration: GitHubAcceleration.fromJson(
@@ -222,6 +246,7 @@ class AppSettings {
       migrateLegacyDefault: j.integer('githubAccelerationPolicy') < 1,
     ),
     destination: j['destination']?.toString(),
+    askDownloadDestination: j.boolean('askDownloadDestination'),
     browserView: j.str('browserView') == 'grid' ? 'grid' : 'list',
     browserDisplays: {
       for (final entry in j.obj('browserDisplays').entries)
@@ -241,6 +266,7 @@ class AppSettings {
     ),
     hideGuestDownloadNotice: j.boolean('hideGuestDownloadNotice', false),
     hideBaiduDownloadNotice: j.boolean('hideBaiduDownloadNotice', false),
+    baiduDownloadNoticeRead: j.boolean('baiduDownloadNoticeRead', false),
     warnOnMobileDataDownload: j.boolean('warnOnMobileDataDownload', true),
   );
   AppSettings update(Json fields) =>

@@ -19,6 +19,16 @@
 | 11 桌面渲染 | Windows/macOS/Linux 使用相同尺寸策略调用 setSize，不超过片源尺寸。修复插件视频参数更新覆盖自定义尺寸。截图继续使用 mpv 源帧路径。 |
 | 12 代理 isolate | HTTP、校验、分片内存和 socket 转发在 worker。下载租约回调通过消息调用，缓存数据用 TransferableTypedData；每 500 ms 发送统计。缓存缩减收到确认后才增加 mpv 缓存。停止关闭连接，超时终止 worker。 |
 
+## 桌面滚轮音量
+
+Windows、macOS、Linux 在视频画面上使用鼠标纵向滚轮调节音量：向上增加、向下降低，每次 5%，限制在 0–100%，显示现有音量提示并保存偏好。与键盘上下键复用调整入口，连续滚动按已请求的音量累加。设置面板滚动、横向滚动、锁屏、布局编辑、投屏及手机播放不触发该快捷操作；普通窗口和全屏沿用同一视频手势区域。
+
+## 内嵌字幕调整
+
+原生播放器使用 `sub-ass-override=scale`，允许内嵌 ASS 对白及 PGS/DVD 图片字幕响应现有字号和位置设置；`no` 会屏蔽这些调整。保留 ASS 的字体、颜色和特效定位，不使用 `force` 或 `strip` 统一覆盖样式。ASS 显式定位的招牌、注释等特效排版继续遵循脚本，图片字幕位置按原始位置偏移；烧录在视频画面中的文字不属于可调整字幕轨。
+
+继续沿用属性去重，调整位置只写 `sub-pos`，不触发 seek 或重建播放器。`native_subtitle_render_test.dart` 使用真实 Windows libmpv 对内嵌 ASS、PGS 与 UTF-8 字幕截图测量，覆盖暂停时缩放、移动、恢复原设置和重新打开视频后保留设置；原有中文 ASS 显式定位、字体加载、背景与外挂字幕回归继续保留。Android 真机显示仍需单独验收。
+
 ## 指标与回退
 
 outputDroppedFrames 是 mpv 输出丢帧；uiOverBudgetRatio 是 Flutter 已报告帧中超预算比例，不能当成视频呈现掉帧率。静态画面可能没有 Flutter 帧样本。eventLoopMaxDelayMs 提示线程阻塞或调度延迟，不能单独证明原因。

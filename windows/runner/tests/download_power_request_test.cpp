@@ -5,6 +5,7 @@
 
 namespace {
 int created, set, cleared, closed;
+POWER_REQUEST_TYPE expected_type = PowerRequestSystemRequired;
 bool fail_create, fail_set, fail_clear, fail_close;
 void Check(bool value) {
   if (!value) throw std::runtime_error("power request lifecycle check failed");
@@ -16,12 +17,12 @@ HANDLE WINAPI Create(PREASON_CONTEXT context) {
   return fail_create ? INVALID_HANDLE_VALUE : reinterpret_cast<HANDLE>(1);
 }
 BOOL WINAPI Set(HANDLE, POWER_REQUEST_TYPE type) {
-  Check(type == PowerRequestSystemRequired);
+  Check(type == expected_type);
   ++set;
   return !fail_set;
 }
 BOOL WINAPI Clear(HANDLE, POWER_REQUEST_TYPE type) {
-  Check(type == PowerRequestSystemRequired);
+  Check(type == expected_type);
   ++cleared;
   return !fail_clear;
 }
@@ -35,6 +36,16 @@ void Reset() {
 
 int main() {
   try {
+    Reset();
+    expected_type = PowerRequestDisplayRequired;
+    {
+      DownloadPowerRequest display(functions, PowerRequestDisplayRequired);
+      Check(display.SetActive(true) && display.active());
+      Check(display.SetActive(true) && set == 1);
+      Check(display.SetActive(false) && !display.active());
+    }
+    Check(set == 1 && cleared == 1 && closed == 1);
+    expected_type = PowerRequestSystemRequired;
     Reset();
     {
       DownloadPowerRequest request(functions);

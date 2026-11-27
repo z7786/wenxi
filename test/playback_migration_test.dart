@@ -14,7 +14,9 @@ void main() {
     () async {
       final fixture = PlaybackFixture();
       addTearDown(fixture.controller.close);
-      fixture.configureBackend = (backend) => backend.failAtPlay = true;
+      fixture.configureBackend = (backend) => backend
+        ..describeVideo()
+        ..failAtPlay = true;
       await fixture.controller.start();
       expect(fixture.backends, hasLength(2));
       expect(fixture.current.plays, 1);
@@ -49,18 +51,30 @@ void main() {
   test(
     'Transport errors are distinguished from decoder initialization failures',
     () {
-      expect(PlaybackFailure.fromLog('HTTP error 403 Forbidden')?.sourceFailure, isTrue);
       expect(
-        PlaybackFailure.fromLog('Failed to open https://example.invalid/video')?.sourceFailure,
+        PlaybackFailure.fromLog('HTTP error 403 Forbidden')?.sourceFailure,
         isTrue,
       );
-      expect(PlaybackFailure.fromLog('Connection refused')?.sourceFailure, isTrue);
       expect(
-        PlaybackFailure.fromLog('Could not initialize video decoder')?.sourceFailure,
+        PlaybackFailure.fromLog(
+          'Failed to open https://example.invalid/video',
+        )?.sourceFailure,
+        isTrue,
+      );
+      expect(
+        PlaybackFailure.fromLog('Connection refused')?.sourceFailure,
+        isTrue,
+      );
+      expect(
+        PlaybackFailure.fromLog(
+          'Could not initialize video decoder',
+        )?.sourceFailure,
         isFalse,
       );
       expect(
-        PlaybackFailure.fromLog('Video output initialization failed')?.sourceFailure,
+        PlaybackFailure.fromLog(
+          'Video output initialization failed',
+        )?.sourceFailure,
         isFalse,
       );
     },
@@ -167,7 +181,9 @@ void main() {
     () async {
       final fixture = PlaybackFixture();
       addTearDown(fixture.controller.close);
-      fixture.configureBackend = (backend) => backend.failHardwareOpen = true;
+      fixture.configureBackend = (backend) => backend
+        ..describeVideo()
+        ..failHardwareOpen = true;
       await fixture.controller.start();
       expect(fixture.controller.error, isEmpty);
       expect(fixture.controller.ready, isTrue);
@@ -189,7 +205,9 @@ void main() {
     () async {
       final fixture = PlaybackFixture();
       addTearDown(fixture.controller.close);
-      fixture.configureBackend = (backend) => backend.failOpen = true;
+      fixture.configureBackend = (backend) => backend
+        ..describeVideo()
+        ..failOpen = true;
       await fixture.controller.start();
       expect(fixture.backends, hasLength(2));
       expect(fixture.controller.loading, isFalse);
@@ -206,6 +224,7 @@ void main() {
       addTearDown(fixture.controller.close);
       final openingGate = Completer<void>();
       fixture.configureBackend = (backend) {
+        backend.describeVideo();
         if (backend.hardwareAcceleration) {
           backend.openBarrier = openingGate.future;
         }
@@ -256,7 +275,9 @@ void main() {
         },
       );
       addTearDown(fixture.controller.close);
-      fixture.configureBackend = (backend) => backend.failOpen = true;
+      fixture.configureBackend = (backend) => backend
+        ..describeVideo()
+        ..failOpen = true;
       await fixture.controller.start();
       expect(fixture.backends, hasLength(1));
       expect(fixture.current.hardwareAcceleration, isFalse);
@@ -271,6 +292,7 @@ void main() {
       addTearDown(fixture.controller.close);
       final closingGate = Completer<void>();
       fixture.configureBackend = (backend) {
+        backend.describeVideo();
         backend.failHardwareOpen = true;
         backend.closeBarrier = closingGate.future;
       };

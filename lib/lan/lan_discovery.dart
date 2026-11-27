@@ -27,6 +27,7 @@ extension _LanDiscovery on LanService {
       socket.multicastHops = 1;
       if (!unicastDiscovery) {
         for (final nic in await NetworkInterface.list(
+          includeLinkLocal: true,
           type: InternetAddressType.IPv4,
         )) {
           try {
@@ -92,12 +93,20 @@ extension _LanDiscovery on LanService {
       }, onError: (Object _) {});
       _announce(discover: true);
       if (unicastDiscovery) _startUnicastScan();
-    } catch (_) {
+    } catch (error, stack) {
       _discovery?.close();
       _discovery = null;
       _datagrams?.close();
       _datagrams = null;
       networkHint = '自动发现暂不可用，可输入对方显示的设备地址连接';
+      DiagnosticLog.error(
+        'lan.discovery_start_failed',
+        error,
+        stack,
+        fields: {
+          if (error is SocketException) 'errno': error.osError?.errorCode,
+        },
+      );
     }
   }
 

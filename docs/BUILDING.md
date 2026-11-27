@@ -1,5 +1,7 @@
 # 编译
 
+本项目安装包统一使用 GitHub Actions 构建，入口见下方“GitHub 自动构建”。本机默认执行 [开发指南](DEVELOPMENT.md) 中的检查与测试；下列本机命令保留为环境复现参考，不作为日常发包步骤。
+
 工具：Flutter 3.41.4 / Dart 3.11.1、Go 1.24.7。Android 需要 JDK 21、SDK 36 和 NDK 28.2.13676358；Windows 需要 Visual Studio 2022 C++ 桌面开发工具链。安装器使用 Inno Setup 6.7.3。
 
 在项目根目录执行：
@@ -32,7 +34,7 @@ flutter pub get --enforce-lockfile
 
 已有用户覆盖安装需要继续使用原签名密钥。私有配置和签名只放在 environment 中，不能提交到源码。
 
-使用私有口令解析、百度取链及解析配置时，额外设置 Secret `ASTERLINK_CLIENT_DEFINES_JSON`。其 JSON 对象以 `baidu-api.defines.json`、`cloud-command.defines.json`、`parser-hub.defines.json` 为键，值为对应本机 `.local/` 文件的 JSON 对象。准备脚本只接受这些文件及已知客户端字段，写入临时构建目录后沿用本机构建的配置校验；不包含后端源码或管理凭据。
+使用私有口令解析及解析配置时，额外设置 Secret `ASTERLINK_CLIENT_DEFINES_JSON`。其 JSON 对象以 `cloud-command.defines.json`、`parser-hub.defines.json` 为键，值为对应本机 `.local/` 文件的 JSON 对象。准备脚本只接受这些文件及已知客户端字段，写入临时构建目录后沿用本机构建的配置校验；不包含后端源码或管理凭据。旧 Secret 中的 `baidu-api.defines.json` 会被忽略，无需先修改 Secret 才能构建。
 
 构建成功后，在运行详情底部的 **Artifacts** 下载 `release-android`（签名 APK）、`release-windows`（x64 安装器、便携 ZIP）和 `release-windows-arm64`（ARM64 安装器、便携 ZIP），保留 14 天。工作流只生成并上传构建附件，公开 Release 另行发布。
 
@@ -63,9 +65,9 @@ macOS 构建需要 Mac 和 Xcode。仓库的 **Actions → Build macOS test app 
 
 百度账号视频下载沿用在线播放取链：个人视频使用 `mediainfo` DLNA / `VideoURL`，分享视频使用 App/DLNA 免转存路线，播放器的下载按钮重新获取当前视频的临时地址。返回普通媒体直链时由 Gopeed 下载，返回 HLS 时沿用现有分片下载；HLS 不使用原文件大小或校验值。视频取链失败会报告错误，不转到普通文件接口。明确选择公益解析的分享下载仍使用该公益通道。
 
-百度账号非视频文件下载优先请求中转直链接口，失败后由 App 内置的预览接口直接向百度取链。中转取链或直链分段检查失败就切换，不耗尽下载准备阶段的重试次数；内置预览保留正常重试，使用当前账号和同一安装标识。未配置中转接口时直接使用内置预览。
+百度账号非视频文件下载统一由设备内置接口直接向百度取链，不再按文件大小分流，也不请求第三方中转取链服务。优先使用内置预览，失败后依次使用百度普通下载接口和文件元数据取链，沿用下载准备阶段的有界重试与当前账号的安装标识。登录失效、取消或账号变化会中止取链。分享普通文件仍使用已确认的临时转存副本，恢复任务复用现有副本。
 
-中转配置：复制 `config/baidu-api.example.json` 到 `.local/baidu-api.defines.json`，填写 `ASTERLINK_BAIDU_RELAY_API_URL`（独立中转根地址，末尾保留 `/`）、服务端 RSA 公钥模数（十六进制）和客户端访问码。`ASTERLINK_BAIDU_API_URL` 保留旧 App 的原服务根地址，线上原预览入口和密钥继续保留。构建脚本自动加载该文件；直接使用 Flutter 编译时加上 `--dart-define-from-file=.local/baidu-api.defines.json`。服务端私钥、工作节点密钥和新取链的私有实现不随 App 发布。
+百度账号取链不需要中转配置。客户端已删除中转请求代码，构建脚本不再读取 `.local/baidu-api.defines.json`；旧 GitHub Secret 中的同名条目被忽略且不会写入临时构建目录。详见 [百度账号下载取链](BAIDU-DOWNLOAD-ROUTING.md)。
 
 阿里视频播放使用 OpenList OAuth 授权及阿里官方开放平台取链，登录现有阿里账号后按需自动授权，无需配置应用私钥。构建后客户端需能访问 `api.oplist.org` 与阿里开放接口；授权范围、分享转存、原画回退及验证记录见 [阿里开放平台播放](ALIYUN-OPEN-PLAYBACK.md)。
 

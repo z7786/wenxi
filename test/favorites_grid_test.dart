@@ -332,10 +332,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('复制名称'), findsNothing);
       expect(find.text('复制分享链接'), findsNothing);
-      await tester.tap(find.text('自定义名称'));
+      await tester.tap(find.text('编辑收藏'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), '我的照片');
-      await tester.tap(find.text('确定'));
+      await tester.tap(find.byKey(const Key('favorite-details-save')));
       await tester.pumpAndSettle();
       expect(tester.widget<Text>(caption(0)).data, '我的照片');
       await tester.tap(tile(0));
@@ -353,7 +353,7 @@ void main() {
       await render(tester, desktop: true);
       await rightClick(tester, tester.getCenter(tile(0)));
       expect(find.byType(BottomSheet), findsNothing);
-      expect(find.text('自定义名称'), findsOneWidget);
+      expect(find.text('编辑收藏'), findsOneWidget);
       expect(find.text('复制名称'), findsNothing);
       expect(find.text('复制分享链接'), findsNothing);
       await tester.tap(find.text('取消收藏'));

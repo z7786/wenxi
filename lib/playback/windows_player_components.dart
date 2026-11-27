@@ -12,6 +12,7 @@ import '../core/json.dart';
 import '../data/http.dart';
 import '../diagnostics/app_log.dart';
 import '../domain/github_acceleration.dart';
+import '../platform/executable_path.dart';
 
 enum WindowsPlayerVariant { compact, full }
 
@@ -60,10 +61,12 @@ class WindowsPlayerComponents extends ChangeNotifier {
     this.artifact = PlayerComponentArtifact.full,
     Dio Function()? http,
     PlayerComponentExtractor? extract,
+    String Function()? executablePath,
     bool? supported,
   }) : _directory = directory ?? defaultDirectory,
        _http = http ?? (() => DioJsonHttp().dio),
        _extract = extract,
+       _executablePath = executablePath ?? applicationExecutablePath,
        supported = supported ?? isSupported;
 
   static final shared = WindowsPlayerComponents();
@@ -84,6 +87,7 @@ class WindowsPlayerComponents extends ChangeNotifier {
   final Future<Directory> Function() _directory;
   final Dio Function() _http;
   final PlayerComponentExtractor? _extract;
+  final String Function() _executablePath;
   Directory? _root;
   Future<void>? _refresh, _download, _edit, _runtimeInitialization;
   GitHubAcceleration Function()? acceleration;
@@ -95,7 +99,8 @@ class WindowsPlayerComponents extends ChangeNotifier {
   PlayerComponentStage stage = PlayerComponentStage.idle;
   int receivedBytes = 0;
   String? error, startupNotice;
-  bool get busy => _download != null || _edit != null;
+  bool get busy =>
+      _download != null || _edit != null || _runtimeInitialization != null;
   bool get restartRequired => selected != active;
   double get progress =>
       (receivedBytes / artifact.archiveBytes).clamp(0.0, 1.0);
@@ -185,48 +190,57 @@ class WindowsPlayerComponents extends ChangeNotifier {
     String? bundledLibrary,
   }) {
     if (_runtimeInitialization case final pending?) return pending;
-    return _runtimeInitialization = () async {
-      if (_runtimeLoaded) return;
-      if (!supported) {
-        initialize(null);
-        _runtimeLoaded = true;
-        return;
-      }
-      await refresh();
-      final variant = processVariant ?? selected;
-      final compact =
-          bundledLibrary ??
-          p.join(p.dirname(Platform.resolvedExecutable), 'libmpv-2.dll');
-      if (variant == WindowsPlayerVariant.full) {
-        try {
-          require(
-            await _matches(
-              _library,
-              artifact.libraryBytes,
-              artifact.libraryHash,
-            ),
-            '完整播放器组件不存在或已损坏',
-          );
-          initialize(_library.path);
-          active = WindowsPlayerVariant.full;
+    return _runtimeInitialization =
+        () async {
+          if (_runtimeLoaded) return;
+          if (!supported) {
+            initialize(null);
+            _runtimeLoaded = true;
+            return;
+          }
+          // Installation/removal may now overlap a background runtime preload.
+          // Finish an already authorized edit before choosing a library file.
+          await _edit?.catchError((Object _) {});
+          await _download;
+          require(!_closed, '播放器组件已关闭');
+          await refresh();
+          final variant = processVariant ?? selected;
+          if (variant == WindowsPlayerVariant.full) {
+            try {
+              require(
+                await _matches(
+                  _library,
+                  artifact.libraryBytes,
+                  artifact.libraryHash,
+                ),
+                '完整播放器组件不存在或已损坏',
+              );
+              initialize(_library.path);
+              active = WindowsPlayerVariant.full;
+              _runtimeLoaded = true;
+              _changed();
+              return;
+            } catch (failure, stack) {
+              startupNotice = '完整组件未能加载，已改用精简版；可重新下载后再启用';
+              DiagnosticLog.error('player.component_fallback', failure, stack);
+              // Keep failure recovery independent of application/account data.
+              try {
+                await _saveSelection(WindowsPlayerVariant.compact);
+              } catch (_) {}
+              selected = WindowsPlayerVariant.compact;
+            }
+          }
+          final compact =
+              bundledLibrary ??
+              p.join(p.dirname(_executablePath()), 'libmpv-2.dll');
+          initialize(compact);
+          active = WindowsPlayerVariant.compact;
           _runtimeLoaded = true;
           _changed();
-          return;
-        } catch (failure, stack) {
-          startupNotice = '完整组件未能加载，已改用精简版；可重新下载后再启用';
-          DiagnosticLog.error('player.component_fallback', failure, stack);
-          // Keep failure recovery independent of application/account data.
-          try {
-            await _saveSelection(WindowsPlayerVariant.compact);
-          } catch (_) {}
-          selected = WindowsPlayerVariant.compact;
-        }
-      }
-      initialize(compact);
-      active = WindowsPlayerVariant.compact;
-      _runtimeLoaded = true;
-      _changed();
-    }().whenComplete(() => _runtimeInitialization = null);
+        }().whenComplete(() {
+          _runtimeInitialization = null;
+          _changed();
+        });
   }
 
   Future<void> download({GitHubAcceleration? acceleration}) {
@@ -415,13 +429,13 @@ class WindowsPlayerComponents extends ChangeNotifier {
     if (cancel.cancelError case final failure?) throw failure;
   }
 
-  static Future<void> _extractPinned(
+  Future<void> _extractPinned(
     File archive,
     Directory destination,
     CancelToken cancel,
   ) async {
     final executable = File(
-      p.join(p.dirname(Platform.resolvedExecutable), 'tools', 'player-7za.exe'),
+      p.join(p.dirname(_executablePath()), 'tools', 'player-7za.exe'),
     );
     require(
       await _matches(executable, 1335296, extractorHash),

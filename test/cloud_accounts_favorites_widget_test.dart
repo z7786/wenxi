@@ -81,10 +81,12 @@ void main() {
         await fixture.render(tester);
         await tap(tester, find.byTooltip('假期相册操作'));
         await tap(tester, find.text('收藏'));
+        await tap(tester, find.byKey(const Key('favorite-details-save')));
         expect(fixture.services.favorites.all, hasLength(1));
         await tap(tester, find.text('假期相册'));
         await tap(tester, find.byTooltip('旧目录视频.mp4操作'));
         await tap(tester, find.text('收藏'));
+        await tap(tester, find.byKey(const Key('favorite-details-save')));
         expect(fixture.services.favorites.all, hasLength(2));
         await tap(tester, find.byTooltip('网盘收藏'));
         await tap(tester, find.text('旧目录视频.mp4'));
@@ -127,13 +129,13 @@ void main() {
         );
         await tester.pumpAndSettle();
         await tap(tester, find.byTooltip('假期相册的收藏操作'));
-        await tap(tester, find.text('自定义名称'));
+        await tap(tester, find.text('编辑收藏'));
         final input = find.descendant(
           of: find.byType(AlertDialog),
           matching: find.byType(TextField),
         );
         await tester.enterText(input, '工作照片');
-        await tap(tester, find.text('确定'));
+        await tap(tester, find.byKey(const Key('favorite-details-save')));
         expect(find.text('工作照片'), findsOneWidget);
         expect(services.favorites.all.single.file.name, '假期相册');
         for (final query in ['假期相册', '工作照片']) {
@@ -155,10 +157,10 @@ void main() {
         await tester.pageBack();
         await tester.pumpAndSettle();
         await tap(tester, find.byTooltip('工作照片的收藏操作'));
-        await tap(tester, find.text('自定义名称'));
+        await tap(tester, find.text('编辑收藏'));
         expect(tester.widget<TextField>(input).controller!.text, '工作照片');
         await tester.enterText(input, '');
-        await tap(tester, find.text('确定'));
+        await tap(tester, find.byKey(const Key('favorite-details-save')));
         expect(find.text('假期相册'), findsOneWidget);
         await services.favorites.rename(
           services.favorites.all.single.id,

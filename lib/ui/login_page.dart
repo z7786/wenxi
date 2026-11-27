@@ -3,11 +3,14 @@ import 'dart:io' show Platform;
 import 'dart:collection';
 import 'dart:convert';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../app_services.dart';
 import '../core/json.dart';
 import '../data/http.dart';
+import '../data/cloud_browser_ua.dart';
 import '../data/providers/baidu.dart';
 import '../data/providers/pan123.dart';
 import '../data/providers/uc_tv.dart';
@@ -27,6 +30,7 @@ import 'cloud_login_layout.dart';
 import 'loading_indicator.dart';
 import 'native_password_login_page.dart';
 import 'github_login_page.dart';
+import 'webdav_login_page.dart';
 import 'guangya_sms_login_page.dart';
 import 'quark_login_page.dart';
 import 'baidu_login_panel.dart';
@@ -166,6 +170,7 @@ class _LoginEntryPage extends StatelessWidget {
         final services = entry.services, platform = entry.platform;
         final owner = entry.owner;
         return switch (platform) {
+          CloudPlatform.webdav => WebDavLoginPage(services, accountId: owner),
           CloudPlatform.github => GitHubLoginPage(services, accountId: owner),
           CloudPlatform.xunlei ||
           CloudPlatform.ctfile ||
@@ -378,13 +383,21 @@ Future<void> accountMenu(
                 ListTile(
                   leading: const Icon(CupertinoIcons.slider_horizontal_3),
                   title: const Text('账号配置'),
-                  subtitle: const Text('查看与复制 Cookie、Token 等登录信息'),
+                  subtitle: Text(
+                    platform == CloudPlatform.webdav
+                        ? '查看服务器地址与用户名'
+                        : '查看与复制 Cookie、Token 等登录信息',
+                  ),
                   onTap: () => Navigator.pop(context, 'info'),
                 ),
                 ListTile(
                   leading: const Icon(CupertinoIcons.arrow_clockwise),
                   title: Text(
-                    platform == CloudPlatform.github ? '刷新账号信息' : '刷新账号容量',
+                    platform == CloudPlatform.webdav
+                        ? '检查连接'
+                        : platform == CloudPlatform.github
+                        ? '刷新账号信息'
+                        : '刷新账号容量',
                   ),
                   onTap: () => Navigator.pop(context, 'refresh'),
                 ),
@@ -403,7 +416,9 @@ Future<void> accountMenu(
                 ),
                 ListTile(
                   leading: const Icon(CupertinoIcons.doc_on_clipboard),
-                  title: const Text('手动填写登录信息'),
+                  title: Text(
+                    platform == CloudPlatform.webdav ? '编辑连接设置' : '手动填写登录信息',
+                  ),
                   onTap: () => Navigator.pop(context, 'manual'),
                 ),
                 if (services.vault.credentialFor(platform, accountId) != null)
@@ -476,7 +491,9 @@ Future<void> accountMenu(
       await Navigator.push<void>(
         context,
         MaterialPageRoute(
-          builder: (_) => platform == CloudPlatform.github
+          builder: (_) => platform == CloudPlatform.webdav
+              ? WebDavLoginPage(services, accountId: accountId)
+              : platform == CloudPlatform.github
               ? GitHubLoginPage(services, accountId: accountId)
               : ManualLoginPage(services, platform),
         ),
@@ -543,7 +560,7 @@ class _WebLoginPageState extends State<WebLoginPage>
   bool _baiduAutoReturn = false;
   String _baiduError = '';
   bool get _baiduNative =>
-      widget.baiduNativeLogin && widget.target.platform == CloudPlatform.baidu;
+      widget.baiduNativeLogin && _target.platform == CloudPlatform.baidu;
   bool get _baiduBusy =>
       _baiduExecuting ||
       const {
@@ -553,8 +570,9 @@ class _WebLoginPageState extends State<WebLoginPage>
       }.contains(_baiduState['phase']);
   final _windows = <_WebLoginWindow>[];
   int _pollSequence = 0;
+  int? _activePoll;
   bool get _flushLogin =>
-      Platform.isWindows && widget.target.platform == CloudPlatform.baidu;
+      Platform.isWindows && _target.platform == CloudPlatform.baidu;
   String _weiyunCaptureState = '';
   String _tianyiBrowserId = '', _tianyiCaptureState = '';
   bool ready = false,
@@ -567,14 +585,38 @@ class _WebLoginPageState extends State<WebLoginPage>
       passwordSent = false,
       passwordFallback = false;
   double progress = 0;
-  String get _initialStatus => widget.target.platform == CloudPlatform.xunlei
+  String get _initialStatus => _target.platform == CloudPlatform.xunlei
       ? '小米账号可在网页底部「更多方式」中登录，完成后自动保存'
       : '完成网页登录后将自动保存登录信息';
   late String status = _initialStatus;
+  String _webCompatibilityHint = '';
   String error = '';
   bool get active => mounted && !leaving && !completed;
   bool get checking => checkingWeb != null;
-  late final diagnostics = WebLoginDiagnostics(widget.target.platform);
+  late final diagnostics = WebLoginDiagnostics(_target.platform);
+  late final _target = () {
+    final target = widget.target;
+    if (!CloudBrowserUa.supports(target.platform) ||
+        !CloudBrowserUa.ordinary(target.userAgent)) {
+      return target;
+    }
+    final identities = widget.services.cloud.browserUa;
+    return WebLoginTarget(
+      target.platform,
+      target.url,
+      target.cookieDomains,
+      userAgent: widget.services.vault.withAccount(
+        target.platform,
+        widget.accountId ??
+            widget.services.vault.activeAccountId(target.platform),
+        () => identities.selected(target.platform),
+      ),
+      desktopMode: target.desktopMode,
+      localStorageKey: target.localStorageKey,
+      clearCookieDomains: target.clearCookieDomains,
+      storageOrigins: target.storageOrigins,
+    );
+  }();
   // Creation and event callbacks can wrap the same native controller twice.
   bool _sameWeb(InAppWebViewController? left, InAppWebViewController? right) =>
       left != null && right != null && identical(left.platform, right.platform);
@@ -583,6 +625,9 @@ class _WebLoginPageState extends State<WebLoginPage>
       ready &&
       (_sameWeb(controller, web) ||
           _windows.any((window) => _sameWeb(window.controller, web)));
+
+  bool _currentPoll(InAppWebViewController web, int poll) =>
+      _activePoll == poll && _current(web) && !manualOpen;
 
   Future<void> _forgetBrowserCookies({
     bool logFailure = true,
@@ -596,7 +641,10 @@ class _WebLoginPageState extends State<WebLoginPage>
         stage: 'cleanup',
         flush: _flushLogin,
       );
-      await forgetWebLoginCookies(manager, widget.target);
+      await forgetWebLoginCookies(manager, _target).timeout(
+        const Duration(seconds: 3),
+        onTimeout: () => throw const AppException('网页登录信息清理超时'),
+      );
       diagnostics.record(
         'cookie_cleanup_completed',
         stage: 'cleanup',
@@ -622,7 +670,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     if (_baiduNative) unawaited(_baiduLifecycle('close'));
     widget.passwordLogin?.clear();
     timer?.cancel();
-    widget.services.login.invalidate(widget.target.platform);
+    widget.services.login.invalidate(_target.platform);
     unawaited(_forgetBrowserCookies(logFailure: false));
   }
 
@@ -835,7 +883,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     if (manualOpen || !active) return;
     manualOpen = true;
     widget.passwordLogin?.clear();
-    widget.services.login.invalidate(widget.target.platform);
+    widget.services.login.invalidate(_target.platform);
     if (_baiduNative) await _baiduLifecycle('pause');
     if (!mounted || !active) return;
     try {
@@ -844,7 +892,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         MaterialPageRoute(
           builder: (_) => ManualLoginPage(
             widget.services,
-            widget.target.platform,
+            _target.platform,
             accountId: widget.accountId,
           ),
         ),
@@ -866,7 +914,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     timer?.cancel();
     diagnostics.record('initialize_started', stage: 'initialize');
     try {
-      widget.services.control.checkCloud(widget.target.platform);
+      widget.services.control.checkCloud(_target.platform);
       environment = await widget.services.webEnvironment();
       if (!active) return;
       diagnostics.record(
@@ -874,7 +922,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         stage: 'initialize',
         flush: _flushLogin,
       );
-      widget.services.control.checkCloud(widget.target.platform);
+      widget.services.control.checkCloud(_target.platform);
       cookies = CookieManager.instance(webViewEnvironment: environment);
       // Clear this login and its authentication hosts before rendering. Apple
       // search shares the default store and keeps unrelated challenge cookies.
@@ -882,6 +930,33 @@ class _WebLoginPageState extends State<WebLoginPage>
       if (!active) return;
       _tianyiBrowserId = '';
       _tianyiCaptureState = '';
+      _webCompatibilityHint = '';
+      if (_target.platform == CloudPlatform.tianyi &&
+          defaultTargetPlatform == TargetPlatform.android) {
+        try {
+          final supported = await WebViewFeature.isFeatureSupported(
+            WebViewFeature.DOCUMENT_START_SCRIPT,
+          ).timeout(const Duration(seconds: 2));
+          if (!active) return;
+          if (!supported) {
+            _webCompatibilityHint =
+                '系统网页组件版本较旧，若滑块无法拖动，请更新 Android System WebView 或切换账号密码登录';
+          }
+          diagnostics.record(
+            'touch_adapter_support',
+            stage: 'initialize',
+            fields: {'documentStartSupported': supported},
+          );
+        } catch (error) {
+          diagnostics.record(
+            'touch_adapter_support_unknown',
+            level: 'warning',
+            stage: 'initialize',
+            fields: {'type': error.runtimeType.toString()},
+          );
+        }
+      }
+      if (!active) return;
       _baiduView = null;
       _baiduViewRevision++;
       setState(() => ready = true);
@@ -890,7 +965,12 @@ class _WebLoginPageState extends State<WebLoginPage>
         stage: 'initialize',
         flush: _flushLogin,
       );
-      timer = Timer.periodic(const Duration(seconds: 2), (_) => _poll());
+      timer = Timer.periodic(
+        Duration(
+          milliseconds: _target.platform == CloudPlatform.tianyi ? 1500 : 2000,
+        ),
+        (_) => _poll(),
+      );
     } catch (e, stack) {
       if (active) {
         diagnostics.record(
@@ -908,7 +988,7 @@ class _WebLoginPageState extends State<WebLoginPage>
   }
 
   Future<String> _readCredentials(InAppWebViewController web, int poll) async {
-    final target = widget.target;
+    final target = _target;
     final readCookies =
         target.localStorageKey == null ||
         target.platform == CloudPlatform.feijipan ||
@@ -934,7 +1014,10 @@ class _WebLoginPageState extends State<WebLoginPage>
     } catch (_) {
       if (!readCookies) rethrow;
     }
-    if (!_current(web) || manualOpen) return '';
+    if (!_currentPoll(web, poll)) return '';
+    if (target.platform == CloudPlatform.tianyi) {
+      return _readTianyiCredentials(web, poll, page);
+    }
     Object? storage;
     if (target.localStorageKey != null && target.canPrepareLocalStorage(page)) {
       final preparation = await web
@@ -942,7 +1025,7 @@ class _WebLoginPageState extends State<WebLoginPage>
             source: target.prepareStorageScript(_storageSession),
           )
           .timeout(const Duration(seconds: 5));
-      if (!_current(web) || manualOpen) return '';
+      if (!_currentPoll(web, poll)) return '';
       if (preparation == 'cleared') {
         // Fallback for older WebViews without document-start injection. Reset
         // the page's in-memory state once, before accepting this new session.
@@ -954,7 +1037,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       }
       if (!target.canReadLocalStorage(page)) return '';
       if (_sameWeb(web, controller)) await _submitWebPassword(web);
-      if (!_current(web) || manualOpen) return '';
+      if (!_currentPoll(web, poll)) return '';
       if (widget.passwordLogin != null && !passwordSent && !passwordFallback) {
         return '';
       }
@@ -966,34 +1049,6 @@ class _WebLoginPageState extends State<WebLoginPage>
       )) {
         return '';
       }
-    }
-    if (target.platform == CloudPlatform.tianyi) {
-      if (TianyiWebLogin.trusted(page)) {
-        try {
-          await web
-              .evaluateJavascript(source: TianyiWebLogin.bootstrapScript)
-              .timeout(const Duration(seconds: 3));
-          final captured = TianyiWebLogin.decode(
-            await web
-                .evaluateJavascript(source: TianyiWebLogin.readScript)
-                .timeout(const Duration(seconds: 3)),
-          );
-          final id = TianyiWebLogin.browserId(captured['browserId']);
-          if (id.isNotEmpty) {
-            final currentPage = (await web.getUrl().timeout(
-              const Duration(seconds: 3),
-            ))?.toString();
-            if (_current(web) &&
-                !manualOpen &&
-                TianyiWebLogin.trusted(currentPage)) {
-              _tianyiBrowserId = id;
-            }
-          }
-        } catch (_) {
-          // A redirect can replace the page after the login iframe was read.
-        }
-      }
-      storage = {'browserId': _tianyiBrowserId};
     }
     if (target.platform == CloudPlatform.weiyun &&
         WeiyunWebLogin.trusted(page)) {
@@ -1014,7 +1069,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         storage = null;
       }
     }
-    if (!_current(web) || manualOpen) return '';
+    if (!_currentPoll(web, poll)) return '';
     final stored = LoginCredentials.fromBrowser(
       target.platform,
       storage: storage,
@@ -1028,7 +1083,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       var successfulReads = 0;
       var hostIndex = 0;
       for (final url in target.cookieUrls(page)) {
-        if (!_current(web) || manualOpen) return '';
+        if (!_currentPoll(web, poll)) return '';
         final readClock = Stopwatch()..start();
         final index = hostIndex++;
         try {
@@ -1041,6 +1096,7 @@ class _WebLoginPageState extends State<WebLoginPage>
           final pairs = await cookies!
               .getCookies(url: WebUri(url), webViewController: web)
               .timeout(const Duration(seconds: 3));
+          if (!_currentPoll(web, poll)) return '';
           successfulReads++;
           diagnostics.record(
             'browser_state_read_completed',
@@ -1073,30 +1129,10 @@ class _WebLoginPageState extends State<WebLoginPage>
             flush: _flushLogin,
           );
         }
-        if (!_current(web) || manualOpen) return '';
+        if (!_currentPoll(web, poll)) return '';
       }
       if (successfulReads == 0 && readError != null && stored.isEmpty) {
         throw const AppException('网页登录信息读取失败，请稍候再检测或刷新网页');
-      }
-    }
-    if (target.platform == CloudPlatform.tianyi) {
-      final native = LoginCredentials.cookiePairs(
-        LoginCredentials.mergeCookies(values),
-      );
-      final fields = <String, Object?>{
-        'nativeEntryCount': native.length,
-        'hasBrowserBinding': _tianyiBrowserId.isNotEmpty,
-        'hasPersistentSession': native.containsKey('COOKIE_LOGIN_USER'),
-        'hasPortalSession': native.containsKey('LOGIN_USER'),
-      };
-      final state = jsonEncode(fields);
-      if (state != _tianyiCaptureState) {
-        _tianyiCaptureState = state;
-        diagnostics.record(
-          'capture_state',
-          stage: 'read_credentials',
-          fields: fields,
-        );
       }
     }
     if (target.platform == CloudPlatform.weiyun) {
@@ -1133,6 +1169,135 @@ class _WebLoginPageState extends State<WebLoginPage>
     );
   }
 
+  Future<String> _readTianyiCredentials(
+    InAppWebViewController web,
+    int poll,
+    String? page,
+  ) async {
+    // Native cookies survive SSO redirects even while the document cannot run
+    // JavaScript. Read independent hosts together, preserving API precedence.
+    Object? readError;
+    var successfulReads = 0;
+    final urls = _target.cookieUrls(page);
+    final nativeRead = Future.wait([
+      for (final (index, url) in urls.indexed)
+        () async {
+          final readClock = Stopwatch()..start();
+          diagnostics.record(
+            'browser_state_read_started',
+            stage: 'read_credentials',
+            fields: {'poll': poll, 'hostIndex': index},
+          );
+          try {
+            final pairs = await cookies!
+                .getCookies(url: WebUri(url), webViewController: web)
+                .timeout(const Duration(seconds: 3));
+            if (!_currentPoll(web, poll)) return '';
+            successfulReads++;
+            diagnostics.record(
+              'browser_state_read_completed',
+              stage: 'read_credentials',
+              fields: {
+                'poll': poll,
+                'hostIndex': index,
+                'entryCount': pairs.length,
+                'durationMs': readClock.elapsedMilliseconds,
+              },
+            );
+            return pairs.map((c) => '${c.name}=${c.value}').join('; ');
+          } catch (e) {
+            readError = e;
+            diagnostics.record(
+              'browser_state_read_failed',
+              level: 'warning',
+              stage: 'read_credentials',
+              fields: {
+                'poll': poll,
+                'hostIndex': index,
+                'durationMs': readClock.elapsedMilliseconds,
+                'type': e.runtimeType.toString(),
+              },
+            );
+            return '';
+          }
+        }(),
+    ]);
+    var readingBinding = true;
+    Future<String> readBinding() async {
+      if (!TianyiWebLogin.trusted(page)) return '';
+      try {
+        await web.evaluateJavascript(source: TianyiWebLogin.bootstrapScript);
+        if (!readingBinding || !_currentPoll(web, poll)) return '';
+        final captured = TianyiWebLogin.decode(
+          await web.evaluateJavascript(source: TianyiWebLogin.readScript),
+        );
+        if (!readingBinding || !_currentPoll(web, poll)) return '';
+        final id = TianyiWebLogin.browserId(captured['browserId']);
+        if (id.isEmpty) return '';
+        final currentPage = (await web.getUrl())?.toString();
+        return readingBinding &&
+                _currentPoll(web, poll) &&
+                TianyiWebLogin.trusted(currentPage)
+            ? id
+            : '';
+      } catch (_) {
+        return '';
+      }
+    }
+
+    // The official parent binding was already captured before the callback.
+    // A loading document must not delay native-cookie validation to reread it.
+    final bindingRead = _tianyiBrowserId.isNotEmpty
+        ? Future.value(_tianyiBrowserId)
+        : readBinding().timeout(
+            const Duration(seconds: 2),
+            onTimeout: () {
+              readingBinding = false;
+              return '';
+            },
+          );
+    final values = await nativeRead;
+    final id = await bindingRead;
+    readingBinding = false;
+    if (!_currentPoll(web, poll)) return '';
+    if (successfulReads == 0 && readError != null) {
+      throw const AppException('网页登录信息读取失败，请稍候再检测或刷新网页');
+    }
+    if (id.isNotEmpty) _tianyiBrowserId = id;
+    final native = LoginCredentials.cookiePairs(
+      LoginCredentials.mergeCookies(values),
+    );
+    final fields = <String, Object?>{
+      'nativeEntryCount': native.length,
+      'hasBrowserBinding': _tianyiBrowserId.isNotEmpty,
+      'hasPersistentSession': native.containsKey('COOKIE_LOGIN_USER'),
+      'hasPortalSession': native.containsKey('LOGIN_USER'),
+    };
+    final state = jsonEncode(fields);
+    if (state != _tianyiCaptureState) {
+      _tianyiCaptureState = state;
+      diagnostics.record(
+        'capture_state',
+        stage: 'read_credentials',
+        fields: fields,
+      );
+    }
+    final raw = LoginCredentials.fromBrowser(
+      CloudPlatform.tianyi,
+      storage: {'browserId': _tianyiBrowserId},
+      cookies: values,
+    );
+    final candidates = TianyiWebLogin.cookieCandidates(raw);
+    if (candidates.length > 1) {
+      diagnostics.record(
+        'session_candidates_captured',
+        stage: 'read_credentials',
+        fields: {'poll': poll, 'candidateCount': candidates.length},
+      );
+    }
+    return raw;
+  }
+
   Future<void> _poll({bool userInitiated = false}) async {
     if (!active ||
         !visible ||
@@ -1146,6 +1311,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     var web = controller!;
     checkingWeb = web;
     final poll = ++_pollSequence;
+    _activePoll = poll;
     final pollClock = Stopwatch()..start();
     diagnostics.record(
       'poll_started',
@@ -1165,7 +1331,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         if (!active || manualOpen || !_baiduOwnerCurrent()) return;
       }
       if (userInitiated) setState(() => status = '正在检测登录信息…');
-      final target = widget.target;
+      final target = _target;
       final browsers = [
         for (final window in _windows.reversed)
           if (window.controller != null) window.controller!,
@@ -1178,12 +1344,20 @@ class _WebLoginPageState extends State<WebLoginPage>
         web = browser;
         checkingWeb = web;
         try {
-          candidate = await _readCredentials(web, poll);
+          final capture = _readCredentials(web, poll);
+          candidate = await (target.platform == CloudPlatform.tianyi
+              ? capture.timeout(
+                  const Duration(seconds: 12),
+                  onTimeout: () =>
+                      throw const AppException('天翼登录信息读取超时，请点击“检测登录”重试，或刷新网页'),
+                )
+              : capture);
         } catch (e, stack) {
           readError = e;
           readStack = stack;
           candidate = '';
         }
+        if (_activePoll != poll) return;
         if (candidate.isNotEmpty && _current(web)) break;
       }
       if (!_current(web) || manualOpen) return;
@@ -1227,13 +1401,17 @@ class _WebLoginPageState extends State<WebLoginPage>
         target.platform,
         candidate,
         accountId: widget.accountId,
+        browserUserAgent: target.userAgent,
+        validationTimeout: target.platform == CloudPlatform.tianyi
+            ? const Duration(seconds: 15)
+            : null,
         rememberedLogin: passwordSent
             ? widget.passwordLogin?.rememberedLogin ?? const {}
             : const {},
       );
       // Closing an SSO popup does not cancel its parent login. The account
       // service has already checked cancellation and account ownership.
-      if (!active || !ready || manualOpen) return;
+      if (!active || !ready || manualOpen || _activePoll != poll) return;
       diagnostics.record(
         'validation_succeeded',
         stage: 'validation',
@@ -1241,7 +1419,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         flush: _flushLogin,
       );
       await _forgetBrowserCookies();
-      if (!active || !ready || manualOpen) return;
+      if (!active || !ready || manualOpen || _activePoll != poll) return;
       completed = true;
       widget.passwordLogin?.clear();
       timer?.cancel();
@@ -1256,7 +1434,8 @@ class _WebLoginPageState extends State<WebLoginPage>
         Navigator.pop(context);
       }
     } catch (e, stack) {
-      if ((stage == 'validation' ? active && ready : _current(web)) &&
+      if (_activePoll == poll &&
+          (stage == 'validation' ? active && ready : _current(web)) &&
           (!_baiduNative || _sameWeb(web, controller)) &&
           !manualOpen) {
         policy.failed(candidate, clock.elapsedMilliseconds);
@@ -1288,7 +1467,8 @@ class _WebLoginPageState extends State<WebLoginPage>
         },
         flush: _flushLogin,
       );
-      if (_sameWeb(checkingWeb, web)) {
+      if (_activePoll == poll) {
+        _activePoll = null;
         checkingWeb = null;
         if (active) setState(() {});
       }
@@ -1319,9 +1499,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       return;
     }
     try {
-      if (!widget.target.canReadLocalStorage(
-        (await web.getUrl())?.toString(),
-      )) {
+      if (!_target.canReadLocalStorage((await web.getUrl())?.toString())) {
         return;
       }
       final state = await web.evaluateJavascript(source: attempt.statusScript);
@@ -1353,7 +1531,7 @@ class _WebLoginPageState extends State<WebLoginPage>
   void _continueWebLogin() {
     if (!active) return;
     widget.passwordLogin?.clear();
-    widget.services.login.invalidate(widget.target.platform);
+    widget.services.login.invalidate(_target.platform);
     setState(() {
       passwordFallback = true;
       status = _initialStatus;
@@ -1363,12 +1541,20 @@ class _WebLoginPageState extends State<WebLoginPage>
   Future<void> _loaded(InAppWebViewController web, WebUri? uri) async {
     if (!_current(web)) return;
     diagnostics.pageLoaded();
+    // Like manual detection, the native-cookie path does not depend on a
+    // rendering script finishing in a busy or navigating portal document.
+    if (_target.platform == CloudPlatform.tianyi) unawaited(_poll());
     try {
-      if (widget.target.desktopMode && !_baiduNative) {
-        await web.evaluateJavascript(source: desktopLoginViewportScript);
+      if (_target.desktopMode && !_baiduNative) {
+        final layout = web.evaluateJavascript(
+          source: desktopLoginViewportScript,
+        );
+        await (_target.platform == CloudPlatform.tianyi
+            ? layout.timeout(const Duration(seconds: 2))
+            : layout);
       }
-      if (widget.target.platform == CloudPlatform.tianyi && _current(web)) {
-        await web.evaluateJavascript(source: TianyiWebLogin.mobileFormScript);
+      if (_target.platform == CloudPlatform.tianyi && _current(web)) {
+        await web.evaluateJavascript(source: TianyiWebLogin.formScript);
       }
       final attempt = widget.passwordLogin;
       if (attempt != null && _current(web)) {
@@ -1401,7 +1587,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       return;
     }
     timer?.cancel();
-    widget.services.login.invalidate(widget.target.platform);
+    widget.services.login.invalidate(_target.platform);
     // A dead renderer cannot be reused. Removing the platform view
     // lets the explicit retry create a fresh one instead of reloading it.
     controller = null;
@@ -1429,6 +1615,17 @@ class _WebLoginPageState extends State<WebLoginPage>
     unawaited(_poll());
   }
 
+  void _restartTianyiCapture() {
+    // A fresh official parent creates a new binding. Invalidate outstanding
+    // reads and validation so a late result cannot restore the old session.
+    _tianyiBrowserId = '';
+    _tianyiCaptureState = '';
+    _activePoll = null;
+    checkingWeb = null;
+    widget.services.login.invalidate(_target.platform);
+    setState(() => status = _initialStatus);
+  }
+
   Widget _webView({_WebLoginWindow? popup}) => InAppWebView(
     key: ValueKey(
       popup?.id ??
@@ -1438,20 +1635,26 @@ class _WebLoginPageState extends State<WebLoginPage>
     ),
     webViewEnvironment: environment,
     windowId: popup?.id,
+    gestureRecognizers:
+        _target.platform == CloudPlatform.tianyi &&
+            defaultTargetPlatform == TargetPlatform.android
+        ? {Factory<OneSequenceGestureRecognizer>(EagerGestureRecognizer.new)}
+        : null,
     initialUrlRequest: popup == null
-        ? URLRequest(url: WebUri(widget.target.url))
+        ? URLRequest(url: WebUri(_target.url))
         : null,
     initialSettings:
         webSettings(
-            userAgent: widget.target.userAgent,
-            desktopMode: widget.target.desktopMode,
+            cloud: _target.platform,
+            userAgent: _target.userAgent,
+            desktopMode: _target.desktopMode,
             isPopup: popup != null,
           )
           ..useOnRenderProcessGone = true
           ..supportMultipleWindows = true
           ..javaScriptCanOpenWindowsAutomatically = true,
     initialUserScripts: UnmodifiableListView([
-      if (widget.target.desktopMode && !_baiduNative) desktopLoginUserScript(),
+      if (_target.desktopMode && !_baiduNative) desktopLoginUserScript(),
       if (_baiduNative && popup == null)
         UserScript(
           source: BaiduWebLogin.bootstrap(_baiduSession),
@@ -1459,33 +1662,41 @@ class _WebLoginPageState extends State<WebLoginPage>
           forMainFrameOnly: true,
           allowedOriginRules: const {BaiduWebLogin.origin},
         ),
-      if (widget.target.platform == CloudPlatform.tianyi)
+      if (_target.platform == CloudPlatform.tianyi)
         UserScript(
-          source: TianyiWebLogin.mobileFormScript,
+          source: TianyiWebLogin.formScript,
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-          forMainFrameOnly: true,
+          forMainFrameOnly: false,
           allowedOriginRules: const {'https://open.e.189.cn'},
         ),
-      if (widget.target.platform == CloudPlatform.tianyi)
+      if (_target.platform == CloudPlatform.tianyi &&
+          defaultTargetPlatform == TargetPlatform.android)
+        UserScript(
+          source: TianyiWebLogin.touchScript,
+          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+          forMainFrameOnly: false,
+          allowedOriginRules: const {'https://open.e.189.cn'},
+        ),
+      if (_target.platform == CloudPlatform.tianyi)
         UserScript(
           source: TianyiWebLogin.bootstrapScript,
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
           forMainFrameOnly: true,
           allowedOriginRules: TianyiWebLogin.origins,
         ),
-      if (widget.target.platform == CloudPlatform.weiyun)
+      if (_target.platform == CloudPlatform.weiyun)
         UserScript(
           source: WeiyunWebLogin.bootstrapScript,
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
           forMainFrameOnly: true,
           allowedOriginRules: WeiyunWebLogin.origins,
         ),
-      if (widget.target.localStorageKey != null)
+      if (_target.localStorageKey != null)
         UserScript(
-          source: widget.target.prepareStorageScript(_storageSession),
+          source: _target.prepareStorageScript(_storageSession),
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
           forMainFrameOnly: true,
-          allowedOriginRules: widget.target.storageOriginRules,
+          allowedOriginRules: _target.storageOriginRules,
         ),
       if (widget.passwordLogin != null && popup == null)
         UserScript(
@@ -1523,9 +1734,14 @@ class _WebLoginPageState extends State<WebLoginPage>
     onCloseWindow: (web) {
       if (popup != null) _closeWindow(popup.id);
     },
-    onLoadStart: (web, _) {
+    onLoadStart: (web, url) {
       if (_current(web)) {
         if (_sameWeb(web, controller)) passwordDocumentReady = false;
+        if (_target.platform == CloudPlatform.tianyi &&
+            url?.origin == 'https://cloud.189.cn' &&
+            url?.path == '/web/login.html') {
+          _restartTianyiCapture();
+        }
         diagnostics.pageStarted();
       }
     },
@@ -1561,15 +1777,12 @@ class _WebLoginPageState extends State<WebLoginPage>
     shouldOverrideUrlLoading: (web, action) async {
       final url = action.request.url;
       if (_current(web) &&
-          widget.target.platform == CloudPlatform.tianyi &&
+          _target.platform == CloudPlatform.tianyi &&
           action.isForMainFrame &&
           TianyiWebLogin.isCompletionLanding(url?.toString())) {
-        // The official mobile SSO callback has already stored its HttpOnly
-        // cookies. Its home/redirect document would send this mobile UA to a
-        // client promotion page. Validate the native jar before that hop.
+        // Let the portal callback and landing finish before the normal
+        // load/history polling reads their native cookies and browser binding.
         diagnostics.record('completion_redirect', stage: 'read_credentials');
-        unawaited(_poll(userInitiated: true));
-        return NavigationActionPolicy.CANCEL;
       }
       return active &&
               url != null &&
@@ -1617,10 +1830,9 @@ class _WebLoginPageState extends State<WebLoginPage>
     }
     try {
       final web = _windows.isEmpty ? controller : _windows.last.controller;
-      if (widget.target.platform == CloudPlatform.tianyi) {
-        await web?.loadUrl(
-          urlRequest: URLRequest(url: WebUri(widget.target.url)),
-        );
+      if (_target.platform == CloudPlatform.tianyi) {
+        _restartTianyiCapture();
+        await web?.loadUrl(urlRequest: URLRequest(url: WebUri(_target.url)));
       } else {
         await web?.reload();
       }
@@ -1662,7 +1874,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     child: PageFrame(
       title: _baiduNative
           ? '百度${_baiduWebVisible ? '登录验证' : '登录'}'
-          : '${widget.target.platform.shortName}${widget.passwordLogin == null || passwordFallback ? '网页登录' : '登录验证'}',
+          : '${_target.platform.shortName}${widget.passwordLogin == null || passwordFallback ? '网页登录' : '登录验证'}',
       actions: [
         IconButton(
           tooltip: '刷新网页',
@@ -1674,6 +1886,14 @@ class _WebLoginPageState extends State<WebLoginPage>
       child: Column(
         children: [
           if (progress < 1 && ready) LinearProgressIndicator(value: progress),
+          if (_webCompatibilityHint.isNotEmpty && ready)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 9, 16, 0),
+              child: Text(
+                _webCompatibilityHint,
+                style: TextStyle(fontSize: 12, color: secondary(context)),
+              ),
+            ),
           if (!_baiduNative || _baiduWebVisible)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),

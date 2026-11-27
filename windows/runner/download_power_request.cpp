@@ -1,7 +1,8 @@
 #include "download_power_request.h"
 
-DownloadPowerRequest::DownloadPowerRequest(DownloadPowerFunctions functions)
-    : functions_(functions) {}
+DownloadPowerRequest::DownloadPowerRequest(DownloadPowerFunctions functions,
+                                         POWER_REQUEST_TYPE type)
+    : functions_(functions), type_(type) {}
 
 DownloadPowerRequest::~DownloadPowerRequest() { SetActive(false); }
 
@@ -9,7 +10,7 @@ bool DownloadPowerRequest::SetActive(bool active) {
   if (active && active_) return true;
   if (!active) {
     if (handle_ == INVALID_HANDLE_VALUE) return true;
-    const BOOL cleared = !active_ || functions_.clear(handle_, PowerRequestSystemRequired);
+    const BOOL cleared = !active_ || functions_.clear(handle_, type_);
     if (cleared) active_ = false;
     const BOOL closed = functions_.close(handle_);
     // Closing the request releases its OS ownership even if clearing failed.
@@ -30,7 +31,7 @@ bool DownloadPowerRequest::SetActive(bool active) {
   const HANDLE handle = functions_.create(&context);
   if (handle == INVALID_HANDLE_VALUE || handle == nullptr) return false;
   handle_ = handle;
-  if (!functions_.set(handle_, PowerRequestSystemRequired)) {
+  if (!functions_.set(handle_, type_)) {
     if (functions_.close(handle_)) handle_ = INVALID_HANDLE_VALUE;
     return false;
   }

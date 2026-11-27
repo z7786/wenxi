@@ -7,6 +7,20 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/platform/clipboard_links.dart';
 
 void main() {
+  test('PikPak net clipboard replay preserves the full access password', () {
+    final suggestion = ClipboardLinkSuggestion.fromText(
+      r'https\://mypikpak.net/s/Share_123AbC-XyZ9876543210 访问密码：abc123',
+    )!;
+    final link = suggestion.links.single;
+    expect(link.kind, LinkKind.cloudShare);
+    expect(link.platform, CloudPlatform.pikpak);
+    expect(link.passcode, 'abc123');
+    final replay = ClipboardLinkSuggestion.fromText(suggestion.text)!;
+    expect(replay.fingerprint, suggestion.fingerprint);
+    expect(replay.links.single.shareId, link.shareId);
+    expect(replay.links.single.passcode, 'abc123');
+  });
+
   test('Tianyi official copied links preserve access codes through replay', () {
     final suggestion = ClipboardLinkSuggestion.fromText(
       'https://cloud.189.cn/web/share?code=TestShare123（访问码：a1B2）',

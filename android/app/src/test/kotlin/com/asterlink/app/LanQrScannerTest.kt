@@ -27,8 +27,9 @@ class LanQrScannerTest {
         var calls = 0
         var value: Any? = null
         var error: String? = null
+        var errorMessage: String? = null
         override fun success(result: Any?) { calls++; value = result }
-        override fun error(code: String, message: String?, details: Any?) { calls++; error = code }
+        override fun error(code: String, message: String?, details: Any?) { calls++; error = code; errorMessage = message }
         override fun notImplemented() { error("not implemented") }
     }
 
@@ -69,6 +70,43 @@ class LanQrScannerTest {
         scanner.activityResult(LanQrScanner.REQUEST_CODE, Activity.RESULT_OK, Intent().putExtra(Intents.Scan.RESULT, payload))
         assertEquals(payload, next.value)
         assertEquals(1, next.calls)
+    }
+
+    @Test fun parseScannerKeepsShareContentAndUsesItsOwnPresentation() {
+        val reply = Reply()
+        scanner.scan(reply, parseShare = true)
+        val request = shadowOf(activity).nextStartedActivityForResult
+        assertTrue(request.intent.getBooleanExtra(LanQrScanner.PARSE_QR_EXTRA, false))
+        val payload = "分享 https://pan.quark.cn/s/Abc 提取码：a123 " + "内容".repeat(1100)
+        scanner.activityResult(LanQrScanner.REQUEST_CODE, Activity.RESULT_OK,
+            Intent().putExtra(Intents.Scan.RESULT, payload))
+        assertEquals(payload, reply.value)
+        val connection = Reply()
+        scanner.scan(connection)
+        val next = shadowOf(activity).nextStartedActivityForResult
+        assertFalse(next.intent.getBooleanExtra(LanQrScanner.PARSE_QR_EXTRA, true))
+        scanner.activityResult(LanQrScanner.REQUEST_CODE, Activity.RESULT_OK,
+            Intent().putExtra(Intents.Scan.RESULT, payload))
+        assertEquals("qr_invalid", connection.error)
+    }
+
+    @Test fun parsePermissionFailureOffersImageRecognitionAndReleasesRequest() {
+        val denied = Reply()
+        scanner.scan(denied, parseShare = true)
+        scanner.activityResult(LanQrScanner.REQUEST_CODE, Activity.RESULT_CANCELED,
+            Intent().putExtra(Intents.Scan.MISSING_CAMERA_PERMISSION, true))
+        assertEquals("qr_permission", denied.error)
+        assertTrue(denied.errorMessage!!.contains("图片"))
+        val next = Reply()
+        scanner.scan(next, parseShare = true)
+        scanner.activityResult(LanQrScanner.REQUEST_CODE, Activity.RESULT_OK,
+            Intent().putExtra(Intents.Scan.RESULT, "x".repeat(16385)))
+        assertEquals("qr_invalid", next.error)
+        val command = Reply()
+        scanner.scan(command, parseShare = true)
+        scanner.activityResult(LanQrScanner.REQUEST_CODE, Activity.RESULT_OK,
+            Intent().putExtra(Intents.Scan.RESULT, "/*391R8TRNLu2U:/"))
+        assertEquals("/*391R8TRNLu2U:/", command.value)
     }
 
     @Test fun permissionDenialIsReportedAndDoesNotLeaveScannerBusy() {

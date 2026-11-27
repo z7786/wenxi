@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../domain/playback.dart';
@@ -38,15 +39,42 @@ class PlayerScreenDisplayPanel extends StatelessWidget {
       AppSwitchListTile(
         key: const Key('player-screen-enabled'),
         title: const Text('开启屏显'),
-        subtitle: const Text('控制栏隐藏后仍显示；选择会自动记住'),
+        subtitle: const Text('控制栏收起时显示，展开时隐藏；选择会自动记住'),
         value: preferences.enabled,
         onChanged: (value) => onChanged(preferences.copyWith(enabled: value)),
       ),
       const Padding(
         padding: EdgeInsets.fromLTRB(16, 8, 16, 12),
         child: Text(
-          '按锁屏时的视频画面固定四角：左上标题，右上时间和网速，左下媒体信息和进度，右下分辨率和播放参数。',
+          '固定在屏幕四角，只显示内容和单位：左上标题和分辨率，右上时间，左下媒体信息和进度，右下播放参数和网速。丢帧数依次为解码 / 输出。视频缩放或留黑边时位置不变。',
           style: TextStyle(fontSize: 12, color: Colors.white60),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('文字样式'),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                for (final (style, label) in [
+                  (PlaybackScreenStyle.outline, '黑色描边'),
+                  (PlaybackScreenStyle.background, '半透明底色'),
+                ])
+                  ChoiceChip(
+                    key: Key('player-screen-style-${style.name}'),
+                    label: Text(label),
+                    selected: preferences.style == style,
+                    onSelected: (_) =>
+                        onChanged(preferences.copyWith(style: style)),
+                  ),
+              ],
+            ),
+          ],
         ),
       ),
       const Divider(height: 1),
@@ -71,14 +99,72 @@ class PlayerScreenDisplay extends StatefulWidget {
     this.television = false,
     this.now = DateTime.now,
     this.insets = EdgeInsets.zero,
+    this.cutouts = const [],
   });
   final PlaybackController controller;
   final bool television;
   final DateTime Function() now;
   final EdgeInsets insets;
+  final List<Rect> cutouts;
 
   @override
   State<PlayerScreenDisplay> createState() => _PlayerScreenDisplayState();
+}
+
+class _ScreenCornerLayout extends SingleChildLayoutDelegate {
+  const _ScreenCornerLayout({required this.alignment, required this.cutouts});
+  final Alignment alignment;
+  final List<Rect> cutouts;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      constraints.loosen();
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final available = Offset(
+      math.max(0, size.width - childSize.width),
+      math.max(0, size.height - childSize.height),
+    );
+    final anchor = alignment.alongOffset(available);
+    final obstacles = [
+      for (final rect in cutouts)
+        if (!rect.isEmpty) rect.inflate(4),
+    ];
+    bool clear(Offset position) =>
+        !obstacles.any((rect) => rect.overlaps(position & childSize));
+    if (clear(anchor)) return anchor;
+
+    // Search only positions that stay within this corner's area. Measure the
+    // displayed child after wrapping/scaling, rather than the large area that
+    // is reserved for it, and move only when the text would touch a cutout.
+    final xs = {anchor.dx}, ys = {anchor.dy};
+    for (final rect in obstacles) {
+      for (final x in [rect.left - childSize.width, rect.right]) {
+        if (x >= 0 && x <= available.dx) xs.add(x);
+      }
+      for (final y in [rect.top - childSize.height, rect.bottom]) {
+        if (y >= 0 && y <= available.dy) ys.add(y);
+      }
+    }
+    var closest = anchor, distance = double.infinity;
+    for (final x in xs) {
+      for (final y in ys) {
+        final candidate = Offset(x, y);
+        final delta = (candidate - anchor).distanceSquared;
+        if (delta < distance && clear(candidate)) {
+          closest = candidate;
+          distance = delta;
+        }
+      }
+    }
+    return closest;
+  }
+
+  @override
+  bool shouldRelayout(_ScreenCornerLayout oldDelegate) =>
+      alignment != oldDelegate.alignment ||
+      !listEquals(cutouts, oldDelegate.cutouts);
 }
 
 class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
@@ -176,7 +262,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
       String two(int value) => '$value'.padLeft(2, '0');
       lines.add((
         'time',
-        '时间 ${two(now.hour)}:${two(now.minute)}:${two(now.second)}',
+        '${two(now.hour)}:${two(now.minute)}:${two(now.second)}',
       ));
     }
     if (show(PlaybackScreenItem.network)) {
@@ -190,7 +276,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
           : measured != null && measured.isFinite && measured >= 0
           ? '${_bytes(measured)}/s'
           : '待获取';
-      lines.add(('network', '网速 $label'));
+      lines.add(('network', label));
     }
     if (show(PlaybackScreenItem.resolution)) {
       final geometry = controller.casting || controller.loading
@@ -198,11 +284,11 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
           : controller.videoGeometry;
       lines.add((
         'resolution',
-        '分辨率 ${!controller.hasVideo
+        !controller.hasVideo
             ? '纯音频'
             : geometry == null
             ? '待获取'
-            : '${geometry.width} × ${geometry.height}'}',
+            : '${geometry.width} × ${geometry.height}',
       ));
     }
     if (show(PlaybackScreenItem.progress)) {
@@ -215,7 +301,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
           : '';
       lines.add((
         'progress',
-        '进度 ${playbackTime(position)} / ${duration > Duration.zero ? playbackTime(duration) : '--:--'}$percent',
+        '${playbackTime(position)} / ${duration > Duration.zero ? playbackTime(duration) : '--:--'}$percent',
       ));
     }
     if (show(PlaybackScreenItem.parameters)) {
@@ -226,24 +312,25 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
         '${_number(state.rate)}×',
         if (controller.casting) '电视投屏' else _decoder(controller, info),
       ];
-      lines.add(('parameters', '播放 ${details.join(' · ')}'));
+      lines.add(('parameters', details.join(' · ')));
       if (!controller.casting && !controller.loading) {
         lines.add((
           'buffer',
-          '缓冲 ${buffer.clamp(0, double.infinity).toStringAsFixed(1)} 秒',
+          '${buffer.clamp(0, double.infinity).toStringAsFixed(1)} s',
         ));
       }
-      final dropped = [
-        if (!controller.casting && info.decoderDroppedFrames != null)
-          '解码丢帧 ${info.decoderDroppedFrames}',
-        if (!controller.casting && info.outputDroppedFrames != null)
-          '输出丢帧 ${info.outputDroppedFrames}',
-      ];
-      if (dropped.isNotEmpty) lines.add(('dropped', dropped.join(' · ')));
+      if (!controller.casting &&
+          (info.decoderDroppedFrames != null ||
+              info.outputDroppedFrames != null)) {
+        lines.add((
+          'dropped',
+          '${info.decoderDroppedFrames ?? '--'} / ${info.outputDroppedFrames ?? '--'} 帧',
+        ));
+      }
     }
     if (show(PlaybackScreenItem.media)) {
       if (controller.casting) {
-        lines.add(('media', '媒体信息由电视端解码，暂不可获取'));
+        lines.add(('media', '电视端解码 · --'));
       } else {
         if (controller.hasVideo) {
           final fps = video?.fps ?? info.videoFps;
@@ -256,7 +343,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
             if (video?.bitrate case final bitrate? when bitrate > 0)
               '${_number(bitrate / 1000000)} Mbps',
           ];
-          lines.add(('video', '视频 ${videoDetails.join(' · ')}'));
+          lines.add(('video', videoDetails.join(' · ')));
         }
         final params = state.audioParams;
         final sampleRate = params.sampleRate ?? audio?.samplerate;
@@ -272,9 +359,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
         ];
         lines.add((
           'audio',
-          state.track.audio.id == 'no'
-              ? '音频 已关闭'
-              : '音频 ${audioDetails.join(' · ')}',
+          state.track.audio.id == 'no' ? '已关闭' : audioDetails.join(' · '),
         ));
       }
     }
@@ -320,7 +405,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
     final hw = info.hardwareDecoder;
     if (controller.loading) return '等待播放';
     if (controller.usingSoftwareDecoder || hw == 'no') return '软件解码';
-    if (hw != null && hw.isNotEmpty) return '硬解 $hw';
+    if (hw != null && hw.isNotEmpty) return hw;
     return controller.backend?.hardwareDecodingActive == true
         ? '硬件解码'
         : '解码方式待获取';
@@ -356,7 +441,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
           if (_lines.isEmpty || box.maxHeight <= 0 || box.maxWidth <= 0) {
             return const SizedBox.shrink();
           }
-          final bounds = _videoBounds(box.biggest);
+          final bounds = _screenBounds(box.biggest);
           if (bounds.isEmpty) return const SizedBox.shrink();
           final tv = widget.television;
           final horizontal = tv ? (bounds.width * .05).clamp(16.0, 48.0) : 12.0;
@@ -374,12 +459,13 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
               Positioned.fromRect(
                 rect: bounds,
                 child: Stack(
-                  key: const Key('player-screen-video-bounds'),
+                  key: const Key('player-screen-viewport-bounds'),
                   children: [
                     _region(
                       context,
                       'top-left',
-                      {'title'},
+                      {'title', 'resolution'},
+                      bounds: bounds,
                       left: horizontal,
                       top: vertical,
                       width: math.min(tv ? 440 : 300, columnWidth),
@@ -388,7 +474,8 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
                     _region(
                       context,
                       'top-right',
-                      {'time', 'network'},
+                      {'time'},
+                      bounds: bounds,
                       right: horizontal,
                       top: vertical,
                       width: math.min(tv ? 240 : 170, columnWidth),
@@ -399,6 +486,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
                       context,
                       'bottom-left',
                       {'video', 'audio', 'media', 'progress'},
+                      bounds: bounds,
                       left: horizontal,
                       bottom: vertical,
                       width: math.min(tv ? 480 : 340, columnWidth),
@@ -407,7 +495,8 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
                     _region(
                       context,
                       'bottom-right',
-                      {'resolution', 'parameters', 'buffer', 'dropped'},
+                      {'parameters', 'buffer', 'dropped', 'network'},
+                      bounds: bounds,
                       right: horizontal,
                       bottom: vertical,
                       width: math.min(tv ? 460 : 320, columnWidth),
@@ -424,36 +513,13 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
     ),
   );
 
-  // Use the same geometry, fit and transforms as the video. The four anchors
-  // stay fixed when playback controls appear, disappear or become locked.
-  Rect _videoBounds(Size viewport) {
-    final controller = widget.controller;
-    final prefs = controller.preferences;
-    var bounds = Offset.zero & viewport;
-    final geometry = controller.videoGeometry;
-    if (controller.hasVideo && !controller.casting && geometry != null) {
-      final aspect = prefs.aspectRatio > 0
-          ? prefs.aspectRatio
-          : geometry.aspectRatio;
-      final fit = switch (prefs.fit) {
-        PlaybackFit.contain => BoxFit.contain,
-        PlaybackFit.cover => BoxFit.cover,
-        PlaybackFit.stretch => BoxFit.fill,
-      };
-      final fitted = applyBoxFit(fit, Size(aspect, 1), viewport).destination;
-      bounds = Rect.fromCenter(
-        center:
-            viewport.center(Offset.zero) +
-            Offset(
-              prefs.videoOffsetX * viewport.width / 2,
-              prefs.videoOffsetY * viewport.height / 2,
-            ),
-        width: fitted.width * prefs.videoScale,
-        height: fitted.height * prefs.videoScale,
-      );
-    }
+  // Anchor to the full player viewport, including letterboxing. Only device
+  // continuous edge insets affect every corner. Individual cutouts are checked
+  // against the actual text bounds so a camera in the middle of an edge does
+  // not reserve that entire edge.
+  Rect _screenBounds(Size viewport) {
     final insets = widget.insets;
-    return bounds.intersect(
+    return (Offset.zero & viewport).intersect(
       Rect.fromLTRB(
         insets.left,
         insets.top,
@@ -467,6 +533,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
     BuildContext context,
     String id,
     Set<String> fields, {
+    required Rect bounds,
     double? left,
     double? right,
     double? top,
@@ -482,6 +549,13 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
       return const SizedBox.shrink();
     }
     final alignment = Alignment(alignRight ? 1 : -1, bottom == null ? -1 : 1);
+    final background =
+        widget.controller.preferences.screenDisplay.style ==
+        PlaybackScreenStyle.background;
+    final origin = Offset(
+      bounds.left + (left ?? bounds.width - right! - width),
+      bounds.top + (top ?? bounds.height - bottom! - height),
+    );
     return Positioned(
       left: left,
       right: right,
@@ -489,21 +563,28 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
       bottom: bottom,
       width: width,
       height: height,
-      child: Align(
-        alignment: alignment,
+      child: CustomSingleChildLayout(
+        delegate: _ScreenCornerLayout(
+          alignment: alignment,
+          cutouts: [for (final rect in widget.cutouts) rect.shift(-origin)],
+        ),
         child: FittedBox(
           fit: BoxFit.scaleDown,
           alignment: alignment,
           // FittedBox lays out its child without constraints. Constrain the
-          // text here so a long decoder or title cannot spill across the video.
+          // text here so a long decoder or title cannot spill across the screen.
           child: Container(
             key: Key('player-screen-region-$id'),
             constraints: BoxConstraints(maxWidth: width),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-            decoration: BoxDecoration(
-              color: const Color(0x99000000),
-              borderRadius: BorderRadius.circular(4),
-            ),
+            padding: background
+                ? const EdgeInsets.symmetric(horizontal: 8, vertical: 5)
+                : const EdgeInsets.all(2),
+            decoration: background
+                ? BoxDecoration(
+                    color: const Color(0x99000000),
+                    borderRadius: BorderRadius.circular(4),
+                  )
+                : null,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: alignRight
@@ -526,29 +607,62 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
     bool alignRight = false,
   }) {
     final (id, text) = line;
-    return Text(
-      text,
-      textAlign: alignRight ? TextAlign.right : TextAlign.left,
-      key: Key('player-screen-line-$id'),
-      maxLines: id == 'parameters'
-          ? 3
-          : id == 'video' || id == 'audio' || id == 'title'
-          ? 2
-          : id == 'progress' || id == 'dropped' || id == 'resolution'
-          ? 2
-          : 1,
-      overflow: TextOverflow.ellipsis,
-      textScaler: MediaQuery.textScalerOf(context).clamp(maxScaleFactor: 1.3),
-      style: TextStyle(
+    final maxLines = id == 'parameters'
+        ? 3
+        : id == 'video' || id == 'audio' || id == 'title'
+        ? 2
+        : id == 'progress' || id == 'dropped' || id == 'resolution'
+        ? 2
+        : 1;
+    final scaler = MediaQuery.textScalerOf(context).clamp(maxScaleFactor: 1.3);
+    final textAlign = alignRight ? TextAlign.right : TextAlign.left;
+    final style = DefaultTextStyle.of(context).style.merge(
+      TextStyle(
         color: id == 'title' ? Colors.white : const Color(0xffe4e4e4),
         fontSize: widget.television ? 16 : 11.5,
         height: 1.5,
         fontWeight: id == 'title' ? FontWeight.w600 : FontWeight.w400,
         fontFeatures: const [FontFeature.tabularFigures()],
-        shadows: const [
-          Shadow(color: Colors.black54, blurRadius: 1, offset: Offset(0, 1)),
-        ],
       ),
+    );
+    final foreground = Text(
+      text,
+      textAlign: textAlign,
+      key: Key('player-screen-line-$id'),
+      maxLines: maxLines,
+      overflow: TextOverflow.ellipsis,
+      textScaler: scaler,
+      style: style,
+    );
+    if (widget.controller.preferences.screenDisplay.style ==
+        PlaybackScreenStyle.background) {
+      return foreground;
+    }
+    return Stack(
+      alignment: alignRight ? Alignment.topRight : Alignment.topLeft,
+      children: [
+        ExcludeSemantics(
+          child: RichText(
+            key: Key('player-screen-outline-$id'),
+            text: TextSpan(
+              text: text,
+              style: style.copyWith(
+                foreground: Paint()
+                  ..style = PaintingStyle.stroke
+                  ..strokeWidth = (widget.television ? 16 : 11.5) * .14
+                  ..strokeJoin = StrokeJoin.round
+                  ..color = Colors.black,
+              ),
+            ),
+            textAlign: textAlign,
+            textDirection: Directionality.of(context),
+            textScaler: scaler,
+            maxLines: maxLines,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        foreground,
+      ],
     );
   }
 }

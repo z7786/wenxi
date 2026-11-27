@@ -17,8 +17,10 @@ import 'data/resource_link_checks.dart';
 import 'data/resource_link_probe.dart';
 import 'data/cloud_repository.dart';
 import 'data/cloud_favorites.dart';
+import 'data/cloud_save_locations.dart';
 import 'data/cloud_command_history.dart';
 import 'data/http.dart';
+import 'data/uploads/upload_concurrency.dart';
 import 'data/remote_control_http.dart';
 import 'data/remote_control_service.dart';
 import 'data/announcement_service.dart';
@@ -28,6 +30,7 @@ import 'data/app_update_service.dart';
 import 'data/github_update_service.dart';
 import 'data/providers/uc.dart';
 import 'data/providers/github.dart';
+import 'data/providers/webdav.dart';
 import 'data/providers/baidu.dart';
 import 'data/providers/quark.dart';
 import 'data/providers/pan123.dart';
@@ -42,6 +45,7 @@ import 'domain/models.dart';
 import 'domain/browser_return.dart';
 import 'domain/settings.dart';
 import 'download/download_manager.dart';
+import 'preview/document_downloads.dart';
 import 'download/mobile_data_download_guard.dart';
 import 'download/transfer_activity.dart';
 import 'download/navigation_transfers.dart';
@@ -52,6 +56,7 @@ import 'transfer/cross_transfer_relay.dart';
 import 'lan/lan_service.dart';
 import 'lan/lan_download_route.dart';
 import 'lan/lan_files.dart';
+import 'lan/lan_browser_receiver.dart';
 import 'download/download_shutdown.dart';
 import 'download/download_overlay.dart';
 import 'download/transfer_http.dart';
@@ -65,6 +70,7 @@ import 'platform/clipboard_links.dart';
 import 'platform/external_open.dart';
 import 'platform/native_engine.dart';
 import 'platform/desktop_platform.dart';
+import 'platform/executable_path.dart';
 import 'platform/windows_actions.dart';
 import 'platform/windows_webview.dart';
 import 'data/providers/ilanzou.dart';
@@ -258,6 +264,7 @@ class AppServices extends ChangeNotifier {
             (cloud.connector(CloudPlatform.tianyi) as TianyiConnector)
                 .authenticate,
       },
+      browserUa: cloud.browserUa,
     );
     favorites = CloudFavorites(store, cloud);
     backgrounds = BackgroundRepository(
@@ -291,6 +298,13 @@ class AppServices extends ChangeNotifier {
         LanService(
           store: store,
           files: LanFiles(android: platformFeatures && Platform.isAndroid),
+          browserReceiver: LanBrowserReceiver(
+            store: store,
+            cache: Directory(p.join(cacheDirectory.path, 'lan-browser')),
+            files: files,
+            destination: () => lanBrowserDestination,
+            budget: () => downloads.space,
+          ),
           foreground: backgroundTransfers
               ? () => transferActivity.sync()
               : null,
@@ -309,9 +323,12 @@ class AppServices extends ChangeNotifier {
         }
       },
     );
+    final uploadFileSlots = UploadWorkLimiter(settings.crossTransferConcurrent);
     uploads = UploadManager(
       store: store,
       cloud: cloud,
+      concurrencyProvider: () => settings.crossTransferConcurrent,
+      fileSlots: uploadFileSlots,
       sources: UploadSources(
         android: platformFeatures && Platform.isAndroid,
         ios: platformFeatures && Platform.isIOS,
@@ -321,11 +338,15 @@ class AppServices extends ChangeNotifier {
     rapidTransfers = RapidTransferManager(
       store: store,
       cloud: cloud,
+      concurrent: () => settings.crossTransferConcurrent,
+      fileSlots: uploadFileSlots,
       relay: CrossTransferRelay(
         cloud: cloud,
         http: transfer,
         cache: Directory('${cacheDirectory.path}/cross-transfers'),
         availableSpace: files.freeBytes,
+        engine: engine,
+        settings: () => settings,
       ),
       confirmDownload: () => mobileDataDownloads.confirm(),
       foreground: backgroundTransfers ? transferActivity.sync : null,
@@ -430,12 +451,15 @@ class AppServices extends ChangeNotifier {
   late final CleanupOutbox cleanups;
   late final CloudRepository cloud;
   late final CloudFavorites favorites;
+  late final saveLocations = CloudSaveLocations(store);
   late final commandHistory = CloudCommandHistory(store);
   late final AccountLoginService login;
   late final BackupRepository backup;
   late final BackgroundRepository backgrounds;
   late final GopeedEngine engine;
   late final DownloadManager downloads;
+  // Optional viewer work is created only on demand, never during bootstrap.
+  late final documentDownloads = DocumentDownloads(downloads);
   late final MobileDataDownloadGuard mobileDataDownloads;
   late final UploadManager uploads;
   late final RapidTransferManager rapidTransfers;
@@ -578,6 +602,20 @@ class AppServices extends ChangeNotifier {
   );
   AppSettings get settings => AppSettings.fromJson(store.data.obj('settings'));
 
+  String? get lanBrowserDestination {
+    if (isDesktopPlatform) {
+      final saved = store.data.obj('lanBrowserDestination');
+      final value = saved['path'];
+      if (saved.containsKey('path') && (value == null || value is String)) {
+        return value as String?;
+      }
+    }
+    return settings.destination;
+  }
+
+  Future<void> updateLanBrowserDestination(String? path) =>
+      store.put('lanBrowserDestination', {'path': path});
+
   static Future<AppServices> open() async {
     final startup = Stopwatch()..start();
     Directory data, cache, destination;
@@ -615,9 +653,9 @@ class AppServices extends ChangeNotifier {
           'AsterLink',
         ),
       );
-      transport = DesktopGopeedTransport(
-        executable: desktopDownloadExecutable(
-          Platform.resolvedExecutable,
+      transport = DesktopGopeedTransport.lazy(
+        executable: () => desktopDownloadExecutable(
+          applicationExecutablePath(),
           Platform.operatingSystem,
         ),
       );
@@ -746,6 +784,7 @@ class AppServices extends ChangeNotifier {
       });
       _readExternalOpensInBackground();
     }
+    await _migrateQuarkDirectConnections();
     await vault.initializeAccounts();
     DiagnosticLog.event(
       'app.accounts_ready',
@@ -778,6 +817,27 @@ class AppServices extends ChangeNotifier {
     _changed();
   }
 
+  Future<void> _migrateQuarkDirectConnections() async {
+    // Keep absent settings absent so a failed Android legacy import can retry.
+    if (store.data['settings'] is! Map ||
+        !AppSettings.needsQuarkDirectConnectionMigration(
+          store.data.obj('settings'),
+        )) {
+      return;
+    }
+    await store.change((draft) {
+      final saved = draft.obj('settings');
+      if (!AppSettings.needsQuarkDirectConnectionMigration(saved)) return;
+      draft['settings'] = {
+        ...saved,
+        'quarkDirectConnectionPolicy':
+            AppSettings.quarkDirectConnectionPolicyVersion,
+        'downloadThreadOverrides': {...saved.obj('downloadThreadOverrides')}
+          ..remove('quark_route_1'),
+      };
+    });
+  }
+
   void _readExternalOpensInBackground() {
     // Incoming files are delivered through the inbox's listener when ready.
     // Optional platform input cannot hold startup or sticky download recovery.
@@ -802,11 +862,21 @@ class AppServices extends ChangeNotifier {
   }
 
   Future<void> retryLegacyImport() async {
-    await downloads.importPausedQueue(importLegacy);
+    await downloads.importPausedQueue(() async {
+      await importLegacy();
+      await _migrateQuarkDirectConnections();
+    });
     notifyListeners();
   }
 
   void _changed() {
+    final dav = cloud.connector(CloudPlatform.webdav);
+    if (dav is WebDavConnector) {
+      dav.retainSessions([
+        for (final profile in vault.profiles(CloudPlatform.webdav))
+          vault.credentialFor(CloudPlatform.webdav, profile.id)!,
+      ]);
+    }
     for (final platform in CloudPlatform.values) {
       final credential = vault.credential(platform),
           revision = (vault.activeAccountId(platform), credential?.updatedAt);
@@ -897,7 +967,9 @@ class AppServices extends ChangeNotifier {
           accountErrors[platform] = e.message;
         } else {
           accountNeedsLogin.remove(platform);
-          accountErrors[platform] = '容量读取失败，点击重试';
+          accountErrors[platform] = platform == CloudPlatform.webdav
+              ? '连接失败，点击重试'
+              : '容量读取失败，点击重试';
         }
       }
     } finally {
@@ -954,7 +1026,9 @@ class AppServices extends ChangeNotifier {
         draft.obj('settings'),
       ).update(changes).toJson();
     });
+    uploads.settingsChanged();
     await downloads.settingsChanged();
+    rapidTransfers.settingsChanged();
   }
 
   Future<void> updateAppearance({
@@ -1155,6 +1229,8 @@ class AppServices extends ChangeNotifier {
     await lan.close();
     await uploads.close();
     await downloads.close();
+    final dav = cloud.connector(CloudPlatform.webdav);
+    if (dav is WebDavConnector) await dav.close();
     cleanups.progress.close();
     _closed = true;
     clipboard.dispose();

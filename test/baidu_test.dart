@@ -1,4 +1,4 @@
-import 'package:asterlink/data/providers/baidu_link_service.dart';
+import 'package:asterlink/data/providers/baidu_resolved_link.dart';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
@@ -6,6 +6,7 @@ import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/providers/baidu.dart';
+import 'package:asterlink/data/providers/baidu_download_resolver.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/downloads.dart';
@@ -603,6 +604,87 @@ void main() {
   });
 
   group('Baidu downloads', () {
+    const previewLimit = 300 * 1024 * 1024;
+    for (final size in [
+      0,
+      1,
+      previewLimit - 1,
+      previewLimit,
+      previewLimit + 1,
+    ]) {
+      for (final shared in [false, true]) {
+        test(
+          '${shared ? 'Own share' : 'Personal'} file of $size bytes uses local resolution',
+          () async {
+            final fixture = _DownloadFixture()..accountUk = '456';
+            final routes = <String>[];
+            final connector = BaiduConnector(
+              fixture.http,
+              downloadResolver: _downloadResolver(fixture.http, routes),
+            );
+            final file = CloudFile.fromJson({..._file.toJson(), 'size': size});
+            final result = await connector.download(
+              shared ? _share : _personal,
+              file,
+              _credential(),
+            );
+            expect(routes, ['local']);
+            expect(result.profile, 'baidu_preview');
+            expect(result.expectedSize, size);
+            expect(result.fileName, _file.name);
+            expect(result.cleanup, isNull);
+            expect(fixture.transfers, 0);
+            expect(fixture.created, isEmpty);
+            expect(result.headers['Cookie'], contains('BDUSS=fixture'));
+          },
+        );
+      }
+    }
+    for (final size in [_file.size, previewLimit + 1]) {
+      for (final legacyDirect in [false, true]) {
+        test(
+          'Shared $size-byte file restores ${legacyDirect ? 'legacy direct' : 'local'} task through local lookup without another transfer',
+          () async {
+            final fixture = _DownloadFixture()..listedSize = size;
+            final routes = <String>[];
+            final repo = await fixture.repository();
+            final previousConnector =
+                repo.connectors[CloudPlatform.baidu] as BaiduConnector;
+            repo.connectors[CloudPlatform.baidu] = BaiduConnector(
+              repo.http,
+              downloadResolver: _downloadResolver(repo.http, routes),
+              stageCleanup: previousConnector.stageCleanup,
+            );
+            final original = await repo.prepare(
+              fixture.boundShare,
+              CloudFile.fromJson({..._file.toJson(), 'size': size}),
+            );
+            final saved = original.source!.obj('baiduTransfer').obj('file');
+            final restored = DownloadSpec.fromJson({
+              ...original.toJson(),
+              if (legacyDirect) ...{
+                'profile': 'baidu_direct',
+                'headers': {
+                  'Host': 'legacy.baidu-int.com',
+                  'User-Agent': 'netdisk',
+                },
+              },
+            });
+            final refreshed = await repo.refresh(restored);
+            expect(routes, ['local', 'local']);
+            expect(original.profile, 'baidu_preview');
+            expect(refreshed.profile, 'baidu_preview');
+            expect(refreshed.headers.containsKey('Host'), isFalse);
+            expect(refreshed.headers['Cookie'], contains('BDUSS=fixture'));
+            expect(refreshed.cleanup!.body, original.cleanup!.body);
+            expect(refreshed.source!.obj('baiduTransfer').obj('file'), saved);
+            expect(refreshed.expectedSize, size);
+            expect(fixture.transfers, 1);
+            expect(fixture.deleted, isEmpty);
+          },
+        );
+      }
+    }
     test(
       'Web-only list session can confirm and reuse a transferred download',
       () async {
@@ -640,7 +722,7 @@ void main() {
     );
 
     test(
-      'Unconfirmed or changed transfers cannot reach the link service',
+      'Unconfirmed or changed transfers cannot reach local link resolution',
       () async {
         for (final missing in [false, true]) {
           final fixture = _DownloadFixture()
@@ -895,31 +977,21 @@ void main() {
       expect(fixture.http.calls, isEmpty);
     });
 
-    test(
-      'Account direct delivery uses service headers without sending the account to CDN',
-      () async {
-        final fixture = _DownloadFixture()
-          ..resolvedLink = const BaiduResolvedLink(
-            url: 'https://fixture.baidupcs.com/file',
-            profile: 'baidu_direct',
-            headers: {
-              'host': 'fixture.baidu-int.com',
-              'user-agent': 'netdisk',
-              'accept-encoding': 'identity',
-            },
-          );
-        final spec = await fixture.connector.download(
-          _personal,
-          _file,
-          _credential(),
+    test('Local ordinary fallback keeps official download headers', () async {
+      final fixture = _DownloadFixture()
+        ..resolvedLink = const BaiduResolvedLink(
+          url: 'https://fixture.baidupcs.com/file',
         );
-        expect(spec.profile, 'baidu_direct');
-        expect(spec.headers['host'], 'fixture.baidu-int.com');
-        expect(spec.headers.containsKey('Cookie'), isFalse);
-        expect(spec.headers.containsKey('cookie'), isFalse);
-        expect(spec.headers.containsKey('Referer'), isFalse);
-      },
-    );
+      final spec = await fixture.connector.download(
+        _personal,
+        _file,
+        _credential(),
+      );
+      expect(spec.profile, 'baidu');
+      expect(spec.headers['Cookie'], contains('BDUSS=fixture'));
+      expect(spec.headers['User-Agent'], startsWith('netdisk;'));
+      expect(spec.headers['Accept-Encoding'], 'identity');
+    });
 
     test(
       'Legacy files forward their file ID when the path is unavailable',
@@ -936,7 +1008,7 @@ void main() {
     );
 
     test(
-      'Service errors propagate and clean only this share temporary folder',
+      'Local lookup errors propagate and clean only this share temporary folder',
       () async {
         final fixture = _DownloadFixture()
           ..lookupError = const AccountLoginRequired('expired');
@@ -951,7 +1023,7 @@ void main() {
     );
 
     test(
-      'Cancellation after service resolution cannot publish a stale URL',
+      'Cancellation after local resolution cannot publish a stale URL',
       () async {
         final scope = RequestScope();
         final connector = BaiduConnector(
@@ -1318,8 +1390,37 @@ class _DownloadFixture {
           'errno': 0,
           'shorturl': 'https://pan.baidu.com/s/1fixture',
         });
+      case '/relay':
+        expect(r.headers['Cookie'], isNull);
+        return const HttpResult(206, 'x', {
+          'content-range': ['bytes 0-0/123'],
+        });
       default:
         throw StateError('Unexpected fixture endpoint: ${r.uri.path}');
     }
   }
 }
+
+BaiduDownloadResolver _downloadResolver(JsonHttp http, List<String> routes) =>
+    BaiduDownloadResolver(
+      http,
+      local:
+          ({
+            required cookie,
+            required path,
+            required fileId,
+            required appId,
+            required device,
+          }) async {
+            routes.add('local');
+            expect(cookie, contains('BDUSS=fixture'));
+            expect(path, startsWith('/'));
+            expect(fileId, isNotEmpty);
+            expect(appId, '250528');
+            expect(device.str('id'), isNotEmpty);
+            return const BaiduResolvedLink(
+              url: 'https://fixture.baidupcs.com/preview',
+              preview: true,
+            );
+          },
+    );

@@ -25,7 +25,7 @@ void main() {
     ).toJson(),
   );
 
-  test('Only explicit private IPv4 HTTP endpoints are accepted', () {
+  test('Only explicit local and shared IPv4 HTTP endpoints are accepted', () {
     for (final host in [
       '10.0.0.1',
       '172.16.0.1',
@@ -33,6 +33,8 @@ void main() {
       '192.168.1.2',
       '169.254.1.1',
       '127.0.0.1',
+      '100.64.0.1',
+      '100.127.255.254',
     ]) {
       expect(isLanAddress(host), isTrue, reason: host);
       expect(lanAddress('$host:52381').host, host);
@@ -44,6 +46,8 @@ void main() {
       'http://user:pass@192.168.1.2',
       'http://8.8.8.8',
       'http://172.32.0.1',
+      'http://100.63.255.254',
+      'http://100.128.0.1',
       'http://[::1]',
       'file:///tmp/a',
       'http://0.0.0.0',

@@ -10,7 +10,7 @@
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="AGPL-3.0"></a>
   </p>
   <p>
-    <a href="#安卓界面">安卓界面</a> · <a href="#windows-界面">Windows 界面</a> · <a href="#支持网盘">支持网盘</a> · <a href="#功能">功能</a> · <a href="#下载">下载</a> · <a href="docs/BUILDING.md">编译</a> · <a href="CHANGELOG.md">更新记录</a>
+    <a href="#手机界面">手机界面</a> · <a href="#电脑端界面">电脑端界面</a> · <a href="#支持网盘">支持网盘</a> · <a href="#功能">功能</a> · <a href="#下载">下载</a> · <a href="docs/BUILDING.md">编译</a> · <a href="CHANGELOG.md">更新记录</a>
   </p>
 </div>
 

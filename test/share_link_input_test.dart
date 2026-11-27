@@ -2,14 +2,95 @@ import 'dart:convert';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/providers/c139.dart';
 import 'package:asterlink/data/providers/pan123.dart';
+import 'package:asterlink/data/providers/pikpak.dart';
 import 'package:asterlink/data/providers/tianyi.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/links.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'support.dart';
 
 void main() {
+  test(
+    'PikPak net copied input reaches anonymous share and nested directory requests',
+    () async {
+      const id = 'Share_123AbC-XyZ9876543210';
+      final store = StateStore.memory();
+      addTearDown(store.dispose);
+      String? deviceId;
+      final http = FakeHttp((request) {
+        expect(request.method, 'GET');
+        expect(request.uri.host, 'api-drive.mypikpak.com');
+        expect(request.headers['X-Client-Id'], PikPakConnector.clientId);
+        expect(request.headers.containsKey('Authorization'), isFalse);
+        deviceId ??= request.headers['X-Device-Id'];
+        expect(deviceId, isNotEmpty);
+        expect(request.headers['X-Device-Id'], deviceId);
+        final parameters = request.uri.queryParameters;
+        expect(parameters['share_id'], id);
+        if (request.uri.path == '/drive/v1/share') {
+          expect(parameters['pass_code'], 'abc123');
+          expect(parameters.containsKey('pass_code_token'), isFalse);
+          return jsonResponse({
+            'share_status': 'OK',
+            'files': [],
+            'pass_code_token': 'fixture-share-token',
+          });
+        }
+        expect(request.uri.path, '/drive/v1/share/detail');
+        expect(parameters['pass_code_token'], 'fixture-share-token');
+        expect(parameters.containsKey('pass_code'), isFalse);
+        final parent = parameters['parent_id'];
+        expect(parent, isIn([null, 'folder1', 'folder2']));
+        return jsonResponse({
+          'share_status': 'OK',
+          'files': [
+            {
+              'id': parent == null
+                  ? 'folder1'
+                  : parent == 'folder1'
+                  ? 'folder2'
+                  : 'file3',
+              'name': parent == 'folder2' ? 'sample.mp4' : '子目录',
+              'kind': parent == 'folder2' ? 'drive#file' : 'drive#folder',
+              'size': '1024',
+              'parent_id': 'owner-private-folder',
+            },
+          ],
+        });
+      });
+      final connector = PikPakConnector(http, Vault(store));
+      final link = LinkParser.parse(
+        r'https\://mypikpak.net/s/'
+        '$id 访问密码：abc123',
+      ).single;
+      expect(link.kind, LinkKind.cloudShare);
+      final session = await connector.openShare(link, null);
+      expect(session.meta('shareId'), id);
+      expect(session.meta('code'), 'abc123');
+      expect(session.sourceLink!.url, 'https://mypikpak.net/s/$id');
+      final root = (await connector.list(session, session.rootId, null)).single;
+      expect(root.id, 'folder1');
+      expect(root.parentId, isEmpty);
+      final folder = (await connector.list(session, root.id, null)).single;
+      expect(folder.id, 'folder1/folder2');
+      final child = (await connector.list(
+        BrowseSession.fromJson(session.toJson()),
+        folder.id,
+        null,
+      )).single;
+      expect(child.id, 'file3');
+      expect(child.parentId, folder.id);
+      expect(jsonDecode(child.token), ['folder1', 'folder2']);
+      await expectLater(
+        connector.download(session, child, null),
+        throwsA(isA<AccountLoginRequired>()),
+      );
+      expect(http.calls, hasLength(4));
+    },
+  );
+
   test(
     'Tianyi H5 encoded copy labels reach anonymous share and child requests',
     () async {

@@ -17,6 +17,30 @@ void main() {
       log.entries().where((e) => e.event == 'player.memory_sample').toList();
 
   test(
+    'Post-close diagnostics read live instance counts after the memory reply',
+    () async {
+      final pending = Completer<Object?>();
+      var retiring = 2;
+      final recorder = PlaybackDiagnostics(readMemory: () => pending.future);
+      recorder.begin({'playbackBackendId': 1});
+      final sample = recorder.afterClose({
+        'retiringPlaybackBackends': 2,
+      }, currentFields: () => {'retiringPlaybackBackends': retiring});
+      retiring = 0;
+      pending.complete({'rssKb': 1234});
+      await sample;
+      final fields =
+          log
+                  .entries()
+                  .singleWhere((e) => e.event == 'player.memory_after_close')
+                  .data['fields']
+              as Map;
+      expect(fields['retiringPlaybackBackends'], 0);
+      expect(fields['playbackBackendId'], 1);
+    },
+  );
+
+  test(
     'Samples are throttled, numeric only and correlated with decoding',
     () async {
       var calls = 0;

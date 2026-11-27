@@ -1,7 +1,14 @@
 import 'dart:io';
 
+import '../diagnostics/app_log.dart';
 import '../platform/windows_lan.dart';
 import 'lan_models.dart';
+
+typedef LanInterfaceReader =
+    Future<List<NetworkInterface>> Function({
+      required bool includeLinkLocal,
+      required InternetAddressType type,
+    });
 
 int lanInterfacePriority(String name) {
   final value = name.toLowerCase();
@@ -15,11 +22,15 @@ int lanInterfacePriority(String name) {
       : 1;
 }
 
-Future<List<String>> localLanAddresses() async {
-  final interfaces = await NetworkInterface.list(
-    type: InternetAddressType.IPv4,
+Future<List<String>> localLanAddresses({
+  LanInterfaceReader listInterfaces = NetworkInterface.list,
+  Future<int?> Function() preferredInterface = windowsLanInterface,
+}) async {
+  final interfaces = await listInterfaces(
+    includeLinkLocal: true,
+    type: InternetAddressType.any,
   );
-  final preferred = await windowsLanInterface();
+  final preferred = await preferredInterface();
   final entries = [
     for (final nic in interfaces)
       for (final address in nic.addresses)
@@ -38,5 +49,25 @@ Future<List<String>> localLanAddresses() async {
     final index = a.index.compareTo(b.index);
     return index != 0 ? index : a.address.compareTo(b.address);
   });
+  if (entries.isEmpty) {
+    final found = interfaces.expand((nic) => nic.addresses).toList();
+    DiagnosticLog.event(
+      'lan.network_unavailable',
+      fields: {
+        'interfaces': interfaces.length,
+        'ipv4': found.where((a) => a.type == InternetAddressType.IPv4).length,
+        'ipv6': found.where((a) => a.type == InternetAddressType.IPv6).length,
+        'loopback': found.where((a) => a.isLoopback).length,
+        'rejectedIpv4': found
+            .where(
+              (a) =>
+                  a.type == InternetAddressType.IPv4 &&
+                  !a.isLoopback &&
+                  !isLanAddress(a.address),
+            )
+            .length,
+      },
+    );
+  }
   return entries.map((entry) => entry.address).toSet().toList();
 }

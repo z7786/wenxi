@@ -8,6 +8,51 @@ import 'remote_control_support.dart';
 
 void main() {
   test(
+    'Integrity fields roundtrip and a malformed publication retains the previous update',
+    () {
+      const digest =
+          'ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789';
+      final root = controlJson(androidBuild: 50, windowsBuild: 51);
+      final windows = (root['updates'] as Map)['windows'] as Map;
+      windows.addAll(<String, Object?>{
+        'packageSha256': digest,
+        'packageSize': 128000000,
+      });
+      final config = RemoteControlConfig.fromJson(root);
+      final restored = RemoteControlConfig.fromJson(config.toJson());
+      expect(restored.updates['windows']!.packageSha256, digest.toLowerCase());
+      expect(restored.updates['windows']!.packageSize, 128000000);
+      expect(config.updates['android']!.packageSha256, isEmpty);
+      expect(config.updates['android']!.packageSize, 0);
+      for (final (field, value) in [
+        ('packageSha256', 'invalid'),
+        ('packageSha256', 123),
+        ('packageSha256', 'a' * 65),
+        ('packageSize', -1),
+        ('packageSize', '128000000'),
+        ('packageSize', 1.5),
+      ]) {
+        windows.addAll(<String, Object?>{
+          'packageSha256': digest,
+          'packageSize': 128000000,
+        });
+        windows[field] = value;
+        final rejected = RemoteControlDocument.parse(root, previous: config);
+        expect(rejected.issues.single.path, 'updates.windows.$field');
+        expect(
+          ControlConfigIssue.isKnownPath(rejected.issues.single.path),
+          isTrue,
+        );
+        expect(
+          rejected.config.updates['windows'],
+          same(config.updates['windows']),
+        );
+        expect(rejected.validSections, contains('updates.android'));
+      }
+    },
+  );
+
+  test(
     'Apple update sections roundtrip independently and retain valid values on a bad publication',
     () {
       final root = controlJson(androidBuild: 221, windowsBuild: 222);
@@ -355,7 +400,11 @@ void main() {
     'http://example.com/a',
     'javascript:alert(1)',
     'file:///C:/test',
-    'https://user:password@example.com/',
+    Uri(
+      scheme: 'https',
+      host: 'example.com',
+      userInfo: 'fixture:invalid',
+    ).toString(),
     'https:///a',
     'https://example.com/a\nb',
     'https://example.com:99999/',

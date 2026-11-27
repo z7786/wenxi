@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/providers/lanzou.dart';
@@ -77,9 +78,14 @@ class LanzouTestHttp extends FakeHttp {
 }
 
 class LanzouFixture {
-  LanzouFixture({Future<void> Function(Duration)? delay}) {
+  LanzouFixture({Future<void> Function(Duration)? delay, Random? random}) {
     http = LanzouTestHttp(respond);
-    connector = LanzouConnector(http, clock: () => now, delay: delay);
+    connector = LanzouConnector(
+      http,
+      clock: () => now,
+      delay: delay,
+      random: random,
+    );
   }
   DateTime now = DateTime.utc(2026, 9, 14);
   late final LanzouTestHttp http;

@@ -47,6 +47,15 @@ class NativeReferenceHolder {
   }
 
   void _ensureInitialized(NativeReferenceHolderCallback callback) async {
+    // flutter_tester starts a new process for each suite. Reused Windows PIDs
+    // can leave a file containing an address from a previous process; only
+    // application hot-restarts may reuse that buffer within the same process.
+    if (Platform.environment['FLUTTER_TEST'] == 'true') {
+      _referenceBuffer = calloc<IntPtr>(kReferenceBufferSize);
+      callback(const <Pointer<Void>>[]);
+      _completer.complete();
+      return;
+    }
     if (!await _file.exists_()) {
       // Allocate reference buffer.
       _referenceBuffer = calloc<IntPtr>(kReferenceBufferSize);

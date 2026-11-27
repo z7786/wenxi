@@ -46,7 +46,9 @@ class _CrossTransferRowState extends State<CrossTransferRow> {
 
   String _amount(RapidTransferTask t) => !t.scanned
       ? '${t.scannedFiles} 个文件 / ${t.scannedFolders} 个目录'
-      : '${t.done}/${t.entries.length} 个文件';
+      : '${t.succeeded}/${t.entries.length} 个文件'
+            '${t.count(RapidEntryStatus.duplicate) > 0 ? ' · 跳过 ${t.count(RapidEntryStatus.duplicate)}' : ''}'
+            '${t.count(RapidEntryStatus.failed) > 0 ? ' · 失败 ${t.count(RapidEntryStatus.failed)}' : ''}';
 
   String _accountName(BrowseSession session) {
     for (final p in services.vault.profiles(session.platform)) {

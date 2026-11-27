@@ -9,6 +9,7 @@ import 'resource_link_check_support.dart';
 import 'resource_search_test.dart' show SearchApiFixture;
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   test(
     'only visible shares are probed, with de-duplication and three concurrent requests',
     () {

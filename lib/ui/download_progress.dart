@@ -50,7 +50,15 @@ class TransferProgress extends StatefulWidget {
   final int total, transferred, speed;
   final TransferProgressStatus status;
   final bool enabled, compact;
-  double get progress => total > 0 ? (transferred / total).clamp(0.0, 1.0) : 0;
+  double get progress => total > 0
+      ? (transferred / total).clamp(
+          0.0,
+          direction.startsWith('cross-') &&
+                  status != TransferProgressStatus.completed
+              ? .99
+              : 1.0,
+        )
+      : 0;
 
   factory TransferProgress.download(
     DownloadTask task, {
@@ -122,11 +130,11 @@ class TransferProgress extends StatefulWidget {
   }) {
     final movingData = task.entries.any(
       (e) =>
-          e.status == RapidEntryStatus.downloading ||
-          e.status == RapidEntryStatus.uploading,
+          e.status == RapidEntryStatus.downloading && !e.downloadVerifying ||
+          e.status == RapidEntryStatus.uploading &&
+              e.uploadPhase == UploadPhase.uploading,
     );
-    // Cross-drive progress includes matching and both relay phases. Use units
-    // of work rather than pretend these values are uploaded byte counts.
+    // Overall progress is size-weighted work across both relay phases.
     final fraction = task.progress;
     final total = fraction == null ? 0 : task.entries.length * 1000000;
     return TransferProgress._(
@@ -138,7 +146,21 @@ class TransferProgress extends StatefulWidget {
       compact: compact,
       direction: 'cross-transfer',
       stage: task.stage,
-      processingLabel: task.scanned ? '匹配中' : '扫描中',
+      processingLabel: !task.scanned
+          ? '扫描中'
+          : task.entries.any((e) => e.checkingTarget)
+          ? '确认中'
+          : task.entries.any((e) => e.downloadVerifying)
+          ? '校验中'
+          : task.entries.any(
+              (e) =>
+                  e.status == RapidEntryStatus.uploading &&
+                  e.uploadPhase == UploadPhase.finishing,
+            )
+          ? '确认中'
+          : task.entries.any((e) => e.status == RapidEntryStatus.uploading)
+          ? '准备中'
+          : '匹配中',
       status: switch (task.status) {
         RapidTaskStatus.pending => TransferProgressStatus.pending,
         RapidTaskStatus.running =>
@@ -164,12 +186,14 @@ class TransferProgress extends StatefulWidget {
     final relay = (entries ?? task.entries)
         .where(
           (e) =>
-              e.method == CrossTransferMethod.relay &&
               e.status != RapidEntryStatus.reused &&
               e.status != RapidEntryStatus.duplicate,
         )
         .toList();
-    final total = relay.fold<int>(0, (n, e) => n + e.size);
+    // Include undecided and queued files from the scanned batch. Adding a new
+    // relay file must not shrink the percentage of an already running phase.
+    final unknown = relay.any((e) => e.size <= 0 && !e.succeeded);
+    final total = unknown ? 0 : relay.fold<int>(0, (n, e) => n + e.size);
     final completed =
         relay.isNotEmpty &&
         relay.every(
@@ -180,30 +204,70 @@ class TransferProgress extends StatefulWidget {
     final moving = relay.any(
       (e) =>
           e.status ==
-          (upload ? RapidEntryStatus.uploading : RapidEntryStatus.downloading),
+              (upload
+                  ? RapidEntryStatus.uploading
+                  : RapidEntryStatus.downloading) &&
+          (upload
+              ? e.uploadPhase == UploadPhase.uploading
+              : !e.downloadVerifying),
+    );
+    final processing = relay.any(
+      (e) => upload
+          ? e.checkingTarget ||
+                e.status == RapidEntryStatus.uploading &&
+                    e.uploadPhase != UploadPhase.uploading
+          : e.status == RapidEntryStatus.downloading && e.downloadVerifying,
     );
     final transferred = relay.fold<int>(
       0,
-      (n, e) =>
-          n +
-          (e.status == RapidEntryStatus.uploaded
-              ? e.size
-              : upload
-              ? e.sent.clamp(0, e.size)
-              : e.downloaded.clamp(0, e.size)),
+      (n, e) => n + (upload ? e.uploadBytes : e.downloadBytes),
     );
+    final failedEntries =
+        entries != null &&
+        relay.any(
+          (e) =>
+              e.status == RapidEntryStatus.failed ||
+              e.status == RapidEntryStatus.missed ||
+              e.status == RapidEntryStatus.noHash,
+        );
     return TransferProgress._(
       id: task.id,
       total: total,
       transferred: transferred,
-      speed: moving ? task.speed : 0,
+      speed: moving
+          ? entries == null
+                ? upload
+                      ? task.uploadSpeed
+                      : task.downloadSpeed
+                : relay.fold<int>(
+                    0,
+                    (sum, e) =>
+                        sum + (upload ? e.uploadSpeed : e.downloadSpeed),
+                  )
+          : 0,
       status: completed
           ? TransferProgressStatus.completed
           : moving && task.active
           ? TransferProgressStatus.running
-          : !task.active && task.canRetry
+          : processing && task.active
+          ? TransferProgressStatus.processing
+          : (task.active && failedEntries ||
+                task.status == RapidTaskStatus.failed ||
+                task.status == RapidTaskStatus.completed && task.canRetry)
           ? TransferProgressStatus.failed
+          : !task.active
+          ? TransferProgressStatus.paused
           : TransferProgressStatus.pending,
+      processingLabel: upload
+          ? relay.any(
+                  (e) =>
+                      e.checkingTarget ||
+                      e.status == RapidEntryStatus.uploading &&
+                          e.uploadPhase == UploadPhase.finishing,
+                )
+                ? '确认中'
+                : '准备中'
+          : '校验中',
       stage: upload ? '上传' : '下载',
       direction: upload ? 'cross-upload' : 'cross-download',
       enabled: enabled,

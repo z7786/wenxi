@@ -306,7 +306,7 @@ class DownloadTargetStore(
         if (destination != null) {
             val tree = Uri.parse(destination)
             if (tree.scheme != "content" || !DocumentsContract.isTreeUri(tree)) throw IOException("请选择有效的下载目录")
-            var parent = DocumentFile.fromTreeUri(context, tree) ?: throw IOException("无法访问所选下载目录")
+            var parent = DownloadDirectory(context).open(tree)
             relativePath.split('/').filter(String::isNotEmpty).forEach { segment ->
                 parent = parent.findFile(segment)?.takeIf(DocumentFile::isDirectory)
                     ?: parent.createDirectory(segment) ?: throw IOException("无法创建下载子目录")

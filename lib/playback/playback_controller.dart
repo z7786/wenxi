@@ -14,12 +14,15 @@ import 'media_backend.dart';
 import 'playlist_order.dart';
 import 'playback_sleep_timer.dart';
 import 'playback_failure.dart';
+import 'playback_runtime.dart';
 import 'playback_decoder_recovery.dart';
 import 'playback_selection.dart';
 import 'subtitle_matching.dart';
 import 'external_stream.dart';
 import 'system_pip.dart';
 import 'cast/cast_session.dart';
+import 'cast/cast_network.dart';
+import 'cast/cast_subtitles.dart';
 import 'cast/dlna.dart';
 import 'cast/cast_platform.dart';
 
@@ -57,6 +60,7 @@ class _Session {
       failurePaused = false,
       playRequested = false;
   bool subtitleSearchStarted = false;
+  Future<void>? automaticSubtitleLoad;
   bool aheadAttempted = false;
   int errorRevision = 0;
   final metadataReady = Completer<void>();
@@ -90,6 +94,7 @@ class PlaybackController extends ChangeNotifier {
     required this.release,
     required this.retain,
     required this.backendFactory,
+    this.initializePlayback,
     this.checkSource,
     this.checkDownload,
     this.refresh,
@@ -149,6 +154,7 @@ class PlaybackController extends ChangeNotifier {
   final void Function(DownloadSpec source) retain;
   final PlaybackBackend Function(PlaybackEntry entry, bool hardwareAcceleration)
   backendFactory;
+  final Future<void> Function()? initializePlayback;
   final ExternalPlaybackStream Function(DownloadSpec source)
   externalStreamFactory;
   final CastSession Function(CastDevice device, DownloadSpec source)
@@ -196,6 +202,7 @@ class PlaybackController extends ChangeNotifier {
   final _decoderRecovery = PlaybackDecoderRecovery();
   bool _playWhenReady = true;
   String error = '', notice = '';
+  bool playbackRuntimeFailed = false;
   Object? sourceError;
   double get subtitleDelay => _selection?.subtitleDelay ?? 0;
   double get audioDelay => _selection?.audioDelay ?? 0;
@@ -499,6 +506,7 @@ class PlaybackController extends ChangeNotifier {
     index = next;
     loading = true;
     error = '';
+    playbackRuntimeFailed = false;
     sourceError = null;
     notice = decoderRecovery
         ? (_decoderRecovery.hardwareOverride == false
@@ -516,6 +524,14 @@ class PlaybackController extends ChangeNotifier {
     Future<void>? warmingReady;
     var stage = 'retire';
     var sourceMs = 0;
+    final stageTimes = <String, int>{};
+    var stageStart = loadWatch.elapsedMilliseconds;
+    void finishStage(String name) {
+      final now = loadWatch.elapsedMilliseconds;
+      stageTimes[name] = (stageTimes[name] ?? 0) + now - stageStart;
+      stageStart = now;
+    }
+
     try {
       await _stopSystemPip();
       await _stopExternalPlayback();
@@ -524,6 +540,7 @@ class PlaybackController extends ChangeNotifier {
       _independentBookmark = null;
       await retiredSelection?.release();
       await _preferenceGate.run(() async {});
+      finishStage('retireMs');
       if (closed || generation != _generation) return;
       if (decoderRecovery) {
         require(old?.nativeClosed == true, '播放器关闭未完成，请退出播放页后重试');
@@ -532,6 +549,17 @@ class PlaybackController extends ChangeNotifier {
       _persistedPreferences = preferences;
       _changed();
       checkSource?.call();
+      if (initializePlayback case final initialize?) {
+        stage = 'runtime';
+        // Leaving the page cancels this waiter, not the shared library load.
+        // Other playback requests may still need that same initialization.
+        await scope.run(
+          () => RequestScope.cancellable(Future<void>.sync(initialize)),
+        );
+        finishStage('runtimeInitMs');
+        if (closed || generation != _generation) return;
+        checkSource?.call();
+      }
       stage = 'backend_create';
       final requestedHardware = automaticRecovery
           ? _decoderRecovery.hardwareOverride ??
@@ -549,6 +577,7 @@ class PlaybackController extends ChangeNotifier {
         () => (refreshSource ? refresh ?? prepare : prepare)(current, scope),
       );
       sourceMs = sourceWatch.elapsedMilliseconds;
+      finishStage('sourceStageMs');
       checkSource?.call();
       if (closed || generation != _generation) return;
       final source = unowned, entry = current;
@@ -576,6 +605,7 @@ class PlaybackController extends ChangeNotifier {
         try {
           stage = 'backend_open';
           await (initialized ?? backend.initialize());
+          finishStage('backendInitWaitMs');
           if (!_current(session)) return;
           await backend.setConnections(connections);
           if (!_current(session)) return;
@@ -585,7 +615,9 @@ class PlaybackController extends ChangeNotifier {
             preferences.decoderCompatibility,
           );
           if (!_current(session)) return;
+          backend.setAutomaticRenderQuality(preferences.automaticRenderQuality);
           await backend.open(source, start);
+          finishStage('backendOpenMs');
           if (!_current(session)) return;
           session.opened = true;
           _rememberGeometry(session);
@@ -600,6 +632,7 @@ class PlaybackController extends ChangeNotifier {
           if (!_current(session)) return;
           _checkInitialization(session);
           stage = 'configure';
+          finishStage('metadataWaitMs');
           await backend.setRate(preferences.rate);
           if (!_current(session)) return;
           // Android uses the media stream volume; do not attenuate it again.
@@ -630,7 +663,9 @@ class PlaybackController extends ChangeNotifier {
           if (!_current(session)) return;
           _checkInitialization(session);
           stage = 'presentation';
+          finishStage('configureMs');
           await beforePlay?.call();
+          finishStage('presentationMs');
           if (!_current(session)) return;
           stage = 'play';
           sleepTimer.checkDeadline();
@@ -644,6 +679,7 @@ class PlaybackController extends ChangeNotifier {
           _checkInitialization(session);
           session.initializing = false;
           loading = false;
+          finishStage('playCommandMs');
           DiagnosticLog.event(
             'player.ready',
             fields: {
@@ -651,6 +687,7 @@ class PlaybackController extends ChangeNotifier {
               'automaticRecovery': automaticRecovery,
               'sourceMs': sourceMs,
               'loadElapsedMs': loadWatch.elapsedMilliseconds,
+              ...stageTimes,
             },
           );
           try {
@@ -689,7 +726,10 @@ class PlaybackController extends ChangeNotifier {
               !hardware ||
               decoderRecovery ||
               attempt != 0 ||
-              !backend.canRetryWithSoftware) {
+              !backend.canRetryWithSoftware ||
+              e is TimeoutException ||
+              !{'backend_open', 'play'}.contains(stage) ||
+              !_allowsSoftwareFallback(backend)) {
             rethrow;
           }
           DiagnosticLog.error(
@@ -712,6 +752,7 @@ class PlaybackController extends ChangeNotifier {
           unowned = source;
           _session = null;
           await _retire(session);
+          finishStage('fallbackRetireMs');
           if (closed || generation != _generation) return;
           require(session.nativeClosed, '播放器初始化未完成，请退出播放页后重试');
           hardware = false;
@@ -736,6 +777,8 @@ class PlaybackController extends ChangeNotifier {
               failure: failure,
             ),
             'recovery': _canRefresh(failure) ? 'refresh' : 'none',
+            ...stageTimes,
+            'failedStageElapsedMs': loadWatch.elapsedMilliseconds - stageStart,
           },
         );
         if (decoderRecovery || failure?.decoderUnavailable == true) {
@@ -754,6 +797,7 @@ class PlaybackController extends ChangeNotifier {
           return;
         }
         error = e is AppException ? e.message : '播放加载失败，请刷新链接重试，或下载后打开';
+        playbackRuntimeFailed = e is PlaybackRuntimeUnavailable;
         sourceError = stage == 'source' ? e : null;
         loading = false;
         final failed = _session;
@@ -948,7 +992,9 @@ class PlaybackController extends ChangeNotifier {
     session.subtitleSearchStarted = true;
     final candidate = matchingSubtitle(session.entry.name, availableSubtitles);
     if (candidate != null) {
-      unawaited(loadCloudSubtitle(candidate, automatic: true));
+      final task = loadCloudSubtitle(candidate, automatic: true);
+      session.automaticSubtitleLoad = task;
+      unawaited(task);
     }
   }
 
@@ -982,6 +1028,7 @@ class PlaybackController extends ChangeNotifier {
     final scope = _subtitleScope = RequestScope();
     final expected = _generation, revision = session.selection.subtitleRevision;
     subtitleLoading = true;
+    if (!automatic) notice = '';
     _changed();
     File? file;
     try {
@@ -1002,6 +1049,12 @@ class PlaybackController extends ChangeNotifier {
         cloudSubtitleId: subtitle.id,
         scope: scope,
       );
+      if (!automatic &&
+          _current(session) &&
+          !scope.token.isCancelled &&
+          session.selection.cloudSubtitleId == subtitle.id) {
+        notice = '已加载字幕：${subtitle.name}';
+      }
     } catch (e, stack) {
       if (_current(session) && !scope.token.isCancelled) {
         DiagnosticLog.error(
@@ -1010,7 +1063,9 @@ class PlaybackController extends ChangeNotifier {
           stack,
           fields: _logFields(session.entry, 'subtitle', session: session),
         );
-        if (!automatic) notice = '字幕加载失败，请重新选择字幕';
+        if (!automatic) {
+          notice = e is AppException ? '字幕加载失败：${e.message}' : '字幕加载失败，请重新选择字幕';
+        }
       }
     } finally {
       if (file != null) await _deleteSubtitleFile(file);
@@ -1036,25 +1091,16 @@ class PlaybackController extends ChangeNotifier {
         connectingCast ||
         usingSystemPip ||
         openingExternalPlayer ||
+        session.backend.failure?.decoderUnavailable == true ||
         session.backend.failure?.kind != PlaybackFailureKind.decoder) {
       return false;
     }
-    final state = session.backend.state;
-    final selected = state.tracks.video.where(
-      (t) =>
-          !{'auto', 'no'}.contains(t.id) &&
-          t.albumart != true &&
-          t.image != true,
-    );
-    final track =
-        selected.where((t) => t.id == state.track.video.id).firstOrNull ??
-        selected.firstOrNull;
-    final fps = session.backend.diagnosticFields['videoFps'];
+    final (width, height, fps) = _decoderWorkload(session.backend);
     final hardware = _decoderRecovery.next(
       hardware: session.hardwareAcceleration,
-      width: track?.w ?? state.width,
-      height: track?.h ?? state.height,
-      fps: fps is num ? fps.toDouble() : track?.fps,
+      width: width,
+      height: height,
+      fps: fps,
       rate: effectiveRate,
     );
     if (hardware == null) return false;
@@ -1087,6 +1133,35 @@ class PlaybackController extends ChangeNotifier {
       );
     });
     return true;
+  }
+
+  (int?, int?, double?) _decoderWorkload(PlaybackBackend backend) {
+    final state = backend.state;
+    final selected = state.tracks.video.where(
+      (t) =>
+          !{'auto', 'no'}.contains(t.id) &&
+          t.albumart != true &&
+          t.image != true,
+    );
+    final track =
+        selected.where((t) => t.id == state.track.video.id).firstOrNull ??
+        (state.track.video.id == 'auto' ? selected.firstOrNull : null);
+    final fps = backend.diagnosticFields['videoFps'];
+    return (
+      track?.w ?? state.width,
+      track?.h ?? state.height,
+      track?.fps ?? (fps is num ? fps.toDouble() : null),
+    );
+  }
+
+  bool _allowsSoftwareFallback(PlaybackBackend backend) {
+    final (width, height, fps) = _decoderWorkload(backend);
+    return PlaybackDecoderRecovery.allowsSoftware(
+      width: width,
+      height: height,
+      fps: fps,
+      rate: preferences.rate,
+    );
   }
 
   Duration _retryPosition() {
@@ -1382,21 +1457,19 @@ class PlaybackController extends ChangeNotifier {
     // Capture the bookmark before releasing the backend, but do not keep a
     // decoder and its buffers alive while the state store is writing downloads.
     final saved = session.retirementSave ??= _save(session);
+    // The store publishes pending progress immediately; close joins this task.
+    _trackAhead(saved);
+    await session.subtitleGate.run(() async {});
     try {
-      await session.subtitleGate.run(() async {});
-      try {
-        await session.backend.close();
-        session.nativeClosed = true;
-      } catch (_) {
-        notice = '播放器关闭未完成，临时文件已保留';
-        _changed();
-        return;
-      }
-      await session.selection.release();
-      await _releaseSafely(session.source);
-    } finally {
-      await saved;
+      await session.backend.close();
+      session.nativeClosed = true;
+    } catch (_) {
+      notice = '播放器关闭未完成，临时文件已保留';
+      _changed();
+      return;
     }
+    await session.selection.release();
+    await _releaseSafely(session.source);
   }
 
   Future<void> _command(
@@ -1552,7 +1625,7 @@ class PlaybackController extends ChangeNotifier {
     index,
     startPosition: _retryPosition(),
     playWhenReady: true,
-    refreshSource: true,
+    refreshSource: !playbackRuntimeFailed,
   );
   Future<void> previous() =>
       canPrevious ? load(previousIndex!) : Future.value();
@@ -1563,6 +1636,7 @@ class PlaybackController extends ChangeNotifier {
   }) async {
     final previous = _persistedPreferences, folder = folderKey;
     preferences = value;
+    backend?.setAutomaticRenderQuality(value.automaticRenderQuality);
     if (!preferences.autoNext) _discardPrepared();
     _changed();
     if (save) {
@@ -1985,10 +2059,15 @@ class PlaybackController extends ChangeNotifier {
 
   bool floating = false;
   PlaybackBookmark? _independentBookmark;
-  Future<void> saveIndependentProgress(PlaybackBookmark bookmark) async {
-    if (closed || !floating) return;
+  Future<void> saveIndependentProgress(PlaybackBookmark bookmark) {
+    if (closed || !floating) return Future.value();
     _independentBookmark = bookmark;
-    await history.save(current.key, bookmark);
+    final saved = history.save(current.key, bookmark).catchError((Object _) {
+      notice = '播放进度未能保存，请检查存储空间';
+      _changed();
+    });
+    _trackAhead(saved);
+    return saved;
   }
 
   void retireIndependentDecoder() {
