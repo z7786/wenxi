@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+from smoke_report import read_report
 
 root = Path(__file__).resolve().parent.parent
 local = root / '.local'
@@ -47,8 +48,8 @@ for family in ['iPhone', 'iPad']:
         deadline = time.monotonic() + 150
         while time.monotonic() < deadline:
             files = list(container.rglob('ios-smoke.json'))
-            if files:
-                report = json.loads(files[0].read_text())
+            report = read_report(files[0]) if files else None
+            if report is not None:
                 assert 'error' not in report, (family, report)
                 assert all(report.get(name) for name in checks), (family, report)
                 assert report.get('authorizedMediaReads', 0) > 0, (family, report)
