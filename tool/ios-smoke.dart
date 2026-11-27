@@ -33,16 +33,18 @@ Future<void> main() async {
     final deadline = DateTime.now().add(const Duration(seconds: 45));
     var ready = false;
     while (DateTime.now().isBefore(deadline)) {
-      final logs = Directory('${folder.path}/AsterLink/diagnostics');
-      if (logs.existsSync()) {
-        for (final entry in logs.listSync(recursive: true).whereType<File>()) {
-          if (entry.path.endsWith('.jsonl') &&
-              entry.readAsStringSync().contains('app.main_frame')) {
-            ready = true;
-          }
-        }
+      // Observe the actual application tree; buffered diagnostic file writes
+      // must not decide whether a rendered main page is ready.
+      void visit(Element element) {
+        if (element.widget is app.AsterLinkApp) ready = true;
+        if (!ready) element.visitChildren(visit);
       }
-      if (ready) break;
+
+      WidgetsBinding.instance.rootElement?.visitChildren(visit);
+      if (ready) {
+        await WidgetsBinding.instance.endOfFrame;
+        break;
+      }
       await Future<void>.delayed(const Duration(milliseconds: 300));
     }
     require(ready, 'Normal iOS startup did not reach its main frame');
