@@ -22,6 +22,7 @@ import '../domain/models.dart';
 import '../domain/github_acceleration.dart';
 import '../domain/settings.dart';
 import '../domain/torrent.dart';
+import '../domain/uc_video_download.dart';
 import '../platform/file_access.dart';
 import '../platform/completed_file_transfer.dart';
 import '../platform/android_download_file.dart';
@@ -2927,7 +2928,12 @@ class DownloadManager extends ChangeNotifier {
     }
     run.check();
     if (probe.hls) {
-      require(task.spec.networkPolicy == null, '该来源暂不支持流媒体清单下载');
+      require(
+        task.spec.networkPolicy == null ||
+            task.spec.platform == CloudPlatform.uc &&
+                UcVideoDownload.fromSpec(task.spec)?.segmented == true,
+        '该来源暂不支持流媒体清单下载',
+      );
       return _hls(id, run);
     }
     final aliyun = _isAliyun(task.spec);
@@ -3483,14 +3489,24 @@ class DownloadManager extends ChangeNotifier {
 
   Future<File> _hls(String id, _Run run) async {
     final task = _tasks[id]!;
-    var playlist = await http.textResponse(task.spec.url, task.spec.headers);
+    var playlist = await http.textDownloadResponse(task.spec);
     for (var depth = 0; depth < 4; depth++) {
       final selected = HlsPlaylist.choose(playlist.url, playlist.text);
       if (selected == playlist.url) break;
-      playlist = await http.textResponse(selected, task.spec.headers);
+      playlist = await http.textDownloadResponse(task.spec, url: selected);
     }
     require(!playlist.text.contains('#EXT-X-STREAM-INF'), '视频播放列表嵌套过多');
     final media = HlsPlaylist.media(playlist.url, playlist.text);
+    for (final url in media.urls) {
+      task.spec.networkPolicy?.checkedUrl(url);
+    }
+    final ucVideo = UcVideoDownload.fromSpec(task.spec);
+    require(
+      ucVideo == null ||
+          !ucVideo.segmented ||
+          (ucVideo.format == 'hls_mp4') == media.fragmentedMp4,
+      'UC 可播放版本的保存格式已变化，请重新创建下载任务',
+    );
     final fingerprint = sha256
         .convert(utf8.encode(jsonEncode(media.urls)))
         .toString();
@@ -3537,9 +3553,8 @@ class DownloadManager extends ChangeNotifier {
           await handle.setPosition(retained);
           var segmentBytes = 0;
           try {
-            final response = await http.stream(
-              media.urls[index],
-              http.headers(task.spec.headers),
+            final response = await http.streamDownload(
+              task.spec.copyWith(url: media.urls[index]),
             );
             final code = response.statusCode ?? 0;
             if (code < 200 || code >= 300) {

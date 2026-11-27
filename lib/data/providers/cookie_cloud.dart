@@ -611,12 +611,13 @@ class CookieCloudConnector extends QuarkUcConnector {
     String address,
     Map<String, String> requestHeaders, {
     bool followRedirects = true,
+    int maxBytes = 1,
   }) async {
     _sessions.checkpoint();
     final result = await _sessions.transport.peek(
       address,
       requestHeaders,
-      maxBytes: 1,
+      maxBytes: maxBytes,
       followRedirects: followRedirects,
     );
     _sessions.checkpoint();

@@ -156,6 +156,14 @@ class TransferHttp {
     zoneValues: {_policyKey: spec.networkPolicy},
   );
 
+  Future<({String text, String url})> textDownloadResponse(
+    DownloadSpec spec, {
+    String? url,
+  }) => runZoned(
+    () => textResponse(url ?? spec.url, spec.headers),
+    zoneValues: {_policyKey: spec.networkPolicy},
+  );
+
   static Dio _createClient({DownloadNetworkPolicy? policy}) =>
       Dio(
           BaseOptions(

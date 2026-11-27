@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
+import 'package:asterlink/core/json.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/ui/browser_page.dart';
@@ -100,6 +101,50 @@ void main() {
         await tester.pumpAndSettle();
         expect(services.downloads.tasks, isEmpty);
         expect(tester.takeException(), isNull);
+      } finally {
+        await closeFixture(tester, services, dir);
+      }
+    },
+  );
+
+  testWidgets(
+    'Segmented quality confirmation shows estimated size and actual container',
+    (tester) async {
+      final f = ucPlayableFixture(),
+          dir = Directory.systemTemp.createTempSync('uc-hls-ui-');
+      final services = createServices(f, dir);
+      f.respond = (r) {
+        if (r.uri.path.endsWith('/v2/play')) {
+          final track = ucPlayableItem(
+            url: 'https://video-play.drive.uc.cn/list.m3u8',
+          );
+          return ucPlayableResponse(
+            items: [
+              {
+                ...track,
+                'supports_format': 'p_qv',
+                'video_info': {...track.obj('video_info'), 'format': 'm3u8'},
+              },
+            ],
+          );
+        }
+        if (r.uri.host == 'video-play.drive.uc.cn') {
+          return const HttpResult(
+            200,
+            '#EXTM3U\n#EXTINF:1,\npart.ts\n#EXT-X-ENDLIST\n',
+          );
+        }
+        return null;
+      };
+      try {
+        await renderButton(tester, services);
+        expect(find.textContaining('预计大小：120 B'), findsOneWidget);
+        expect(find.textContaining('保存格式：TS'), findsOneWidget);
+        expect(find.textContaining('视频（流畅 270×480）.ts'), findsOneWidget);
+        expect(services.downloads.tasks, isEmpty);
+        await tester.tap(find.text('取消'));
+        await tester.pumpAndSettle();
+        expect(services.downloads.tasks, isEmpty);
       } finally {
         await closeFixture(tester, services, dir);
       }

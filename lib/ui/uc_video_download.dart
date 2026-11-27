@@ -62,7 +62,8 @@ Future<void> downloadUcPlayable(
               ),
               const SizedBox(height: 16),
               Text(
-                '画质：${quality.label}\n分辨率：${quality.dimensions}\n大小：${formatBytes(quality.size)}',
+                '画质：${quality.label}\n分辨率：${quality.dimensions}\n${quality.segmented ? '预计大小' : '大小'}：${formatBytes(quality.size)}'
+                '${quality.segmented ? '\n保存格式：${quality.extension.toUpperCase()}' : ''}',
                 style: const TextStyle(height: 1.8),
               ),
               const SizedBox(height: 12),

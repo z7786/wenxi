@@ -4,9 +4,11 @@ import '../../core/json.dart';
 import '../../domain/models.dart';
 import '../../domain/auth.dart';
 import '../../domain/file_types.dart';
+import '../../domain/download_network_policy.dart';
 import '../../domain/uc_video_download.dart';
 import '../../domain/public_share_route.dart';
 import '../../diagnostics/app_log.dart';
+import '../../download/hls.dart';
 import 'cookie_cloud.dart';
 import 'uc_tv.dart';
 
@@ -77,7 +79,7 @@ class UcConnector extends CookieCloudConnector {
             UcVideoDownload.labels.containsKey(item.str('resolution')) &&
             (resolution == null || item.str('resolution') == resolution) &&
             item.str('trans_status', 'success') == 'success' &&
-            item.str('supports_format') == 'mp4' &&
+            (item.str('supports_format') == 'mp4' || _hlsTrack(item)) &&
             info.str('hls_type', 'none') == 'none' &&
             info.str('url').isNotEmpty;
       }).toList();
@@ -90,16 +92,10 @@ class UcConnector extends CookieCloudConnector {
       require(
         choices.isNotEmpty,
         resolution == null
-            ? 'UC 暂未提供可下载的 MP4 可播放版本，请稍后重试或尝试原文件下载'
+            ? 'UC 暂未提供可下载的可播放版本，请稍后重试或尝试原文件下载'
             : 'UC 原选画质已不可用，无法续传；请重新选择可播放版本',
       );
       final chosen = choices.first, info = chosen.obj('video_info');
-      final quality = UcVideoDownload.fromJson({
-        'resolution': chosen.str('resolution'),
-        'width': info['width'],
-        'height': info['height'],
-        'size': info['size'],
-      });
       final address = info.str('url'), uri = Uri.tryParse(address);
       require(
         uri != null &&
@@ -109,31 +105,76 @@ class UcConnector extends CookieCloudConnector {
         'UC 未返回有效的可播放版本下载地址',
       );
       final downloadHeaders = {...headers(''), 'Accept-Encoding': 'identity'};
+      var format = 'mp4';
+      DownloadNetworkPolicy? policy;
+      if (_hlsTrack(chosen)) {
+        // HLS segment requests also carry the web session. Keep every URL and
+        // redirect inside UC's HTTPS hosts, including after task restoration.
+        policy = DownloadNetworkPolicy.fromJson({
+          'hosts': ['uc.cn', '*.uc.cn'],
+          'schemes': ['https'],
+          'ports': [443],
+        });
+        policy.checkedUrl(address);
+        final playlist = await probeDownload(
+          address,
+          downloadHeaders,
+          followRedirects: false,
+          maxBytes: 512 * 1024,
+        );
+        require(
+          playlist.successful &&
+              {
+                '',
+                'identity',
+              }.contains(playlist.header('content-encoding').toLowerCase()),
+          'UC 可播放版本连接失败（HTTP ${playlist.status}），请重试',
+        );
+        require(
+          !playlist.body.contains('#EXT-X-STREAM-INF') &&
+              playlist.body.trimRight().endsWith('#EXT-X-ENDLIST'),
+          'UC 视频播放列表不完整或格式不支持，请稍后重试',
+        );
+        final media = HlsPlaylist.media(address, playlist.body);
+        for (final url in media.urls) {
+          policy.checkedUrl(url);
+        }
+        format = media.fragmentedMp4 ? 'hls_mp4' : 'hls_ts';
+      }
+      final quality = UcVideoDownload.fromJson({
+        'resolution': chosen.str('resolution'),
+        'width': info['width'],
+        'height': info['height'],
+        'size': info['size'],
+        'format': format,
+      });
       // Keep account cookies on the returned UC node; a redirect must be
       // resolved again instead of forwarding credentials to an unknown host.
-      final probe = await probeDownload(
-        address,
-        downloadHeaders,
-        followRedirects: false,
-      );
-      require(probe.successful, 'UC 可播放版本连接失败（HTTP ${probe.status}），请重试');
-      final range = RegExp(
-        r'^bytes 0-0/(\d+)$',
-      ).firstMatch(probe.header('content-range'));
-      final length = int.tryParse(probe.header('content-length'));
-      final total =
-          probe.status == 206 &&
-              range != null &&
-              (length == null || length == 1)
-          ? int.tryParse(range.group(1)!)
-          : probe.status == 200
-          ? length
-          : null;
-      final encoding = probe.header('content-encoding').toLowerCase();
-      require(
-        (encoding.isEmpty || encoding == 'identity') && total == quality.size,
-        'UC 可播放版本的实际大小不一致，请重新获取下载链接',
-      );
+      if (!quality.segmented) {
+        final probe = await probeDownload(
+          address,
+          downloadHeaders,
+          followRedirects: false,
+        );
+        require(probe.successful, 'UC 可播放版本连接失败（HTTP ${probe.status}），请重试');
+        final range = RegExp(
+          r'^bytes 0-0/(\d+)$',
+        ).firstMatch(probe.header('content-range'));
+        final length = int.tryParse(probe.header('content-length'));
+        final total =
+            probe.status == 206 &&
+                range != null &&
+                (length == null || length == 1)
+            ? int.tryParse(range.group(1)!)
+            : probe.status == 200
+            ? length
+            : null;
+        final encoding = probe.header('content-encoding').toLowerCase();
+        require(
+          (encoding.isEmpty || encoding == 'identity') && total == quality.size,
+          'UC 可播放版本的实际大小不一致，请重新获取下载链接',
+        );
+      }
       DiagnosticLog.event(
         'uc.playable_download',
         fields: {'file': DiagnosticLog.reference(file.id), ...quality.toJson()},
@@ -141,11 +182,26 @@ class UcConnector extends CookieCloudConnector {
       return DownloadSpec(
         url: address,
         fileName: quality.fileName(file.name),
-        expectedSize: quality.size,
+        // The API's estimate can differ from the assembled HLS container size.
+        expectedSize: quality.segmented ? 0 : quality.size,
         headers: downloadHeaders,
         source: {'ucVideo': quality.toJson()},
+        networkPolicy: policy,
       );
     }, forPlayback: false);
+  }
+
+  static bool _hlsTrack(Json item) {
+    final info = item.obj('video_info');
+    return {
+          'm3u8',
+          'fmp4',
+          'fmp4_av',
+          'p_qv',
+        }.contains(item.str('supports_format')) &&
+        (info.str('format') == 'm3u8' || info.str('file_format') == 'm3u8') &&
+        Uri.tryParse(info.str('url'))?.path.toLowerCase().endsWith('.m3u8') ==
+            true;
   }
 
   @override
