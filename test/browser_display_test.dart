@@ -260,6 +260,8 @@ void main() {
       await tester.tapAt(const Offset(2, 2));
       await tester.pumpAndSettle();
       expect(find.text('百度网盘下载提示'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
       expect(value.services.downloads.tasks, isEmpty);
