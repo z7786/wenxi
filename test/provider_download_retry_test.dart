@@ -1,4 +1,3 @@
-import 'package:asterlink/data/providers/baidu_link_service.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,7 +5,6 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/http.dart';
-import 'package:asterlink/data/providers/baidu.dart';
 import 'package:asterlink/data/providers/quark.dart';
 import 'package:asterlink/data/providers/uc.dart';
 import 'package:asterlink/data/state_store.dart';
@@ -261,12 +259,33 @@ void main() {
               : encoded({'s3': 'fixture', 'etag': ''}),
         );
         final http = FakeHttp((request) {
+          if (platform == CloudPlatform.baidu) {
+            expect(
+              request.uri.host,
+              anyOf('pan.baidu.com', 'passport.baidu.com', 'd.pcs.baidu.com'),
+            );
+            if (request.uri.path == '/rest/2.0/xpan/nas') {
+              return jsonResponse({'errno': 0, 'vip_type': 0});
+            }
+            if (request.uri.host == 'passport.baidu.com') {
+              return jsonResponse({'errno': 0, 'uid': '123456789'});
+            }
+            if (request.uri.path == '/api/report/user') {
+              return jsonResponse({
+                'errno': 0,
+                'uinfo': 'RLs/VygyH/SSzONO6GIxAXLEsLVtm3s=',
+              });
+            }
+            expect(request.uri.host, 'd.pcs.baidu.com');
+          }
           if (request.uri.host == 'cdn.example') {
             return const HttpResult(206, 'file');
           }
           expect(
             request.method,
-            platform == CloudPlatform.tianyi ? 'GET' : 'POST',
+            {CloudPlatform.tianyi, CloudPlatform.baidu}.contains(platform)
+                ? 'GET'
+                : 'POST',
           );
           if (++lookups == 1) {
             return const HttpResult(503, '<html>unavailable</html>');
@@ -275,7 +294,7 @@ void main() {
             CloudPlatform.baidu => {
               'errno': 0,
               'urls': [
-                {'encrypt': 0, 'url': _direct},
+                {'encrypt': 0, 'url': 'https://fixture.baidupcs.com/ready'},
               ],
             },
             CloudPlatform.quark || CloudPlatform.uc => {
@@ -309,31 +328,6 @@ void main() {
           CleanupOutbox(store, http),
           retryWait: (delay) async => delays.add(delay),
         );
-        if (platform == CloudPlatform.baidu) {
-          repository.connectors[platform] = BaiduConnector(
-            repository.http,
-            store: vault,
-            linkLookup:
-                ({
-                  required cookie,
-                  required path,
-                  required fileId,
-                  required appId,
-                  required device,
-                }) async {
-                  // The private service is injected here; its encrypted client
-                  // protocol is covered separately by baidu_link_service_test.
-                  final response = await repository.http.postJsonRead(
-                    'https://link.example.test/v1/baidu/link',
-                    {'fileId': fileId},
-                  );
-                  return BaiduResolvedLink(
-                    url: response.json.list('urls').single.str('url'),
-                    preview: false,
-                  );
-                },
-          );
-        }
         final spec = await repository.prepare(
           BrowseSession(
             platform: platform,
@@ -343,7 +337,12 @@ void main() {
           ),
           file,
         );
-        expect(spec.url, _direct);
+        expect(
+          spec.url,
+          platform == CloudPlatform.baidu
+              ? 'https://fixture.baidupcs.com/ready'
+              : _direct,
+        );
         expect(lookups, 2);
         expect(delays, [const Duration(seconds: 2)]);
       },

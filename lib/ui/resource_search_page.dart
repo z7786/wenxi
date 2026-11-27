@@ -12,7 +12,9 @@ import '../domain/resource_search.dart';
 import 'common.dart';
 import 'skeleton_loading.dart';
 import 'resource_search_bar.dart';
+import 'resource_search_history.dart';
 import 'resource_preferences.dart';
+import 'resource_content_details.dart';
 
 class ResourceSearchPage extends StatefulWidget {
   const ResourceSearchPage(
@@ -49,6 +51,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   bool _waitingUpdate = false;
   bool _visibilityScheduled = false;
   String? opening;
+  bool _showingContentDetails = false;
   bool advanced = false, showTop = false;
   final _tabKeys = <String, GlobalKey>{};
   double _swipeDistance = 0;
@@ -105,6 +108,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   void scheduleVisibility() {
     if (!mounted ||
         !widget.active ||
+        _showingContentDetails ||
         search.phase != ResourceSearchPhase.idle ||
         search.linkChecks == null ||
         _visibilityScheduled) {
@@ -115,6 +119,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
       _visibilityScheduled = false;
       if (!mounted ||
           !widget.active ||
+          _showingContentDetails ||
           opening != null ||
           WidgetsBinding.instance.lifecycleState != null &&
               WidgetsBinding.instance.lifecycleState !=
@@ -192,7 +197,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
       return sorted;
     }
     final filters =
-        '${search.cloudFilter}\u0000${search.includeTerms.join('\u0000')}\u0001${search.excludeTerms.join('\u0000')}\u0001${search.cloudPriority.map((p) => p.key).join(',')}\u0001${search.preferSupported}';
+        '${search.cloudFilter}\u0000${search.includeTerms.join('\u0000')}\u0001${search.excludeTerms.join('\u0000')}\u0001${search.enabledCloudPriority.map((p) => p.key).join(',')}\u0001${search.preferSupported}';
     if (_displayGeneration != search.resultGeneration ||
         _displayFilters != filters ||
         !scroll.hasClients ||
@@ -273,9 +278,29 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
               widget.services.control.cloudEnabled(hit.platform!)) ||
       widget.services.sources.candidates(hit.url).isNotEmpty;
 
-  Future<void> open(ResourceSearchHit hit) async {
+  Future<void> showContent(ResourceSearchHit hit) async {
+    if (opening != null || _showingContentDetails) return;
+    _showingContentDetails = true;
+    search.linkChecks?.clearVisible();
+    try {
+      final selected = await showResourceContentDetails(
+        context,
+        hit: hit,
+        copyText: widget.services.copyText,
+        canOpen: canOpen,
+      );
+      if (selected != null && mounted) {
+        await open(selected, chooseLink: false);
+      }
+    } finally {
+      _showingContentDetails = false;
+      if (mounted) scheduleVisibility();
+    }
+  }
+
+  Future<void> open(ResourceSearchHit hit, {bool chooseLink = true}) async {
     if (opening != null) return;
-    final selected = await _selectLink(hit);
+    final selected = chooseLink ? await _selectLink(hit) : hit;
     if (selected == null) return;
     if (!canOpen(selected)) {
       await external(selected);
@@ -347,38 +372,10 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
     }
   }
 
-  Future<void> clearHistory() async {
-    try {
-      await search.clearHistory();
-    } catch (e) {
-      if (mounted) message(context, errorText(e));
-    }
+  Future<void> showHistory() async {
+    final term = await showResourceSearchHistory(context, search);
+    if (term != null && mounted) submit(term);
   }
-
-  Future<void> showHistory() => showModalBottomSheet<void>(
-    context: context,
-    showDragHandle: true,
-    useSafeArea: true,
-    isScrollControlled: true,
-    constraints: const BoxConstraints(maxWidth: 700),
-    builder: (sheetContext) => AnimatedBuilder(
-      animation: search,
-      builder: (context, _) => ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(context).height * .65,
-        ),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-          child: historyPanel(
-            onSelect: (term) {
-              Navigator.of(sheetContext).pop();
-              submit(term);
-            },
-          ),
-        ),
-      ),
-    ),
-  );
 
   Future<void> details(ResourceSearchHit hit) => showModalBottomSheet<void>(
     context: context,
@@ -782,7 +779,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                           child: InkWell(
                             onTap: opening != null
                                 ? null
-                                : () => unawaited(open(hit)),
+                                : () => unawaited(showContent(hit)),
                             child: Padding(
                               padding: const EdgeInsets.all(16),
                               child: Column(
@@ -875,7 +872,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                                         )
                                       else
                                         Text(
-                                          canOpen(hit) ? '打开资源' : '浏览器打开',
+                                          '查看简介',
                                           style: TextStyle(
                                             fontSize: 12,
                                             color: themeAccent(context),
@@ -905,64 +902,6 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
     );
   }
 
-  Widget historyPanel({ValueChanged<String>? onSelect}) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 12),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(CupertinoIcons.clock, size: 16, color: secondary(context)),
-            const SizedBox(width: 8),
-            const Expanded(
-              child: Text(
-                '最近搜索',
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-              ),
-            ),
-            if (search.history.isNotEmpty)
-              IconButton(
-                key: const Key('resource-clear-history'),
-                tooltip: '清空搜索历史',
-                onPressed: () => unawaited(clearHistory()),
-                icon: Icon(
-                  CupertinoIcons.trash,
-                  size: 16,
-                  color: secondary(context),
-                ),
-              ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        if (search.history.isEmpty)
-          Text(
-            '搜索过的关键词会保存在这里。',
-            style: TextStyle(fontSize: 12, color: secondary(context)),
-          ),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            for (final term in search.history)
-              ActionChip(
-                key: ValueKey('resource-history-$term'),
-                label: Text(term),
-                onPressed: opening == null
-                    ? () => (onSelect ?? submit)(term)
-                    : null,
-                labelStyle: const TextStyle(fontSize: 12),
-                side: BorderSide.none,
-                backgroundColor: fill(context),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
-          ],
-        ),
-      ],
-    ),
-  );
-
   void selectCloud(String? name) {
     search.filter(name);
     resetVisible();
@@ -981,7 +920,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
   }
 
   void swipeCloud(DragEndDetails details) {
-    if (opening != null || search.allItems.isEmpty) return;
+    if (opening != null || search.enabledItems.isEmpty) return;
     final velocity = details.primaryVelocity ?? 0;
     if (_swipeDistance.abs() < 45 && velocity.abs() < 250) return;
     final names = <String?>[null, ...search.orderedClouds];
@@ -995,10 +934,11 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
 
   Widget cloudFilters(bool wide) {
     final counts = <String, int>{};
-    for (final hit in search.allItems) {
+    final enabled = search.enabledItems;
+    for (final hit in enabled) {
       counts.update(hit.cloudName, (v) => v + 1, ifAbsent: () => 1);
     }
-    final names = search.orderedClouds;
+    final names = [...search.orderedClouds];
     if (search.cloudFilter != null && !names.contains(search.cloudFilter)) {
       names.add(search.cloudFilter!);
     }
@@ -1058,7 +998,7 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                         borderRadius: BorderRadius.circular(5),
                       ),
                       child: Text(
-                        '${name == null ? search.allItems.length : counts[name] ?? 0}',
+                        '${name == null ? enabled.length : counts[name] ?? 0}',
                         style: TextStyle(
                           fontSize: 10,
                           color: selected
@@ -1199,10 +1139,10 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
         '${search.checksPaused ? '检测已暂停' : '正在检测链接'} ${search.checkCompleted}/${search.checkTotal}',
       ResourceSearchPhase.stopped => '搜索已停止',
       ResourceSearchPhase.failed =>
-        search.allItems.isNotEmpty ? '已保留部分结果' : '搜索未完成',
+        search.enabledItems.isNotEmpty ? '已保留部分结果' : '搜索未完成',
       _ =>
         search.fromCache
-            ? '最近搜索'
+            ? '缓存结果'
             : search.linkChecks != null
             ? '链接检测完成'
             : '',
@@ -1430,17 +1370,17 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                 actions: [
                   IconButton(
                     key: const Key('resource-priority-settings'),
-                    tooltip: '网盘展示优先级',
+                    tooltip: '搜索设置',
                     onPressed: opening == null
                         ? () => showResourcePrioritySheet(context, search)
                         : null,
                     icon: const Icon(Icons.settings_outlined),
                   ),
-                  TextButton.icon(
+                  IconButton(
                     key: const Key('resource-search-history'),
+                    tooltip: '搜索历史',
                     onPressed: opening == null ? showHistory : null,
-                    icon: const Icon(CupertinoIcons.clock, size: 17),
-                    label: const Text('历史'),
+                    icon: const Icon(Icons.history_rounded),
                   ),
                   const SizedBox(width: 8),
                 ],
@@ -1517,15 +1457,17 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                                             ),
                                             label: const Text('推荐'),
                                           ),
-                                        TextButton.icon(
+                                        IconButton(
+                                          key: const Key(
+                                            'resource-search-history',
+                                          ),
+                                          tooltip: '搜索历史',
                                           onPressed: opening == null
                                               ? showHistory
                                               : null,
                                           icon: const Icon(
-                                            CupertinoIcons.clock,
-                                            size: 16,
+                                            Icons.history_rounded,
                                           ),
-                                          label: const Text('历史'),
                                         ),
                                       ],
                                     ),
@@ -1533,8 +1475,6 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                                 header(wide, idle),
                                 if (idle) ...[
                                   recommendationPanel(),
-                                  const SizedBox(height: 12),
-                                  historyPanel(),
                                   const SizedBox(height: 32),
                                   Text(
                                     '找到分享后，打开即可继续解析、播放或下载。',

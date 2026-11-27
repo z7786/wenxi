@@ -8,6 +8,8 @@ import '../domain/download_network_policy.dart';
 import '../lan/lan_files.dart';
 import '../diagnostics/app_log.dart';
 import 'cast/dlna.dart' show castMimeType;
+import 'cast/cast_network.dart';
+import 'cast/cast_subtitles.dart';
 import 'playback_failure.dart';
 import 'isolated_stream_proxy.dart';
 
@@ -85,11 +87,32 @@ class ExternalPlaybackStream {
   Future<void>? _closing;
   String _url = '';
   String get url => _url;
+  CastSubtitle? _subtitle;
+  String? _subtitleUrl;
+  String? get subtitleUrl => _subtitleUrl;
+
+  /// Bytes are already staged and converted by the controller. Taking a
+  /// snapshot lets a TV finish its subtitle request after the local decoder
+  /// has released that media's temporary subtitle file.
+  void attachSubtitle(CastSubtitle subtitle) {
+    require(!_closed && lanAddress != null && _server != null, '投屏字幕会话已关闭');
+    _subtitle = subtitle;
+    _subtitleUrl = Uri(
+      scheme: 'http',
+      host: _host,
+      port: _server!.port,
+      path: '/$_token/subtitle/caption.srt',
+    ).toString();
+  }
 
   /// Probe before publishing DIDL. Reuse the existing isolated range scheduler
   /// for ordinary seekable media; unsupported ranges and HLS keep the relay.
   Future<void> prepareMedia({int connections = 8}) async {
-    if (lanAddress == null || _localFile != null || _rangeProxy != null) return;
+    if (lanAddress == null || _rangeProxy != null) return;
+    if (_localFile != null) {
+      _sourcePrepared(parallel: false, connections: 0);
+      return;
+    }
     final proxy = _rangeProxy = IsolatedPlaybackStreamProxy(
       source,
       connections: connections,
@@ -115,19 +138,34 @@ class ExternalPlaybackStream {
         await proxy.close();
         _rangeProxy = null;
       }
+      _sourcePrepared(parallel: available, connections: proxy.connections);
+    } catch (_) {
+      await proxy.close();
+      _rangeProxy = null;
+      rethrow;
+    }
+  }
+
+  void _sourcePrepared({required bool parallel, required int connections}) =>
       DiagnosticLog.event(
         'cast.source_prepared',
         fields: {
           'relay': DiagnosticLog.reference(_token),
-          'parallel': available,
-          'connections': proxy.connections,
-          'file_bytes': proxy.length,
+          'parallel': parallel,
+          'connections': connections,
+          'file_bytes': mediaSize,
           'mime': mimeType,
         },
       );
-    } catch (_) {
-      await proxy.close();
-      _rangeProxy = null;
+
+  Future<HttpServer> _bind() async {
+    try {
+      return await HttpServer.bind(
+        lanAddress ?? InternetAddress.loopbackIPv4,
+        0,
+      );
+    } on SocketException catch (error) {
+      if (lanAddress != null) throw CastNetworkException('bind', error);
       rethrow;
     }
   }
@@ -174,10 +212,7 @@ class ExternalPlaybackStream {
       _url = source.url;
       return;
     }
-    final server = await HttpServer.bind(
-      lanAddress ?? InternetAddress.loopbackIPv4,
-      0,
-    );
+    final server = await _bind();
     if (_closed) {
       await server.close(force: true);
       throw const AppException('第三方播放已取消');
@@ -196,6 +231,16 @@ class ExternalPlaybackStream {
       _handlers.add(task);
       unawaited(task.whenComplete(() => _handlers.remove(task)));
     }, onError: (Object _) {});
+    if (lanAddress != null) {
+      DiagnosticLog.event(
+        'cast.relay_started',
+        fields: {
+          'relay': DiagnosticLog.reference(_token),
+          'local': DiagnosticLog.reference(lanAddress!.address),
+          'port': server.port,
+        },
+      );
+    }
   }
 
   Uri _register(Uri upstream) {
@@ -418,6 +463,7 @@ class ExternalPlaybackStream {
     _RelayPeer? peer;
     HttpClientRequest? outgoing;
     StreamIterator<List<int>>? body;
+    var captionRequest = false;
     final watch = Stopwatch()..start();
     try {
       // Detach before contacting the source: HttpResponse.done does not report
@@ -429,8 +475,12 @@ class ExternalPlaybackStream {
       final upstream = _resources[request.uri.path];
       final local =
           _localFile != null && request.uri.path == '/$_token/local/video';
+      final subtitle =
+          _subtitle != null &&
+          request.uri.path == Uri.tryParse(_subtitleUrl ?? '')?.path;
+      captionRequest = subtitle;
       if (_closed ||
-          upstream == null && !local ||
+          upstream == null && !local && !subtitle ||
           lanAddress == null && request.uri.hasQuery) {
         peer.statusCode = HttpStatus.notFound;
         return;
@@ -439,7 +489,7 @@ class ExternalPlaybackStream {
         peer.statusCode = HttpStatus.methodNotAllowed;
         return;
       }
-      requestsServed++;
+      if (!subtitle) requestsServed++;
       if (_handlers.length >= 24) {
         peer.statusCode = HttpStatus.serviceUnavailable;
         peer.headers.set(HttpHeaders.retryAfterHeader, '1');
@@ -451,6 +501,18 @@ class ExternalPlaybackStream {
           'contentFeatures.dlna.org',
           'DLNA.ORG_OP=01;DLNA.ORG_CI=0',
         );
+        // Samsung-style receivers query these headers instead of DIDL.
+        // Never echo a URL supplied by the renderer or an upstream server.
+        if (!subtitle &&
+            request.uri.path == Uri.parse(_url).path &&
+            _subtitleUrl != null) {
+          peer.headers.set('CaptionInfo.sec', _subtitleUrl!);
+          peer.headers.set('CaptionInfoEx.sec', _subtitleUrl!);
+        }
+      }
+      if (subtitle) {
+        _serveSubtitle(request, peer, _subtitle!);
+        return;
       }
       if (local) {
         await _serveLocal(request, peer, _localFile!);
@@ -621,6 +683,7 @@ class ExternalPlaybackStream {
           'cast.relay_request',
           fields: {
             'relay': DiagnosticLog.reference(_token),
+            'resource': captionRequest ? 'subtitle' : 'media',
             'method': request.method,
             'status': peer?.statusCode,
             'cancelled': peer?.cancelled,
@@ -698,6 +761,58 @@ class ExternalPlaybackStream {
     }
   }
 
+  void _serveSubtitle(
+    HttpRequest request,
+    _RelayPeer peer,
+    CastSubtitle subtitle,
+  ) {
+    final bytes = subtitle.bytes;
+    var start = 0, end = bytes.length;
+    final range = request.headers.value(HttpHeaders.rangeHeader);
+    if (range != null) {
+      final match = RegExp(r'^bytes=(\d*)-(\d*)$').firstMatch(range.trim());
+      var valid =
+          match != null && (match[1]!.isNotEmpty || match[2]!.isNotEmpty);
+      if (valid) {
+        if (match[1]!.isEmpty) {
+          final suffix = int.tryParse(match[2]!);
+          valid = suffix != null && suffix > 0;
+          if (valid) start = (bytes.length - suffix).clamp(0, bytes.length);
+        } else {
+          final first = int.tryParse(match[1]!);
+          final last = match[2]!.isEmpty
+              ? bytes.length - 1
+              : int.tryParse(match[2]!);
+          valid = first != null && last != null && last >= first;
+          if (valid) {
+            start = first;
+            end = (last + 1).clamp(0, bytes.length);
+          }
+        }
+      }
+      if (!valid || start >= bytes.length || end <= start) {
+        peer.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+        peer.headers.set(
+          HttpHeaders.contentRangeHeader,
+          'bytes */${bytes.length}',
+        );
+        return;
+      }
+      peer.statusCode = HttpStatus.partialContent;
+      peer.headers.set(
+        HttpHeaders.contentRangeHeader,
+        'bytes $start-${end - 1}/${bytes.length}',
+      );
+    }
+    peer.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+    peer.headers.set(HttpHeaders.contentTypeHeader, 'text/srt; charset=utf-8');
+    peer.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+    peer.contentLength = end - start;
+    if (request.method != 'HEAD') {
+      peer.add(Uint8List.sublistView(bytes, start, end));
+    }
+  }
+
   Future<void> close() => _closing ??= () async {
     _closed = true;
     for (final request in _requests.toList()) {
@@ -719,6 +834,8 @@ class ExternalPlaybackStream {
     await Future.wait(_handlers.toList());
     _resources.clear();
     _paths.clear();
+    _subtitle = null;
+    _subtitleUrl = null;
   }();
 }
 

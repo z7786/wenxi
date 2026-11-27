@@ -46,12 +46,16 @@ enum CloudPlatform {
     'pipipan.com',
   ]),
   feijipan('Feijipan', '小飞机网盘', '小飞机', 'feijipan', ['feijipan.com']),
-  pikpak('PikPak', 'PikPak网盘', 'PikPak', 'pikpak', ['mypikpak.com']),
+  pikpak('PikPak', 'PikPak网盘', 'PikPak', 'pikpak', [
+    'mypikpak.com',
+    'mypikpak.net',
+  ]),
   github('GitHub', 'GitHub', 'GitHub', 'github', [
     'github.com',
     'raw.githubusercontent.com',
     'codeload.github.com',
-  ]);
+  ]),
+  webdav('WebDAV', 'WebDAV', 'WebDAV', 'webdav', []);
 
   const CloudPlatform(
     this.key,
@@ -67,7 +71,8 @@ enum CloudPlatform {
   bool get supportsFamilyCloud =>
       this == tianyi || this == c139 || this == wopan;
   bool get supportsPersonalSpaces => this == aliyun || this == ctfile;
-  bool get supportsShareParsing => this != ilanzou && this != weiyun;
+  bool get supportsShareParsing =>
+      this != ilanzou && this != weiyun && this != webdav;
   bool get shareRequiresAccount => !{
     baidu,
     lanzou,
@@ -83,7 +88,11 @@ enum CloudPlatform {
     github,
   }.contains(this);
   bool get supportsSharing =>
-      this != ilanzou && this != weiyun && this != wopan && this != github;
+      this != ilanzou &&
+      this != weiyun &&
+      this != wopan &&
+      this != github &&
+      this != webdav;
   String get shareUnavailableMessage => '$label暂不支持分享解析，请在网盘页登录后浏览个人文件';
   bool get exactFileSize =>
       this != ilanzou && this != lanzou && this != feijipan;
@@ -321,6 +330,7 @@ class CloudFile {
   const CloudFile({
     required this.id,
     required this.name,
+    String? displayName,
     this.size = 0,
     this.isDirectory = false,
     this.parentId = '',
@@ -329,8 +339,12 @@ class CloudFile {
     this.hashType,
     this.hashValue,
     this.thumbnailUrl = '',
-  });
-  final String id, name, parentId, token, modifiedAt;
+  }) : displayName = displayName ?? name;
+  final String id, parentId, token, modifiedAt;
+  // Protocol names stay unchanged for remote operations and source identity.
+  // New local downloads use displayName, then apply platform filename rules.
+  final String name;
+  final String displayName;
   final int size;
   final bool isDirectory;
   final String? hashType, hashValue;
@@ -340,6 +354,7 @@ class CloudFile {
   Json toJson() => {
     'id': id,
     'name': name,
+    if (displayName != name) 'displayName': displayName,
     'size': size,
     'isDirectory': isDirectory,
     'parentId': parentId,
@@ -351,6 +366,7 @@ class CloudFile {
   factory CloudFile.fromJson(Json j) => CloudFile(
     id: j.str('id'),
     name: j.str('name'),
+    displayName: j['displayName']?.toString(),
     size: j.integer('size'),
     isDirectory: j.boolean('isDirectory'),
     parentId: j.str('parentId'),
@@ -395,6 +411,8 @@ class BrowseSession {
       ? mode == BrowseMode.personal && meta('githubAuthenticated') == 'true'
       : mode == BrowseMode.personal && !isFamily;
   Map<String, String> get spaceMetadata => {
+    if (platform == CloudPlatform.webdav && meta('webdavRoot').isNotEmpty)
+      'webdavRoot': meta('webdavRoot'),
     if (isFamily) 'familyId': familyId,
     if (isFamily) 'familyName': meta('familyName'),
     if (personalSpaceId.isNotEmpty) 'driveId': personalSpaceId,
@@ -511,6 +529,7 @@ class DownloadSpec {
   );
   DownloadSpec copyWith({
     String? url,
+    Map<String, String>? headers,
     String? relativePath,
     Json? source,
     String? fileName,
@@ -522,7 +541,7 @@ class DownloadSpec {
     url: url ?? this.url,
     fileName: fileName ?? this.fileName,
     relativePath: relativePath ?? this.relativePath,
-    headers: headers,
+    headers: headers ?? this.headers,
     expectedSize: expectedSize,
     checksumType: checksumType,
     checksumValue: checksumValue,

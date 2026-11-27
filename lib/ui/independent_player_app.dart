@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
@@ -11,6 +12,9 @@ import '../platform/windows_pip.dart';
 import 'desktop_pip_surface.dart';
 import '../playback/video_output_policy.dart';
 import '../playback/windows_player_components.dart';
+import '../playback/playback_render_policy.dart';
+import '../playback/playback_viewport_updater.dart';
+import '../diagnostics/app_log.dart';
 
 class IndependentPlayerApp extends StatelessWidget {
   const IndependentPlayerApp({super.key, required this.endpoint});
@@ -39,6 +43,22 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
   final subscriptions = <StreamSubscription<Object?>>[];
   Future<void>? _playerDisposal;
   final _windowGate = AsyncGate();
+  final _progress = ValueNotifier<DesktopPipProgress>((
+    playing: false,
+    position: Duration.zero,
+    duration: Duration.zero,
+  ));
+  late final _viewport = PlaybackViewportUpdater(
+    (size) async {
+      if (closing || video == null) return;
+      await video!.setSize(
+        width: size.width.toInt(),
+        height: size.height.toInt(),
+      );
+    },
+    onError: (error, stack) =>
+        DiagnosticLog.error('player.window_render_size', error, stack),
+  );
   VideoGeometry? _geometry;
   double? _windowAspect;
   bool closing = false, reporting = false;
@@ -130,8 +150,20 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
         decoder.stream.playing,
         decoder.stream.duration,
         decoder.stream.completed,
-        decoder.stream.videoParams,
       ]) {
+        subscriptions.add(
+          stream.listen((_) {
+            if (!mounted || closing) return;
+            final state = decoder.state;
+            _progress.value = (
+              playing: state.playing,
+              position: state.position,
+              duration: state.duration,
+            );
+          }),
+        );
+      }
+      for (final stream in <Stream<Object?>>[decoder.stream.videoParams]) {
         subscriptions.add(
           stream.listen((_) {
             if (!mounted || closing) return;
@@ -148,7 +180,7 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
                   rotation: params.rotate ?? 0,
                   pixelAspect: params.par ?? 1,
                 );
-            if (geometry != null) {
+            if (geometry != null && geometry != _geometry) {
               _geometry = geometry;
               if (_windowAspect != geometry.aspectRatio) {
                 unawaited(
@@ -157,8 +189,8 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
                   ).catchError((Object _) {}),
                 );
               }
+              setState(() {});
             }
-            setState(() {});
           }),
         );
       }
@@ -166,7 +198,12 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
         decoder,
         configuration: VideoControllerConfiguration(
           enableHardwareAcceleration: supportsNativeHardwareRendering,
-          hwdec: preferences.hardwareAcceleration ? null : 'no',
+          hwdec: preferences.hardwareAcceleration
+              ? playbackDecoderMode(
+                  defaultTargetPlatform,
+                  compatible: preferences.decoderCompatibility,
+                )
+              : 'no',
         ),
       );
       setState(() {});
@@ -249,6 +286,7 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
   void onWindowClose() => unawaited(closeWindow());
   Future<void> disposePlayer() => _playerDisposal ??= () async {
     await Future.wait(subscriptions.map((s) => s.cancel()));
+    await _viewport.close();
     await player?.dispose();
   }();
   @override
@@ -258,6 +296,7 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
     windowManager.removeListener(this);
     client.close(force: true);
     unawaited(disposePlayer());
+    _progress.dispose();
     super.dispose();
   }
 
@@ -267,36 +306,56 @@ class _IndependentPlayerState extends State<_IndependentPlayer>
     final state = decoder?.state;
     return Scaffold(
       backgroundColor: Colors.black,
-      body: DesktopPipSurface(
-        video: error.isNotEmpty
-            ? Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(error),
+      body: LayoutBuilder(
+        builder: (context, box) {
+          final geometry = _geometry;
+          if (geometry != null && video != null) {
+            _viewport.request(
+              playbackRenderSize(
+                source: Size(
+                  geometry.width.toDouble(),
+                  geometry.height.toDouble(),
                 ),
-              )
-            : video == null
-            ? const Center(child: CircularProgressIndicator())
-            : Video(
-                controller: video!,
-                controls: NoVideoControls,
+                viewport: box.biggest,
+                pixelRatio: MediaQuery.devicePixelRatioOf(context),
                 fit: BoxFit.contain,
-                aspectRatio: _geometry?.aspectRatio,
-                pauseUponEnteringBackgroundMode: false,
-                resumeUponEnteringForegroundMode: false,
               ),
-        playing: state?.playing ?? false,
-        position: state?.position ?? Duration.zero,
-        duration: state?.duration ?? Duration.zero,
-        onToggle: () =>
-            unawaited(decoder?.playOrPause() ?? Future<void>.value()),
-        onSeek: (position) =>
-            unawaited(decoder?.seek(position) ?? Future<void>.value()),
-        onDrag: () => unawaited(windowManager.startDragging()),
-        onResize: (edge) => unawaited(windowManager.startResizing(edge)),
-        onPin: () async =>
-            windowManager.setAlwaysOnTop(!await windowManager.isAlwaysOnTop()),
-        onClose: () => unawaited(closeWindow()),
+            );
+          }
+          return DesktopPipSurface(
+            progress: _progress,
+            video: error.isNotEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(error),
+                    ),
+                  )
+                : video == null
+                ? const Center(child: CircularProgressIndicator())
+                : Video(
+                    controller: video!,
+                    controls: NoVideoControls,
+                    fit: BoxFit.contain,
+                    aspectRatio: _geometry?.aspectRatio,
+                    pauseUponEnteringBackgroundMode: false,
+                    resumeUponEnteringForegroundMode: false,
+                  ),
+            playing: state?.playing ?? false,
+            position: state?.position ?? Duration.zero,
+            duration: state?.duration ?? Duration.zero,
+            onToggle: () =>
+                unawaited(decoder?.playOrPause() ?? Future<void>.value()),
+            onSeek: (position) =>
+                unawaited(decoder?.seek(position) ?? Future<void>.value()),
+            onDrag: () => unawaited(windowManager.startDragging()),
+            onResize: (edge) => unawaited(windowManager.startResizing(edge)),
+            onPin: () async => windowManager.setAlwaysOnTop(
+              !await windowManager.isAlwaysOnTop(),
+            ),
+            onClose: () => unawaited(closeWindow()),
+          );
+        },
       ),
     );
   }

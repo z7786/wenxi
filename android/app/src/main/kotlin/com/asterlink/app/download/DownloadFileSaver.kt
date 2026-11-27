@@ -226,8 +226,7 @@ class DownloadFileSaver(private val context: Context) {
 
     private fun saveToTree(source: File, fileName: String, relativePath: String, treeUri: Uri, checkpoint: (Int) -> Unit): Uri {
         val document = synchronized(creationLock) {
-            var parent = DocumentFile.fromTreeUri(context, treeUri)
-                ?: error("无法访问选择的目录")
+            var parent = DownloadDirectory(context).open(treeUri)
             relativePath.split('/').filter(String::isNotEmpty).forEach { segment ->
                 checkpoint(0)
                 parent = parent.findFile(segment)?.takeIf(DocumentFile::isDirectory)

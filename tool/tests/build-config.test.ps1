@@ -78,6 +78,18 @@ try {
         if (-not $rejected) { throw "Invalid build field was accepted: $($change.field)" }
         $count++
     }
+    # Source a copy so this fixture never reads or modifies real private settings.
+    $definesRoot = Join-Path $stage 'defines-project'
+    New-Item -ItemType Directory -Path (Join-Path $definesRoot 'tool'), (Join-Path $definesRoot '.local') -Force | Out-Null
+    $definesScript = Join-Path $definesRoot 'tool/build-common.ps1'
+    Copy-Item -LiteralPath (Join-Path $projectPath 'tool/build-common.ps1') -Destination $definesScript
+    [IO.File]::WriteAllText((Join-Path $definesRoot '.local/baidu-api.defines.json'), 'invalid retired config', [Text.UTF8Encoding]::new($false))
+    $defines = & {
+        . $definesScript
+        Get-AsterLinkDartDefines -Settings $settings
+    }
+    if ($defines -match 'baidu-api|ASTERLINK_BAIDU') { throw 'Retired Baidu service configuration was injected into the build.' }
+    $count++
     $rejected = $false
     try { Invoke-AsterLinkTool -Command python -Arguments @('-c', 'raise SystemExit(7)') }
     catch { $rejected = $true }

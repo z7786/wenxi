@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
@@ -8,7 +9,14 @@ import 'package:media_kit_video/media_kit_video.dart';
 // ignore: implementation_imports
 import 'package:media_kit_video/src/video_controller/android_video_controller/real.dart';
 import 'package:asterlink/playback/media_backend.dart';
+import 'package:asterlink/domain/models.dart';
 import 'support.dart';
+
+class _FixtureOutput extends PlatformVideoController {
+  _FixtureOutput(super.player, super.configuration);
+  @override
+  Future<void> setSize({int? width, int? height}) async {}
+}
 
 class _RecordingNative extends NativePlayer {
   _RecordingNative({this.platformOnly = false})
@@ -17,11 +25,14 @@ class _RecordingNative extends NativePlayer {
   final properties = <(String, String)>[];
   int seeks = 0;
   void emitVideoParams(VideoParams value) => videoParamsController.add(value);
+  void emitErrorLog(String prefix, String text) =>
+      logController.add(PlayerLog(prefix: prefix, level: 'error', text: text));
   @override
   Future<void> setProperty(
     String property,
     String value, {
     bool waitForInitialization = true,
+    Duration timeout = const Duration(seconds: 5),
   }) async {
     properties.add((property, value));
     if (!platformOnly) {
@@ -52,6 +63,121 @@ void main() {
       tearDown(
         () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .setMockMethodCallHandler(channel, null),
+      );
+      for (final hardware in [true, false]) {
+        test(
+          'Windows compatibility sets real mpv copy-back mode with hardware=$hardware',
+          () async {
+            debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+            addTearDown(() => debugDefaultTargetPlatformOverride = null);
+            final native = _RecordingNative();
+            await native.setProperty('ao', 'null');
+            await native.setProperty('hwdec', hardware ? 'auto' : 'no');
+            final player = Player(platformPlayer: native);
+            final backend = MediaKitBackend(
+              video: true,
+              hardwareAcceleration: hardware,
+              player: player,
+            );
+            // No native texture exists in a Flutter unit test. Supply only
+            // its configuration; property writes below use the real mpv handle.
+            backend.videoController!.platform.complete(
+              _FixtureOutput(
+                player,
+                VideoControllerConfiguration(hwdec: hardware ? 'auto' : 'no'),
+              ),
+            );
+            native.videoControllerCompleter.complete();
+            try {
+              native.properties.clear();
+              await backend.setDecoderCompatibility(true);
+              expect(
+                await native.getProperty('hwdec'),
+                hardware ? 'auto-copy' : 'no',
+              );
+              expect(
+                native.properties,
+                hardware ? [('hwdec', 'auto-copy')] : isEmpty,
+              );
+              expect(
+                backend.diagnosticFields['decoderCompatibilityRequested'],
+                hardware,
+              );
+              await backend.setDecoderCompatibility(false);
+              expect(
+                await native.getProperty('hwdec'),
+                hardware ? 'auto' : 'no',
+              );
+              expect(native.seeks, 0);
+            } finally {
+              await backend.close();
+            }
+          },
+        );
+      }
+      test(
+        'A released MediaCodec during playback reports once without END_FILE',
+        () async {
+          final native = _RecordingNative();
+          await native.setProperty('ao', 'null');
+          final player = Player(platformPlayer: native);
+          final backend = MediaKitBackend(video: true, player: player);
+          backend.videoController!.platform.complete(
+            _FixtureOutput(player, const VideoControllerConfiguration()),
+          );
+          native.videoControllerCompleter.complete();
+          addTearDown(backend.close);
+          final failures = <int>[];
+          final subscription = native.playbackFailures.listen(failures.add);
+          addTearDown(subscription.cancel);
+          await backend.open(
+            DownloadSpec(
+              url: File('test/fixtures/player-sample.mkv').absolute.path,
+              fileName: 'sample.mkv',
+            ),
+            Duration.zero,
+          );
+          const released =
+              'amediacodec: flush() is valid only at Executing states; currently at Released state';
+          Future<void> emit(String prefix, String text) async {
+            final delivered = player.stream.log.firstWhere(
+              (entry) => entry.text == text,
+            );
+            native.emitErrorLog(prefix, text);
+            await delivered;
+          }
+
+          await emit('ffmpeg', released);
+          expect(backend.failure, isNull);
+          await backend.play();
+          await until(
+            () =>
+                player.state.playing &&
+                player.state.position.inMilliseconds > 100,
+          );
+          await emit(
+            'ffmpeg/video',
+            'h264_mediacodec: Both surface and native_window are NULL',
+          );
+          await emit(
+            'vo/gpu/aimagereader',
+            'acquireLatestImage failed: -30001',
+          );
+          await emit('ffmpeg/audio', released);
+          await emit(
+            'ffmpeg/video',
+            'h264_mediacodec: Failed to dequeue output buffer (status=-542398533)',
+          );
+          expect(backend.errorRevision, 0);
+          await emit('ffmpeg', released);
+          await emit(
+            'ffmpeg/video',
+            'h264_mediacodec: Failed to dequeue output buffer (status=-542398533)',
+          );
+          expect(backend.failure?.decoderUnavailable, isTrue);
+          expect(backend.errorRevision, 1);
+          expect(failures, isEmpty);
+        },
       );
       for (final emulator in [false, true]) {
         test(

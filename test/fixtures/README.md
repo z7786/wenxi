@@ -1,6 +1,8 @@
 # 兼容性测试样本
 
-`player-pgs.mkv` 是 tool/fixtures/make_pgs_sample.py 生成的原创小视频，内嵌 PGS 绿色矩形图形字幕，不含第三方视频或账号信息。用于验证真实 Windows libmpv 的图形字幕解码、自动选择和手动切换，不能用文本字幕渲染测试替代。
+`player-pgs.mkv` 是 tool/fixtures/make_pgs_sample.py 生成的原创小视频，内嵌 PGS 绿色矩形图形字幕，不含第三方视频或账号信息。用于验证真实 Windows libmpv 的图形字幕解码、自动选择、手动切换、缩放和位置调整，不能用文本字幕渲染测试替代。
+
+`player-ass.mkv` 是 tool/fixtures/make_ass_sample.py 生成的原创小视频，内嵌带字体、字号、绿色文字及底部边距的 ASS 对白字幕。与 PGS、UTF-8 内嵌字幕样本一起，用真实渲染像素验证暂停时缩放、移动、恢复原设置及重新打开视频后保留设置；生成器只在重新生成样本时需要 Pillow。
 
 `legacy-jvm-backup.json` 是用于验证原 JVM 备份能被 Dart 正确解密的固定样本，密码为测试代码公开使用的 `测试密码123`。
 

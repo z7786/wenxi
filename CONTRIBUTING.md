@@ -2,6 +2,8 @@
 
 先阅读 [构建说明](docs/BUILDING.md)、[隐私说明](docs/PRIVACY.md) 和 [许可证范围](docs/LICENSING.md)。贡献代码应与其所属部分的许可证兼容，保留参考来源与版权声明。
 
+日常任务拆分、模块与组件复用、分层测试和文档维护统一见 [开发指南](docs/DEVELOPMENT.md)，AI 开发约束见 [AGENTS.md](AGENTS.md)。工具要求 Python 3.10+；Windows 使用 `py -3 tool/verify.py test <测试路径>` 跑局部测试，收尾运行 `py -3 tool/verify.py source`，跨模块阶段完成后运行 `py -3 tool/verify.py full`。其他系统使用符合要求的 `python3`；原生构建及真机体验按改动范围补验。
+
 修改协议时优先增加有代表性的本地服务测试，覆盖失效会话、取消、重试和错误响应；不要把真实账号、Cookie、下载签名或日志 ZIP 当作测试数据提交。测试用链接和凭据应明确为合成数据。
 
 提交前运行公开文件检查、版本检查、静态分析和受影响的测试。改动原生接口或打包脚本时，应验证对应平台构建。版本修改后运行 `dart tool/sync_version.dart --write`；不要直接编辑生成的版本文件。

@@ -9,9 +9,15 @@ import 'common.dart';
 import 'login_webview.dart';
 
 class GuangyaVerificationPage extends StatefulWidget {
-  const GuangyaVerificationPage(this.services, this.challenge, {super.key});
+  const GuangyaVerificationPage(
+    this.services,
+    this.challenge, {
+    super.key,
+    this.userAgent,
+  });
   final AppServices services;
   final GuangyaCaptchaChallenge challenge;
+  final String? userAgent;
 
   @override
   State<GuangyaVerificationPage> createState() =>
@@ -67,7 +73,13 @@ class _GuangyaVerificationPageState extends State<GuangyaVerificationPage> {
                   initialUrlRequest: URLRequest(
                     url: WebUri.uri(widget.challenge.url),
                   ),
-                  initialSettings: webSettings(),
+                  initialSettings: webSettings(
+                    userAgent:
+                        widget.userAgent ??
+                        widget.services.cloud.browserUa.selected(
+                          CloudPlatform.guangya,
+                        ),
+                  ),
                   initialUserScripts: UnmodifiableListView([
                     desktopLoginUserScript(),
                   ]),

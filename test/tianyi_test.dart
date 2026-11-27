@@ -387,9 +387,9 @@ void main() {
     });
     test('Cloud cookies are polled separately from cleared SSO cookies', () {
       final target = WebLoginTarget.targets[_platform]!;
-      expect(Uri.parse(target.url).host, 'm.cloud.189.cn');
-      expect(Uri.parse(target.url).path, '/udb/udb_login.jsp');
-      expect(target.desktopMode, isFalse);
+      expect(Uri.parse(target.url).host, 'cloud.189.cn');
+      expect(Uri.parse(target.url).path, '/web/login.html');
+      expect(target.desktopMode, isTrue);
       expect(target.cookieDomains, contains('https://cloud.189.cn/api/'));
       expect(
         target.cookieDomains.every(
@@ -1437,7 +1437,10 @@ void main() {
 
     for (final url in [
       'javascript:alert(1)',
-      'https://user:password@example.test/file',
+      Uri.https(
+        'example.test',
+        '/file',
+      ).replace(userInfo: 'fixture:unused').toString(),
     ]) {
       test(
         'An invalid optional video address is rejected without transfer: $url',
@@ -2064,7 +2067,10 @@ void main() {
       for (final url in [
         '',
         'javascript:alert(1)',
-        'https://user:password@example.test/file',
+        Uri.https(
+          'example.test',
+          '/file',
+        ).replace(userInfo: 'fixture:unused').toString(),
       ]) {
         await expectLater(
           _connector(

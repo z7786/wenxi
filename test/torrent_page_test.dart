@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +11,8 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/domain/torrent.dart';
+import 'package:asterlink/domain/settings.dart';
+import 'package:asterlink/domain/download_destination.dart';
 import 'package:asterlink/download/download_manager.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'package:asterlink/main.dart';
@@ -48,12 +51,15 @@ class _SelectionQueue extends DownloadManager {
             throw StateError('No cloud request in a BT selection test'),
       );
   List<int> selection = [];
+  DownloadDestinationSelection? destination;
   @override
   Future<List<String>> enqueueTorrent(
     TorrentInfo info,
-    List<int> selected,
-  ) async {
+    List<int> selected, {
+    DownloadDestinationSelection? location,
+  }) async {
     selection = selected;
+    destination = location;
     return [for (final index in selected) 'selected-$index'];
   }
 }
@@ -68,6 +74,8 @@ class _UiServices extends Fake implements AppServices {
   late final cacheDirectory = Directory(p.join(dataDirectory.path, 'cache'));
   @override
   final store = StateStore.memory();
+  @override
+  AppSettings get settings => AppSettings.fromJson(store.data.obj('settings'));
   @override
   late final vault = Vault(store);
   @override
@@ -110,6 +118,7 @@ void main() {
   });
   for (final (name, size, dark, scale, count) in [
     ('phone-bt', const Size(430, 960), false, 1.0, 2),
+    ('desktop-bt', const Size(1100, 780), false, 1.0, 2),
     ('phone-bt-dark', const Size(430, 960), true, 1.0, 2),
     ('landscape-bt-large-text', const Size(900, 430), false, 1.3, 2),
     ('phone-bt-many-files', const Size(430, 960), false, 1.0, 1001),
@@ -124,6 +133,10 @@ void main() {
           ? '下载 $selected 个文件'
           : '下载选中 $selected 个文件';
       tester.view.devicePixelRatio = 1;
+      final desktop = name.startsWith('desktop');
+      debugDefaultTargetPlatformOverride = desktop
+          ? TargetPlatform.windows
+          : TargetPlatform.android;
       tester.view.physicalSize = size;
       tester.platformDispatcher.textScaleFactorTestValue = scale;
       addTearDown(tester.view.resetDevicePixelRatio);
@@ -153,6 +166,11 @@ void main() {
                   ],
                 },
         );
+        await services.store.put('settings', {
+          'askDownloadDestination': true,
+          'destination': r'D:\Configured',
+        });
+        await services.store.put('recentDownloadDestinations', [r'E:\BT']);
       });
       try {
         await tester.pumpWidget(
@@ -183,6 +201,68 @@ void main() {
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
         expect(find.text(downloadLabel(count)), findsOneWidget);
+        // Only immediate children are shown; opening a folder preserves the
+        // selection and returning restores its parent directory.
+        expect(find.byKey(const ValueKey('torrent-file-0')), findsNothing);
+        final firstPath = (services as _UiServices).metadata
+            .list('files')
+            .first
+            .str('path');
+        var folderPath = '';
+        for (final part
+            in firstPath.split('/').take(firstPath.split('/').length - 1)) {
+          folderPath = folderPath.isEmpty ? part : '$folderPath/$part';
+          await tester.tap(find.byKey(ValueKey('torrent-folder-$folderPath')));
+          await tester.pumpAndSettle();
+        }
+        expect(find.byKey(const ValueKey('torrent-file-0')), findsOneWidget);
+        await tester.tap(find.byKey(const Key('torrent-up')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('torrent-file-0')), findsNothing);
+        final directoryRow = find.byKey(ValueKey('torrent-folder-$folderPath'));
+        final directoryCheckbox = find.descendant(
+          of: directoryRow,
+          matching: find.byType(Checkbox),
+        );
+        await tester.tap(directoryCheckbox);
+        await tester.pump();
+        expect(find.text('已选 0 个'), findsOneWidget);
+        await tester.tap(directoryCheckbox);
+        await tester.pump();
+        expect(find.text('已选 $count 个'), findsOneWidget);
+        await tester.tap(directoryRow);
+        await tester.pumpAndSettle();
+        final fileList = find.byKey(const PageStorageKey('torrent-files'));
+        Future<void> revealFile(int index) async {
+          final row = find.byKey(ValueKey('torrent-file-$index'));
+          if (row.evaluate().isEmpty) {
+            tester
+                .state<ScrollableState>(
+                  find.descendant(
+                    of: fileList,
+                    matching: find.byType(Scrollable),
+                  ),
+                )
+                .position
+                .jumpTo(0);
+            await tester.pumpAndSettle();
+          }
+          await tester.scrollUntilVisible(
+            row,
+            180,
+            scrollable: find.descendant(
+              of: fileList,
+              matching: find.byType(Scrollable),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(row.hitTestable(), findsOneWidget);
+        }
+
+        if (name.contains('narrow-large-text')) {
+          // Deep folder rows may fill a small screen before its first file.
+          await revealFile(0);
+        }
         final preview = Platform.environment['APP_BT_PREVIEW_DIR'];
         if (preview != null) {
           final boundary = tester.renderObject<RenderRepaintBoundary>(
@@ -206,7 +286,7 @@ void main() {
           final listRect = tester.getRect(
             find.byKey(const PageStorageKey('torrent-files')),
           );
-          final fullyVisible = find.byType(CheckboxListTile).evaluate().where((
+          final fullyVisible = find.byType(ListTile).evaluate().where((
             element,
           ) {
             final box = element.renderObject as RenderBox;
@@ -214,7 +294,12 @@ void main() {
             return top >= listRect.top &&
                 top + box.size.height <= listRect.bottom;
           }).length;
-          expect(fullyVisible, greaterThanOrEqualTo(10));
+          // The current directory fills the viewport with file rows.
+          expect(
+            fullyVisible,
+            greaterThanOrEqualTo(name.contains('long-paths') ? 8 : 10),
+          );
+          expect(find.byKey(const ValueKey('torrent-file-0')), findsOneWidget);
         }
         if (name.contains('long-paths')) {
           final first = find.byKey(const ValueKey('torrent-file-0'));
@@ -231,7 +316,7 @@ void main() {
           expect(find.text(fullPath), findsOneWidget);
           await tester.pump(const Duration(seconds: 3));
         }
-        if (systemFont && count == 2) {
+        if (systemFont && count == 2 && !desktop) {
           await expectLater(
             find.byKey(const Key('capture')),
             matchesGoldenFile('goldens/$name.png'),
@@ -247,8 +332,7 @@ void main() {
         );
         for (final index in [0, 1]) {
           final row = find.byKey(ValueKey('torrent-file-$index'));
-          await tester.ensureVisible(row);
-          await tester.pumpAndSettle();
+          await revealFile(index);
           await tester.tap(
             find.descendant(of: row, matching: find.byType(Checkbox)),
           );
@@ -271,6 +355,7 @@ void main() {
           await tester.pumpAndSettle();
         }
         for (final index in [0, 1]) {
+          await revealFile(index);
           expect(
             tester
                 .widget<CheckboxListTile>(
@@ -280,10 +365,7 @@ void main() {
             isTrue,
           );
         }
-        await tester.ensureVisible(
-          find.byKey(const ValueKey('torrent-file-0')),
-        );
-        await tester.pumpAndSettle();
+        await revealFile(0);
         await tester.tap(find.byKey(const ValueKey('torrent-file-0')));
         await tester.pump();
         expect(find.text(downloadLabel(1)), findsOneWidget);
@@ -318,14 +400,71 @@ void main() {
           expect(last.hitTestable(), findsOneWidget);
           expect(tester.widget<CheckboxListTile>(last).value, isTrue);
         }
+        if (count > 2 && count <= 200) {
+          final position = tester
+              .state<ScrollableState>(find.byType(Scrollable))
+              .position;
+          final oldOffset = position.pixels;
+          expect(oldOffset, greaterThan(0));
+          final navigator = Navigator.of(
+            tester.element(find.byType(TorrentPage)),
+          );
+          await navigator.maybePop();
+          await tester.pumpAndSettle();
+          expect(find.byType(TorrentPage), findsOneWidget);
+          expect(
+            find.byKey(ValueKey('torrent-folder-$folderPath')),
+            findsOneWidget,
+          );
+          await tester.tap(find.byKey(ValueKey('torrent-folder-$folderPath')));
+          await tester.pumpAndSettle();
+          expect(
+            tester
+                .state<ScrollableState>(find.byType(Scrollable))
+                .position
+                .pixels,
+            closeTo(oldOffset, 1),
+          );
+          expect(find.text(downloadLabel(count)), findsOneWidget);
+        }
+        // A BT selection owns one destination even when prompting is enabled.
+        if (desktop) {
+          await tester.tap(find.byKey(const Key('download-location-recent')));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(r'E:\BT'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const Key('download-location-recent')));
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const Key('download-location-default')));
+          await tester.pumpAndSettle();
+        } else {
+          expect(
+            find.byKey(const Key('download-location-recent')),
+            findsNothing,
+          );
+          expect(
+            find.byKey(const Key('download-location-browse')),
+            findsNothing,
+          );
+        }
         await tester.tap(find.byKey(const Key('torrent-download')));
         await tester.pumpAndSettle();
+        expect(find.text('下载保存位置'), findsNothing);
+        expect(
+          (services.downloads as _SelectionQueue).destination?.path,
+          desktop ? r'E:\BT' : r'D:\Configured',
+        );
+        expect(
+          (services.downloads as _SelectionQueue).destination?.makeDefault,
+          desktop ? isTrue : isFalse,
+        );
         expect(
           (services.downloads as _SelectionQueue).selection,
           List<int>.generate(count, (i) => i),
         );
         expect(tester.takeException(), isNull);
       } finally {
+        debugDefaultTargetPlatformOverride = null;
         await tester.pumpWidget(const SizedBox());
         var closed = false;
         services.close().then((_) => closed = true);

@@ -38,10 +38,13 @@ Duration? parseRetryAfter(String? header) {
 }
 
 class DownloadNetworkException extends AppException {
-  const DownloadNetworkException(this.kind, {this.retryable = true})
+  const DownloadNetworkException(this.kind, {this.retryable = true, this.cause})
     : super('下载连接中断或超时，请检查网络后重试');
   final String kind;
   final bool retryable;
+  // Keep the native failure for structured diagnostics, without adding URLs or
+  // request headers to the user-facing exception message.
+  final Object? cause;
 }
 
 class DownloadRetryExhausted extends AppException {
@@ -72,11 +75,13 @@ class Probe {
     this.hls, {
     this.rangeSupported = false,
     this.host,
+    this.contentType = '',
   });
   final RemoteIdentity identity;
   final bool hls;
   final bool rangeSupported;
   final String? host;
+  final String contentType;
 
   factory Probe.response(
     int code,
@@ -121,6 +126,7 @@ class Probe {
           (headers['content-type']?.toLowerCase().contains('mpegurl') ?? false),
       rangeSupported: code == 206,
       host: host,
+      contentType: headers['content-type']?.toLowerCase() ?? '',
     );
   }
 }
@@ -147,6 +153,14 @@ class TransferHttp {
     CancelToken? cancel,
   }) => runZoned(
     () => stream(spec.url, headers(spec.headers), cancel: cancel),
+    zoneValues: {_policyKey: spec.networkPolicy},
+  );
+
+  Future<({String text, String url})> textDownloadResponse(
+    DownloadSpec spec, {
+    String? url,
+  }) => runZoned(
+    () => textResponse(url ?? spec.url, spec.headers),
     zoneValues: {_policyKey: spec.networkPolicy},
   );
 
@@ -237,6 +251,7 @@ class TransferHttp {
       throw DownloadNetworkException(
         e.type.name,
         retryable: retryableDownloadError(e),
+        cause: e.error,
       );
     }
   }
@@ -379,6 +394,7 @@ class TransferHttp {
       throw DownloadNetworkException(
         e.type.name,
         retryable: retryableDownloadError(e),
+        cause: e.error,
       );
     } finally {
       cancel.cancel();

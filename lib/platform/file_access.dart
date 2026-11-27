@@ -7,6 +7,7 @@ import 'android_download_file.dart';
 import 'native_engine.dart';
 import 'windows_storage.dart';
 import 'apple_storage.dart';
+import 'storage_path.dart';
 
 String safeFileName(String raw) {
   var name = raw
@@ -278,7 +279,7 @@ class PlatformFileAccess implements FileAccess {
           p.dirname(directory.path) != directory.path) {
         directory = directory.parent;
       }
-      final resolved = await directory.resolveSymbolicLinks();
+      final resolved = await resolveStoragePath(directory);
       final apple = await _appleStorage.volume(resolved);
       if (apple != null) {
         return (StorageVolume(apple.id, resolved), apple.hardLinks);
@@ -360,10 +361,15 @@ class PlatformFileAccess implements FileAccess {
           }) ??
           -1;
     }
+    // The destination/cache can have been removed by a cleanup tool. Query
+    // its existing volume; the download writer recreates the folder itself.
+    var directory = Directory(await resolveAppleDirectory(path));
+    while (!await directory.exists() &&
+        directory.parent.path != directory.path) {
+      directory = directory.parent;
+    }
     return asJson(
-      await transport.call('freeSpace', {
-        'path': await resolveAppleDirectory(path),
-      }),
+      await transport.call('freeSpace', {'path': directory.path}),
     ).integer('bytes');
   }
 
@@ -409,12 +415,12 @@ class PlatformFileAccess implements FileAccess {
       await resolveAppleDirectory(destination ?? defaultDirectory.path),
     );
     await root.create(recursive: true);
-    final rootPath = await root.resolveSymbolicLinks();
+    final rootPath = await resolveStoragePath(root);
     final targetDirectory = Directory(
       p.join(rootPath, safeRelativePath(relativePath)),
     );
     await targetDirectory.create(recursive: true);
-    final resolved = await targetDirectory.resolveSymbolicLinks();
+    final resolved = await resolveStoragePath(targetDirectory);
     require(
       p.equals(rootPath, resolved) || p.isWithin(rootPath, resolved),
       '下载路径超出所选目录',

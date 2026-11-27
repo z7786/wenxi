@@ -19,7 +19,13 @@ UploadFile _source(Uint8List bytes) => UploadFile(
 );
 
 void main() {
-  for (final mode in ['switch-node', 'cancel', 'untrusted-node']) {
+  for (final mode in [
+    'switch-node',
+    'http-unavailable',
+    'http-forbidden',
+    'cancel',
+    'untrusted-node',
+  ]) {
     test('Baidu upload node handling: $mode', () async {
       final scope = RequestScope(), bytes = Uint8List.fromList([11, 22, 33]);
       final sent = <RecordedRequest>[];
@@ -54,6 +60,8 @@ void main() {
             bytes,
           );
           if (sent.length == 1) {
+            if (mode == 'http-unavailable') return const HttpResult(503, '');
+            if (mode == 'http-forbidden') return const HttpResult(403, '');
             if (mode == 'cancel') scope.cancel();
             throw const HttpRequestFailure(
               'node unavailable',
@@ -98,14 +106,17 @@ void main() {
           Credential('fixture', {'primary': 'BDUSS=fixture'}),
         ),
       );
-      if (mode == 'switch-node') {
+      if (mode == 'switch-node' || mode == 'http-unavailable') {
         expect((await upload).id, '99');
         expect(sent, hasLength(2));
         expect(commits, 1);
       } else {
         await expectLater(upload, throwsA(isA<AppException>()));
         expect(commits, 0);
-        expect(sent, hasLength(mode == 'cancel' ? 1 : 0));
+        expect(
+          sent,
+          hasLength(mode == 'cancel' || mode == 'http-forbidden' ? 1 : 0),
+        );
       }
     });
   }
@@ -196,7 +207,9 @@ void main() {
         if (badHash) {
           await expectLater(request, throwsA(isA<AppException>()));
           expect(commits, 0);
-          expect(parts, 1);
+          // Other temporary blocks may already be in flight; none can merge
+          // after a failed digest, regardless of completion order.
+          expect(parts, inInclusiveRange(1, 2));
         } else {
           expect((await request).id, '99');
           expect(commits, 1);

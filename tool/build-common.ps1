@@ -96,29 +96,6 @@ function Get-AsterLinkDartDefines {
         "--dart-define=ASTERLINK_CONTROL_URL=$($Settings.controlUrl)"
         "--dart-define=ASTERLINK_GITHUB_REPO=$($Settings.githubRepository)"
     )
-    $baiduConfig = Join-Path (Split-Path -Parent $PSScriptRoot) '.local/baidu-api.defines.json'
-    if (Test-Path -LiteralPath $baiduConfig -PathType Leaf) {
-        $baidu = Get-Content -Raw -Encoding utf8 -LiteralPath $baiduConfig | ConvertFrom-Json
-        $serviceUri = $null
-        if (-not [Uri]::TryCreate($baidu.ASTERLINK_BAIDU_API_URL, [UriKind]::Absolute, [ref]$serviceUri) -or
-            $serviceUri.Scheme -notin @('http', 'https') -or $serviceUri.UserInfo -or
-            $serviceUri.Query -or $serviceUri.Fragment -or
-            $baidu.ASTERLINK_BAIDU_API_PUBLIC_KEY -notmatch '^[0-9a-fA-F]{768,1024}$' -or
-            $baidu.ASTERLINK_BAIDU_API_ACCESS_KEY -notmatch '^[0-9a-fA-F]{64}$') {
-            throw 'Invalid private Baidu API build configuration.'
-        }
-        if ($baidu.ASTERLINK_BAIDU_RELAY_API_URL) {
-            $relayUri = $null
-            if (-not [Uri]::TryCreate($baidu.ASTERLINK_BAIDU_RELAY_API_URL, [UriKind]::Absolute, [ref]$relayUri) -or
-                $relayUri.Scheme -notin @('http', 'https') -or -not $relayUri.Host -or
-                $relayUri.UserInfo -or $relayUri.Query -or $relayUri.Fragment -or
-                -not $relayUri.AbsolutePath.EndsWith('/') -or
-                $baidu.ASTERLINK_BAIDU_RELAY_API_URL -match '[\s\x00-\x1f\x7f\\]') {
-                throw 'Invalid private Baidu relay API build configuration.'
-            }
-        }
-        "--dart-define-from-file=$baiduConfig"
-    }
     $commandConfig = Join-Path (Split-Path -Parent $PSScriptRoot) '.local/cloud-command.defines.json'
     $parserConfig = Join-Path (Split-Path -Parent $PSScriptRoot) '.local/parser-hub.defines.json'
     if (Test-Path -LiteralPath $parserConfig -PathType Leaf) {

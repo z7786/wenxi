@@ -33,7 +33,8 @@ void main() {
             'tianyi': {
               'bootstrap': TianyiWebLogin.bootstrapScript,
               'read': TianyiWebLogin.readScript,
-              'mobileForm': TianyiWebLogin.mobileFormScript,
+              'form': TianyiWebLogin.formScript,
+              'touch': TianyiWebLogin.touchScript,
             },
             for (final platform in [
               CloudPlatform.ilanzou,

@@ -10,10 +10,14 @@ class SystemProxyHttpClientAdapter implements HttpClientAdapter {
   SystemProxyHttpClientAdapter({
     required this.resolve,
     this.shouldProxy = pikpakRequest,
-  });
+    this.diagnosticPlatform = 'PikPak',
+    this.createHttpClient,
+  }) : _direct = IOHttpClientAdapter(createHttpClient: createHttpClient);
   final Future<WindowsProxyRoute> Function(Uri) resolve;
   final bool Function(Uri) shouldProxy;
-  final _direct = IOHttpClientAdapter();
+  final String diagnosticPlatform;
+  final HttpClient Function()? createHttpClient;
+  final IOHttpClientAdapter _direct;
   final _routes = <String, IOHttpClientAdapter>{};
   final _lastRoute = <String, (String, String)>{};
   bool _closed = false;
@@ -70,7 +74,7 @@ class SystemProxyHttpClientAdapter implements HttpClientAdapter {
       DiagnosticLog.event(
         'network.windows_proxy_failed',
         fields: {
-          'platform': 'PikPak',
+          'platform': diagnosticPlatform,
           'reason': error.reason,
           if (error.systemCode != null) 'systemCode': error.systemCode,
         },
@@ -104,7 +108,7 @@ class SystemProxyHttpClientAdapter implements HttpClientAdapter {
       DiagnosticLog.event(
         'network.windows_proxy',
         fields: {
-          'platform': 'PikPak',
+          'platform': diagnosticPlatform,
           'source': route.source,
           'usesProxy': route.usesProxy,
         },
@@ -116,9 +120,12 @@ class SystemProxyHttpClientAdapter implements HttpClientAdapter {
         _routes.remove(_routes.keys.first)!.close();
       }
       adapter = IOHttpClientAdapter(
-        createHttpClient: () => HttpClient()
-          ..idleTimeout = const Duration(seconds: 3)
-          ..findProxy = (_) => route.value,
+        createHttpClient: () {
+          final client =
+              createHttpClient?.call() ??
+              (HttpClient()..idleTimeout = const Duration(seconds: 3));
+          return client..findProxy = (_) => route.value;
+        },
       );
     }
     // Each route has its own connection pool. A connection opened before the
@@ -128,7 +135,9 @@ class SystemProxyHttpClientAdapter implements HttpClientAdapter {
       return await adapter.fetch(routed, requestStream, cancelFuture);
     } on DioException catch (error) {
       if (route.usesProxy && error.type == DioExceptionType.connectionError) {
-        throw error.copyWith(error: const WindowsProxyException('connection'));
+        throw error.copyWith(
+          error: WindowsProxyException.connection(error.error),
+        );
       }
       rethrow;
     }

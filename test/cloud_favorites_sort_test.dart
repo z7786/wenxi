@@ -50,6 +50,125 @@ void main() {
   List<String> ids() => favorites.all.map((favorite) => favorite.id).toList();
 
   test(
+    'new file, folder and share favorites keep the selected category',
+    () async {
+      final folderId = await favorites.createFolder('工作资料');
+      for (final directory in [false, true]) {
+        await favorites.toggle(
+          session,
+          CloudFile(id: 'new-$directory', name: '新增收藏', isDirectory: directory),
+          [(session.rootId, '全部文件')],
+          folderId: folderId,
+        );
+      }
+      final shared = BrowseSession(
+        platform: session.platform,
+        mode: BrowseMode.share,
+        title: '分享资料',
+        rootId: 'share-root',
+        metadata: {'accountId': session.accountId!},
+        sourceLink: ParsedLink(
+          source: '',
+          url: 'https://cloud.189.cn/t/fixture',
+          platform: session.platform,
+          kind: LinkKind.cloudShare,
+          shareId: 'fixture',
+        ),
+      );
+      await favorites.toggleShare(shared, folderId: folderId);
+      final added = favorites.all.where((f) => f.folderId == folderId).toList();
+      expect(added, hasLength(3));
+      expect(added.every((f) => f.folderId == folderId), isTrue);
+      expect(added.where((f) => f.isShareLink), hasLength(1));
+      final reopened = CloudFavorites(StateStore.memory(store.data), cloud);
+      expect(reopened.all.where((f) => f.folderId == folderId), hasLength(3));
+      await expectLater(
+        favorites.toggle(
+          session,
+          const CloudFile(id: 'invalid', name: '不可保存'),
+          [(session.rootId, '全部文件')],
+          folderId: 'removed-folder',
+        ),
+        throwsA(isA<AppException>()),
+      );
+      expect(favorites.all, hasLength(8));
+      final existing = added.firstWhere((f) => !f.isShareLink);
+      expect(
+        await favorites.toggle(
+          session,
+          existing.file,
+          existing.trail,
+          folderId: 'removed-folder',
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'editing name and category commits together and preserves other fields',
+    () async {
+      final folderId = await favorites.createFolder('影视');
+      await favorites.setPinned('f0', true);
+      final original = favorites.all.singleWhere((f) => f.id == 'f0').toJson();
+      await favorites.edit('f0', name: '  我的影片  ', folderId: folderId);
+      final edited = favorites.all.singleWhere((f) => f.id == 'f0');
+      expect(edited.toJson(), {
+        ...original,
+        'customName': '我的影片',
+        'folderId': folderId,
+      });
+      await expectLater(
+        favorites.edit('f0', name: '不应保存的名字', folderId: 'removed-folder'),
+        throwsA(isA<AppException>()),
+      );
+      expect(
+        favorites.all.singleWhere((f) => f.id == 'f0').toJson(),
+        edited.toJson(),
+      );
+      await expectLater(
+        favorites.edit('f0', name: '非法\n名称', folderId: ''),
+        throwsA(isA<AppException>()),
+      );
+      expect(favorites.all.singleWhere((f) => f.id == 'f0').folderId, folderId);
+      await favorites.rename('f0', '仅修改名称');
+      expect(favorites.all.singleWhere((f) => f.id == 'f0').folderId, folderId);
+      await favorites.edit('f0', name: '', folderId: '');
+      expect(favorites.all.singleWhere((f) => f.id == 'f0').name, 'Bravo');
+      expect(favorites.all.singleWhere((f) => f.id == 'f0').folderId, isEmpty);
+      await favorites.remove('f0');
+      await expectLater(
+        favorites.edit('f0', name: '不能重建', folderId: folderId),
+        throwsA(isA<AppException>()),
+      );
+      expect(favorites.all, hasLength(4));
+    },
+  );
+
+  test(
+    'folder assignment survives rename and reopen; deletion preserves favorites',
+    () async {
+      final id = await favorites.createFolder('影视');
+      await favorites.moveToFolder('f0', id);
+      await favorites.renameFolder(id, '电视剧');
+      await expectLater(
+        favorites.createFolder('电视剧'),
+        throwsA(isA<AppException>()),
+      );
+      final reopened = CloudFavorites(StateStore.memory(store.data), cloud);
+      expect(reopened.folders.single.name, '电视剧');
+      expect(reopened.folderOf(reopened.all.first), id);
+      await favorites.deleteFolder(id);
+      expect(favorites.all, hasLength(5));
+      expect(favorites.folderOf(favorites.all.first), '');
+      await expectLater(
+        favorites.moveToFolder('f1', id),
+        throwsA(isA<AppException>()),
+      );
+    },
+  );
+
+  test(
     'Legacy order becomes persistent manual order and survives sort switches',
     () async {
       expect(favorites.sort, CloudFavoriteSort.manual);
@@ -207,6 +326,8 @@ void main() {
   test(
     'Encrypted backup preserves pinning, manual order, recent use and selected sort',
     () async {
+      final folderId = await favorites.createFolder('备份分类');
+      await favorites.edit('f2', name: '已归类收藏', folderId: folderId);
       await favorites.reorder(['f4', 'f2', 'f0', 'f1', 'f3']);
       await favorites.setPinned('f1', true);
       await favorites.open(
@@ -221,6 +342,10 @@ void main() {
       expect(imported.all.map((favorite) => favorite.id), ids());
       expect(imported.all.first.pinned, isTrue);
       expect(imported.all[1].lastOpenedAt, greaterThan(0));
+      expect(imported.folders.single.name, '备份分类');
+      final restoredFavorite = imported.all.singleWhere((f) => f.id == 'f2');
+      expect(restoredFavorite.customName, '已归类收藏');
+      expect(restoredFavorite.folderId, folderId);
       await imported.setSort(CloudFavoriteSort.manual);
       expect(imported.all.map((favorite) => favorite.id), [
         'f1',

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:dio/dio.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/data/remote_control_http.dart';
 import 'package:asterlink/domain/remote_control.dart';
@@ -217,26 +218,47 @@ void main() {
     expect(chain.requests, hasLength(DioRemoteControlFetcher.maxRedirects + 1));
   });
 
-  test('All redirect requests share a single total timeout', () async {
-    var hop = 0;
-    final adapter = _Adapter((_) async {
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      return ResponseBody.fromString(
-        '',
-        302,
-        headers: {
-          'location': ['https://config.example.test/hop-${++hop}'],
-        },
+  test('All redirect requests share a single total timeout', () {
+    fakeAsync((time) {
+      var hop = 0;
+      final adapter = _Adapter((_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        return ResponseBody.fromString(
+          '',
+          302,
+          headers: {
+            'location': ['https://config.example.test/hop-${++hop}'],
+          },
+        );
+      });
+      final fetcher = create(
+        adapter,
+        timeout: const Duration(milliseconds: 120),
       );
+      var completed = false;
+      Object? failure;
+      unawaited(
+        fetcher
+            .fetch(endpoint)
+            .then<void>(
+              (_) => completed = true,
+              onError: (Object error) => failure = error,
+            ),
+      );
+      time.elapse(const Duration(milliseconds: 80));
+      expect(adapter.requests, hasLength(2));
+      expect(completed, isFalse);
+      expect(failure, isNull);
+      time.elapse(const Duration(milliseconds: 40));
+      expect(failure, anyOf(isA<TimeoutException>(), isA<DioException>()));
+      expect(adapter.cancelled, isTrue);
+      time.elapse(const Duration(milliseconds: 180));
+      expect(adapter.requests, hasLength(2));
+      expect(completed, isFalse);
+      fetcher.close();
+      time.flushMicrotasks();
+      expect(time.pendingTimers, isEmpty);
     });
-    final fetcher = create(adapter, timeout: const Duration(milliseconds: 120));
-    await expectLater(
-      fetcher.fetch(endpoint),
-      throwsA(anyOf(isA<TimeoutException>(), isA<DioException>())),
-    );
-    await Future<void>.delayed(const Duration(milliseconds: 180));
-    expect(adapter.cancelled, isTrue);
-    expect(adapter.requests, hasLength(2));
   });
 
   test(

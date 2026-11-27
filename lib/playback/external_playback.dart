@@ -6,6 +6,7 @@ import '../platform/external_open.dart';
 import 'media_backend.dart';
 import 'playback_backend_factory.dart';
 import 'playback_controller.dart';
+import 'playback_runtime.dart';
 
 PlaybackController externalPlayback(
   AppServices services,
@@ -29,6 +30,9 @@ PlaybackController externalPlayback(
     prepare: (_, _) async => spec,
     retain: (_) {},
     release: (_) async {},
+    initializePlayback: backendFactory == null
+        ? PlaybackRuntime.shared.ensureInitialized
+        : null,
     backendFactory:
         backendFactory ??
         (entry, hardware) => createPlaybackBackend(

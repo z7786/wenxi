@@ -1,4 +1,4 @@
-import 'package:asterlink/data/providers/baidu_link_service.dart';
+import 'package:asterlink/data/providers/baidu_resolved_link.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/providers/baidu_app_client.dart';
@@ -102,7 +102,7 @@ void main() {
   );
 
   test(
-    'The link service receives the same device used for download headers',
+    'Local resolution receives the same device used for download headers',
     () async {
       final client = BaiduAppClient(
         readEnvironment: () async => {

@@ -118,6 +118,41 @@ class LinkOpeningTest {
         assertTrue(matches(aliases.getValue("com.asterlink.app.link.SelectionEntry"), "", Intent.ACTION_PROCESS_TEXT, "text/plain"))
     }
 
+    @Test fun pikpakNetAliasesFollowTheExistingCloudSwitch() {
+        val entries = entries()
+        val manager = LinkOpening(context)
+        val target = LinkOpening.targets.single { it.id == "pikpak" }
+        val entry = entries.getValue(target.alias)
+        val urls = listOf(
+            "https://mypikpak.net/s/Share_123-Xyz?pass_code=abc123",
+            "https://www.mypikpak.net/s/Share_123-Xyz",
+            "http://mypikpak.net/s/Share_123-Xyz",
+            "http://www.mypikpak.net/s/Share_123-Xyz",
+        )
+        for (url in urls) {
+            assertEquals(setOf(target.alias), enabledMatches(entries, url))
+        }
+        for (url in listOf(
+            "https://mypikpak.net/drive/all",
+            "https://mypikpak.net/help/s/Share_123-Xyz",
+            "https://mypikpak.net.evil.test/s/Share_123-Xyz",
+            "https://notmypikpak.net/s/Share_123-Xyz",
+        )) {
+            assertFalse("Unrelated PikPak address captured: $url", matches(entry, url))
+        }
+        manager.setEnabled(target.id, false)
+        for (url in urls) {
+            for (mime in listOf(null, "text/html", "application/xhtml+xml")) {
+                assertTrue("Disabled PikPak address still captured: $url ($mime)",
+                    enabledMatches(entries, url, mime = mime).isEmpty())
+            }
+        }
+        manager.setEnabled(target.id, true)
+        for (url in urls) {
+            assertEquals(setOf(target.alias), enabledMatches(entries, url))
+        }
+    }
+
     @Test fun disablingAllCloudsLeavesNoEntryForOrdinaryShareHyperlinks() {
         val entries = entries()
         val manager = LinkOpening(context)

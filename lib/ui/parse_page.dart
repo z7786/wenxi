@@ -27,12 +27,15 @@ import '../domain/resource_search.dart';
 import 'cloud_command_page.dart';
 import '../platform/file_access.dart';
 import '../platform/document_actions.dart';
+import '../platform/qr_image.dart';
+import '../platform/qr_scanner.dart';
 import 'browser_page.dart';
 import 'ctfile_verification_page.dart';
 import 'baidu_share_route_picker.dart';
 import 'resource_preferences.dart';
 import 'parser_site_picker.dart';
 import 'common.dart';
+import 'download_location_picker.dart';
 import 'liquid_glass.dart';
 import 'app_context_menu.dart';
 import 'app_popup_menu.dart';
@@ -70,6 +73,8 @@ class ParsePageState extends State<ParsePage> {
   bool _ctfileVerifying = false;
   bool working = false;
   bool _startingParse = false;
+  bool _readingQr = false;
+  int _qrGeneration = 0, _inputRevision = 0;
   String stage = '', error = '';
   String? _recognizedText;
   String? _parserPasswordGrant;
@@ -116,6 +121,7 @@ class ParsePageState extends State<ParsePage> {
   @override
   void didUpdateWidget(ParsePage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.active && !widget.active) _qrGeneration++;
     if (!widget.active &&
         !widget.resourceActive &&
         (oldWidget.active || oldWidget.resourceActive)) {
@@ -143,6 +149,7 @@ class ParsePageState extends State<ParsePage> {
 
   void _recognize() {
     if (_recognizedText == input.text) return;
+    _inputRevision++;
     _recognizedText = input.text;
     _parserPasswordGrant = null;
     if (working || _ctfileVerifying) _cancel();
@@ -170,6 +177,7 @@ class ParsePageState extends State<ParsePage> {
   void _editCode(String value) {
     var link = current;
     if (link == null) return;
+    _inputRevision++;
     if (_ctfileVerifying) _cancel();
     setState(() {
       _manualCodes[link.url] = value;
@@ -180,6 +188,7 @@ class ParsePageState extends State<ParsePage> {
 
   @override
   void dispose() {
+    _qrGeneration++;
     widget.services.parserRules.removeListener(_parserRulesChanged);
     widget.services.sources.removeListener(_parserRulesChanged);
     _generation++;
@@ -265,6 +274,115 @@ class ParsePageState extends State<ParsePage> {
       await widget.services.clipboard.acknowledgeText(value.text!);
     } else {
       message(context, '剪贴板中没有文本');
+    }
+  }
+
+  Future<void> _readQr() async {
+    if (_readingQr || working || _startingParse || _ctfileVerifying) return;
+    focus.unfocus();
+    codeFocus.unfocus();
+    final generation = ++_qrGeneration;
+    final revision = _inputRevision, parseGeneration = _generation;
+    bool isCurrent() =>
+        mounted &&
+        widget.active &&
+        generation == _qrGeneration &&
+        revision == _inputRevision &&
+        parseGeneration == _generation &&
+        !working &&
+        !_startingParse &&
+        !_ctfileVerifying &&
+        (ModalRoute.of(context)?.isCurrent ?? true);
+    setState(() => _readingQr = true);
+    try {
+      var camera = false;
+      if (canScanQr) {
+        final choice = await showModalBottomSheet<bool>(
+          context: context,
+          showDragHandle: true,
+          builder: (sheetContext) => SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, 12),
+                  child: Text(
+                    '识别二维码',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                ListTile(
+                  key: const Key('parse-qr-image'),
+                  leading: const Icon(CupertinoIcons.photo),
+                  title: const Text('从图片识别'),
+                  subtitle: const Text('选择相册图片或分享截图'),
+                  onTap: () => Navigator.pop(sheetContext, false),
+                ),
+                ListTile(
+                  key: const Key('parse-qr-camera'),
+                  leading: const Icon(CupertinoIcons.qrcode_viewfinder),
+                  title: const Text('相机扫码'),
+                  onTap: () => Navigator.pop(sheetContext, true),
+                ),
+                const SizedBox(height: 12),
+              ],
+            ),
+          ),
+        );
+        if (choice == null || !isCurrent()) return;
+        camera = choice;
+      }
+      final List<String>? texts;
+      if (camera) {
+        final value = await scanParseQr();
+        texts = value == null ? null : [value];
+      } else {
+        texts = await pickQrImage();
+      }
+      if (!mounted || !isCurrent() || texts == null) return;
+      final contents = texts;
+      String? text;
+      if (contents.length == 1) {
+        text = contents.single;
+      } else {
+        text = await showDialog<String>(
+          context: context,
+          builder: (dialogContext) => SimpleDialog(
+            title: const Text('选择要填入的二维码内容'),
+            children: [
+              for (var i = 0; i < contents.length; i++)
+                SimpleDialogOption(
+                  key: ValueKey('parse-qr-result-$i'),
+                  onPressed: () => Navigator.pop(dialogContext, contents[i]),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Text(
+                      contents[i],
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      }
+      if (!mounted || !isCurrent() || text == null) return;
+      text = text.trim();
+      require(text.isNotEmpty && text.length <= 16384, '二维码内容为空或过长，请换一个二维码');
+      _replaceInput(text);
+      input.selection = TextSelection.collapsed(offset: text.length);
+      message(context, current == null ? '二维码内容已填入，网盘口令可使用「口令解析」' : '二维码内容已填入');
+    } catch (error) {
+      if (mounted && isCurrent()) {
+        message(
+          context,
+          error is AppException ? error.message : '二维码识别失败，请换一张图片或重新扫码',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _readingQr = false);
     }
   }
 
@@ -588,6 +706,7 @@ class ParsePageState extends State<ParsePage> {
             () => _progress.run(() async {
               final session = await widget.services.cloud.share(
                 link,
+                preferQuarkMobileTransfer: _openingResource,
                 baiduRoute: _publicRoute(platform)
                     ? BaiduShareRoute.publicParser
                     : BaiduShareRoute.account,
@@ -1009,6 +1128,15 @@ class ParsePageState extends State<ParsePage> {
     String recognition, {
     bool desktop = false,
   }) {
+    final qrIcon = _readingQr
+        ? const SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+        : const Icon(CupertinoIcons.qrcode_viewfinder, size: 20);
+    final qrEnabled =
+        !working && !_startingParse && !_ctfileVerifying && !_readingQr;
     final recognitionControl = InkWell(
       key: const Key('parse-recognized-action'),
       onTap: current == null || working ? null : parse,
@@ -1047,6 +1175,12 @@ class ParsePageState extends State<ParsePage> {
             icon: const Icon(CupertinoIcons.clock, size: 16),
             label: const Text('历史'),
           ),
+          TextButton.icon(
+            key: const Key('parse-qr'),
+            onPressed: qrEnabled ? _readQr : null,
+            icon: qrIcon,
+            label: Text(_readingQr ? '识别中…' : '二维码'),
+          ),
           OutlinedButton.icon(
             key: const Key('parse-paste'),
             onPressed: working ? null : paste,
@@ -1061,7 +1195,7 @@ class ParsePageState extends State<ParsePage> {
       );
       return LayoutBuilder(
         builder: (context, bounds) {
-          if (bounds.maxWidth < 430 ||
+          if (bounds.maxWidth < 580 ||
               MediaQuery.textScalerOf(context).scale(14) > 21) {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1078,70 +1212,99 @@ class ParsePageState extends State<ParsePage> {
         },
       );
     }
-    final pasteControl = InkWell(
-      key: const Key('parse-paste'),
-      onTap: working ? null : paste,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Row(
-          children: [
-            Icon(
-              CupertinoIcons.doc_text,
-              color: themeAccent(context),
-              size: 27,
-            ),
-            const SizedBox(width: 17),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '粘贴内容',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 3),
-                  recognitionControl,
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-    final historyControl = TextButton.icon(
-      key: const Key('parse-history'),
-      onPressed: working ? null : _history,
-      style: TextButton.styleFrom(
-        backgroundColor: themeAccent(context).withValues(alpha: .11),
-        foregroundColor: themeAccent(context),
-        minimumSize: const Size(0, 32),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-        shape: const StadiumBorder(),
-      ),
-      icon: const Icon(CupertinoIcons.clock, size: 17),
-      label: const Text(
-        '历史',
-        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-      ),
-    );
     return LayoutBuilder(
       builder: (context, bounds) {
-        if (bounds.maxWidth < 275 ||
-            MediaQuery.textScalerOf(context).scale(14) > 21) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              pasteControl,
-              const SizedBox(height: 8),
-              Align(alignment: Alignment.centerRight, child: historyControl),
-            ],
-          );
-        }
+        final compact =
+            bounds.maxWidth < 300 ||
+            MediaQuery.textScalerOf(context).scale(14) > 21;
+        // Keep both actions beside the title on narrow screens and large text.
+        // Compact icons leave room for the text without shrinking system fonts.
+        final pasteControl = InkWell(
+          key: const Key('parse-paste'),
+          onTap: working ? null : paste,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              children: [
+                if (!compact) ...[
+                  Icon(
+                    CupertinoIcons.doc_text,
+                    color: themeAccent(context),
+                    size: 27,
+                  ),
+                  const SizedBox(width: 17),
+                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '粘贴内容',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      recognitionControl,
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+        final historyControl = compact
+            ? IconButton(
+                key: const Key('parse-history'),
+                tooltip: '历史解析',
+                onPressed: working ? null : _history,
+                constraints: const BoxConstraints.tightFor(
+                  width: 48,
+                  height: 48,
+                ),
+                style: IconButton.styleFrom(
+                  backgroundColor: themeAccent(context).withValues(alpha: .11),
+                  foregroundColor: themeAccent(context),
+                ),
+                icon: const Icon(CupertinoIcons.clock, size: 20),
+              )
+            : TextButton.icon(
+                key: const Key('parse-history'),
+                onPressed: working ? null : _history,
+                style: TextButton.styleFrom(
+                  backgroundColor: themeAccent(context).withValues(alpha: .11),
+                  foregroundColor: themeAccent(context),
+                  minimumSize: const Size(0, 48),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 7,
+                  ),
+                  shape: const StadiumBorder(),
+                ),
+                icon: const Icon(CupertinoIcons.clock, size: 17),
+                label: const Text(
+                  '历史',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                ),
+              );
         return Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Expanded(child: pasteControl),
             const SizedBox(width: 8),
+            IconButton(
+              key: const Key('parse-qr'),
+              tooltip: _readingQr ? '正在识别二维码' : '识别二维码',
+              onPressed: qrEnabled ? _readQr : null,
+              color: themeAccent(context),
+              constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+              icon: qrIcon,
+            ),
+            const SizedBox(width: 4),
             historyControl,
           ],
         );
@@ -1209,16 +1372,18 @@ class ParsePageState extends State<ParsePage> {
           children: [
             Icon(CupertinoIcons.add_circled_solid, size: 18),
             SizedBox(width: 8),
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  '添加BT',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                ),
-                SizedBox(height: 2),
-                Text('选择种子文件', style: TextStyle(fontSize: 10, height: 1.2)),
-              ],
+            Flexible(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '添加BT',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
+                  SizedBox(height: 2),
+                  Text('选择种子文件', style: TextStyle(fontSize: 10, height: 1.2)),
+                ],
+              ),
             ),
           ],
         ),
@@ -1426,6 +1591,7 @@ class ParsePageState extends State<ParsePage> {
       TargetPlatform.windows,
       TargetPlatform.macOS,
     }.contains(Theme.of(context).platform);
+    final tablet = !desktop && MediaQuery.sizeOf(context).shortestSide >= 600;
     final hint = Theme.of(context).brightness == Brightness.dark
         ? const Color(0xff77777c)
         : const Color(0xffc4c4c7);
@@ -1481,11 +1647,13 @@ class ParsePageState extends State<ParsePage> {
                   controller: input,
                   focusNode: focus,
                   readOnly: working,
-                  minLines: desktop ? 6 : 4,
+                  minLines: desktop || tablet ? 6 : 4,
                   maxLines: desktop ? 10 : 7,
                   style: TextStyle(fontSize: desktop ? 14 : 16, height: 1.6),
                   decoration: InputDecoration(
-                    hintText: desktop ? '粘贴分享链接或包含提取码的完整文本' : '粘贴分享链接或包含链接的文本',
+                    hintText: desktop
+                        ? '粘贴分享链接或包含提取码的完整文本，也可识别二维码图片'
+                        : '粘贴链接或文本，也可识别二维码',
                     hintStyle: TextStyle(
                       color: desktop ? secondary(context) : hint,
                       fontSize: desktop ? 14 : 17,
@@ -1666,6 +1834,7 @@ class ParsePageState extends State<ParsePage> {
             ),
           );
           final parseTools = Column(
+            key: const Key('parse-tools'),
             children: [
               form,
               const SizedBox(height: 18),
@@ -1834,19 +2003,47 @@ class ParsePageState extends State<ParsePage> {
           return ListView(
             key: const PageStorageKey('parse'),
             padding: EdgeInsets.fromLTRB(
-              bounds.maxWidth > 720 ? (bounds.maxWidth - 680) / 2 : 18,
+              tablet ? 28 : 18,
               18,
-              bounds.maxWidth > 720 ? (bounds.maxWidth - 680) / 2 : 18,
+              tablet ? 28 : 18,
               28 + MediaQuery.paddingOf(context).bottom,
             ),
             children: [
-              parseTools,
-              const SizedBox(height: 18),
-              favorites,
-              const SizedBox(height: 18),
-              recent,
-              const SizedBox(height: 18),
-              support,
+              LayoutBuilder(
+                builder: (context, contentBounds) {
+                  final twoColumns =
+                      tablet &&
+                      contentBounds.maxWidth >= 980 &&
+                      MediaQuery.textScalerOf(context).scale(14) <= 21;
+                  final sidebarWidth = twoColumns
+                      ? (contentBounds.maxWidth * .3).clamp(300.0, 400.0)
+                      : contentBounds.maxWidth;
+                  final formWidth = twoColumns
+                      ? contentBounds.maxWidth - sidebarWidth - 22
+                      : contentBounds.maxWidth;
+                  // Keep the same children when resizing or rotating so the
+                  // editor retains focus, selection and composing text.
+                  return Wrap(
+                    spacing: 22,
+                    runSpacing: 18,
+                    children: [
+                      SizedBox(width: formWidth, child: parseTools),
+                      SizedBox(
+                        width: sidebarWidth,
+                        child: Column(
+                          children: [
+                            favorites,
+                            const SizedBox(height: 18),
+                            recent,
+                            const SizedBox(height: 18),
+                            support,
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
             ],
           );
         },
@@ -1863,23 +2060,32 @@ Future<bool> directDownloadDialog(
   Map<String, String> headers = const {},
   bool external = false,
 }) async {
-  final selection = await showDialog<({DownloadSpec spec, int connections})>(
-    context: context,
-    barrierDismissible: !external,
-    builder: (_) => _DirectDialog(
-      initial,
-      fileName,
-      headers,
-      services.settings.threads,
-      external: external,
-    ),
-  );
+  final selection =
+      await showDialog<
+        ({
+          DownloadSpec spec,
+          int connections,
+          DownloadDestinationSelection location,
+        })
+      >(
+        context: context,
+        barrierDismissible: !external,
+        builder: (_) => _DirectDialog(
+          initial,
+          fileName,
+          headers,
+          services.settings.threads,
+          services,
+          external: external,
+        ),
+      );
   if (selection == null || !context.mounted) return false;
   final id = await busy(
     context,
     () => services.downloads.enqueue(
       selection.spec,
       connections: selection.connections,
+      location: selection.location,
     ),
     label: '添加下载…',
   );
@@ -1894,13 +2100,15 @@ class _DirectDialog extends StatefulWidget {
     this.initial,
     this.fileName,
     this.headers,
-    this.connections, {
+    this.connections,
+    this.services, {
     this.external = false,
   });
   final String initial;
   final String fileName;
   final Map<String, String> headers;
   final int connections;
+  final AppServices services;
   final bool external;
   @override
   State<_DirectDialog> createState() => _DirectDialogState();
@@ -1925,8 +2133,12 @@ class _DirectDialogState extends State<_DirectDialog> {
   late final name = TextEditingController(text: safeFileName(initialName()));
   late final headers = TextEditingController(text: jsonEncode(widget.headers));
   late final connections = TextEditingController(text: '${widget.connections}');
+  late var location = DownloadDestinationSelection(
+    widget.services.settings.destination,
+  );
   String error = '';
   bool advanced = false;
+  bool choosingLocation = false;
   @override
   void dispose() {
     for (final c in [url, name, headers, connections]) {
@@ -1946,6 +2158,7 @@ class _DirectDialogState extends State<_DirectDialog> {
             expectedSize: link.size,
           ),
           connections: 1,
+          location: location,
         ));
         return;
       }
@@ -1974,6 +2187,7 @@ class _DirectDialogState extends State<_DirectDialog> {
           headers: parsed,
         ),
         connections: count!,
+        location: location,
       ));
     } catch (e) {
       setState(() => error = e is AppException ? e.message : '请检查链接和请求头格式');
@@ -2021,6 +2235,15 @@ class _DirectDialogState extends State<_DirectDialog> {
               decoration: const InputDecoration(labelText: '保存文件名'),
             ),
             const SizedBox(height: 16),
+            if (supportsDownloadLocationChoice) ...[
+              DownloadLocationField(
+                services: widget.services,
+                selection: location,
+                onChanged: (value) => setState(() => location = value),
+                onChoosing: (value) => setState(() => choosingLocation = value),
+              ),
+              const SizedBox(height: 8),
+            ],
             if (isEd2k)
               const Text(
                 'ED2K 自动查找来源并排队，下载速度取决于在线来源和网络。下载期间会共享已校验的分片，上传上限为 128 KiB/s；暂停会停止传输。',
@@ -2083,7 +2306,7 @@ class _DirectDialogState extends State<_DirectDialog> {
       ),
       FilledButton(
         key: const Key('direct-download-submit'),
-        onPressed: submit,
+        onPressed: choosingLocation ? null : submit,
         child: const Text('添加下载'),
       ),
     ],

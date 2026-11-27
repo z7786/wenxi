@@ -3,6 +3,15 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Package targets (Android is ARM64; Windows is x64)'
+        type: choice
+        default: all
+        options:
+          - all
+          - android
+          - android-windows
 permissions:
   contents: read
 concurrency:
@@ -40,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [android, windows, windows-arm64]
+        target: ${{ fromJSON(inputs.targets == 'android' && '["android"]' || inputs.targets == 'android-windows' && '["android", "windows"]' || '["android", "windows", "windows-arm64"]') }}
     env:
       PUB_HOSTED_URL: https://pub.dev
       FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
@@ -126,6 +135,10 @@ jobs:
       - name: Test account and playback compatibility with the ARM64 SDK
         if: matrix.target == 'windows-arm64'
         run: flutter test --no-pub --concurrency=4 test/account_cookie_test.dart test/account_identity_test.dart test/floating_playback_test.dart test/playback_features_test.dart test/download_playback_test.dart
+      - name: Generate release asset checksums
+        run: |
+          python tool/package-release.py --checksums
+          if ($LASTEXITCODE -ne 0) { throw 'Release checksum generation failed.' }
       - name: Save only release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -134,6 +147,7 @@ jobs:
             .local/release-assets/*.apk
             .local/release-assets/*.exe
             .local/release-assets/*.zip
+            .local/release-assets/SHA256SUMS.txt
           include-hidden-files: true
           if-no-files-found: error
           compression-level: 0

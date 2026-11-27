@@ -46,18 +46,10 @@ extension _LanServer on LanService {
       if (parts.isNotEmpty && parts.last.isEmpty) parts.removeLast();
       if (browserRead &&
           (request.uri.path == '/' || request.uri.path.isEmpty)) {
-        // The device address is public pairing information, not a share token.
-        // Guide browsers without exposing active shares or the connection code.
-        _browserPage(
-          response,
-          title: '设备互联已开启',
-          content:
-              '<p>这是设备连接地址，用于在文析助手中手动连接设备。</p>'
-              '<p>要下载文件，请在发送端打开“我的分享”，复制完整分享链接，'
-              '或扫描文件的分享二维码。</p>'
-              '<p>完整文件链接会包含 <code>/s/…</code>。'
-              '连接二维码请使用文析助手内的“扫码连接”打开。</p>',
-        );
+        await loadLanBrowserAssets();
+        _browserHome(response);
+      } else if (request.uri.path.startsWith('/web/')) {
+        await _browserRoute(request, remote);
       } else if (browserRead && request.uri.path == '/favicon.ico') {
         response.statusCode = HttpStatus.noContent;
       } else if (request.method == 'GET' && request.uri.path == '/v1/info') {
@@ -265,10 +257,19 @@ extension _LanServer on LanService {
         _reply(response, share.manifest.toJson());
       } else if (parts.length == 2 && parts[0] == 's' && browserRead) {
         final share = _findShare(parts[1]);
-        require(
-          share.manifest.singleFile && !share.draining,
-          '请用文析助手连接码接收多文件或文件夹',
-        );
+        require(!share.draining, '此分享已停止接受新接收');
+        if (!share.manifest.singleFile) {
+          final escaped = const HtmlEscape().convert(share.manifest.name);
+          _browserPage(
+            response,
+            title: share.manifest.name,
+            content:
+                '<p>${share.manifest.files.length} 个文件 · ${_browserSize(share.manifest.size)}</p>'
+                '<a href="/v1/zip/${share.manifest.token}?transfer=${lanId()}" download>下载 $escaped（ZIP）</a>'
+                '<p>包含文件夹结构和空目录，请保持发送端的分享开启。</p>',
+          );
+          return;
+        }
         final file = share.manifest.files.single;
         final url =
             '/v1/files/${share.manifest.token}/${file.id}?transfer=${lanId()}';
@@ -285,6 +286,11 @@ extension _LanServer on LanService {
               '<p>$validity</p>'
               '<p>请保持两台设备在同一局域网，并让发送端保持分享开启。</p>',
         );
+      } else if (parts.length == 3 &&
+          parts[0] == 'v1' &&
+          parts[1] == 'zip' &&
+          browserRead) {
+        await _serveBrowserZip(request, _findShare(parts[2]), remote);
       } else if (parts.length == 4 &&
           parts[0] == 'v1' &&
           parts[1] == 'files' &&
@@ -314,6 +320,10 @@ extension _LanServer on LanService {
         final message = error is AppException ? error.message : '设备请求失败，请重新连接';
         final status = error is _LanRequestError
             ? error.status
+            : error is LanBrowserException
+            ? error.status
+            : error is DownloadSpaceException
+            ? 507
             : error is _LanConnectionError
             ? 503
             : 400;
@@ -346,13 +356,13 @@ extension _LanServer on LanService {
     response.headers.contentType = ContentType.html;
     response.headers.set(
       'Content-Security-Policy',
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     );
     final escapedTitle = const HtmlEscape().convert(title);
     response.write(
-      '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>文析助手 · $escapedTitle</title>
-<style>body{margin:0;padding:24px;font-family:system-ui,sans-serif;background:#f2f2f7;color:#1c1c1e}main{max-width:480px;margin:12vh auto;padding:30px;background:white;border-radius:24px}small,p{color:#73737b;line-height:1.8}h1{font-size:22px;overflow-wrap:anywhere}a{display:block;text-align:center;background:#007aff;color:white;text-decoration:none;padding:15px;border-radius:14px;margin-top:24px}code{overflow-wrap:anywhere}</style>
-<main><small>文析助手 · 局域网分享</small><h1>$escapedTitle</h1>$content</main></html>''',
+      '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>文析助手 · $escapedTitle</title><link rel="stylesheet" href="/web/app.css"></head>
+<body><header class="topbar"><div class="navigation"><a class="brand" href="/" aria-label="文析助手网页互传首页">文析助手</a><span class="navigation-title">设备互联</span><span class="network">局域网</span></div></header>
+<main><section class="standalone-view" aria-labelledby="share-title"><h1 id="share-title">$escapedTitle</h1><div class="group standalone-content">$content</div></section></main></body></html>''',
     );
   }
 

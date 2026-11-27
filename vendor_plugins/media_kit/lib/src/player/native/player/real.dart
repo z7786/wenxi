@@ -30,6 +30,7 @@ import 'package:media_kit/src/models/video_params.dart';
 import 'package:media_kit/src/player/native/core/fallback_bitrate_handler.dart';
 import 'package:media_kit/src/player/native/core/initializer.dart';
 import 'package:media_kit/src/player/native/core/native_library.dart';
+import 'package:media_kit/src/player/native/core/native_disposal.dart';
 import 'package:media_kit/src/player/native/utils/android_asset_loader.dart';
 import 'package:media_kit/src/player/native/utils/android_helper.dart';
 import 'package:media_kit/src/player/native/utils/isolates.dart';
@@ -81,44 +82,110 @@ class NativePlayer extends PlatformPlayer {
   /// {@macro native_player}
   NativePlayer({required super.configuration})
       : mpv = generated.MPV(DynamicLibrary.open(NativeLibrary.path)) {
+    unawaited(_nativeDisposed.future.catchError((Object _) {}));
     future = _create()
       ..then((_) {
         try {
           configuration.ready?.call();
         } catch (_) {}
+      }, onError: (Object error, StackTrace stack) {
+        // Callers observe initialization through waitForPlayerInitialization.
+        // Do not create an unhandled error from the ready notification branch.
       });
   }
+
+  @override
+  Future<void> get waitForPlayerInitialization async {
+    await future;
+    await completer.future.timeout(const Duration(seconds: 10));
+  }
+
+  @override
+  Future<void> get waitForVideoControllerInitializationIfAttached => super
+      .waitForVideoControllerInitializationIfAttached
+      .timeout(const Duration(seconds: 10));
+
+  /// Completes after native teardown, including the surface grace period.
+  /// dispose() itself only waits for output/event detachment.
+  Future<void> get nativeDisposed => _nativeDisposed.future;
+  final _nativeDisposed = Completer<void>();
+  Future<void>? _disposeFuture;
 
   /// Disposes the [Player] instance & releases the resources.
   @override
   Future<void> dispose({bool synchronized = true}) {
+    final existing = _disposeFuture;
+    if (existing != null) {
+      return existing.timeout(const Duration(seconds: 10));
+    }
     Future<void> function() async {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
-
-      await NativeReferenceHolder.instance.remove(ctx);
-      await stop(notify: false, synchronized: false);
+      try {
+        await future;
+      } catch (_) {
+        // A partially initialized native handle still needs to be retired.
+      }
+      // The caller has a bounded wait, but this cleanup must not race output
+      // creation or free a Surface before the native stop acknowledgement.
+      if (isVideoControllerAttached) await videoControllerCompleter.future;
+      if (ctx != nullptr) {
+        await _command(['stop'], timeout: null, requireSuccess: true);
+        await NativeReferenceHolder.instance.remove(ctx);
+      }
 
       disposed = true;
+      // No reply can be consumed once the native event loop is detached.
+      for (final request in _getPropertyRequests.values) {
+        if (!request.isCompleted) request.complete('');
+      }
+      _getPropertyRequests.clear();
+      for (final requests in [_setPropertyRequests, _commandRequests]) {
+        for (final request in requests.values) {
+          if (!request.isCompleted) {
+            request.completeError(StateError('Player disposed before reply'));
+          }
+        }
+        requests.clear();
+      }
 
       await _playbackFailures.close();
       await super.dispose();
 
+      if (ctx == nullptr) {
+        _nativeDisposed.complete();
+        return;
+      }
       await Initializer(mpv).dispose(ctx);
 
-      Future.delayed(const Duration(seconds: 5), () {
-        mpv.mpv_terminate_destroy(ctx);
-        Initializer(mpv).release(ctx);
-      });
+      // Keep the established Surface grace period, but never join decoder
+      // threads on the UI isolate. Release the trampoline only after that join.
+      unawaited(_destroyAfterGrace());
     }
 
-    if (synchronized) {
-      return lock.synchronized(function);
-    } else {
-      return function();
+    final cleanup = _disposeFuture =
+        synchronized ? lock.synchronized(function) : function();
+    unawaited(cleanup.then((_) {}, onError: (Object error, StackTrace stack) {
+      if (!_nativeDisposed.isCompleted) {
+        _nativeDisposed.completeError(error, stack);
+      }
+    }));
+    // A timeout is reported to the caller, so it cannot start another decoder
+    // assuming teardown succeeded. Cleanup keeps running on a late native reply.
+    return cleanup.timeout(const Duration(seconds: 10));
+  }
+
+  Future<void> _destroyAfterGrace() async {
+    try {
+      await Future<void>.delayed(const Duration(seconds: 5));
+      await destroyNativePlayer(NativeLibrary.path, ctx.address);
+      Initializer(mpv).release(ctx);
+      _nativeDisposed.complete();
+    } catch (error, stack) {
+      // Never fall back to a blocking UI-isolate destroy. Keep the trampoline
+      // alive on failure; observers can report the incomplete native teardown.
+      _nativeDisposed.completeError(error, stack);
     }
   }
 
@@ -1130,6 +1197,8 @@ class NativePlayer extends PlatformPlayer {
             track.title ?? 'external',
             track.language ?? 'auto',
           ],
+          // Failed sub-add must not publish an external track as selected.
+          requireSuccess: true,
         );
         state = state.copyWith(
           track: state.track.copyWith(
@@ -1231,6 +1300,7 @@ class NativePlayer extends PlatformPlayer {
     String property,
     String value, {
     bool waitForInitialization = true,
+    Duration timeout = const Duration(seconds: 5),
   }) async {
     if (disposed) {
       throw AssertionError('[Player] has been disposed');
@@ -1241,19 +1311,18 @@ class NativePlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
     }
 
-    final name = property.toNativeUtf8();
-    final data = value.toNativeUtf8();
-    mpv.mpv_set_property_string(
-      ctx,
-      name.cast(),
-      data.cast(),
-    );
-    calloc.free(name);
-    calloc.free(data);
+    if (disposed) {
+      throw AssertionError('[Player] has been disposed');
+    }
+    // Surface reconfiguration can wait on the Android decoder. Await the
+    // native reply without blocking Dart's (merged Android) platform thread.
+    await _setPropertyString(property, value, timeout: timeout);
   }
 
   /// Retrieves the value of a property from the internal libmpv instance of this [Player].
   /// Please use this method only if you know what you are doing, existing methods in [Player] implementation are suited for the most use cases.
+  /// Unavailable properties return an empty string. An unresponsive playback
+  /// core throws [TimeoutException], without blocking the caller's isolate.
   ///
   /// See:
   /// * https://mpv.io/manual/master/#options
@@ -1262,6 +1331,7 @@ class NativePlayer extends PlatformPlayer {
   Future<String> getProperty(
     String property, {
     bool waitForInitialization = true,
+    Duration timeout = const Duration(seconds: 2),
   }) async {
     if (disposed) {
       throw AssertionError('[Player] has been disposed');
@@ -1272,19 +1342,27 @@ class NativePlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
     }
 
-    final name = property.toNativeUtf8();
-    final value = mpv.mpv_get_property_string(ctx, name.cast());
-    if (value != nullptr) {
-      final result = value.cast<Utf8>().toDartString();
-      calloc.free(name);
-      mpv.mpv_free(value.cast());
-
-      return result;
+    if (disposed) {
+      throw AssertionError('[Player] has been disposed');
     }
-
-    // Missing optional properties are polled during playback diagnostics too.
-    calloc.free(name);
-    return "";
+    // A synchronous get can wait indefinitely for the playback core. In
+    // particular, periodic metrics must not freeze Android input dispatch.
+    final requestNumber = _asyncRequestNumber++;
+    final completer = _getPropertyRequests[requestNumber] = Completer<String>();
+    final name = property.toNativeUtf8();
+    try {
+      final immediate = mpv.mpv_get_property_async(
+        ctx,
+        requestNumber,
+        name.cast(),
+        generated.mpv_format.MPV_FORMAT_STRING,
+      );
+      if (immediate < 0) return '';
+      return await completer.future.timeout(timeout);
+    } finally {
+      calloc.free(name);
+      _getPropertyRequests.remove(requestNumber);
+    }
   }
 
   /// Observes property for the internal libmpv instance of this [Player].
@@ -1322,7 +1400,7 @@ class NativePlayer extends PlatformPlayer {
       ctx,
       reply,
       name.cast(),
-      generated.mpv_format.MPV_FORMAT_NONE,
+      generated.mpv_format.MPV_FORMAT_STRING,
     );
     calloc.free(name);
   }
@@ -1368,6 +1446,7 @@ class NativePlayer extends PlatformPlayer {
   Future<void> command(
     List<String> command, {
     bool waitForInitialization = true,
+    Duration timeout = const Duration(seconds: 5),
   }) async {
     if (disposed) {
       throw AssertionError('[Player] has been disposed');
@@ -1378,10 +1457,30 @@ class NativePlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
     }
 
-    await _command(command);
+    if (disposed) throw AssertionError('[Player] has been disposed');
+    await _command(command, timeout: timeout);
   }
 
   Future<void> _handler(Pointer<generated.mpv_event> event) async {
+    if (event.ref.event_id ==
+        generated.mpv_event_id.MPV_EVENT_GET_PROPERTY_REPLY) {
+      final request = _getPropertyRequests.remove(event.ref.reply_userdata);
+      // Late replies are owned by libmpv and expire at the next wait_event.
+      // A timed-out request must neither be completed again nor free them.
+      if (request != null && !request.isCompleted) {
+        var value = '';
+        if (event.ref.error >= 0 && event.ref.data != nullptr) {
+          final property = event.ref.data.cast<generated.mpv_event_property>();
+          if (property.ref.format == generated.mpv_format.MPV_FORMAT_STRING &&
+              property.ref.data != nullptr) {
+            final string = property.ref.data.cast<Pointer<Utf8>>().value;
+            if (string != nullptr) value = string.toDartString();
+          }
+        }
+        request.complete(value);
+      }
+      return;
+    }
     if (event.ref.event_id ==
         generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE) {
       final prop = event.ref.data.cast<generated.mpv_event_property>();
@@ -1447,19 +1546,13 @@ class NativePlayer extends PlatformPlayer {
     if (event.ref.event_id ==
         generated.mpv_event_id.MPV_EVENT_SET_PROPERTY_REPLY) {
       final completer = _setPropertyRequests.remove(event.ref.reply_userdata);
-      if (completer == null) {
-        print(
-            'Warning: Received MPV_EVENT_SET_PROPERTY_REPLY with unregistered ID ${event.ref.reply_userdata}');
-      } else {
+      if (completer != null && !completer.isCompleted) {
         completer.complete(event.ref.error);
       }
     }
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_COMMAND_REPLY) {
       final completer = _commandRequests.remove(event.ref.reply_userdata);
-      if (completer == null) {
-        print(
-            'Warning: Received MPV_EVENT_COMMAND_REPLY with unregistered ID ${event.ref.reply_userdata}');
-      } else {
+      if (completer != null && !completer.isCompleted) {
         completer.complete(event.ref.error);
       }
     }
@@ -2068,18 +2161,26 @@ class NativePlayer extends PlatformPlayer {
         }
       }
       if (observed.containsKey(prop.ref.name.cast<Utf8>().toDartString())) {
-        if (prop.ref.format == generated.mpv_format.MPV_FORMAT_NONE) {
+        if (prop.ref.format == generated.mpv_format.MPV_FORMAT_STRING &&
+            prop.ref.data != nullptr) {
           final fn = observed[prop.ref.name.cast<Utf8>().toDartString()];
           if (fn != null) {
-            final data = mpv.mpv_get_property_string(ctx, prop.ref.name);
+            final data = prop.ref.data.cast<Pointer<Utf8>>().value;
             if (data != nullptr) {
               try {
-                await fn.call(data.cast<Utf8>().toDartString());
+                // Copy while the event is valid, then release the event pump.
+                // A listener may itself await another native property reply.
+                final value = data.toDartString();
+                unawaited(Future<void>.sync(() => fn(value)).catchError(
+                  (Object exception, StackTrace stacktrace) {
+                    print(exception);
+                    print(stacktrace);
+                  },
+                ));
               } catch (exception, stacktrace) {
                 print(exception);
                 print(stacktrace);
               }
-              mpv.mpv_free(data.cast());
             }
           }
         }
@@ -2552,14 +2653,45 @@ class NativePlayer extends PlatformPlayer {
   }
 
   int _asyncRequestNumber = 0;
+  final Map<int, Completer<String>> _getPropertyRequests = {};
   final Map<int, Completer<int>> _setPropertyRequests = {};
   final Map<int, Completer<int>> _commandRequests = {};
 
-  Future<void> _setProperty(String name, int format, Pointer<Void> data) async {
-    final requestNumber = _asyncRequestNumber++;
-    final completer = _setPropertyRequests[requestNumber] = Completer<int>();
+  /// Pending reply bookkeeping, exposed for lifecycle diagnostics.
+  int get pendingNativeRequests =>
+      _getPropertyRequests.length +
+      _setPropertyRequests.length +
+      _commandRequests.length;
+
+  void _checkPropertyResult(String name, int code, String text) {
+    _logError(code, text);
+    // Continuing a Surface reconfiguration after a rejected vo/wid/hwdec
+    // write is unsafe. Optional quality/statistics properties remain log-only.
+    if (code < 0 &&
+        const {'vo', 'wid', 'hwdec', 'vid', 'pause', 'speed', 'volume'}
+            .contains(name)) {
+      throw StateError('$text failed ($code)');
+    }
+  }
+
+  Future<void> _setProperty(
+    String name,
+    int format,
+    Pointer<Void> data, {
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    if (disposed) throw AssertionError('[Player] has been disposed');
     final namePtr = name.toNativeUtf8();
-    if (configuration.async) {
+    int? requestNumber;
+    final text = '_setProperty($name, $format)';
+    try {
+      if (!configuration.async) {
+        _checkPropertyResult(name,
+            mpv.mpv_set_property(ctx, namePtr.cast(), format, data), text);
+        return;
+      }
+      requestNumber = _asyncRequestNumber++;
+      final completer = _setPropertyRequests[requestNumber] = Completer<int>();
       final immediate = mpv.mpv_set_property_async(
         ctx,
         requestNumber,
@@ -2567,92 +2699,113 @@ class NativePlayer extends PlatformPlayer {
         format,
         data,
       );
-      final text = '_setProperty($name, $format)';
       if (immediate < 0) {
-        // Sending failed.
-        _logError(immediate, text);
+        _checkPropertyResult(name, immediate, text);
         return;
       }
-      _logError(await completer.future, text);
-    } else {
-      mpv.mpv_set_property(
-        ctx,
-        namePtr.cast(),
-        format,
-        data,
-      );
+      // Unsupported optional properties retain the upstream log-only behavior.
+      // Missing replies are different: propagate the timeout to release gates.
+      _checkPropertyResult(name, await completer.future.timeout(timeout), text);
+    } finally {
+      if (requestNumber != null) _setPropertyRequests.remove(requestNumber);
+      calloc.free(namePtr);
     }
-    calloc.free(namePtr);
   }
 
   Future<void> _setPropertyFlag(String name, bool value) async {
-    final ptr = calloc<Bool>(1)..value = value;
-    await _setProperty(
-      name,
-      generated.mpv_format.MPV_FORMAT_FLAG,
-      ptr.cast(),
-    );
-    calloc.free(ptr);
+    // MPV_FORMAT_FLAG takes a C int, not a one-byte C/Dart bool.
+    final ptr = calloc<Int>(1)..value = value ? 1 : 0;
+    try {
+      await _setProperty(
+          name, generated.mpv_format.MPV_FORMAT_FLAG, ptr.cast());
+    } finally {
+      calloc.free(ptr);
+    }
   }
 
   Future<void> _setPropertyDouble(String name, double value) async {
     final ptr = calloc<Double>(1)..value = value;
-    await _setProperty(
-      name,
-      generated.mpv_format.MPV_FORMAT_DOUBLE,
-      ptr.cast(),
-    );
-    calloc.free(ptr);
+    try {
+      await _setProperty(
+          name, generated.mpv_format.MPV_FORMAT_DOUBLE, ptr.cast());
+    } finally {
+      calloc.free(ptr);
+    }
   }
 
   Future<void> _setPropertyInt64(String name, int value) async {
     final ptr = calloc<Int64>(1)..value = value;
-    await _setProperty(
-      name,
-      generated.mpv_format.MPV_FORMAT_INT64,
-      ptr.cast(),
-    );
-    calloc.free(ptr);
+    try {
+      await _setProperty(
+          name, generated.mpv_format.MPV_FORMAT_INT64, ptr.cast());
+    } finally {
+      calloc.free(ptr);
+    }
   }
 
-  Future<void> _setPropertyString(String name, String value) async {
+  Future<void> _setPropertyString(
+    String name,
+    String value, {
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
     final string = value.toNativeUtf8();
-    // API requires char**.
-    final ptr = calloc<Pointer<Void>>(1);
-    ptr.value = Pointer.fromAddress(string.address);
-    await _setProperty(
-      name,
-      generated.mpv_format.MPV_FORMAT_STRING,
-      ptr.cast(),
-    );
-    calloc.free(ptr);
-    calloc.free(string);
+    // API requires char** and copies the value before returning from enqueue.
+    final ptr = calloc<Pointer<Void>>(1)..value = string.cast();
+    try {
+      await _setProperty(
+          name, generated.mpv_format.MPV_FORMAT_STRING, ptr.cast(),
+          timeout: timeout);
+    } finally {
+      calloc.free(ptr);
+      calloc.free(string);
+    }
   }
 
-  Future<void> _command(List<String> args) async {
-    final pointers = args.map<Pointer<Utf8>>((e) => e.toNativeUtf8()).toList();
-    final arr = calloc<Pointer<Utf8>>(128);
-    for (int i = 0; i < args.length; i++) {
-      (arr + i).value = pointers[i];
-    }
-
-    if (configuration.async) {
-      final requestNumber = _asyncRequestNumber++;
-      final completer = _commandRequests[requestNumber] = Completer<int>();
-      final immediate = mpv.mpv_command_async(ctx, requestNumber, arr.cast());
-      final text = '_command(${args.join(', ')})';
-      if (immediate < 0) {
-        // Sending failed.
-        _logError(immediate, text);
-        return;
+  Future<void> _command(
+    List<String> args, {
+    Duration? timeout = const Duration(seconds: 5),
+    bool requireSuccess = false,
+  }) async {
+    if (disposed) throw AssertionError('[Player] has been disposed');
+    final pointers = <Pointer<Utf8>>[];
+    final arr = calloc<Pointer<Utf8>>(args.length + 1);
+    int? requestNumber;
+    // Avoid including URLs, headers or credentials in command diagnostics.
+    final text = '_command(${args.firstOrNull ?? "empty"})';
+    try {
+      for (var i = 0; i < args.length; i++) {
+        final pointer = args[i].toNativeUtf8();
+        pointers.add(pointer);
+        arr[i] = pointer;
       }
-      _logError(await completer.future, text);
-    } else {
-      mpv.mpv_command(ctx, arr.cast());
+      if (configuration.async) {
+        requestNumber = _asyncRequestNumber++;
+        final completer = _commandRequests[requestNumber] = Completer<int>();
+        final immediate = mpv.mpv_command_async(ctx, requestNumber, arr.cast());
+        if (immediate < 0) {
+          _logError(immediate, text);
+          if (requireSuccess) throw StateError('$text failed ($immediate)');
+          return;
+        }
+        final result = await (timeout == null
+            ? completer.future
+            : completer.future.timeout(timeout));
+        _logError(result, text);
+        if (requireSuccess && result < 0) {
+          throw StateError('$text failed ($result)');
+        }
+      } else {
+        final result = mpv.mpv_command(ctx, arr.cast());
+        _logError(result, text);
+        if (requireSuccess && result < 0) {
+          throw StateError('$text failed ($result)');
+        }
+      }
+    } finally {
+      if (requestNumber != null) _commandRequests.remove(requestNumber);
+      calloc.free(arr);
+      pointers.forEach(calloc.free);
     }
-
-    calloc.free(arr);
-    pointers.forEach(calloc.free);
   }
 
   String _sanitizeUri(String uri) {

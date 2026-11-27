@@ -8,6 +8,7 @@ class UcVideoDownload {
     required this.width,
     required this.height,
     required this.size,
+    this.format = 'mp4',
   });
 
   static const labels = {
@@ -19,19 +20,23 @@ class UcVideoDownload {
     '4k': '4K',
   };
   final String resolution;
+  final String format;
   final int width, height, size;
+  bool get segmented => format != 'mp4';
+  String get extension => format == 'hls_ts' ? 'ts' : 'mp4';
   String get label => labels[resolution]!;
   String get dimensions => '$width×$height';
   bool sameAs(UcVideoDownload other) =>
       resolution == other.resolution &&
       width == other.width &&
       height == other.height &&
-      size == other.size;
+      size == other.size &&
+      format == other.format;
 
   String fileName(String original) {
     final dot = original.lastIndexOf('.');
     final stem = dot > 0 ? original.substring(0, dot) : original;
-    return '$stem（$label $dimensions）.mp4';
+    return '$stem（$label $dimensions）.$extension';
   }
 
   Json toJson() => {
@@ -39,15 +44,18 @@ class UcVideoDownload {
     'width': width,
     'height': height,
     'size': size,
+    if (format != 'mp4') 'format': format,
   };
 
   factory UcVideoDownload.fromJson(Json json) {
     final resolution = json.str('resolution'),
+        format = json.str('format', 'mp4'),
         width = json.integer('width'),
         height = json.integer('height'),
         size = json.integer('size');
     require(
       labels.containsKey(resolution) &&
+          {'mp4', 'hls_ts', 'hls_mp4'}.contains(format) &&
           width > 0 &&
           width <= 32768 &&
           height > 0 &&
@@ -60,6 +68,7 @@ class UcVideoDownload {
       width: width,
       height: height,
       size: size,
+      format: format,
     );
   }
 

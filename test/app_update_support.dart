@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:asterlink/domain/download_destination.dart';
 import 'package:flutter/foundation.dart';
 import 'package:asterlink/data/app_update_service.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/cloud_repository.dart';
+import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
@@ -11,7 +13,11 @@ import 'package:asterlink/domain/remote_control.dart';
 import 'package:asterlink/download/download_manager.dart';
 import 'package:asterlink/platform/app_update_installer.dart';
 import 'package:asterlink/platform/windows_actions.dart';
+import 'package:asterlink/platform/quark_transfer_device.dart';
 import 'support.dart';
+
+const updatePackageSha256 =
+    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 class UpdateDownloads extends ChangeNotifier implements DownloadManager {
   final records = <DownloadTask>[];
@@ -21,7 +27,12 @@ class UpdateDownloads extends ChangeNotifier implements DownloadManager {
   @override
   DownloadTask? task(String id) => records.where((t) => t.id == id).firstOrNull;
   @override
-  Future<String> enqueue(DownloadSpec spec, {int? connections}) async {
+  Future<String> enqueue(
+    DownloadSpec spec, {
+    int? connections,
+    String? destination,
+    DownloadDestinationSelection? location,
+  }) async {
     final id = 'update-${++created}';
     records.add(
       DownloadTask(id: id, spec: spec, createdAt: created, total: 1024),
@@ -110,10 +121,32 @@ class UpdateInstaller extends AppUpdateInstaller {
 }
 
 class UpdateFixture {
-  UpdateFixture({this.platform = 'android'}) {
-    final http = FakeHttp();
+  UpdateFixture({
+    this.platform = 'android',
+    JsonHttp? transport,
+    QuarkTransferDevice? quarkTransferDevice,
+  }) {
+    if (platform == 'windows') {
+      final update = current!;
+      current = RemoteUpdate(
+        update.version,
+        update.build,
+        update.downloadUrl,
+        update.notes,
+        inAppDownloadUrl: update.inAppDownloadUrl,
+        inAppPasscode: update.inAppPasscode,
+        packageSha256: updatePackageSha256,
+        packageSize: 1024,
+      );
+    }
+    final http = transport ?? FakeHttp();
     cleanups = CleanupOutbox(store, http);
-    cloud = CloudRepository(http, Vault(store), cleanups);
+    cloud = CloudRepository(
+      http,
+      Vault(store),
+      cleanups,
+      quarkTransferDevice: quarkTransferDevice,
+    );
     cloud.connectors[CloudPlatform.lanzou] = connector;
     installer = UpdateInstaller(platform);
     service = AppUpdateService(

@@ -3,6 +3,26 @@ import 'links.dart';
 import 'models.dart';
 import 'ed2k.dart';
 
+class ResourceSearchHistory {
+  static const limit = 100, recentLimit = 12;
+
+  static List<String> read(Object? raw) {
+    if (raw is! List) return const [];
+    final seen = <String>{};
+    return raw
+        .whereType<String>()
+        .map((term) => term.trim())
+        .where(
+          (term) =>
+              term.isNotEmpty &&
+              term.length <= 120 &&
+              seen.add(term.toLowerCase()),
+        )
+        .take(limit)
+        .toList(growable: false);
+  }
+}
+
 class ResourceSearchLink {
   const ResourceSearchLink({
     required this.url,

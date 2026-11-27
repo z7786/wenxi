@@ -14,7 +14,8 @@ struct DownloadPowerFunctions {
 // or rely on a Dart isolate remaining on the same operating-system thread.
 class DownloadPowerRequest {
  public:
-  explicit DownloadPowerRequest(DownloadPowerFunctions functions = {});
+  explicit DownloadPowerRequest(DownloadPowerFunctions functions = {},
+                                POWER_REQUEST_TYPE type = PowerRequestSystemRequired);
   ~DownloadPowerRequest();
   DownloadPowerRequest(const DownloadPowerRequest&) = delete;
   DownloadPowerRequest& operator=(const DownloadPowerRequest&) = delete;
@@ -24,6 +25,7 @@ class DownloadPowerRequest {
 
  private:
   DownloadPowerFunctions functions_;
+  POWER_REQUEST_TYPE type_;
   HANDLE handle_ = INVALID_HANDLE_VALUE;
   bool active_ = false;
 };

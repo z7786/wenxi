@@ -8,6 +8,7 @@ import AsterLinkCore
   private var originalBrightness: CGFloat?
   private lazy var documents = AppleDocuments()
   private var scanner: AppleQrScanner?
+  private lazy var qrImages = AppleQrImagePicker()
   private var externalChannel: FlutterMethodChannel?
   private var pendingOpens = [[String: Any]]()
   private var recentOpens = [String: TimeInterval]()
@@ -43,11 +44,14 @@ import AsterLinkCore
         } else if call.method == "cancelExternalPlayer" {
           if args["session"] as? String == self.playbackSession { self.externalPlayer.cancel() }
           result(nil)
-        } else if call.method == "lanScanQr" {
+        } else if call.method == "pickQrImage" {
+          self.qrImages.pick(result: result)
+        } else if call.method == "lanScanQr" || call.method == "scanQr" {
           guard self.scanner == nil, let parent = AppleDocuments.presenter else {
             result(FlutterError(code: "busy", message: "请先关闭当前扫码窗口", details: nil)); return
           }
-          let scanner = AppleQrScanner { [weak self] value, error in
+          let hint = call.method == "scanQr" ? "扫描分享二维码，内容会自动填入解析框" : "将设备二维码放入画面中"
+          let scanner = AppleQrScanner(hint: hint) { [weak self] value, error in
             self?.scanner = nil
             if let error = error { result(FlutterError(code: "camera", message: error, details: nil)) }
             else { result(value) }

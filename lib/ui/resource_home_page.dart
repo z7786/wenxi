@@ -11,6 +11,9 @@ import 'skeleton_loading.dart';
 import 'resource_search_bar.dart';
 import 'resource_preferences.dart';
 import 'resource_search_page.dart';
+import 'resource_search_history.dart';
+import 'resource_content_details.dart';
+import 'search_announcement.dart';
 
 class ResourceHomePage extends StatefulWidget {
   const ResourceHomePage(
@@ -37,6 +40,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
   Set<String> get loading => widget.services.resourceSearch.catalogLoading;
   String get error => widget.services.resourceSearch.catalogError;
   String? opening;
+  bool _showingDetails = false;
   bool get loaded => widget.services.resourceSearch.catalogLoaded;
   int catalogRevision = 0;
   String tileKey(ResourceSearchHit hit) =>
@@ -86,7 +90,11 @@ class _ResourceHomePageState extends State<ResourceHomePage>
 
   void scheduleVisibility() {
     final checks = widget.services.resourceSearch.linkChecks;
-    if (!mounted || !widget.active || checks == null || visibilityScheduled) {
+    if (!mounted ||
+        !widget.active ||
+        _showingDetails ||
+        checks == null ||
+        visibilityScheduled) {
       return;
     }
     visibilityScheduled = true;
@@ -94,6 +102,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
       visibilityScheduled = false;
       if (!mounted ||
           !widget.active ||
+          _showingDetails ||
           opening != null ||
           ModalRoute.of(context)?.isCurrent == false ||
           WidgetsBinding.instance.lifecycleState != null &&
@@ -141,6 +150,12 @@ class _ResourceHomePageState extends State<ResourceHomePage>
   Future<void> submit([String? keyword]) async {
     final term = (keyword ?? input.text).trim();
     if (term.isEmpty || opening != null) return;
+    if (keyword != null) {
+      input.value = TextEditingValue(
+        text: term,
+        selection: TextSelection.collapsed(offset: term.length),
+      );
+    }
     FocusManager.instance.primaryFocus?.unfocus();
     final search = widget.services.resourceSearch;
     search.filter(null);
@@ -160,99 +175,38 @@ class _ResourceHomePageState extends State<ResourceHomePage>
     }
   }
 
-  Future<void> clearHistory() async {
+  Future<void> showHistory() async {
+    final term = await showResourceSearchHistory(
+      context,
+      widget.services.resourceSearch,
+    );
+    if (term != null && mounted) await submit(term);
+  }
+
+  Future<void> showContent(ResourceSearchHit hit) async {
+    if (opening != null || _showingDetails) return;
+    _showingDetails = true;
+    widget.services.resourceSearch.linkChecks?.clearVisible();
     try {
-      await widget.services.resourceSearch.clearHistory();
-    } catch (e) {
-      if (mounted) message(context, errorText(e));
+      final selected = await showResourceContentDetails(
+        context,
+        hit: hit,
+        copyText: widget.services.copyText,
+        canOpen: (item) =>
+            item.canParse ||
+            widget.services.sources.candidates(item.url).isNotEmpty,
+      );
+      if (selected != null && mounted) {
+        await open(selected);
+      }
+    } finally {
+      _showingDetails = false;
+      if (mounted) scheduleVisibility();
     }
   }
 
-  Widget recentSearches(BuildContext context) {
-    final search = widget.services.resourceSearch;
-    final history = search.history;
-    if (history.isEmpty) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: 14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.history_rounded, size: 17, color: secondary(context)),
-              const SizedBox(width: 7),
-              const Expanded(
-                child: Text(
-                  '最近搜索',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                ),
-              ),
-              TextButton(
-                key: const Key('resource-home-clear-history'),
-                onPressed: clearHistory,
-                style: TextButton.styleFrom(
-                  minimumSize: const Size(0, 30),
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                child: Text(
-                  '清空',
-                  style: TextStyle(fontSize: 12, color: secondary(context)),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          SingleChildScrollView(
-            key: ValueKey('resource-home-history-list-${history.first}'),
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                for (final term in history)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: ActionChip(
-                      key: ValueKey('resource-home-history-$term'),
-                      label: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 180),
-                        child: Text(
-                          term,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      onPressed: opening == null
-                          ? () {
-                              input.value = TextEditingValue(
-                                text: term,
-                                selection: TextSelection.collapsed(
-                                  offset: term.length,
-                                ),
-                              );
-                              unawaited(submit(term));
-                            }
-                          : null,
-                      labelStyle: const TextStyle(fontSize: 12),
-                      backgroundColor: fill(context),
-                      side: BorderSide(color: border(context), width: .6),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> open(ResourceSearchHit hit) async {
+  Future<void> open(ResourceSearchHit selected) async {
     if (opening != null) return;
-    final selected = await _selectLink(hit);
-    if (selected == null) return;
     setState(() => opening = selected.identity);
     widget.services.resourceSearch.linkChecks?.clearVisible();
     try {
@@ -273,36 +227,6 @@ class _ResourceHomePageState extends State<ResourceHomePage>
         scheduleVisibility();
       }
     }
-  }
-
-  Future<ResourceSearchHit?> _selectLink(ResourceSearchHit hit) async {
-    if (hit.links.length <= 1 || !mounted) return hit;
-    final selected = await showModalBottomSheet<ResourceSearchLink>(
-      context: context,
-      showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            const ListTile(title: Text('选择网盘入口')),
-            for (final link in hit.links)
-              ListTile(
-                leading: const Icon(Icons.cloud_outlined),
-                title: Text(link.cloudName),
-                subtitle: Text(
-                  link.password.isEmpty
-                      ? link.url
-                      : '${link.url}\n提取码：${link.password}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                onTap: () => Navigator.pop(sheetContext, link),
-              ),
-          ],
-        ),
-      ),
-    );
-    return selected == null ? null : hit.withLink(selected);
   }
 
   Widget sectionHeader(String name, String section, {bool popular = false}) =>
@@ -369,6 +293,13 @@ class _ResourceHomePageState extends State<ResourceHomePage>
             final columns = popular ? popularColumns : categoryColumns;
             final tileWidth =
                 (width - padding * 2 - 12 * (columns - 1)) / columns;
+            var textHeight = (popular ? 68.0 : 48.0) * math.max(scale, 1);
+            for (final hit in rows) {
+              textHeight = math.max(
+                textHeight,
+                _resourceCoverTextHeight(context, hit, tileWidth, popular),
+              );
+            }
             return SliverPadding(
               padding: EdgeInsets.symmetric(horizontal: padding),
               sliver: SliverGrid(
@@ -376,9 +307,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                   crossAxisCount: columns,
                   crossAxisSpacing: 12,
                   mainAxisSpacing: 12,
-                  mainAxisExtent:
-                      tileWidth / (popular ? 1.85 : 1) +
-                      (popular ? 68 : 48) * math.max(scale, 1),
+                  mainAxisExtent: tileWidth / (popular ? 1.85 : 1) + textHeight,
                 ),
                 delegate: SliverChildBuilderDelegate((context, index) {
                   final hit = rows[index];
@@ -388,7 +317,7 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                     popular: popular,
                     opening: opening == hit.identity,
                     health: checks?.health(hit),
-                    onTap: opening == null ? () => open(hit) : null,
+                    onTap: opening == null ? () => showContent(hit) : null,
                   );
                   return SizedBox(
                     key: rowKeys.putIfAbsent(tileKey(hit), GlobalKey.new),
@@ -421,54 +350,72 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                            OverflowBar(
+                              alignment: MainAxisAlignment.spaceBetween,
+                              overflowAlignment: OverflowBarAlignment.end,
+                              overflowSpacing: 8,
                               children: [
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text.rich(
-                                        TextSpan(
-                                          children: [
-                                            const TextSpan(text: '网盘'),
-                                            TextSpan(
-                                              text: '搜索',
-                                              style: TextStyle(
-                                                color: themeAccent(context),
-                                              ),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text.rich(
+                                      TextSpan(
+                                        children: [
+                                          const TextSpan(text: '网盘'),
+                                          TextSpan(
+                                            text: '搜索',
+                                            style: TextStyle(
+                                              color: themeAccent(context),
                                             ),
-                                          ],
-                                        ),
-                                        style: const TextStyle(
-                                          fontSize: 30,
-                                          fontWeight: FontWeight.w800,
-                                          letterSpacing: -1,
-                                        ),
+                                          ),
+                                        ],
                                       ),
-                                      const SizedBox(height: 5),
-                                      Text(
-                                        '发现好资源，搜索更简单',
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          color: secondary(context),
-                                        ),
+                                      style: const TextStyle(
+                                        fontSize: 30,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: -1,
                                       ),
-                                    ],
-                                  ),
+                                    ),
+                                    const SizedBox(height: 5),
+                                    Text(
+                                      '发现好资源，搜索更简单',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: secondary(context),
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                                IconButton(
-                                  key: const Key('resource-priority-settings'),
-                                  tooltip: '网盘展示优先级',
-                                  onPressed: () => showResourcePrioritySheet(
-                                    context,
-                                    widget.services.resourceSearch,
-                                  ),
-                                  icon: const Icon(
-                                    Icons.settings_outlined,
-                                    size: 23,
-                                  ),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      key: const Key(
+                                        'resource-priority-settings',
+                                      ),
+                                      tooltip: '搜索设置',
+                                      onPressed: () =>
+                                          showResourcePrioritySheet(
+                                            context,
+                                            widget.services.resourceSearch,
+                                          ),
+                                      icon: const Icon(
+                                        Icons.settings_outlined,
+                                        size: 23,
+                                      ),
+                                    ),
+                                    IconButton(
+                                      key: const Key('resource-search-history'),
+                                      tooltip: '搜索历史',
+                                      onPressed: opening == null
+                                          ? showHistory
+                                          : null,
+                                      icon: const Icon(
+                                        Icons.history_rounded,
+                                        size: 23,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ],
                             ),
@@ -507,11 +454,25 @@ class _ResourceHomePageState extends State<ResourceHomePage>
                                 ),
                               ),
                             ),
-                            AnimatedBuilder(
-                              animation: widget.services.resourceSearch.store,
+                            ListenableBuilder(
+                              listenable: widget.services.control,
                               builder: (context, _) {
-                                scheduleVisibility();
-                                return recentSearches(context);
+                                final notice = widget
+                                    .services
+                                    .control
+                                    .config
+                                    .searchAnnouncement;
+                                if (notice == null) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Padding(
+                                  padding: const EdgeInsets.only(top: 12),
+                                  child: SearchAnnouncementBar(
+                                    notice: notice,
+                                    active: widget.active,
+                                    copyText: widget.services.copyText,
+                                  ),
+                                );
                               },
                             ),
                             if (error.isNotEmpty)
@@ -671,6 +632,7 @@ class _ResourceCoverTile extends StatelessWidget {
     return Semantics(
       button: true,
       label: hit.title,
+      hint: '查看内容简介与网盘入口',
       child: InkWell(
         key: ValueKey(
           'resource-catalog-item-${hit.recommendationId}-${hit.identity}',
@@ -690,10 +652,14 @@ class _ResourceCoverTile extends StatelessWidget {
                     if (hit.coverUrl.isEmpty)
                       fallback
                     else
-                      Image.network(
-                        hit.coverUrl,
+                      Image(
+                        image: ResizeImage(
+                          NetworkImage(hit.coverUrl),
+                          width: popular ? 640 : 400,
+                          height: popular ? 640 : 400,
+                          policy: ResizeImagePolicy.fit,
+                        ),
                         fit: BoxFit.cover,
-                        cacheWidth: popular ? 640 : 400,
                         errorBuilder: (_, _, _) => fallback,
                         loadingBuilder: (_, child, progress) =>
                             progress == null ? child : fallback,
@@ -758,11 +724,7 @@ class _ResourceCoverTile extends StatelessWidget {
                   hit.title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: popular ? 14 : 12,
-                    fontWeight: FontWeight.w600,
-                    height: 1.4,
-                  ),
+                  style: _resourceCoverTitleStyle(popular),
                 ),
                 if (popular && hit.description.isNotEmpty) ...[
                   const SizedBox(height: 4),
@@ -780,6 +742,43 @@ class _ResourceCoverTile extends StatelessWidget {
       ),
     );
   }
+}
+
+TextStyle _resourceCoverTitleStyle(bool popular) => TextStyle(
+  fontSize: popular ? 14 : 12,
+  fontWeight: FontWeight.w600,
+  height: 1.4,
+);
+
+double _resourceCoverTextHeight(
+  BuildContext context,
+  ResourceSearchHit hit,
+  double width,
+  bool popular,
+) {
+  double height(String text, TextStyle style, int lines) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: DefaultTextStyle.of(context).style.merge(style),
+      ),
+      maxLines: lines,
+      ellipsis: '…',
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      locale: Localizations.maybeLocaleOf(context),
+    )..layout(maxWidth: width);
+    final result = painter.height;
+    painter.dispose();
+    return result;
+  }
+
+  return (9 +
+          height(hit.title, _resourceCoverTitleStyle(popular), 2) +
+          (popular && hit.description.isNotEmpty
+              ? 4 + height(hit.description, const TextStyle(fontSize: 11), 1)
+              : 0))
+      .ceilToDouble();
 }
 
 IconData resourceTypeIcon(String text) {

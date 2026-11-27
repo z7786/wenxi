@@ -24,6 +24,7 @@ WebLoginTarget webLoginTarget(CloudPlatform cloud, {TargetPlatform? platform}) {
 }
 
 InAppWebViewSettings webSettings({
+  CloudPlatform? cloud,
   String? userAgent,
   bool desktopMode = true,
   bool isPopup = false,
@@ -50,8 +51,12 @@ InAppWebViewSettings webSettings({
   // profile. Android popups must avoid clearing the shared cookie jar again.
   // WK CookieManager reads the default website store. Keep Apple login
   // windows and their SSO popups in that store so HttpOnly cookies are visible.
+  // Tianyi waits for Android cookie cleanup before opening its portal. Plugin
+  // incognito would start another global, unawaited removeAllCookies call.
   incognito:
       !usesAppleWebStore(platform) &&
+      !(cloud == CloudPlatform.tianyi &&
+          (platform ?? defaultTargetPlatform) == TargetPlatform.android) &&
       (!isPopup ||
           (platform ?? defaultTargetPlatform) == TargetPlatform.windows),
   cacheEnabled: usesAppleWebStore(platform),
@@ -119,10 +124,28 @@ const desktopLoginViewportScript = r'''(() => {
     if (!document.head) return;
     const login = location.hostname === 'www.guangyapan.com' &&
       (location.hash.split('?')[0] === '#/oauth/login' || location.pathname === '/oauth/login');
+    const tianyiParent = location.origin === 'https://cloud.189.cn' &&
+      location.pathname === '/web/login.html';
+    const tianyi = tianyiParent || (location.origin === 'https://open.e.189.cn' &&
+      location.pathname === '/api/logbox/separate/web/index.html');
     const content = login
       ? 'width=device-width,initial-scale=1,minimum-scale=0.5,maximum-scale=8,user-scalable=yes'
+      : tianyi
+      ? 'width=400,minimum-scale=0.1,maximum-scale=8,user-scalable=yes'
       : 'width=1280,minimum-scale=0.1,maximum-scale=8,user-scalable=yes';
     document.documentElement?.toggleAttribute('data-aster-guangya-login', login);
+    document.documentElement?.toggleAttribute('data-aster-tianyi-login', tianyiParent);
+    if (tianyiParent && !document.getElementById('aster-tianyi-login-layout')) {
+      const style = document.createElement('style');
+      style.id = 'aster-tianyi-login-layout';
+      style.textContent = 'html[data-aster-tianyi-login] .main-contain{min-width:400px!important;width:100%!important;' +
+        'display:flex!important;justify-content:center!important;align-items:flex-start!important;box-sizing:border-box;margin:0!important;padding:24px 0!important}' +
+        'html[data-aster-tianyi-login] .main-contain>.main-center,html[data-aster-tianyi-login] .main-contain>.robot-bg{display:none!important}' +
+        'html[data-aster-tianyi-login] .main-contain>.login-pannel{position:static!important;margin:0!important;transform:none!important;flex:none!important}' +
+        'html[data-aster-tianyi-login] #J_narBar,html[data-aster-tianyi-login] .behind-content,' +
+        'html[data-aster-tianyi-login] .footer-container,html[data-aster-tianyi-login] .ad-placeholder-blank{display:none!important}';
+      document.head.appendChild(style);
+    }
     if (login && !document.getElementById('aster-guangya-login-layout')) {
       const style = document.createElement('style');
       style.id = 'aster-guangya-login-layout';

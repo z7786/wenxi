@@ -33,6 +33,32 @@ test('Optional in-app update fields roundtrip and count as changed publication c
 });
 const issue = (value, path) => assert.ok(C.validate(value).some(e => e.path === path), `Expected validation error at ${path}`);
 
+test('search home notices roundtrip independently, validate dates and detect content changes', () => {
+  const baseline = C.normalize({announcement:{enabled:true,title:'启动公告',content:'旧正文'}});
+  assert.equal(baseline.searchAnnouncement.enabled, false);
+  const config = C.clone(baseline);
+  config.searchAnnouncement = {enabled:true,title:'新资源上线',content:'',buttonText:'查看',buttonUrl:'https://example.test/news',startsAt:'2026-11-25T00:00:00Z',expiresAt:'2026-11-26T00:00:00Z'};
+  valid(config);
+  const restored = C.normalize(C.parse(JSON.stringify(config)));
+  assert.deepEqual(native(restored.searchAnnouncement),native(config.searchAnnouncement));
+  assert.deepEqual(native(restored.announcement),native(baseline.announcement));
+  assert.equal(C.samePublishedContent(config,baseline),false);
+  assert.ok(!C.extras(config).some(path => path.startsWith('searchAnnouncement')));
+  for (const [field,value] of [['title',''],['title','字'.repeat(161)],['content','字'.repeat(8193)],['startsAt','2026-02-30T00:00:00Z'],['expiresAt','2026-11-24T00:00:00Z'],['buttonUrl','javascript:alert(1)'],['buttonText','']]) {
+    const invalid = C.clone(config);
+    invalid.searchAnnouncement[field] = value;
+    issue(invalid,'searchAnnouncement.'+field);
+  }
+  for (const [field,value] of [['title','另一个通知'],['content','详情'],['startsAt','2026-11-24T00:00:00Z'],['expiresAt','2026-11-27T00:00:00Z'],['buttonText','打开'],['buttonUrl','https://example.test/other']]) {
+    const changed = C.clone(config);
+    changed.searchAnnouncement[field] = value;
+    assert.equal(C.samePublishedContent(changed,config),false,field);
+  }
+  config.searchAnnouncement = {enabled:false,title:123};
+  valid(config);
+  assert.equal(C.samePublishedContent(config,baseline),true);
+});
+
 test('Apple updates have editable fields, independent policies and legacy defaults', () => {
   const config = C.normalize(C.parse('{"updates":{"android":{"enabled":false}}}'));
   assert.deepEqual(native(C.PLATFORMS), ['android','windows','ios','macos']);

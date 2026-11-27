@@ -32,7 +32,11 @@ DownloadPowerBridge::DownloadPowerBridge(flutter::BinaryMessenger* messenger) {
     auto owners = cast_owners_;
     if (*enabled) owners.insert(*token);
     else owners.erase(*token);
-    if (!cast_request_.SetActive(!owners.empty())) {
+    const bool system_ok = cast_request_.SetActive(!owners.empty());
+    const bool display_ok = cast_display_request_.SetActive(!owners.empty());
+    if (!system_ok || !display_ok) {
+      cast_request_.SetActive(!cast_owners_.empty());
+      cast_display_request_.SetActive(!cast_owners_.empty());
       result->Error("active", "无法更新投屏保活状态");
       return;
     }

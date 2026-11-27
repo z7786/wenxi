@@ -7,7 +7,9 @@ import 'package:open_filex/open_filex.dart';
 import '../app_services.dart';
 import '../core/json.dart';
 import '../domain/downloads.dart';
+import '../domain/download_eta.dart';
 import '../domain/models.dart' show CloudPlatform;
+import '../preview/document_format.dart';
 import '../download/completed_files.dart';
 import '../platform/file_access.dart';
 import '../platform/completed_file_actions.dart';
@@ -28,7 +30,8 @@ import 'download_concurrency_dialog.dart';
 import 'download_completion_option.dart';
 import 'uc_tv_authorization_page.dart';
 import 'uc_video_download.dart';
-import 'text_preview.dart';
+import 'document_preview.dart';
+import 'document_download_preview.dart';
 
 enum _DownloadHelpAction { announcements, resources }
 
@@ -39,11 +42,13 @@ class DownloadsPage extends StatefulWidget {
     this.active = true,
     this.onPlay,
     this.fileActions,
+    this.onSelectionChanged,
   });
   final AppServices services;
   final bool active;
   final Future<void> Function(DownloadTask)? onPlay;
   final CompletedFileActions? fileActions;
+  final ValueChanged<bool>? onSelectionChanged;
   @override
   State<DownloadsPage> createState() => _DownloadsPageState();
 }
@@ -54,6 +59,7 @@ class _DownloadsPageState extends State<DownloadsPage>
   Timer? _refreshTimer;
   bool _foreground = true;
   bool _selecting = false, _batching = false;
+  bool _selectionNotificationPending = false;
   bool _detailsOpen = false;
   bool _externalFileActionPending = false;
   late final _fileActions = widget.fileActions ?? CompletedFileActions();
@@ -90,7 +96,22 @@ class _DownloadsPageState extends State<DownloadsPage>
     if (_selected.every(visible.contains) && visible.isNotEmpty) return;
     setState(() {
       _selected.removeWhere((id) => !visible.contains(id));
-      if (visible.isEmpty) _selecting = false;
+      if (visible.isEmpty) _setSelecting(false);
+    });
+  }
+
+  void _setSelecting(bool value) {
+    if (_selecting == value) return;
+    _selecting = value;
+    if (_selectionNotificationPending || widget.onSelectionChanged == null) {
+      return;
+    }
+    // A tab change can reset selection in didUpdateWidget. Notify after this
+    // frame so the parent can update its footer without rebuilding mid-layout.
+    _selectionNotificationPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _selectionNotificationPending = false;
+      if (mounted) widget.onSelectionChanged?.call(_selecting);
     });
   }
 
@@ -98,7 +119,7 @@ class _DownloadsPageState extends State<DownloadsPage>
     if (_batching) return;
     if (!_selecting) ScaffoldMessenger.of(context).removeCurrentSnackBar();
     setState(() {
-      _selecting = true;
+      _setSelecting(true);
       _selectionNotice = null;
       if (!_selected.add(id)) _selected.remove(id);
     });
@@ -107,7 +128,7 @@ class _DownloadsPageState extends State<DownloadsPage>
   void _exitSelection() {
     if (_batching) return;
     setState(() {
-      _selecting = false;
+      _setSelecting(false);
       _selected.clear();
       _selectionNotice = null;
     });
@@ -127,7 +148,7 @@ class _DownloadsPageState extends State<DownloadsPage>
     super.didUpdateWidget(oldWidget);
     if (!widget.active && oldWidget.active) {
       _selected.clear();
-      _selecting = false;
+      _setSelecting(false);
     }
     if (widget.active && !oldWidget.active) {
       WidgetsBinding.instance.addPostFrameCallback(
@@ -202,6 +223,7 @@ class _DownloadsPageState extends State<DownloadsPage>
           if (!didPop && widget.active && _selecting) _exitSelection();
         },
         child: Column(
+          key: const Key('downloads-task-layout'),
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             TransferFilterBar(
@@ -221,7 +243,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                       if (filter == value) return;
                       filter = value;
                       _selected.clear();
-                      _selecting = false;
+                      _setSelecting(false);
                     }),
             ),
             if (_selecting)
@@ -369,13 +391,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                       ),
                     ),
             ),
-            if (_selecting)
-              Padding(
-                padding: EdgeInsets.only(
-                  bottom: MediaQuery.paddingOf(context).bottom,
-                ),
-                child: _selectionActions(),
-              ),
+            if (_selecting) _selectionActions(),
           ],
         ),
       );
@@ -439,18 +455,22 @@ class _DownloadsPageState extends State<DownloadsPage>
     return Container(
       key: const Key('downloads-selection-bar'),
       decoration: BoxDecoration(
-        border: Border.symmetric(
-          horizontal: BorderSide(color: border(context), width: .5),
-        ),
+        color: themeAccent(context).withValues(alpha: .04),
+        border: Border(bottom: BorderSide(color: border(context), width: .5)),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
       child: Row(
         children: [
           IconButton(
             tooltip: '退出多选',
             onPressed: _batching ? null : _exitSelection,
-            icon: const Icon(CupertinoIcons.xmark, size: 20),
+            style: IconButton.styleFrom(
+              minimumSize: const Size(36, 36),
+              foregroundColor: secondary(context),
+            ),
+            icon: const Icon(CupertinoIcons.xmark, size: 18),
           ),
+          const SizedBox(width: 4),
           Expanded(
             child: Text(
               '已选 ${_selected.length} 项',
@@ -479,84 +499,145 @@ class _DownloadsPageState extends State<DownloadsPage>
 
   Widget _selectionActions() {
     final selected = _selectedTasks;
-    return Container(
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        border: Border(top: BorderSide(color: border(context), width: .5)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (_selectionNotice != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-              child: Text(
-                _selectionNotice!,
-                key: const Key('downloads-selection-notice'),
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.error,
-                ),
-              ),
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 600),
+          child: Material(
+            key: const Key('downloads-selection-actions'),
+            color: Theme.of(context).colorScheme.surface,
+            elevation: 2,
+            shadowColor: Colors.black.withValues(alpha: .12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: BorderSide(color: border(context).withValues(alpha: .6)),
             ),
-          Row(
-            children: [
-              for (final action in DownloadBatchAction.values)
-                Expanded(
-                  child: TextButton(
-                    key: Key('downloads-batch-${action.name}'),
-                    onPressed: _batching || !selected.any(action.accepts)
-                        ? null
-                        : () => action == DownloadBatchAction.delete
-                              ? _deleteSelectedDialog()
-                              : _runSelectedAction(action),
-                    style: TextButton.styleFrom(
-                      foregroundColor: action == DownloadBatchAction.delete
-                          ? Colors.red
-                          : themeAccent(context),
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_selectionNotice != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 4, 8, 10),
+                      child: Text(
+                        _selectionNotice!,
+                        key: const Key('downloads-selection-notice'),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
                     ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(switch (action) {
-                          DownloadBatchAction.pause => CupertinoIcons.pause,
-                          DownloadBatchAction.resume => CupertinoIcons.play,
-                          DownloadBatchAction.delete => CupertinoIcons.trash,
-                        }, size: 20),
-                        const SizedBox(height: 3),
-                        Text(
-                          action.label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      for (final action in DownloadBatchAction.values) ...[
+                        if (action != DownloadBatchAction.pause)
+                          const SizedBox(width: 8),
+                        Expanded(
+                          child: _selectionActionButton(
+                            key: Key('downloads-batch-${action.name}'),
+                            label: action.label,
+                            icon: switch (action) {
+                              DownloadBatchAction.pause => CupertinoIcons.pause,
+                              DownloadBatchAction.resume => CupertinoIcons.play,
+                              DownloadBatchAction.delete =>
+                                CupertinoIcons.trash,
+                            },
+                            destructive: action == DownloadBatchAction.delete,
+                            primary: action == DownloadBatchAction.resume,
+                            onPressed:
+                                _batching || !selected.any(action.accepts)
+                                ? null
+                                : () => action == DownloadBatchAction.delete
+                                      ? _deleteSelectedDialog()
+                                      : _runSelectedAction(action),
+                          ),
                         ),
                       ],
-                    ),
+                    ],
                   ),
-                ),
-            ],
-          ),
-          if (_supportsFileTransfer)
-            Wrap(
-              spacing: 16,
-              children: [
-                for (final move in [false, true])
-                  TextButton.icon(
-                    key: Key(
-                      move ? 'downloads-batch-move' : 'downloads-batch-copy',
+                  if (_supportsFileTransfer) ...[
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Divider(height: 1),
                     ),
-                    onPressed: _batching || !selected.any(_transferable)
-                        ? null
-                        : () => _transferSelected(move: move),
-                    icon: Icon(
-                      move ? CupertinoIcons.folder : CupertinoIcons.doc_on_doc,
-                      size: 19,
+                    Row(
+                      children: [
+                        for (final move in [false, true]) ...[
+                          if (move) const SizedBox(width: 8),
+                          Expanded(
+                            child: _selectionActionButton(
+                              key: Key(
+                                move
+                                    ? 'downloads-batch-move'
+                                    : 'downloads-batch-copy',
+                              ),
+                              icon: move
+                                  ? CupertinoIcons.folder
+                                  : CupertinoIcons.doc_on_doc,
+                              label: move ? '移动文件' : '复制文件',
+                              onPressed:
+                                  _batching || !selected.any(_transferable)
+                                  ? null
+                                  : () => _transferSelected(move: move),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
-                    label: Text(move ? '移动文件' : '复制文件'),
-                  ),
-              ],
+                  ],
+                ],
+              ),
             ),
-        ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _selectionActionButton({
+    required Key key,
+    required String label,
+    required IconData icon,
+    required VoidCallback? onPressed,
+    bool destructive = false,
+    bool primary = false,
+  }) {
+    final colors = Theme.of(context).colorScheme;
+    final foreground = destructive
+        ? colors.error
+        : primary
+        ? themeAccent(context)
+        : colors.onSurface;
+    return TextButton(
+      key: key,
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        minimumSize: const Size(0, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+        foregroundColor: foreground,
+        backgroundColor: destructive || primary
+            ? foreground.withValues(alpha: .08)
+            : fill(context),
+        disabledForegroundColor: colors.onSurface.withValues(alpha: .3),
+        disabledBackgroundColor: fill(context),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.standard,
+        textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 6,
+        runSpacing: 4,
+        children: [Icon(icon, size: 18), Text(label)],
       ),
     );
   }
@@ -603,7 +684,7 @@ class _DownloadsPageState extends State<DownloadsPage>
     if (!mounted || result == null) return;
     setState(() {
       _selected.removeAll([...result!.succeeded, ...result.skipped]);
-      if (_selected.isEmpty) _selecting = false;
+      if (_selected.isEmpty) _setSelecting(false);
     });
     final notice =
         '已${move ? '移动' : '复制'} ${result.succeeded.length} 个文件'
@@ -649,7 +730,7 @@ class _DownloadsPageState extends State<DownloadsPage>
     if (!mounted || result == null) return;
     setState(() {
       _selected.removeAll([...result!.succeeded, ...result.skipped]);
-      if (_selected.isEmpty) _selecting = false;
+      if (_selected.isEmpty) _setSelecting(false);
     });
     final summary = '已${action.label} ${result.succeeded.length} 项';
     final notice = result.failed.isEmpty
@@ -815,10 +896,15 @@ class _DownloadsPageState extends State<DownloadsPage>
               label: move ? '移动文件' : '复制文件',
               icon: move ? CupertinoIcons.folder : CupertinoIcons.doc_on_doc,
             ),
-        if (kind == FileKind.video || kind == FileKind.text)
+        if (kind == FileKind.video ||
+            documentFormat(task.spec.fileName) != null)
           AppMenuAction(
             value: 'open',
-            label: kind == FileKind.video ? '播放视频' : '预览文本 / 代码',
+            label: kind == FileKind.video
+                ? '播放视频'
+                : kind == FileKind.text
+                ? '预览文本 / 代码'
+                : '预览文档',
             icon: CupertinoIcons.play_rectangle,
           ),
         if (kind == FileKind.audio)
@@ -857,6 +943,12 @@ class _DownloadsPageState extends State<DownloadsPage>
               : '继续下载',
           icon: task.active ? CupertinoIcons.pause : CupertinoIcons.play,
           enabled: _authorizingDownload != id,
+        ),
+      if (!completed && documentFormat(task.spec.fileName) != null)
+        const AppMenuAction(
+          value: 'document-preview',
+          label: '下载并预览文档',
+          icon: CupertinoIcons.doc_text,
         ),
       if (canRecoverUcPlayable(task))
         const AppMenuAction(
@@ -1072,6 +1164,15 @@ class _DownloadsPageState extends State<DownloadsPage>
                             : secondary(context),
                       ),
                     ),
+                    if (downloadEta(task) case final eta?)
+                      Text(
+                        eta,
+                        key: ValueKey('download-eta-${task.id}'),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: secondary(context),
+                        ),
+                      ),
                     DownloadProgress(
                       task: task,
                       compact: true,
@@ -1103,8 +1204,10 @@ class _DownloadsPageState extends State<DownloadsPage>
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? '播放视频'
-                              : fileKind(task.spec.fileName) == FileKind.text
-                              ? '预览文本'
+                              : documentFormat(task.spec.fileName) != null
+                              ? fileKind(task.spec.fileName) == FileKind.text
+                                    ? '预览文本'
+                                    : '预览文档'
                               : '打开文件'
                         : running
                         ? '暂停下载'
@@ -1116,7 +1219,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? CupertinoIcons.play_rectangle
-                              : fileKind(task.spec.fileName) == FileKind.text
+                              : documentFormat(task.spec.fileName) != null
                               ? CupertinoIcons.doc_text
                               : CupertinoIcons.folder
                         : running
@@ -1206,12 +1309,15 @@ class _DownloadsPageState extends State<DownloadsPage>
     final path = task.savedPath;
     if (path == null) return;
     final kind = fileKind(task.spec.fileName);
-    if (!reveal && kind == FileKind.text) {
+    if (!reveal && documentFormat(task.spec.fileName) != null) {
       await Navigator.push<void>(
         context,
         MaterialPageRoute(
-          builder: (_) =>
-              LocalTextPreviewPage(path: path, name: task.spec.fileName),
+          builder: (_) => LocalDocumentPreviewPage(
+            services: widget.services,
+            path: path,
+            name: task.spec.fileName,
+          ),
         ),
       );
       return;
@@ -1426,6 +1532,13 @@ class _DownloadsPageState extends State<DownloadsPage>
                           ),
                         ),
                       const Divider(),
+                      if (!task.terminal &&
+                          documentFormat(task.spec.fileName) != null)
+                        ListTile(
+                          leading: const Icon(CupertinoIcons.doc_text),
+                          title: const Text('下载并预览文档'),
+                          onTap: () => Navigator.pop(context, 'document-preview'),
+                        ),
                       if (task.status == DownloadStatus.completed &&
                           availability == FileAvailability.present) ...[
                         ListTile(
@@ -1435,12 +1548,15 @@ class _DownloadsPageState extends State<DownloadsPage>
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                                 ? '播放视频'
-                                : fileKind(task.spec.fileName) == FileKind.text
-                                ? '预览文本 / 代码'
+                                : documentFormat(task.spec.fileName) != null
+                                ? fileKind(task.spec.fileName) == FileKind.text
+                                      ? '预览文本 / 代码'
+                                      : '预览文档'
                                 : '打开文件',
                           ),
                           subtitle:
                               isDesktopPlatform &&
+                                  documentFormat(task.spec.fileName) == null &&
                                   !{
                                     FileKind.video,
                                     FileKind.text,
@@ -1457,10 +1573,11 @@ class _DownloadsPageState extends State<DownloadsPage>
                             onTap: () => Navigator.pop(context, 'play'),
                           ),
                         if (isDesktopPlatform &&
-                            {
-                              FileKind.video,
-                              FileKind.text,
-                            }.contains(fileKind(task.spec.fileName)))
+                            (documentFormat(task.spec.fileName) != null ||
+                                {
+                                  FileKind.video,
+                                  FileKind.text,
+                                }.contains(fileKind(task.spec.fileName))))
                           ListTile(
                             leading: const Icon(CupertinoIcons.folder_open),
                             title: const Text('打开所在文件夹'),
@@ -1655,6 +1772,16 @@ class _DownloadsPageState extends State<DownloadsPage>
         }
       case 'open':
         await _open(task);
+      case 'document-preview':
+        await Navigator.push<void>(
+          context,
+          MaterialPageRoute(
+            builder: (_) => DocumentDownloadPreview(
+              services: widget.services,
+              taskId: task.id,
+            ),
+          ),
+        );
       case 'play':
         await _open(task, play: true);
       case 'folder':

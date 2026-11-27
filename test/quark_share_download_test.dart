@@ -8,6 +8,7 @@ import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/settings.dart';
+import 'package:asterlink/domain/quark_share_transfer.dart';
 import 'package:asterlink/download/download_request.dart';
 import 'support.dart';
 
@@ -56,6 +57,8 @@ class _Fixture {
   late final CloudRepository repository;
   int generation = 0, directories = 0;
   String rootFileId = 'shared-file';
+  String rootFileName = 'fixture.bin';
+  String? downloadFileName;
   int rootFileSize = 4;
   bool rootUnavailable = false;
   String? capacityFailure;
@@ -68,6 +71,8 @@ class _Fixture {
   String? directFileId;
   int? probeSize;
   int directExpirations = 0;
+  bool rejectStaleSaveTokens = false;
+  void Function()? onShareToken;
   final tasks = <String, String>{};
   final savedSizes = <String, int>{};
 
@@ -102,6 +107,7 @@ class _Fixture {
       case '/1/clouddrive/config':
         return _ok({});
       case '/1/clouddrive/share/sharepage/token':
+        onShareToken?.call();
         if (guestRefreshNeedsLogin && (r.headers['Cookie'] ?? '').isEmpty) {
           return jsonResponse({'status': 401, 'code': 31001}, 401);
         }
@@ -124,7 +130,7 @@ class _Fixture {
           'list': [
             {
               'fid': parent == '0' ? rootFileId : 'nested-file',
-              'file_name': 'fixture.bin',
+              'file_name': rootFileName,
               'size': parent == '0' ? rootFileSize : 4,
               // Root entries retain their owner's unshared physical parent.
               'pdir_fid': parent == '0' ? 'owner-only-folder' : parent,
@@ -155,6 +161,13 @@ class _Fixture {
       case '/1/clouddrive/file':
         return _ok({'fid': 'temporary-${++directories}'});
       case '/1/clouddrive/share/sharepage/save':
+        if (rejectStaleSaveTokens &&
+            (r.json.str('stoken') != 'share-token-$generation' ||
+                (r.json['fid_token_list'] as List).any(
+                  (token) => token != 'file-token-$generation',
+                ))) {
+          return jsonResponse({'status': 400, 'message': '转存文件token校验异常'}, 400);
+        }
         if (saveError != null) throw saveError!;
         if (capacityFailure == 'save') {
           return jsonResponse({
@@ -220,6 +233,7 @@ class _Fixture {
         return _ok([
           {
             'fid': fid,
+            if (downloadFileName != null) 'file_name': downloadFileName,
             'size': savedSizes[fid] ?? 4,
             'download_url': 'https://cdn.example/$fid',
           },
@@ -249,6 +263,155 @@ class _Fixture {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  for (final direct in [false, true]) {
+    test(
+      'Quark ${direct ? "direct" : "transfer"} download saves decoded names and retains raw origin',
+      () async {
+        const raw = "[第15話 Φ&#39;s VS χ].mkv";
+        const local = "[第15話 Φ's VS χ].mkv";
+        final f = _Fixture(directPolicy: (_, _) => direct)
+          ..rootFileName = raw
+          ..downloadFileName = raw
+          ..authenticatedDirectAvailable = direct;
+        final session = await f.repository.share(f.link);
+        final file = (await f.repository.list(session, session.rootId)).first;
+        final plan = f.repository.planDownload(session, file);
+        expect(plan.fileName, local);
+        final prepared = await f.repository.prepare(session, file);
+        expect(prepared.fileName, local);
+        expect(prepared.cleanup != null, !direct);
+        final queued = DownloadSpec.fromJson(plan.toJson());
+        final refreshed = await f.repository.refresh(queued);
+        expect(refreshed.fileName, local);
+        final origin = DownloadOrigin.fromJson(refreshed.source!);
+        expect(origin.file.name, raw);
+        expect(origin.file.id, file.id);
+        expect(origin.file.token, 'file-token-2');
+        if (!direct) {
+          expect(f.calls('/share/sharepage/save').last.json['fid_list'], [
+            file.id,
+          ]);
+          expect(f.calls('/share/sharepage/save').last.json['fid_token_list'], [
+            'file-token-2',
+          ]);
+        }
+        // Existing tasks keep their destination, including a user-chosen name.
+        final resumed = await f.repository.refresh(
+          queued.copyWith(fileName: raw),
+        );
+        expect(resumed.fileName, raw);
+      },
+    );
+  }
+
+  for (final platform in [CloudPlatform.quark, CloudPlatform.uc]) {
+    for (final parent in ['0', 'shared-folder']) {
+      test(
+        '$platform cross transfer renews queued share tokens in $parent',
+        () async {
+          final f = _Fixture(platform: platform, directPolicy: (_, _) => false)
+            ..rejectStaleSaveTokens = true;
+          final initial = await f.repository.share(f.link);
+          final selected = (await f.repository.list(initial, parent)).first;
+          // Retrying a persisted batch reopens the session but retains the
+          // selected file from its old scan, exactly as in the failed log.
+          final reopened = await f.repository.reopenTransferSource(initial);
+          final result = await f.repository.prepareTransfer(reopened, selected);
+          final save = f.calls('/share/sharepage/save').single.json;
+          expect(save['stoken'], 'share-token-3');
+          expect(save['fid_token_list'], ['file-token-3']);
+          expect(save['pdir_fid'], parent);
+          expect(save['fid_list'], [selected.id]);
+          final origin = DownloadOrigin.fromJson(result.source!);
+          expect(origin.file.token, 'file-token-3');
+          expect(origin.session.accountId, initial.accountId);
+          expect(result.cleanup, isNotNull);
+        },
+      );
+    }
+  }
+
+  for (final changed in ['removed', 'size']) {
+    test('cross transfer rejects a $changed source before saving', () async {
+      final f = _Fixture(directPolicy: (_, _) => false);
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, '0')).first;
+      if (changed == 'removed') {
+        f.rootFileId = 'different-file';
+      } else {
+        f.rootFileSize = 5;
+      }
+      await expectLater(
+        f.repository.prepareTransfer(session, file),
+        throwsA(isA<AppException>()),
+      );
+      expect(f.calls('/share/sharepage/save'), isEmpty);
+      expect(f.calls('/file'), isEmpty);
+    });
+  }
+
+  test(
+    'cross transfer cancellation during token renewal prevents saving',
+    () async {
+      final f = _Fixture(directPolicy: (_, _) => false);
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, '0')).first;
+      final scope = RequestScope();
+      f.onShareToken = scope.cancel;
+      await expectLater(
+        scope.run(() => f.repository.prepareTransfer(session, file)),
+        throwsA(isA<AppException>()),
+      );
+      expect(f.calls('/share/sharepage/save'), isEmpty);
+      expect(f.calls('/file'), isEmpty);
+    },
+  );
+
+  test('cross transfer renewal keeps the queued source account', () async {
+    final f = _Fixture(directPolicy: (_, _) => false);
+    final session = await f.repository.share(f.link);
+    final file = (await f.repository.list(session, '0')).first;
+    final other = await f.vault.createAccount(CloudPlatform.quark);
+    await f.vault.withAccount(
+      CloudPlatform.quark,
+      other,
+      () => f.vault.putCredential(
+        CloudPlatform.quark,
+        f.account.withFields({'primary': '__pus=other; __puus=other'}),
+      ),
+    );
+    await f.vault.activate(CloudPlatform.quark, other);
+    final result = await f.repository.prepareTransfer(session, file);
+    expect(result.headers['Cookie'], contains('__pus=fixture-account'));
+    expect(
+      f.calls('/share/sharepage/token').last.headers['Cookie'],
+      contains('__pus=fixture-account'),
+    );
+    expect(
+      DownloadOrigin.fromJson(result.source!).session.accountId,
+      session.accountId,
+    );
+  });
+
+  test(
+    'searched Quark keeps automatic direct recovery after web fallback quota failure',
+    () async {
+      final f = _Fixture(directPolicy: (_, _) => false)
+        ..capacityFailure = 'task'
+        ..authenticatedDirectAvailable = true;
+      final session = await f.repository.share(
+        f.link,
+        preferQuarkMobileTransfer: true,
+      );
+      expect(QuarkShareTransfer.prefersMobile(session), isTrue);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      final spec = await f.repository.prepare(session, file);
+      expect(spec.cleanup, isNull);
+      expect(f.calls('/share/sharepage/save'), hasLength(1));
+      expect(f.calls('/file/download'), hasLength(1));
+    },
+  );
 
   for (final planned in [false, true]) {
     test(

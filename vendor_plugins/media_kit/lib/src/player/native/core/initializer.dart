@@ -50,7 +50,7 @@ class Initializer {
     if (!isExecmemRestricted) {
       await InitializerNativeCallable(mpv).dispose(ctx);
     } else {
-      InitializerIsolate().dispose(mpv, ctx);
+      await InitializerIsolate().dispose(mpv, ctx);
     }
   }
 

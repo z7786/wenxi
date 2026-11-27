@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
@@ -15,6 +16,7 @@ class _Connector extends CloudConnector {
   final files = <CloudFile>[];
   int commits = 0, folders = 0;
   Future<void> Function()? onChunk;
+  Future<CloudFile> Function(UploadFile)? uploadOverride;
   @override
   Future<List<CloudFile>> list(
     BrowseSession s,
@@ -29,6 +31,7 @@ class _Connector extends CloudConnector {
     Credential c, {
     UploadProgressCallback? onProgress,
   }) async {
+    if (uploadOverride case final upload?) return upload(source);
     await for (final _ in source.openRead()) {
       await onChunk?.call();
     }
@@ -96,6 +99,129 @@ Future<(CloudRepository, Vault, _Connector)> _fixture({
 }
 
 void main() {
+  test(
+    'same destination writes serialize and recheck a saved file before a second upload',
+    () async {
+      final (repository, _, connector) = await _fixture();
+      final started = Completer<void>(), release = Completer<void>();
+      var commits = 0;
+      connector.uploadOverride = (file) async {
+        commits++;
+        if (!started.isCompleted) started.complete();
+        await release.future;
+        final saved = CloudFile(
+          id: 'saved',
+          name: file.name,
+          size: file.size,
+          parentId: '0',
+        );
+        connector.files.add(saved);
+        return saved;
+      };
+      final first = repository.withWriteTarget(
+        _session,
+        '0',
+        'sample.txt',
+        () => repository.upload(_session, '0', _source()),
+      );
+      await started.future;
+      final next = repository.upload(_session, '0', _source());
+      final checked = expectLater(next, throwsA(isA<AppException>()));
+      expect(commits, 1);
+      release.complete();
+      expect((await first).id, 'saved');
+      await checked;
+      expect(commits, 1);
+    },
+  );
+
+  test(
+    'a cancelled destination waiter leaves other names and the first write running',
+    () async {
+      final (repository, _, connector) = await _fixture();
+      final release = Completer<void>(), started = Completer<void>();
+      final sent = <String>[];
+      connector.uploadOverride = (file) async {
+        sent.add(file.name);
+        if (file.name == 'sample.txt') {
+          if (!started.isCompleted) started.complete();
+          await release.future;
+        }
+        return CloudFile(id: file.name, name: file.name, size: file.size);
+      };
+      final first = repository.upload(_session, '0', _source());
+      await started.future;
+      final scope = RequestScope();
+      final next = scope.run(() => repository.upload(_session, '0', _source()));
+      scope.cancel();
+      await expectLater(next, throwsA(isA<AppException>()));
+      expect(
+        (await repository.upload(_session, '0', _source('other.txt'))).name,
+        'other.txt',
+      );
+      expect(sent, ['sample.txt', 'other.txt']);
+      release.complete();
+      await first;
+      expect(sent, ['sample.txt', 'other.txt']);
+    },
+  );
+  test(
+    'Write marker is saved after preflight and receipt before cancellation',
+    () async {
+      final (repository, _, connector) = await _fixture();
+      final scope = RequestScope(), events = <String>[];
+      connector.uploadOverride = (file) async {
+        events.add('write');
+        scope.cancel();
+        return CloudFile(id: 'saved', name: file.name, size: file.size);
+      };
+      await expectLater(
+        scope.run(
+          () => repository.upload(
+            _session,
+            '0',
+            _source(),
+            beforeWrite: () async => events.add('marked'),
+            onSaved: (file) async => events.add('receipt:${file.id}'),
+          ),
+        ),
+        throwsA(isA<AppException>()),
+      );
+      expect(events, ['marked', 'write', 'receipt:saved']);
+    },
+  );
+  test(
+    'Local preflight failure clears the marker without any mutation',
+    () async {
+      final (repository, _, connector) = await _fixture();
+      var pending = false;
+      connector.uploadOverride = (_) async =>
+          throw const AppException('local file missing');
+      await expectLater(
+        repository.upload(
+          _session,
+          '0',
+          _source(),
+          beforeWrite: () async => pending = true,
+          onNotSubmitted: () async => pending = false,
+        ),
+        throwsA(isA<AppException>()),
+      );
+      expect(pending, isFalse);
+      connector.files.add(const CloudFile(id: 'other', name: 'sample.txt'));
+      var marks = 0;
+      await expectLater(
+        repository.upload(
+          _session,
+          '0',
+          _source(),
+          beforeWrite: () async => marks++,
+        ),
+        throwsA(isA<AppException>()),
+      );
+      expect(marks, 0);
+    },
+  );
   test(
     'All personal providers expose upload and folder creation capabilities',
     () {

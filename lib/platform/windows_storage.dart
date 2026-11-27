@@ -2,6 +2,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:path/path.dart' as p;
 
 class WindowsStorageVolume {
   const WindowsStorageVolume(this.id, {required this.supportsHardLinks});
@@ -53,6 +54,32 @@ class WindowsStorage {
       >('CreateHardLinkW');
   static final _lastError = _kernel
       .lookupFunction<Uint32 Function(), int Function()>('GetLastError');
+  static final _attributes = _kernel
+      .lookupFunction<
+        Uint32 Function(Pointer<Utf16>),
+        int Function(Pointer<Utf16>)
+      >('GetFileAttributesW');
+
+  /// A lexical path is safe only when every existing component is ordinary.
+  /// Check all reparse points, including junctions and directory mount points;
+  /// a failed metadata query must never be interpreted as an ordinary path.
+  static bool isPlainPath(String path) {
+    if (!Platform.isWindows || !p.isAbsolute(path)) return false;
+    var current = p.normalize(path);
+    while (true) {
+      final input = current.toNativeUtf16();
+      late final int attributes;
+      try {
+        attributes = _attributes(input);
+      } finally {
+        calloc.free(input);
+      }
+      if (attributes == 0xffffffff || (attributes & 0x400) != 0) return false;
+      final parent = p.dirname(current);
+      if (p.equals(parent, current)) return true;
+      current = parent;
+    }
+  }
 
   static WindowsStorageVolume? volume(String path) {
     if (!Platform.isWindows) return null;

@@ -136,6 +136,56 @@ extension PlaybackCasting on PlaybackController {
         unowned = await (refresh ?? prepare)(current, scope);
       }
       check();
+      // Same-directory captions load independently of local playback. Give
+      // that pending read a bounded chance to finish before the TV handoff;
+      // a slow caption must not leave video playback waiting indefinitely.
+      var subtitlePending = false;
+      if (preferences.subtitles && session?.selection.subtitle == null) {
+        final pending = session?.automaticSubtitleLoad;
+        if (pending != null) {
+          await scope.run(
+            () => RequestScope.cancellable(
+              pending.timeout(
+                const Duration(seconds: 3),
+                onTimeout: () => subtitlePending = true,
+              ),
+            ),
+          );
+        }
+        check();
+      }
+      final localState = session?.backend.state;
+      CastSubtitle? subtitle;
+      var subtitleWarning = subtitlePending ? '同目录字幕仍在加载，完成后请重新连接电视以同步字幕' : '';
+      final subtitleRevision = session?.selection.subtitleRevision;
+      final selectedSubtitle = preferences.subtitles
+          ? session?.selection.subtitle ?? localState?.track.subtitle
+          : null;
+      if (selectedSubtitle != null &&
+          (selectedSubtitle.uri || selectedSubtitle.data)) {
+        try {
+          subtitle = await CastSubtitle.load(
+            selectedSubtitle,
+            delay: session?.selection.subtitleDelay ?? 0,
+          );
+          subtitleWarning = '';
+        } catch (failure) {
+          // A subtitle failure must not stop a video the TV can already play.
+          subtitleWarning = failure is AppException
+              ? failure.message
+              : '字幕文件无法读取，请重新选择字幕后再投屏';
+          DiagnosticLog.event(
+            'cast.subtitle_prepare_failed',
+            fields: {'error_type': failure.runtimeType.toString()},
+          );
+        }
+      }
+      if (!preferences.subtitles ||
+          session?.selection.subtitleRevision != subtitleRevision) {
+        subtitle = null;
+        subtitleWarning = preferences.subtitles ? '字幕设置已变化，请重新连接电视以同步字幕' : '';
+      }
+      check();
       // Pause the actual local decoder before publishing remote state.
       await endBoost();
       await backend?.pause();
@@ -148,6 +198,12 @@ extension PlaybackCasting on PlaybackController {
       await castPlatform.active(true);
       check();
       cast = castSessionFactory(device, unowned);
+      cast.configureMedia(
+        tracks: localState?.tracks ?? const Tracks(),
+        track: localState?.track ?? const Track(),
+        subtitle: subtitle,
+        subtitleWarning: subtitleWarning,
+      );
       cast.streamConnections = preferences.connectionsFor(current.platform);
       cast.useControllerPlatform();
       await cast.start(
@@ -193,8 +249,10 @@ extension PlaybackCasting on PlaybackController {
         'cast.connect_failed',
         fields: {
           'device': DiagnosticLog.reference(device.id),
-          'code': failure is CastSoapException ? failure.code : null,
-          'error_type': failure.runtimeType.toString(),
+          ...castFailureFields(
+            failure,
+            stage: cast?.connectionStage ?? 'prepare',
+          ),
         },
       );
       rethrow;

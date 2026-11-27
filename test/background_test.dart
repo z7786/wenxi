@@ -208,10 +208,25 @@ void main() {
       await repo.endDraft(draft);
       final backup = BackupRepository(sourceStore, backgrounds: repo);
       const password = 'background-test-password';
-      final bytes = await backup.create(
-        password,
-        includeBackgroundImages: true,
+      final exported = await backup.create(password);
+      final payload = decryptBackup((exported, password));
+      expect(payload.containsKey('backgroundImages'), isFalse);
+      expect(
+        AppSettings.fromJson(payload.obj('settings')).background.hasImage,
+        isFalse,
       );
+      // Old packages containing images remain readable.
+      final bytes = encryptBackup((
+        {
+          ...payload,
+          'settings': {
+            ...payload.obj('settings'),
+            'background': background.toJson(),
+          },
+          'backgroundImages': await repo.exportImages(background),
+        },
+        password,
+      ));
       expect(bytes.length, lessThanOrEqualTo(16 * 1024 * 1024));
       final targetStore = StateStore.memory();
       final targetRepo = BackgroundRepository(

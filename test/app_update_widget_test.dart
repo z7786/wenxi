@@ -45,6 +45,8 @@ void main() {
           force: force,
           inAppDownloadUrl: update.inAppDownloadUrl,
           inAppPasscode: update.inAppPasscode,
+          packageSha256: update.packageSha256,
+          packageSize: update.packageSize,
         ),
       },
     ).toJson();

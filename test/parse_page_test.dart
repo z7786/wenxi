@@ -9,6 +9,7 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/data/providers/baidu.dart';
 import 'package:asterlink/domain/baidu_share_route.dart';
 import 'package:asterlink/domain/resource_search.dart';
+import 'package:asterlink/domain/quark_share_transfer.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/main.dart';
@@ -229,6 +230,59 @@ void main() {
       }
     });
   }
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.windows]) {
+    scenario('PikPak net input opens a share without login on $platform', (
+      tester,
+    ) async {
+      await render(tester, loggedIn: false, platform: platform);
+      final pikpak = _ShareConnector(CloudPlatform.pikpak)
+        ..requiredCode = 'abc123';
+      services.cloud.connectors[CloudPlatform.pikpak] = pikpak;
+      await enter(
+        tester,
+        r'https\://mypikpak.net/s/Share_123AbC-XyZ9876543210 访问密码：abc123',
+      );
+      expect(find.textContaining('已识别：PikPak网盘'), findsOneWidget);
+      expect(code(tester), 'abc123');
+      expect(pikpak.opened, isEmpty);
+      await start(tester);
+      expect(find.byType(BrowserPage), findsOneWidget);
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(pikpak.openCredentials, [null]);
+      expect(pikpak.opened.single.passcode, 'abc123');
+      expect(
+        pikpak.opened.single.url,
+        'https://mypikpak.net/s/Share_123AbC-XyZ9876543210',
+      );
+      expect(pikpak.lists, 1);
+    });
+  }
+
+  scenario(
+    'Quark search and recommendation opens mark mobile transfer without saving',
+    (tester) async {
+      await render(tester);
+      final pending = pageKey.currentState!.openResource(
+        ResourceSearchHit.fromRaw({
+          'title': 'fixture resource',
+          'url': 'https://pan.quark.cn/s/resource',
+          'pan_type': 'quark',
+          'password': 'aB12',
+        }),
+      );
+      await tester.pumpAndSettle();
+      final browser = tester.widget<BrowserPage>(find.byType(BrowserPage));
+      expect(QuarkShareTransfer.prefersMobile(browser.session), isTrue);
+      expect(connector.downloads, 0);
+      Navigator.of(tester.element(find.byType(BrowserPage))).pop();
+      await tester.pumpAndSettle();
+      await pending;
+      await start(tester);
+      final manual = tester.widget<BrowserPage>(find.byType(BrowserPage));
+      expect(QuarkShareTransfer.prefersMobile(manual.session), isFalse);
+    },
+  );
 
   scenario(
     'Raw GitHub files open direct download without requesting repository APIs',

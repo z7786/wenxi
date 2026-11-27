@@ -405,6 +405,8 @@
                 <data android:scheme="https"/>
                 <data android:host="mypikpak.com"/>
                 <data android:host="*.mypikpak.com"/>
+                <data android:host="mypikpak.net"/>
+                <data android:host="*.mypikpak.net"/>
                 <data android:pathPrefix="/s/"/>
             </intent-filter>
         </activity-alias>

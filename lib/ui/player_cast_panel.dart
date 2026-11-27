@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../core/json.dart';
 import '../domain/playback.dart' show playbackTime;
 import '../playback/cast/cast_discovery.dart';
+import '../playback/cast/cast_network.dart';
 import '../playback/cast/dlna.dart';
 import '../playback/playback_controller.dart';
 
@@ -55,7 +57,11 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
       await action();
     } catch (e) {
       if (mounted) {
-        error = e is AppException ? e.message : '连接或控制电视失败，请确认电视已开启 DLNA 投屏后重试';
+        error = e is AppException
+            ? e.message
+            : e is SocketException || e is TimeoutException
+            ? CastNetworkException('control', e).message
+            : '连接或控制电视失败，请确认电视已开启 DLNA 投屏后重试';
       }
     } finally {
       if (mounted) setState(() => busy = false);
@@ -132,6 +138,17 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
           ),
           if (cast.error.isNotEmpty) _message(cast.error),
           if (cast.warning.isNotEmpty) _message(cast.warning),
+          if (cast.subtitleWarning.isNotEmpty) _message(cast.subtitleWarning),
+          if (active && cast.audioDescription.isNotEmpty)
+            Text(
+              '视频音轨 ${cast.audioDescription}',
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          if (active && cast.subtitleDelivered)
+            const Text(
+              '已发送外挂字幕，可在电视字幕菜单开启',
+              style: TextStyle(color: Colors.white70, fontSize: 12),
+            ),
           if (active && max > 0) ...[
             Slider(
               value: (preview ?? state.position.inMilliseconds.toDouble())
@@ -195,32 +212,55 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
                 ),
               ],
             ),
-            if (cast.volumeSupported)
+            if (cast.volumeSupported || cast.muteSupported)
               Row(
                 children: [
-                  const Icon(Icons.volume_up_outlined, size: 20),
+                  if (cast.muteSupported)
+                    IconButton(
+                      key: const Key('cast-mute'),
+                      tooltip: cast.muted == true ? '取消电视静音' : '电视静音',
+                      onPressed: enabled
+                          ? () => _run(() => cast.setMuted(cast.muted != true))
+                          : null,
+                      icon: Icon(
+                        cast.muted == true
+                            ? Icons.volume_off_outlined
+                            : Icons.volume_up_outlined,
+                        size: 20,
+                      ),
+                    )
+                  else
+                    const Icon(Icons.volume_up_outlined, size: 20),
                   Expanded(
                     child: Text(
-                      '电视音量 ${state.volume.round()}%',
+                      cast.muted == true
+                          ? '电视已静音'
+                          : cast.volumeSupported
+                          ? '电视音量 ${state.volume.round()}%'
+                          : '电视声音',
                       textAlign: TextAlign.center,
                     ),
                   ),
-                  IconButton(
-                    tooltip: '减小电视音量',
-                    onPressed: enabled
-                        ? () =>
-                              _run(() => controller.setVolume(state.volume - 5))
-                        : null,
-                    icon: const Icon(Icons.remove),
-                  ),
-                  IconButton(
-                    tooltip: '增大电视音量',
-                    onPressed: enabled
-                        ? () =>
-                              _run(() => controller.setVolume(state.volume + 5))
-                        : null,
-                    icon: const Icon(Icons.add),
-                  ),
+                  if (cast.volumeSupported)
+                    IconButton(
+                      tooltip: '减小电视音量',
+                      onPressed: enabled
+                          ? () => _run(
+                              () => controller.setVolume(state.volume - 5),
+                            )
+                          : null,
+                      icon: const Icon(Icons.remove),
+                    ),
+                  if (cast.volumeSupported)
+                    IconButton(
+                      tooltip: '增大电视音量',
+                      onPressed: enabled
+                          ? () => _run(
+                              () => controller.setVolume(state.volume + 5),
+                            )
+                          : null,
+                      icon: const Icon(Icons.add),
+                    ),
                 ],
               ),
             const SizedBox(height: 8),

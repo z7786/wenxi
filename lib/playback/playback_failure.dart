@@ -52,8 +52,7 @@ class PlaybackFailure extends AppException {
   static PlaybackFailure? fromLog(String message) {
     if (RegExp(
       r'\b(?:a?mediacodec|\w+_mediacodec)\b[^\r\n]*'
-      r'(?:\b(?:released|uninitialized) state\b|\bstate[:= ]+(?:released|uninitialized)\b|'
-      r'failed to dequeue (?:input|output) buffer[^\r\n]*status\s*=\s*-542398533)',
+      r'(?:\b(?:released|uninitialized) state\b|\bstate[:= ]+(?:released|uninitialized)\b)',
       caseSensitive: false,
     ).hasMatch(message)) {
       return const PlaybackFailure(
@@ -81,7 +80,9 @@ class PlaybackFailure extends AppException {
     }
     if (RegExp(
       r'(?:could not|failed to|cannot) (?:initialize|open|find|create) (?:video |audio )?decoder|'
-      r'video output initialization failed|no video or audio streams selected',
+      r'video output initialization failed|no video or audio streams selected|'
+      r'\b(?:a?mediacodec|\w+_mediacodec)\b[^\r\n]*failed to dequeue '
+      r'(?:input|output) buffer[^\r\n]*status\s*=\s*-542398533\b',
       caseSensitive: false,
     ).hasMatch(message)) {
       return const PlaybackFailure(

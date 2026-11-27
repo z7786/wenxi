@@ -54,6 +54,7 @@ class CloudThumbnail extends StatelessWidget {
       ),
     );
     final referer = switch (platform) {
+      CloudPlatform.webdav => '',
       CloudPlatform.github => '',
       CloudPlatform.pikpak => 'https://mypikpak.com/',
       CloudPlatform.feijipan => 'https://www.feijipan.com/',

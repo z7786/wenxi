@@ -4,6 +4,7 @@ import 'dart:io';
 import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/playback.dart';
+import '../platform/executable_path.dart';
 import 'playback_controller.dart';
 import 'windows_player_components.dart';
 
@@ -43,7 +44,7 @@ class IndependentPlayerWindow {
       };
       server.listen((request) => unawaited(_serve(request, metadata)));
       final process = _process = await Process.start(
-        Platform.resolvedExecutable,
+        applicationExecutablePath(),
         [independentPlayerArgument, address],
         environment: {
           // A pending selection must not change the runtime of a new small
@@ -101,20 +102,23 @@ class IndependentPlayerWindow {
             value.containsKey('durationMs')) {
           final durationMs = value.integer('durationMs');
           if (durationMs > 0) {
-            await controller.saveIndependentProgress(
-              PlaybackBookmark(
-                name: controller.current.name,
-                source: controller.current.source,
-                position: Duration(
-                  milliseconds: value
-                      .integer('positionMs')
-                      .clamp(0, 31536000000),
+            // A heartbeat must not wait for disk I/O. Session close joins writes.
+            unawaited(
+              controller.saveIndependentProgress(
+                PlaybackBookmark(
+                  name: controller.current.name,
+                  source: controller.current.source,
+                  position: Duration(
+                    milliseconds: value
+                        .integer('positionMs')
+                        .clamp(0, 31536000000),
+                  ),
+                  duration: Duration(
+                    milliseconds: durationMs.clamp(0, 31536000000),
+                  ),
+                  completed: value.boolean('completed'),
+                  updatedAt: DateTime.now().millisecondsSinceEpoch,
                 ),
-                duration: Duration(
-                  milliseconds: durationMs.clamp(0, 31536000000),
-                ),
-                completed: value.boolean('completed'),
-                updatedAt: DateTime.now().millisecondsSinceEpoch,
               ),
             );
           }

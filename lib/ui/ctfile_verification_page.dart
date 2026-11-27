@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../app_services.dart';
 import '../core/json.dart';
-import '../domain/auth.dart';
 import '../domain/ctfile_captcha.dart';
 import '../domain/models.dart';
 import 'common.dart';
@@ -199,7 +198,9 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
     webViewEnvironment: _environment,
     initialUrlRequest: URLRequest(url: WebUri.uri(widget.challenge.url)),
     initialSettings: webSettings(
-      userAgent: WebLoginTarget.desktopUserAgent,
+      userAgent:
+          widget.challenge.imageHeaders['User-Agent'] ??
+          widget.services.cloud.browserUa.selected(CloudPlatform.ctfile),
       desktopMode: false,
     ),
     initialUserScripts: UnmodifiableListView([

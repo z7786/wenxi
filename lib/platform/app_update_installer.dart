@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
+import 'package:crypto/crypto.dart';
 import 'package:open_filex/open_filex.dart';
 import '../core/json.dart';
 import '../domain/downloads.dart';
@@ -34,19 +36,48 @@ class AppUpdateInstaller {
 
   Future<String> prepare(DownloadTask task, RemoteUpdate update) async {
     requirePackageName(task.spec.fileName, platform);
-    final path = task.savedPath!;
+    var path = task.savedPath!;
     if (platform == 'android') {
       try {
+        // Android downloads are usually document URIs. The existing bridge
+        // reads them through ContentResolver and validates the APK identity.
+        // Hash the returned copy: it is also the file handed to the installer.
         final prepared = await _channel.invokeMethod<String>(
           'prepareAppUpdate',
           {'path': path, 'version': update.version, 'build': update.build},
         );
         require(prepared != null && prepared.isNotEmpty, '无法校验更新安装包');
-        return prepared!;
+        path = prepared!;
       } on PlatformException catch (error) {
         throw AppException(error.message ?? '安装包校验失败，请使用浏览器更新');
       }
     }
+    if (platform == 'windows' || update.packageSha256.isNotEmpty) {
+      require(
+        RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(update.packageSha256),
+        '此更新缺少安装包完整性校验信息，请使用浏览器更新',
+      );
+      try {
+        final file = File(path);
+        final size = await file.length();
+        require(size > 0, '安装包不完整，请重新下载');
+        for (final expected in [
+          update.packageSize,
+          task.spec.expectedSize,
+          task.total,
+        ]) {
+          require(expected <= 0 || size == expected, '安装包大小不一致，请重新下载');
+        }
+        final digest = await _packageDigest(path);
+        require(
+          digest == update.packageSha256.toLowerCase(),
+          '安装包完整性校验失败，请重新下载或使用浏览器更新',
+        );
+      } on FileSystemException {
+        throw const AppException('无法读取更新安装包，请检查目录权限或重新下载');
+      }
+    }
+    if (platform == 'android') return path;
     if (platform == 'macos') {
       final input = await File(path).open();
       try {
@@ -137,3 +168,8 @@ class AppUpdateInstaller {
     }
   }
 }
+
+Future<String> _packageDigest(String path) => Isolate.run(
+  () async => (await File(path).openRead().transform(sha256).first).toString(),
+  debugName: 'update-package-checksum',
+);

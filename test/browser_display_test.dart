@@ -46,6 +46,41 @@ class _FileListConnector extends BrowserTestConnector {
       ];
 }
 
+class _NestedDateConnector extends BrowserTestConnector {
+  _NestedDateConnector() : super(CloudPlatform.tianyi);
+  @override
+  Future<List<CloudFile>> list(
+    BrowseSession session,
+    String parentId,
+    Credential? credential,
+  ) async {
+    reads.add((session.familyId, parentId));
+    return switch (parentId) {
+      'personal-root' => const [
+        CloudFile(
+          id: 'a',
+          name: '旧目录新文件',
+          isDirectory: true,
+          modifiedAt: '2026-01-01',
+        ),
+        CloudFile(
+          id: 'b',
+          name: '新目录旧文件',
+          isDirectory: true,
+          modifiedAt: '2026-11-22',
+        ),
+      ],
+      'a' => const [CloudFile(id: 'child', name: '子目录', isDirectory: true)],
+      'child' => const [
+        CloudFile(id: 'new', name: 'new.txt', modifiedAt: '2026-11-20'),
+      ],
+      _ => const [
+        CloudFile(id: 'old', name: 'old.txt', modifiedAt: '2026-03-01'),
+      ],
+    };
+  }
+}
+
 class _EpisodeNameConnector extends BrowserTestConnector {
   _EpisodeNameConnector() : super(CloudPlatform.tianyi);
 
@@ -153,6 +188,27 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  for (final view in ['list', 'grid']) {
+    browserTest('File $view labels use the decoded display name', (
+      tester,
+    ) async {
+      final value = await fixture(tester, view: view);
+      value.services.cloud.connectors[CloudPlatform.tianyi] =
+          _FileListConnector(const [
+            CloudFile(
+              id: 'episode-15',
+              name: '[第15話 Φ&#39;s VS χ].mkv',
+              displayName: "[第15話 Φ's VS χ].mkv",
+            ),
+          ]);
+      await value.render(tester);
+      expect(find.text("[第15話 Φ's VS χ].mkv"), findsOneWidget);
+      expect(find.text('[第15話 Φ&#39;s VS χ].mkv'), findsNothing);
+      expect(find.byTooltip("[第15話 Φ's VS χ].mkv操作"), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   browserTest(
     'Aliyun folder loading shows file counts and rate limit waiting',
     (tester) async {
@@ -204,6 +260,8 @@ void main() {
       await tester.tapAt(const Offset(2, 2));
       await tester.pumpAndSettle();
       expect(find.text('百度网盘下载提示'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
       expect(value.services.downloads.tasks, isEmpty);
@@ -273,6 +331,37 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  browserTest(
+    'Folder time sort uses provider metadata without reading child folders',
+    (tester) async {
+      final value = await fixture(tester);
+      final connector = _NestedDateConnector();
+      value.services.cloud.connectors[CloudPlatform.tianyi] = connector;
+      await value.render(tester, size: const Size(1100, 900));
+      await tester.tap(find.byTooltip('排序'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('时间 · 倒序'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(find.text('旧目录新文件')).dy,
+        greaterThan(tester.getTopLeft(find.text('新目录旧文件')).dy),
+      );
+      expect(find.textContaining('2026-11-22'), findsOneWidget);
+      expect(find.textContaining('2026-01-01'), findsOneWidget);
+      expect(connector.reads, [('', 'personal-root')]);
+      expect(find.text('正在读取子文件夹中的最新文件时间…'), findsNothing);
+      await tester.tap(find.byTooltip('排序'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('时间 · 正序'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(find.text('旧目录新文件')).dy,
+        lessThan(tester.getTopLeft(find.text('新目录旧文件')).dy),
+      );
+      expect(connector.reads, [('', 'personal-root')]);
+    },
+  );
 
   browserTest('Date sort compares mixed formats and keeps undated files last', (
     tester,

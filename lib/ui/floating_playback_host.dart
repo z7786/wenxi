@@ -317,6 +317,38 @@ class _FloatingSurfaceState extends State<_FloatingSurface> {
   PlaybackController get controller => widget.controller;
   Timer? _subtitleTimer;
   Object? _subtitleLayout;
+  Object? _surfaceState;
+  Object _snapshot() => (
+    controller.backend,
+    controller.preferences,
+    controller.videoGeometry,
+    controller.state.subtitle.join('\n'),
+    controller.state.buffering,
+    controller.error,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _surfaceState = _snapshot();
+    controller.addListener(_onSurfaceChanged);
+  }
+
+  void _onSurfaceChanged() {
+    final next = _snapshot();
+    if (next == _surfaceState || !mounted) return;
+    setState(() => _surfaceState = next);
+  }
+
+  @override
+  void didUpdateWidget(covariant _FloatingSurface oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != controller) {
+      oldWidget.controller.removeListener(_onSurfaceChanged);
+      controller.addListener(_onSurfaceChanged);
+      _surfaceState = _snapshot();
+    }
+  }
 
   void _syncSubtitles(BoxConstraints box) {
     final backend = controller.backend;
@@ -351,28 +383,39 @@ class _FloatingSurfaceState extends State<_FloatingSurface> {
   @override
   void dispose() {
     _subtitleTimer?.cancel();
+    controller.removeListener(_onSurfaceChanged);
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-    animation: controller,
-    builder: (_, _) => LayoutBuilder(
-      builder: (_, box) {
-        _syncSubtitles(box);
-        final backend = controller.backend;
-        final nativeSubtitles = backend?.buildSubtitleOverlay();
-        return Stack(
-          fit: StackFit.expand,
-          clipBehavior: Clip.hardEdge,
-          children: [
-            Transform.translate(
-              offset: Offset(
-                controller.preferences.videoOffsetX * box.maxWidth / 2,
-                controller.preferences.videoOffsetY * box.maxHeight / 2,
-              ),
-              child: Transform.scale(
-                scale: controller.preferences.videoScale,
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (_, box) {
+      _syncSubtitles(box);
+      final backend = controller.backend;
+      backend?.setRenderViewport(
+        box.biggest,
+        MediaQuery.devicePixelRatioOf(context),
+        switch (controller.preferences.fit) {
+          PlaybackFit.contain => BoxFit.contain,
+          PlaybackFit.cover => BoxFit.cover,
+          PlaybackFit.stretch => BoxFit.fill,
+        },
+        controller.preferences.videoScale,
+      );
+      final nativeSubtitles = backend?.buildSubtitleOverlay();
+      return Stack(
+        fit: StackFit.expand,
+        clipBehavior: Clip.hardEdge,
+        children: [
+          Transform.translate(
+            offset: Offset(
+              controller.preferences.videoOffsetX * box.maxWidth / 2,
+              controller.preferences.videoOffsetY * box.maxHeight / 2,
+            ),
+            child: Transform.scale(
+              scale: controller.preferences.videoScale,
+              child: Transform.rotate(
+                angle: controller.preferences.videoRotation * math.pi / 180,
                 child:
                     controller.backend?.buildVideo(
                       fit: switch (controller.preferences.fit) {
@@ -387,47 +430,47 @@ class _FloatingSurfaceState extends State<_FloatingSurface> {
                     const SizedBox.expand(),
               ),
             ),
-            if (controller.preferences.subtitles)
-              if (nativeSubtitles != null)
-                Positioned.fill(child: nativeSubtitles)
-              else if ((backend?.rendersSubtitlesNatively != true ||
-                      backend?.usesSubtitleOverlay == true) &&
-                  controller.state.subtitle.any((line) => line.isNotEmpty))
-                Align(
-                  alignment: Alignment.bottomCenter,
-                  child: Padding(
-                    padding: const EdgeInsets.all(6),
-                    child: SubtitleCaption(
-                      text: controller.state.subtitle
-                          .where((line) => line.isNotEmpty)
-                          .join('\n'),
-                      size: 12,
-                      backgroundColor:
-                          controller.preferences.subtitleBackgroundArgb,
-                    ),
-                  ),
-                ),
-            if (controller.state.buffering)
-              const Center(
-                child: SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
-            if (controller.error.isNotEmpty)
-              const Center(
+          ),
+          if (controller.preferences.subtitles)
+            if (nativeSubtitles != null)
+              Positioned.fill(child: nativeSubtitles)
+            else if ((backend?.rendersSubtitlesNatively != true ||
+                    backend?.usesSubtitleOverlay == true) &&
+                controller.state.subtitle.any((line) => line.isNotEmpty))
+              Align(
+                alignment: Alignment.bottomCenter,
                 child: Padding(
-                  padding: EdgeInsets.all(12),
-                  child: Text(
-                    '播放中断，请还原窗口重试',
-                    style: TextStyle(color: Colors.white, fontSize: 12),
+                  padding: const EdgeInsets.all(6),
+                  child: SubtitleCaption(
+                    text: controller.state.subtitle
+                        .where((line) => line.isNotEmpty)
+                        .join('\n'),
+                    size: 12,
+                    backgroundColor:
+                        controller.preferences.subtitleBackgroundArgb,
                   ),
                 ),
               ),
-          ],
-        );
-      },
-    ),
+          if (controller.state.buffering)
+            const Center(
+              child: SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          if (controller.error.isNotEmpty)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(12),
+                child: Text(
+                  '播放中断，请还原窗口重试',
+                  style: TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ),
+            ),
+        ],
+      );
+    },
   );
 }

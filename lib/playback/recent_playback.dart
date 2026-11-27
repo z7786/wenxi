@@ -13,6 +13,7 @@ import '../platform/file_access.dart';
 import 'media_backend.dart';
 import 'playback_backend_factory.dart';
 import 'playback_controller.dart';
+import 'playback_runtime.dart';
 import 'playback_sources.dart';
 import 'torrent_playback.dart';
 import 'download_playback.dart';
@@ -121,6 +122,9 @@ Future<PlaybackController> _restoreRecentPlayback(
         }),
         retain: (_) {},
         release: (_) async {},
+        initializePlayback: backendFactory == null
+            ? PlaybackRuntime.shared.ensureInitialized
+            : null,
         backendFactory:
             backendFactory ??
             (entry, hardware) => createPlaybackBackend(

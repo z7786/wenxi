@@ -254,7 +254,7 @@ void main() {
     );
   }
 
-  test('A completed save cannot discard a newer pending bookmark', () async {
+  test('Coalesced saves persist the newest pending bookmark', () async {
     final store = _BlockedStateStore();
     final history = PlaybackStore(store);
     const key = 'successive-pending-bookmarks';
@@ -270,8 +270,6 @@ void main() {
           updatedAt: 1,
         ),
       );
-      final secondBarrier = Completer<void>();
-      store.barrier = secondBarrier;
       second = PlaybackStore(store).save(
         key,
         const PlaybackBookmark(
@@ -280,14 +278,18 @@ void main() {
           updatedAt: 2,
         ),
       );
+      expect(identical(first, second), isTrue);
+      expect(store.requestedWrites, 1);
+      expect(history.bookmark(key)!.position, const Duration(minutes: 3));
+      expect(store.data.obj('playbackHistory'), isEmpty);
       firstBarrier.complete();
       await first;
       expect(history.bookmark(key)!.position, const Duration(minutes: 3));
       expect(
         store.data.obj('playbackHistory').obj(key).integer('position'),
-        90000,
+        180000,
       );
-      store.release();
+      store.barrier = null;
       await second;
       expect(history.bookmark(key)!.position, const Duration(minutes: 3));
     } finally {
