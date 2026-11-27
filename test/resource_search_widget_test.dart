@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,15 +17,19 @@ import 'package:asterlink/data/resource_search_api.dart';
 import 'package:asterlink/data/resource_link_checks.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/appearance.dart';
 import 'package:asterlink/domain/background.dart';
 import 'package:asterlink/domain/settings.dart';
 import 'package:asterlink/domain/resource_search.dart';
+import 'package:asterlink/platform/clipboard_links.dart';
 import 'package:asterlink/ui/app_navigation.dart';
 import 'package:asterlink/ui/app_background.dart';
 import 'package:asterlink/ui/app_theme.dart';
 import 'package:asterlink/ui/browser_page.dart';
+import 'package:asterlink/ui/common.dart' show PlatformMark;
 import 'package:asterlink/ui/preview_page.dart';
+import 'package:asterlink/ui/document_download_preview.dart';
 import 'package:asterlink/ui/resource_search_page.dart';
 import 'package:asterlink/ui/resource_home_page.dart';
 import 'package:asterlink/ui/search_security_dialog.dart';
@@ -32,6 +38,9 @@ import 'support.dart';
 import 'fixtures/resource_search_samples.dart';
 import 'resource_link_check_support.dart';
 import 'background_support.dart';
+import 'browser_test_support.dart' show ThumbnailHttpClient;
+import 'remote_control_support.dart';
+import 'package:asterlink/domain/remote_control.dart';
 
 List<ResourceSearchHit> results() => [
   ResourceSearchHit.fromRaw({
@@ -142,6 +151,7 @@ void main() {
     bool home = false,
     double scale = 1,
     double bottomInset = 0,
+    TargetPlatform? platform,
     AppPalette palette = AppPalette.blue,
     bool wallpaper = false,
     Stream<ResourceSearchBatch> Function(String, dynamic)? response,
@@ -151,6 +161,7 @@ void main() {
     ResourceCatalog? catalog,
     void Function(SearchApiFixture)? configureApi,
     bool waitForIdle = true,
+    SearchAnnouncement? searchAnnouncement,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;
@@ -174,6 +185,8 @@ void main() {
             height: 1280,
           );
     final store = StateStore.memory({
+      if (searchAnnouncement != null)
+        ...controlCache({'searchAnnouncement': searchAnnouncement.toJson()}),
       'resourceSearchHistory': ['Python 教程', '设计素材', '电子书'],
       'settings': AppSettings(
         themePalette: palette,
@@ -204,7 +217,10 @@ void main() {
       files: FakeFiles(Directory('${directory.path}/files')),
       http: FakeHttp(),
       platformFeatures: false,
-      controlEnabled: false,
+      controlEnabled: searchAnnouncement != null,
+      controlUrl: controlEndpoint,
+      controlFetcher: FakeControlFetcher(),
+      clock: () => controlNow,
       resourceSearch: service,
     );
     if (picture != null) {
@@ -244,33 +260,38 @@ void main() {
           palette: palette,
           fontFamily: loadedChineseFont ? 'ResourceSearchFixture' : null,
         ).copyWith(
-          platform: size.width >= 1000
-              ? TargetPlatform.windows
-              : TargetPlatform.android,
+          platform:
+              platform ??
+              (size.width >= 1000
+                  ? TargetPlatform.windows
+                  : TargetPlatform.android),
         );
     await tester.pumpWidget(
-      MaterialApp(
-        debugShowCheckedModeBanner: false,
-        theme: theme,
-        locale: const Locale('zh', 'CN'),
-        localizationsDelegates: GlobalMaterialLocalizations.delegates,
-        supportedLocales: const [Locale('zh', 'CN')],
-        builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(textScaler: TextScaler.linear(scale)),
-          child: child!,
+      RepaintBoundary(
+        key: const Key('resource-page-capture'),
+        child: MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: theme,
+          locale: const Locale('zh', 'CN'),
+          localizationsDelegates: GlobalMaterialLocalizations.delegates,
+          supportedLocales: const [Locale('zh', 'CN')],
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: TextScaler.linear(scale)),
+            child: child!,
+          ),
+          home: root
+              ? MainShell(services, initialTab: initialTab)
+              : home
+              ? Scaffold(
+                  body: ResourceHomePage(
+                    services,
+                    onOpen: onOpen ?? (_) async {},
+                  ),
+                )
+              : ResourceSearchPage(services, onOpen: onOpen ?? (_) async {}),
         ),
-        home: root
-            ? MainShell(services, initialTab: initialTab)
-            : home
-            ? Scaffold(
-                body: ResourceHomePage(
-                  services,
-                  onOpen: onOpen ?? (_) async {},
-                ),
-              )
-            : ResourceSearchPage(services, onOpen: onOpen ?? (_) async {}),
       ),
     );
     if (!waitForIdle || linkChecks != null && service.searching) {
@@ -290,6 +311,8 @@ void main() {
     final imageContext = tester.element(find.byType(Scaffold).first);
     await tester.runAsync(() async {
       for (final platform in CloudPlatform.values) {
+        // WebDAV uses a themed Icon instead of an image asset.
+        if (platform == CloudPlatform.webdav) continue;
         final icon = platform.icon;
         await precacheImage(
           AssetImage('assets/icons/$icon.${icon == '123' ? 'webp' : 'png'}'),
@@ -316,6 +339,23 @@ void main() {
       directory.deleteSync(recursive: true);
     });
     return (services, api);
+  }
+
+  Future<void> flushStore(WidgetTester tester, StateStore store) async {
+    var finished = false;
+    unawaited(store.flush().then((_) => finished = true));
+    for (var index = 0; index < 100 && !finished; index++) {
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 1)),
+      );
+    }
+    expect(
+      finished,
+      isTrue,
+      reason: 'Queued search history changes must finish',
+    );
+    await tester.pumpAndSettle();
   }
 
   testWidgets(
@@ -396,10 +436,762 @@ void main() {
       await tester.ensureVisible(third);
       await tester.tap(third);
       await tester.pumpAndSettle();
+      expect(opened, isNull);
+      expect(find.byKey(const Key('resource-content-details')), findsOneWidget);
+      expect(find.text('不要显示的来源'), findsNothing);
+      await tester.tap(find.byKey(const Key('resource-content-open')));
+      await tester.pumpAndSettle();
       expect(opened?.recommendationId, 3);
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
+
+  ResourceSearchHit publishedContent({
+    bool multiLink = false,
+    bool empty = false,
+    String cover = '',
+  }) => ResourceSearchHit.fromRaw({
+    'title': '后台推荐的学习资料：从入门到实践，含视频课程、配套代码与练习说明',
+    'url': 'https://pan.quark.cn/s/published',
+    'recommendation_id': 21,
+    'category': '学习资料',
+    'datetime': '2026-11-24',
+    'cover_url': cover,
+    'description': empty
+        ? ''
+        : '这套资料包括视频课程、配套代码和练习说明。\n\n'
+              '${List.generate(16, (n) => '第 ${n + 1} 部分：按章节学习基础知识，再结合示例练习；可以根据需要选择适合自己的内容。').join('\n')}\n\n'
+              '简介结尾：使用前请阅读课程目录。',
+    'open_ticket': 'published-grant',
+    if (multiLink)
+      'links': [
+        {
+          'url': 'https://pan.quark.cn/s/published',
+          'password': 'q123',
+          'open_ticket': 'quark-entry-grant',
+        },
+        {
+          'url': 'https://pan.baidu.com/s/1published',
+          'password': 'b456',
+          'open_ticket': 'baidu-entry-grant',
+        },
+      ],
+  });
+
+  Finder publishedTile(ResourceSearchHit hit, {bool home = true}) => find.byKey(
+    ValueKey(
+      '${home ? 'resource-catalog-item' : 'resource-recommendation'}-${hit.recommendationId}-${hit.identity}',
+    ),
+  );
+
+  Future<void> captureContentDetails(WidgetTester tester, String name) async {
+    final directory = Platform.environment['RESOURCE_DETAILS_PREVIEW_DIR'];
+    if (directory == null) return;
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.byKey(const Key('resource-page-capture')),
+    );
+    await tester.runAsync(() async {
+      final image = await boundary.toImage(pixelRatio: 1);
+      try {
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        final file = File('$directory/$name.png');
+        await file.parent.create(recursive: true);
+        await file.writeAsBytes(bytes!.buffer.asUint8List());
+      } finally {
+        image.dispose();
+      }
+    });
+  }
+
+  for (final (name, size, dark, scale) in [
+    ('phone', const Size(390, 844), false, 1.0),
+    ('phone-large', const Size(320, 700), true, 2.0),
+    ('desktop', const Size(1280, 900), false, 1.0),
+    ('desktop-dark', const Size(1280, 900), true, 1.0),
+  ]) {
+    testWidgets('Search home notice placement and details $name', (
+      tester,
+    ) async {
+      final (services, _) = await render(
+        tester,
+        home: true,
+        size: size,
+        dark: dark,
+        scale: scale,
+        catalog: ResourceCatalog(popular: [results().first]),
+        searchAnnouncement: SearchAnnouncement(
+          title: '本周资源已更新',
+          content:
+              '本周新增学习资料、精选影片与实用软件。\n\n### 使用提示\n\n- 点击首页推荐，查看资源简介。\n- 分享链接失效时，欢迎通过反馈入口告诉我们。',
+          buttonText: '查看更新说明',
+          buttonUrl: Uri.parse('https://example.test/news'),
+        ),
+      );
+      final bar = find.byKey(const Key('search-announcement-bar'));
+      expect(bar, findsOneWidget);
+      final searchBottom = tester
+          .getBottomLeft(find.byKey(const Key('resource-home-search-input')))
+          .dy;
+      expect(tester.getTopLeft(bar).dy, greaterThan(searchBottom));
+      final recommendationsBefore = tester.getTopLeft(find.text('热门推荐')).dy;
+      expect(tester.getBottomLeft(bar).dy, lessThan(recommendationsBefore));
+      final occupied = tester.getSize(bar).height + 12;
+      await captureContentDetails(tester, 'announcement-home-$name');
+      await tester.tap(bar);
+      await tester.pumpAndSettle();
+      await captureContentDetails(tester, 'announcement-detail-$name');
+      expect(
+        find.byKey(const Key('search-announcement-details')),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-home-search-input')),
+        '资料',
+      );
+      await tester.tap(find.byKey(const Key('resource-home-search-submit')));
+      await tester.pumpAndSettle();
+      expect(bar, findsNothing);
+      Navigator.of(tester.element(find.byType(ResourceSearchPage))).pop();
+      await tester.pumpAndSettle();
+      expect(bar, findsOneWidget);
+      // A valid publication omitting the notice removes its spacing as well.
+      await services.control.refresh(force: true);
+      await tester.pumpAndSettle();
+      expect(bar, findsNothing);
+      expect(
+        tester.getTopLeft(find.text('热门推荐')).dy,
+        closeTo(recommendationsBefore - occupied, .1),
+      );
+    });
+  }
+
+  Future<void> revealPublishedTile(
+    WidgetTester tester,
+    ResourceSearchHit hit, {
+    bool home = true,
+  }) async {
+    await tester.scrollUntilVisible(
+      publishedTile(hit, home: home),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(home ? ResourceHomePage : ResourceSearchPage),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+      maxScrolls: 20,
+    );
+    await tester.pumpAndSettle();
+  }
+
+  void mockContentCopies(
+    WidgetTester tester,
+    Future<void> Function(String) write,
+  ) {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          await write((call.arguments as Map)['text'] as String);
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+  }
+
+  for (final (name, size, scale, platform, width, height) in [
+    ('phone', const Size(393, 864), 1.0, TargetPlatform.android, 200, 2000),
+    ('narrow', const Size(320, 700), 1.6, TargetPlatform.android, 2000, 400),
+    ('desktop', const Size(1280, 900), 1.0, TargetPlatform.windows, 2000, 400),
+  ]) {
+    for (final broken in [false, true]) {
+      testWidgets(
+        'Published content image follows its introduction on $name: broken=$broken',
+        (tester) async {
+          final png = await tester.runAsync(
+            () => backgroundFixture(width: width, height: height),
+          );
+          final client = ThumbnailHttpClient(image: png);
+          debugNetworkImageHttpClientProvider = () => client;
+          addTearDown(() {
+            debugNetworkImageHttpClientProvider = null;
+            PaintingBinding.instance.imageCache.clear();
+            PaintingBinding.instance.imageCache.clearLiveImages();
+          });
+          try {
+            final hit = publishedContent(
+              cover:
+                  'https://images.example.test/${broken ? 'broken' : 'content'}-$name.png',
+            );
+            final copied = <String>[];
+            ResourceSearchHit? opened;
+            mockContentCopies(tester, (text) async => copied.add(text));
+            await render(
+              tester,
+              home: true,
+              catalog: ResourceCatalog(popular: [hit]),
+              size: size,
+              scale: scale,
+              platform: platform,
+              onOpen: (selected) async => opened = selected,
+            );
+            await revealPublishedTile(tester, hit);
+            await tester.tap(publishedTile(hit));
+            await tester.pump(const Duration(milliseconds: 400));
+            final figure = find.byKey(const Key('resource-content-image'));
+            final image = find.descendant(
+              of: figure,
+              matching: find.byType(RawImage),
+            );
+            for (var attempt = 0; attempt < 40; attempt++) {
+              final ready = broken
+                  ? find.text('图片暂时无法加载').evaluate().isNotEmpty
+                  : image.evaluate().isNotEmpty &&
+                        tester.widget<RawImage>(image).image != null;
+              if (ready) break;
+              await tester.runAsync(
+                () => Future<void>.delayed(const Duration(milliseconds: 20)),
+              );
+              await tester.pump();
+            }
+            expect(figure, findsOneWidget);
+            expect(
+              tester.getTopLeft(figure).dy,
+              greaterThanOrEqualTo(
+                tester
+                    .getBottomRight(
+                      find.byKey(const Key('resource-content-description')),
+                    )
+                    .dy,
+              ),
+            );
+            if (broken) {
+              expect(find.text('图片暂时无法加载'), findsOneWidget);
+            } else {
+              final pixels = tester.widget<RawImage>(image).image!;
+              expect(pixels.width, lessThanOrEqualTo(1600));
+              expect(pixels.height, lessThanOrEqualTo(1600));
+              expect(
+                pixels.width / pixels.height,
+                closeTo(width / height, .02),
+              );
+              final imageWidget = tester.widget<Image>(
+                find.descendant(of: figure, matching: find.byType(Image)),
+              );
+              expect(imageWidget.fit, BoxFit.contain);
+            }
+            expect(
+              client.requests.map((request) => request.uri),
+              contains(Uri.parse(hit.coverUrl)),
+            );
+            expect(tester.getSize(figure).height, lessThanOrEqualTo(640));
+            expect(tester.getSize(figure).width, lessThanOrEqualTo(size.width));
+            await tester.ensureVisible(figure);
+            await tester.pumpAndSettle();
+            await captureContentDetails(
+              tester,
+              '$name-content-image${broken ? '-error' : ''}',
+            );
+            final open = find.byKey(const Key('resource-content-open'));
+            expect(open.hitTestable(), findsOneWidget);
+            await tester.tap(
+              find.byKey(const Key('resource-content-copy-description')),
+            );
+            await tester.pumpAndSettle();
+            expect(copied, [hit.description]);
+            await tester.tap(open);
+            await tester.pumpAndSettle();
+            expect(opened?.coverUrl, hit.coverUrl);
+            expect(
+              find.byKey(const Key('resource-content-details')),
+              findsNothing,
+            );
+            expect(tester.takeException(), isNull);
+          } finally {
+            debugNetworkImageHttpClientProvider = null;
+            PaintingBinding.instance.imageCache.clear();
+            PaintingBinding.instance.imageCache.clearLiveImages();
+          }
+        },
+      );
+    }
+  }
+
+  for (final (name, size, scale, inset, dark, platform) in [
+    ('phone', const Size(393, 864), 1.0, 28.0, false, TargetPlatform.android),
+    (
+      'phone-dark',
+      const Size(393, 864),
+      1.0,
+      28.0,
+      true,
+      TargetPlatform.android,
+    ),
+    (
+      'large-text',
+      const Size(320, 700),
+      1.6,
+      34.0,
+      false,
+      TargetPlatform.android,
+    ),
+    (
+      'landscape',
+      const Size(844, 390),
+      1.4,
+      21.0,
+      true,
+      TargetPlatform.android,
+    ),
+    (
+      'short-large-text',
+      const Size(568, 320),
+      1.6,
+      21.0,
+      false,
+      TargetPlatform.android,
+    ),
+    ('desktop', const Size(1280, 900), 1.0, 0.0, false, TargetPlatform.windows),
+    (
+      'desktop-dark',
+      const Size(1280, 900),
+      1.0,
+      0.0,
+      true,
+      TargetPlatform.windows,
+    ),
+    (
+      'desktop-compact',
+      const Size(800, 420),
+      1.3,
+      0.0,
+      false,
+      TargetPlatform.windows,
+    ),
+  ]) {
+    testWidgets(
+      'published content details fit $name and copy the full introduction',
+      (tester) async {
+        final hit = publishedContent();
+        final copied = <String>[];
+        var opens = 0;
+        mockContentCopies(tester, (text) async => copied.add(text));
+        final (_, api) = await render(
+          tester,
+          home: true,
+          catalog: ResourceCatalog(popular: [hit]),
+          onOpen: (_) async => opens++,
+          size: size,
+          scale: scale,
+          bottomInset: inset,
+          dark: dark,
+          platform: platform,
+        );
+        await revealPublishedTile(tester, hit);
+        await tester.tap(publishedTile(hit));
+        await tester.pumpAndSettle();
+        final details = find.byKey(const Key('resource-content-details'));
+        final open = find.byKey(const Key('resource-content-open'));
+        final close = find.byKey(const Key('resource-content-close'));
+        expect(details, findsOneWidget);
+        expect(
+          find.byType(Dialog),
+          platform == TargetPlatform.windows ? findsOneWidget : findsNothing,
+        );
+        expect(
+          find.byType(BottomSheet),
+          platform == TargetPlatform.android ? findsOneWidget : findsNothing,
+        );
+        expect(
+          tester.getSize(details).width,
+          lessThanOrEqualTo(platform == TargetPlatform.windows ? 840 : 700),
+        );
+        expect(tester.getTopLeft(details).dy, greaterThanOrEqualTo(0));
+        expect(
+          tester.getBottomRight(details).dy,
+          lessThanOrEqualTo(size.height - inset),
+        );
+        expect(open.hitTestable(), findsOneWidget);
+        expect(close.hitTestable(), findsOneWidget);
+        await captureContentDetails(tester, '$name-details');
+        expect(
+          tester
+              .widget<SelectableText>(
+                find.byKey(const Key('resource-content-description')),
+              )
+              .data,
+          hit.description,
+        );
+        await tester.tap(
+          find.byKey(const Key('resource-content-copy-description')),
+        );
+        await tester.pumpAndSettle();
+        expect(copied, [hit.description]);
+        expect(find.text('简介已复制'), findsOneWidget);
+        expect(open.hitTestable(), findsOneWidget);
+        await captureContentDetails(tester, '$name-copied');
+        final link = find.byKey(const Key('resource-content-link'));
+        await tester.ensureVisible(link);
+        await tester.pumpAndSettle();
+        expect(link.hitTestable(), findsOneWidget);
+        expect(tester.widget<SelectableText>(link).data, hit.url);
+        expect(opens, 0);
+        expect(api.openCalls, isEmpty);
+        expect(tester.takeException(), isNull);
+        expect(await tester.binding.handlePopRoute(), isTrue);
+        await tester.pumpAndSettle();
+        expect(details, findsNothing);
+        expect(opens, 0);
+        expect(api.openCalls, isEmpty);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'category content opens details and closing does not open the resource',
+    (tester) async {
+      final hit = publishedContent();
+      var opens = 0;
+      final (_, api) = await render(
+        tester,
+        home: true,
+        catalog: ResourceCatalog(
+          categories: [
+            ResourceCategory(id: 7, name: '课程', resources: [hit]),
+          ],
+        ),
+        onOpen: (_) async => opens++,
+      );
+      await revealPublishedTile(tester, hit);
+      await tester.tap(publishedTile(hit));
+      await tester.tap(publishedTile(hit), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('resource-content-details')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('resource-content-close')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
+      expect(opens, 0);
+      expect(api.openCalls, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final home in [true, false]) {
+    testWidgets(
+      'published ${home ? 'catalog' : 'recommendation'} uses the selected drive for copying and opening',
+      (tester) async {
+        final hit = publishedContent(multiLink: true);
+        final copied = <String>[];
+        ResourceSearchHit? opened;
+        bool? detailsPresentOnOpen;
+        mockContentCopies(tester, (text) async => copied.add(text));
+        final (services, api) = await render(
+          tester,
+          home: home,
+          catalog: ResourceCatalog(popular: [hit]),
+          recommendations: [hit],
+          onOpen: (selected) async {
+            detailsPresentOnOpen = find
+                .byKey(const Key('resource-content-details'))
+                .evaluate()
+                .isNotEmpty;
+            opened = selected;
+          },
+        );
+        await revealPublishedTile(tester, hit, home: home);
+        await tester.tap(publishedTile(hit, home: home));
+        await tester.pumpAndSettle();
+        final picker = find.byKey(const Key('resource-content-link-picker'));
+        await tester.ensureVisible(picker);
+        await tester.tap(picker);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('百度网盘').last);
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widgetList<PlatformMark>(
+                find.descendant(
+                  of: picker,
+                  matching: find.byType(PlatformMark),
+                ),
+              )
+              .map((mark) => mark.platform),
+          contains(CloudPlatform.baidu),
+        );
+        expect(
+          tester
+              .widget<SelectableText>(
+                find.byKey(const Key('resource-content-link')),
+              )
+              .data,
+          'https://pan.baidu.com/s/1published',
+        );
+        expect(find.text('提取码：b456'), findsOneWidget);
+        await tester.tap(find.byKey(const Key('resource-content-copy-link')));
+        await tester.pumpAndSettle();
+        expect(copied, [
+          '${hit.title}\nhttps://pan.baidu.com/s/1published\n提取码：b456',
+        ]);
+        expect(
+          services.store.data['clipboardRecognitionLastHandled'],
+          ClipboardLinkSuggestion.fromText(copied.single)!.fingerprint,
+        );
+        expect(find.text('链接和提取码已复制'), findsOneWidget);
+        expect(opened, isNull);
+        expect(api.openCalls, isEmpty);
+        await tester.tap(find.byKey(const Key('resource-content-open')));
+        await tester.pumpAndSettle();
+        expect(detailsPresentOnOpen, isFalse);
+        expect(opened?.platform, CloudPlatform.baidu);
+        expect(opened?.password, 'b456');
+        expect(opened?.link?.passcode, 'b456');
+        expect(opened?.openTicket, 'baidu-entry-grant');
+        expect(opened?.recommendationId, 21);
+        expect(opened?.description, hit.description);
+        expect(
+          find.byKey(const Key('resource-content-link-picker')),
+          findsNothing,
+        );
+        expect(api.openCalls, isEmpty);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'published content without an introduction can still copy and open its link',
+    (tester) async {
+      final hit = publishedContent(empty: true);
+      final copied = <String>[];
+      ResourceSearchHit? opened;
+      mockContentCopies(tester, (text) async => copied.add(text));
+      await render(
+        tester,
+        home: true,
+        catalog: ResourceCatalog(popular: [hit]),
+        onOpen: (selected) async => opened = selected,
+      );
+      await tester.tap(publishedTile(hit));
+      await tester.pumpAndSettle();
+      expect(find.text('暂未填写简介'), findsOneWidget);
+      expect(
+        tester
+            .widget<TextButton>(
+              find.byKey(const Key('resource-content-copy-description')),
+            )
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(find.byKey(const Key('resource-content-copy-link')));
+      await tester.pumpAndSettle();
+      expect(copied, [hit.copyText]);
+      expect(find.text('链接已复制'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('resource-content-open')));
+      await tester.pumpAndSettle();
+      expect(opened?.identity, hit.identity);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'failed content copies can retry and an unfinished copy can be dismissed',
+    (tester) async {
+      final hit = publishedContent(multiLink: true);
+      final pending = Completer<void>();
+      var attempts = 0;
+      mockContentCopies(tester, (_) async {
+        attempts++;
+        if (attempts == 1) {
+          throw PlatformException(code: 'clipboard_unavailable');
+        }
+        await pending.future;
+      });
+      await render(
+        tester,
+        home: true,
+        catalog: ResourceCatalog(popular: [hit]),
+      );
+      await tester.tap(publishedTile(hit));
+      await tester.pumpAndSettle();
+      final copyDescription = find.byKey(
+        const Key('resource-content-copy-description'),
+      );
+      await tester.tap(copyDescription);
+      await tester.pumpAndSettle();
+      expect(find.text('复制失败，请长按文本手动复制'), findsOneWidget);
+      expect(tester.widget<TextButton>(copyDescription).onPressed, isNotNull);
+      await tester.tap(copyDescription);
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextButton>(copyDescription).onPressed, isNull);
+      expect(
+        tester
+            .widget<TextButton>(
+              find.byKey(const Key('resource-content-copy-link')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const Key('resource-content-open')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<DropdownButtonFormField<int>>(
+              find.byKey(const Key('resource-content-link-picker')),
+            )
+            .onChanged,
+        isNull,
+      );
+      await tester.tap(copyDescription);
+      expect(attempts, 2);
+      await tester.tap(find.byKey(const Key('resource-content-close')));
+      await tester.pumpAndSettle();
+      pending.complete();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
+      await tester.tap(publishedTile(hit));
+      await tester.pumpAndSettle();
+      await tester.tap(copyDescription);
+      await tester.pumpAndSettle();
+      expect(attempts, 3);
+      expect(find.text('简介已复制'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'published resource open failure keeps the home usable for retry',
+    (tester) async {
+      final hit = publishedContent();
+      var attempts = 0;
+      await render(
+        tester,
+        home: true,
+        catalog: ResourceCatalog(popular: [hit]),
+        onOpen: (_) async {
+          attempts++;
+          if (attempts == 1) throw const AppException('分享暂时不可用');
+        },
+      );
+      for (var attempt = 1; attempt <= 2; attempt++) {
+        await tester.tap(publishedTile(hit));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('resource-content-open')));
+        await tester.pumpAndSettle();
+        expect(attempts, attempt);
+        expect(find.byKey(const Key('resource-content-details')), findsNothing);
+        if (attempt == 1) expect(find.text('分享暂时不可用'), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'published content closes the keyboard and resumes visible checks after cancel',
+    (tester) async {
+      final hit = publishedContent();
+      final probe = LinkCheckApiFixture();
+      await render(
+        tester,
+        home: true,
+        linkChecks: ResourceLinkChecks(probe),
+        catalog: ResourceCatalog(popular: [hit]),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(probe.calls, hasLength(1));
+      final input = find.byKey(const Key('resource-home-search-input'));
+      await tester.tap(input);
+      await tester.pump();
+      final fieldContext = tester.element(input);
+      expect(FocusScope.of(fieldContext).hasFocus, isTrue);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pump();
+      await revealPublishedTile(tester, hit);
+      await tester.tap(publishedTile(hit));
+      await tester.pumpAndSettle();
+      expect(FocusScope.of(fieldContext).hasFocus, isFalse);
+      expect(probe.calls.single.cancellation.isCancelled, isTrue);
+      await tester.pump(const Duration(seconds: 1));
+      expect(probe.calls, hasLength(1));
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('resource-content-close')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(probe.calls, hasLength(2));
+      probe.calls.last.complete(ResourceLinkState.valid);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final home in [true, false]) {
+    testWidgets(
+      'published ${home ? 'catalog' : 'recommendation'} offers external opening for an unsupported link',
+      (tester) async {
+        final hit = ResourceSearchHit.fromRaw({
+          'title': '后台推荐的公开资料',
+          'url': 'https://example.test/materials',
+          'recommendation_id': 23,
+          'description': '使用浏览器查看资料说明。',
+        });
+        const channel = MethodChannel('plugins.flutter.io/url_launcher');
+        final calls = <MethodCall>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          (call) async {
+            calls.add(call);
+            return true;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        var opens = 0;
+        await render(
+          tester,
+          home: home,
+          catalog: ResourceCatalog(popular: [hit]),
+          recommendations: [hit],
+          onOpen: (_) async => opens++,
+        );
+        await revealPublishedTile(tester, hit, home: home);
+        await tester.tap(publishedTile(hit, home: home));
+        await tester.pumpAndSettle();
+        expect(find.text('浏览器打开'), findsOneWidget);
+        await tester.tap(find.byKey(const Key('resource-content-open')));
+        await tester.pumpAndSettle();
+        expect(calls.single.method, 'launch');
+        expect(calls.single.arguments['url'], hit.url);
+        expect(calls.single.arguments['useWebView'], isFalse);
+        expect(calls.single.arguments['useSafariVC'], isFalse);
+        expect(opens, 0);
+        expect(find.byKey(const Key('resource-content-details')), findsNothing);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 
   for (final (name, size, scale) in [
     ('phone', const Size(430, 932), 1.0),
@@ -506,7 +1298,8 @@ void main() {
     expect(find.byKey(const Key('resource-priority-settings')), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('navigation-4')));
     await tester.pumpAndSettle();
-    expect(find.byTooltip('更多操作'), findsOneWidget);
+    expect(find.byTooltip('更多操作'), findsNothing);
+    expect(find.byTooltip('打赏作者'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('navigation-1')));
     await tester.pumpAndSettle();
     expect(find.byTooltip('更多操作'), findsNothing);
@@ -807,24 +1600,229 @@ void main() {
     },
   );
 
-  testWidgets('resource home shows reusable recent searches', (tester) async {
-    final (services, api) = await render(tester, home: true);
-    expect(find.text('最近搜索'), findsOneWidget);
-    expect(
-      find.byKey(const ValueKey('resource-home-history-电子书')),
-      findsOneWidget,
-    );
+  testWidgets(
+    'resource home keeps history only behind its icon after searching',
+    (tester) async {
+      final (services, api) = await render(tester, home: true);
+      final historyIcon = find.byKey(const Key('resource-search-history'));
+      expect(find.text('最近搜索'), findsNothing);
+      expect(find.byType(ActionChip), findsNothing);
+      expect(
+        find.byKey(const Key('resource-home-clear-history')),
+        findsNothing,
+      );
+      expect(historyIcon, findsOneWidget);
+      await tester.tap(historyIcon);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('resource-history-电子书')));
+      await tester.pumpAndSettle();
+      expect(find.byType(ResourceSearchPage), findsOneWidget);
+      expect(services.resourceSearch.keyword, '电子书');
+      expect(api.calls, ['电子书']);
 
-    await tester.tap(find.byKey(const ValueKey('resource-home-history-电子书')));
+      expect(await tester.binding.handlePopRoute(), isTrue);
+      await tester.pumpAndSettle();
+      expect(find.byType(ResourceHomePage), findsOneWidget);
+      expect(services.resourceSearch.history.first, '电子书');
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('resource-home-search-input')),
+            )
+            .controller!
+            .text,
+        '电子书',
+      );
+
+      expect(find.byType(ActionChip), findsNothing);
+      await tester.tap(historyIcon);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('resource-clear-history')));
+      await flushStore(tester, services.store);
+      expect(services.resourceSearch.history, isEmpty);
+      expect(find.text('暂无搜索历史'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('resource-search-history-close')));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('resource-home-search-input')),
+        '视频素材',
+      );
+      await tester.tap(find.byKey(const Key('resource-home-search-submit')));
+      await tester.pumpAndSettle();
+      expect(await tester.binding.handlePopRoute(), isTrue);
+      await tester.pumpAndSettle();
+      expect(historyIcon, findsOneWidget);
+      expect(find.text('最近搜索'), findsNothing);
+      expect(find.byType(ActionChip), findsNothing);
+      expect(services.resourceSearch.history, ['视频素材']);
+      await tester.tap(historyIcon);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('resource-history-视频素材')),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final home in [true, false]) {
+    for (final (name, size, scale, dark) in [
+      ('phone', const Size(390, 844), 1.0, false),
+      ('narrow-large-text', const Size(320, 700), 1.8, true),
+      ('tablet', const Size(820, 1180), 1.0, false),
+      ('desktop', const Size(1280, 900), 1.0, true),
+      ('landscape', const Size(740, 360), 1.6, false),
+    ]) {
+      testWidgets(
+        'Search history icon browses all saved terms beside settings on ${home ? 'home' : 'results'} $name',
+        (tester) async {
+          final (services, api) = await render(
+            tester,
+            home: home,
+            populated: !home,
+            size: size,
+            scale: scale,
+            dark: dark,
+          );
+          final history = [
+            for (var index = 1; index <= 39; index++) '历史搜索 $index',
+            '最后一条完整搜索关键词 ${List.filled(10, '学习资料').join(' ')}',
+          ];
+          await tester.runAsync(
+            () => services.store.put('resourceSearchHistory', history),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('最近搜索'), findsNothing);
+          expect(find.byType(ActionChip), findsNothing);
+          final settings = tester.getRect(
+            find.byKey(const Key('resource-priority-settings')),
+          );
+          final icon = find.byKey(const Key('resource-search-history'));
+          final iconRect = tester.getRect(icon);
+          expect(iconRect.center.dy, closeTo(settings.center.dy, 1));
+          expect(iconRect.left, greaterThanOrEqualTo(settings.right));
+          expect(iconRect.left - settings.right, lessThanOrEqualTo(8));
+          expect(tester.widget(icon), isA<IconButton>());
+          final calls = List.of(api.calls);
+          final input = find.byKey(
+            Key(home ? 'resource-home-search-input' : 'resource-search-input'),
+          );
+          final inputBefore = tester.widget<TextField>(input).controller!.text;
+          final itemsBefore = services.resourceSearch.items;
+          await captureContentDetails(
+            tester,
+            'search-history-page-${home ? 'home' : 'results'}-$name',
+          );
+          await tester.tap(icon);
+          await tester.pumpAndSettle();
+          final sheet = find.byKey(const Key('resource-search-history-sheet'));
+          expect(sheet, findsOneWidget);
+          expect(
+            tester
+                .widget<ListView>(
+                  find.byKey(const Key('resource-search-history-list')),
+                )
+                .childrenDelegate
+                .estimatedChildCount,
+            history.length,
+          );
+          final last = find.descendant(
+            of: sheet,
+            matching: find.byKey(ValueKey('resource-history-${history.last}')),
+          );
+          await tester.scrollUntilVisible(
+            last,
+            200,
+            scrollable: find.descendant(
+              of: find.byKey(const Key('resource-search-history-list')),
+              matching: find.byType(Scrollable),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.descendant(of: last, matching: find.text(history.last)),
+            findsOneWidget,
+          );
+          expect(last.hitTestable(), findsOneWidget);
+          await captureContentDetails(
+            tester,
+            'search-history-${home ? 'home' : 'results'}-$name',
+          );
+          await tester.tap(
+            find.byKey(const Key('resource-search-history-close')),
+          );
+          await tester.pumpAndSettle();
+          expect(sheet, findsNothing);
+          expect(services.resourceSearch.allHistory, history);
+          expect(services.resourceSearch.history, history.take(12).toList());
+          expect(services.resourceSearch.items, itemsBefore);
+          expect(tester.widget<TextField>(input).controller!.text, inputBefore);
+          expect(api.calls, calls);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+
+    testWidgets(
+      'Search history clears in place and remains accessible when empty on ${home ? 'home' : 'results'}',
+      (tester) async {
+        final (services, api) = await render(
+          tester,
+          home: home,
+          populated: !home,
+          size: const Size(740, 360),
+          scale: 1.8,
+        );
+        final calls = List.of(api.calls);
+        final history = find.byKey(const Key('resource-search-history'));
+        await tester.tap(history);
+        await tester.pumpAndSettle();
+        final sheet = find.byKey(const Key('resource-search-history-sheet'));
+        await tester.tap(
+          find.descendant(
+            of: sheet,
+            matching: find.byKey(const Key('resource-clear-history')),
+          ),
+        );
+        await flushStore(tester, services.store);
+        expect(sheet, findsOneWidget);
+        expect(find.text('暂无搜索历史'), findsOneWidget);
+        expect(services.resourceSearch.history, isEmpty);
+        await tester.tap(
+          find.byKey(const Key('resource-search-history-close')),
+        );
+        await tester.pumpAndSettle();
+        expect(history, findsOneWidget);
+        await tester.tap(history);
+        await tester.pumpAndSettle();
+        expect(find.text('暂无搜索历史'), findsOneWidget);
+        expect(await tester.binding.handlePopRoute(), isTrue);
+        await tester.pumpAndSettle();
+        expect(sheet, findsNothing);
+        expect(api.calls, calls);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('Resource home history selection reuses search and fills input', (
+    tester,
+  ) async {
+    final (services, api) = await render(tester, home: true);
+    await tester.tap(find.byKey(const Key('resource-search-history')));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('resource-history-电子书')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('resource-search-history-sheet')),
+      findsNothing,
+    );
     expect(find.byType(ResourceSearchPage), findsOneWidget);
     expect(services.resourceSearch.keyword, '电子书');
     expect(api.calls, ['电子书']);
-
     expect(await tester.binding.handlePopRoute(), isTrue);
     await tester.pumpAndSettle();
-    expect(find.byType(ResourceHomePage), findsOneWidget);
-    expect(services.resourceSearch.history.first, '电子书');
     expect(
       tester
           .widget<TextField>(
@@ -834,25 +1832,7 @@ void main() {
           .text,
       '电子书',
     );
-
-    await tester.tap(find.byKey(const Key('resource-home-clear-history')));
-    await tester.pumpAndSettle();
-    expect(services.resourceSearch.history, isEmpty);
-    expect(find.text('最近搜索'), findsNothing);
-
-    await tester.enterText(
-      find.byKey(const Key('resource-home-search-input')),
-      '视频素材',
-    );
-    await tester.tap(find.byKey(const Key('resource-home-search-submit')));
-    await tester.pumpAndSettle();
-    expect(await tester.binding.handlePopRoute(), isTrue);
-    await tester.pumpAndSettle();
-    expect(
-      find.byKey(const ValueKey('resource-home-history-视频素材')),
-      findsOneWidget,
-    );
-    expect(services.resourceSearch.history, ['视频素材']);
+    expect(services.resourceSearch.history.first, '电子书');
     expect(tester.takeException(), isNull);
   });
 
@@ -862,7 +1842,22 @@ void main() {
       final (services, _) = await render(tester, root: true);
       await tester.tap(find.byKey(const Key('resource-priority-settings')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('下移夸克'));
+      expect(find.byTooltip('上移夸克'), findsNothing);
+      expect(find.byTooltip('下移夸克'), findsNothing);
+      final drag = find.byKey(const ValueKey('resource-drag-Quark'));
+      final target = tester.getCenter(
+        find.byKey(const ValueKey('resource-drag-Tianyi')),
+      );
+      final gesture = await tester.startGesture(tester.getCenter(drag));
+      await tester.pump();
+      await gesture.moveBy(const Offset(0, 20));
+      await tester.pump();
+      await gesture.moveTo(target);
+      await tester.pump(const Duration(milliseconds: 300));
+      await gesture.moveBy(const Offset(0, 1));
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('resource-priority-save')));
       await tester.pumpAndSettle();
       expect(services.resourceSearch.cloudPriority.first, CloudPlatform.uc);
@@ -898,6 +1893,243 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets(
+    'cloud display switch saves with settings and default restores visibility and order',
+    (tester) async {
+      final (services, api) = await render(tester, populated: true);
+      final settings = find.byKey(const Key('resource-priority-settings'));
+      final toggle = find.byKey(const ValueKey('resource-enabled-Quark'));
+      final save = find.byKey(const Key('resource-priority-save'));
+
+      await tester.tap(settings);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(toggle).value, isTrue);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(toggle).value, isFalse);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.disabledClouds, isEmpty);
+      expect(services.resourceSearch.items, hasLength(4));
+
+      await tester.tap(settings);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(toggle).value, isTrue);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(toggle).value, isFalse);
+      await tester.tap(save);
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.disabledClouds, {CloudPlatform.quark});
+      expect(services.resourceSearch.items, hasLength(3));
+      expect(
+        find.byKey(const ValueKey('resource-result-Quark:books')),
+        findsNothing,
+      );
+      expect(find.byKey(const ValueKey('resource-filter-夸克网盘')), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('resource-filter-all')),
+          matching: find.text('3'),
+        ),
+        findsOneWidget,
+      );
+      expect(api.calls, hasLength(1));
+
+      await tester.tap(settings);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(toggle).value, isFalse);
+      final drag = find.byKey(const ValueKey('resource-drag-Quark'));
+      final target = tester.getCenter(
+        find.byKey(const ValueKey('resource-drag-Tianyi')),
+      );
+      final gesture = await tester.startGesture(tester.getCenter(drag));
+      await tester.pump();
+      await gesture.moveBy(const Offset(0, 20));
+      await tester.pump();
+      await gesture.moveTo(target);
+      await tester.pump(const Duration(milliseconds: 300));
+      await gesture.moveBy(const Offset(0, 1));
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+      await tester.tap(save);
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.cloudPriority.first, CloudPlatform.uc);
+      expect(services.resourceSearch.disabledClouds, {CloudPlatform.quark});
+
+      await tester.tap(settings);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('resource-priority-reset')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(toggle).value, isTrue);
+      await tester.tap(save);
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.disabledClouds, isEmpty);
+      expect(
+        services.resourceSearch.cloudPriority,
+        ResourceSearch.defaultCloudPriority,
+      );
+      expect(services.resourceSearch.items, hasLength(4));
+      expect(
+        find.byKey(const ValueKey('resource-result-Quark:books')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('resource-filter-夸克网盘')),
+        findsOneWidget,
+      );
+      expect(api.calls, hasLength(1));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'disabling a cloud removes already checked rows while scrolled away from the top',
+    (tester) async {
+      final checkerApi = LinkCheckApiFixture(
+        (_) async => ResourceLinkHealth.checked(
+          ResourceLinkState.valid,
+          DateTime(2026, 10, 22),
+        ),
+      );
+      final hits = [
+        ...List.generate(12, (i) => probeHit('quark$i')),
+        ...List.generate(
+          18,
+          (i) => probeHit('baidu$i', url: 'https://pan.baidu.com/s/1baidu$i'),
+        ),
+      ];
+      final (services, api) = await render(
+        tester,
+        populated: true,
+        linkChecks: ResourceLinkChecks(checkerApi),
+        response: (_, _) =>
+            Stream.value(ResourceSearchBatch(hits, complete: true)),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.byKey(const PageStorageKey('resource-search-results')),
+        const Offset(0, -450),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .state<ScrollableState>(find.byType(Scrollable).last)
+            .position
+            .pixels,
+        greaterThan(16),
+      );
+      await tester.tap(find.byKey(const Key('resource-priority-settings')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('resource-enabled-Quark')));
+      await tester.tap(find.byKey(const Key('resource-priority-save')));
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.items, hasLength(18));
+      final rows = tester.widgetList<ResourceSearchResultRow>(
+        find.byType(ResourceSearchResultRow),
+      );
+      expect(rows, isNotEmpty);
+      expect(
+        rows.every((row) => row.hit.platform == CloudPlatform.baidu),
+        isTrue,
+      );
+      expect(find.byKey(const ValueKey('resource-filter-夸克网盘')), findsNothing);
+      expect(api.calls, hasLength(1));
+      expect(checkerApi.calls, hasLength(30));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'incognito switch in search settings saves immediately on both pages',
+    (tester) async {
+      final (services, _) = await render(tester, home: true);
+      final history = services.resourceSearch.history;
+      await tester.tap(find.byKey(const Key('resource-priority-settings')));
+      await tester.pumpAndSettle();
+      final toggle = find.byKey(const Key('resource-search-incognito'));
+      expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.incognito, isTrue);
+      // Dismissing without saving the separate display order keeps incognito.
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-home-search-input')),
+        '私密搜索',
+      );
+      await tester.tap(find.byKey(const Key('resource-home-search-submit')));
+      await tester.pumpAndSettle();
+      expect(find.byType(ResourceSearchPage), findsOneWidget);
+      expect(services.resourceSearch.history, history);
+      await tester.tap(find.byKey(const Key('resource-priority-settings')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-search-input')),
+        '正常搜索',
+      );
+      await tester.tap(find.byKey(const Key('resource-search-submit')));
+      await tester.pumpAndSettle();
+      expect(services.resourceSearch.incognito, isFalse);
+      expect(services.resourceSearch.history.first, '正常搜索');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final (size, scale) in [
+    (const Size(320, 568), 1.5),
+    (const Size(844, 390), 1.3),
+    (const Size(1280, 800), 1.0),
+  ]) {
+    testWidgets('search settings fit ${size.width} at text scale $scale', (
+      tester,
+    ) async {
+      await render(tester, size: size, scale: scale);
+      await tester.tap(find.byKey(const Key('resource-priority-settings')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('resource-search-incognito')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('resource-priority-save')).hitTestable(),
+        findsOneWidget,
+      );
+      final toggle = find.byKey(const ValueKey('resource-enabled-C139'));
+      await tester.scrollUntilVisible(
+        toggle,
+        120,
+        scrollable: find
+            .descendant(
+              of: find.byType(ReorderableListView),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.pumpAndSettle();
+      expect(toggle.hitTestable(), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('resource-drag-C139')).hitTestable(),
+        findsOneWidget,
+      );
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(toggle).value, isFalse);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets(
     'Android system back during a streaming search returns home and cancels the request',
@@ -1053,6 +2285,53 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  Future<void> expectDocumentDownload(
+    WidgetTester tester,
+    AppServices services, {
+    required String shareId,
+    required String fileId,
+  }) async {
+    expect(find.byType(DocumentDownloadPreview), findsOneWidget);
+    expect(services.downloads.tasks, isEmpty);
+    await tester.tap(find.byKey(const Key('document-download-confirm')));
+    await tester.pump();
+    // The download queue uses real filesystem I/O as well as frame timers.
+    for (var attempt = 0; attempt < 100; attempt++) {
+      if (services.downloads.tasks.isNotEmpty &&
+          services.downloads.tasks.single.status == DownloadStatus.failed &&
+          find
+              .byKey(const Key('document-download-control'))
+              .evaluate()
+              .isNotEmpty) {
+        break;
+      }
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+    expect(find.byType(DocumentDownloadPreview), findsOneWidget);
+    expect(services.downloads.tasks, hasLength(1));
+    final task = services.downloads.tasks.single;
+    final origin = DownloadOrigin.fromJson(task.spec.source!);
+    expect(origin.session.platform, CloudPlatform.quark);
+    expect(origin.session.mode, BrowseMode.share);
+    expect(origin.session.rootId, shareId);
+    expect(origin.file.id, fileId);
+    expect(task.spec.fileName, 'Python 学习指南.pdf');
+    // This connector deliberately rejects downloads. The resulting task must
+    // remain available for retry, rather than loading an online viewer.
+    expect(task.status, DownloadStatus.failed);
+    expect(
+      find.byTooltip('重试下载'),
+      findsOneWidget,
+      reason: tester
+          .widgetList<Text>(find.byType(Text))
+          .map((t) => t.data)
+          .join('; '),
+    );
+  }
+
   Future<(SearchApiFixture, _SearchShareConnector)> openOriginalBrowser(
     WidgetTester tester,
   ) async {
@@ -1071,6 +2350,9 @@ void main() {
     tester,
   ) async {
     final (api, connector) = await openOriginalBrowser(tester);
+    final services = tester
+        .widget<BrowserPage>(find.byType(BrowserPage))
+        .services;
     api.resolve = (_, _, _) => Future.error(StateError('转存服务暂时不可用'));
     await tester.tap(find.text('Python 学习指南.pdf'));
     await settlePreview(tester);
@@ -1078,6 +2360,7 @@ void main() {
     expect(find.byKey(const Key('pool-preview-original')), findsNothing);
     expect(find.text('使用原链接预览'), findsNothing);
     expect(connector.downloadCalls, 0);
+    expect(services.downloads.tasks, isEmpty);
     expect(api.openCalls, hasLength(1));
     expect(connector.opened!.shareId, 'books');
     api.resolve = (hit, _, selection) async =>
@@ -1092,7 +2375,12 @@ void main() {
     expect(api.openCalls, hasLength(2));
     expect(connector.opened!.shareId, 'poolnew');
     expect(find.text('暂未完成资源准备'), findsNothing);
-    expect(find.text('下载文件'), findsOneWidget);
+    await expectDocumentDownload(
+      tester,
+      services,
+      shareId: 'poolnew',
+      fileId: 'newbook',
+    );
     expect(tester.takeException(), isNull);
   });
 
@@ -1100,6 +2388,9 @@ void main() {
     'failed transfer offers retry and return without original preview',
     (tester) async {
       final (api, connector) = await openOriginalBrowser(tester);
+      final services = tester
+          .widget<BrowserPage>(find.byType(BrowserPage))
+          .services;
       api.resolve = (hit, _, _) async => ResourceSearchOpenResult(
         hit: hit,
         mode: 'original',
@@ -1114,16 +2405,9 @@ void main() {
       expect(find.byKey(const Key('pool-preview-original')), findsNothing);
       expect(find.text('使用原链接预览'), findsNothing);
       expect(find.text('下载文件'), findsNothing);
-      expect(
-        tester
-            .widget<IconButton>(
-              find.byWidgetPredicate(
-                (widget) => widget is IconButton && widget.tooltip == '下载文件',
-              ),
-            )
-            .onPressed,
-        isNull,
-      );
+      expect(find.byType(DocumentDownloadPreview), findsNothing);
+      expect(services.downloads.tasks, isEmpty);
+      expect(find.byTooltip('传输管理'), findsOneWidget);
       expect(connector.downloadCalls, 0);
       expect(api.openCalls, hasLength(1));
       expect(connector.opened!.shareId, 'books');
@@ -1198,16 +2482,9 @@ void main() {
         expect(find.byKey(const Key('pool-preview-original')), findsNothing);
         expect(find.text('使用原链接预览'), findsNothing);
         expect(find.text('下载文件'), findsNothing);
-        expect(
-          tester
-              .widget<IconButton>(
-                find.byWidgetPredicate(
-                  (widget) => widget is IconButton && widget.tooltip == '下载文件',
-                ),
-              )
-              .onPressed,
-          isNull,
-        );
+        expect(find.byType(DocumentDownloadPreview), findsNothing);
+        expect(services.downloads.tasks, isEmpty);
+        expect(find.byTooltip('传输管理'), findsOneWidget);
         expect(connector.downloadCalls, 0);
         expect(connector.opened!.shareId, 'books');
         expect(api.openCalls, hasLength(attempt + 1));
@@ -1229,6 +2506,9 @@ void main() {
       tester,
     ) async {
       final (api, connector) = await openOriginalBrowser(tester);
+      final services = tester
+          .widget<BrowserPage>(find.byType(BrowserPage))
+          .services;
       api.resolve = (hit, _, _) async => ResourceSearchOpenResult(
         hit: hit,
         mode: 'original',
@@ -1241,7 +2521,12 @@ void main() {
       expect(find.text('号池暂不可用，使用原链接预览'), findsNothing);
       expect(find.byKey(const Key('pool-preview-original')), findsNothing);
       expect(find.text('暂未完成资源准备'), findsNothing);
-      expect(find.text('下载文件'), findsOneWidget);
+      await expectDocumentDownload(
+        tester,
+        services,
+        shareId: 'books',
+        fileId: 'book',
+      );
       expect(api.openCalls, hasLength(1));
       expect(connector.opened!.shareId, 'books');
       expect(connector.opened!.passcode, 'aB12');
@@ -1352,11 +2637,11 @@ void main() {
     final (services, _) = await render(tester, populated: true);
     await tester.tap(find.byKey(const Key('resource-search-history')));
     await tester.pumpAndSettle();
-    expect(find.text('最近搜索'), findsOneWidget);
+    expect(find.text('搜索历史'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('resource-history-电子书')));
     await tester.pumpAndSettle();
     expect(services.resourceSearch.keyword, '电子书');
-    expect(find.text('最近搜索'), findsNothing);
+    expect(find.text('搜索历史'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -1384,6 +2669,7 @@ void main() {
       await tester.tap(find.textContaining('Python 编程：').first);
       await tester.pumpAndSettle();
       expect(find.text('资源详情'), findsOneWidget);
+      expect(find.byKey(const Key('resource-content-details')), findsNothing);
       expect(find.text('提取码：aB12'), findsOneWidget);
       expect(find.text('电子书与配套练习代码，适合零基础学习与查阅。'), findsWidgets);
       expect(tester.takeException(), isNull);

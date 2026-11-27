@@ -54,6 +54,12 @@ class Drive extends CloudConnector {
   bool rapidSupported = true;
   bool sourceMd5Supported = true;
   bool failUploadBeforeSave = false;
+  Future<CloudFile> Function(
+    UploadFile source,
+    UploadProgressCallback? progress,
+  )?
+  uploadOverride;
+  Future<List<CloudFile>> Function(String parent)? listOverride;
   String downloadUrl = '';
   final downloads = <String>[], uploads = <String>[];
   AppException? rapidFailure;
@@ -69,7 +75,7 @@ class Drive extends CloudConnector {
     BrowseSession s,
     String parent,
     Credential? c,
-  ) async => List.of(directories[parent] ?? []);
+  ) async => listOverride?.call(parent) ?? List.of(directories[parent] ?? []);
   @override
   Future<CloudFilePage> listPage(
     BrowseSession s,
@@ -111,6 +117,7 @@ class Drive extends CloudConnector {
     if (rapidFailure != null) throw rapidFailure!;
     if (hold != null) await RequestScope.cancellable(hold!.future);
     RequestScope.checkpoint();
+    WriteRequestScope.current?.markSent();
     if (miss.contains(source.name)) return const RapidTransferResult.missed();
     final result = file('saved-${calls.length}', source.name, parent);
     directories.putIfAbsent(parent, () => []).add(result);
@@ -143,7 +150,9 @@ class Drive extends CloudConnector {
     Credential c, {
     UploadProgressCallback? onProgress,
   }) async {
+    if (uploadOverride case final upload?) return upload(source, onProgress);
     if (failUploadBeforeSave) throw const AppException('模拟上传失败');
+    WriteRequestScope.current?.markSent();
     final bytes = await source.openRead().fold<List<int>>(
       [],
       (all, part) => all..addAll(part),
@@ -163,6 +172,48 @@ class Drive extends CloudConnector {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _SnapshotRelay extends CrossTransferRelay {
+  _SnapshotRelay({
+    required super.cloud,
+    required super.http,
+    required super.cache,
+  });
+  final first = Completer<void>(), next = Completer<void>();
+  final rollback = Completer<void>(), finish = Completer<void>();
+  var snapshots = 0;
+  @override
+  Future<T> transfer<T>(
+    BrowseSession source,
+    CloudFile file, {
+    required String taskId,
+    required String entryId,
+    required String? expectedMd5,
+    required void Function(int received, int total) onProgress,
+    void Function()? onVerifying,
+    required Future<T> Function(UploadFile file, String md5) upload,
+  }) async {
+    for (final (gate, received) in [
+      (first, file.size * 9 ~/ 10),
+      (next, file.size * 95 ~/ 100),
+      (rollback, file.size * 8 ~/ 10),
+    ]) {
+      await RequestScope.cancellable(gate.future);
+      onProgress(received, file.size);
+      snapshots++;
+    }
+    await RequestScope.cancellable(finish.future);
+    onVerifying?.call();
+    return upload(
+      UploadFile(
+        name: file.name,
+        size: file.size,
+        read: (_, _) => const Stream<List<int>>.empty(),
+      ),
+      hash,
+    );
+  }
 }
 
 void main() {
@@ -222,6 +273,7 @@ void main() {
       confirmDownload: () async {
         confirmations++;
       },
+      confirmationWait: (_) async => RequestScope.checkpoint(),
     );
     await manager.initialize();
   });
@@ -238,6 +290,116 @@ void main() {
     await until(() => !manager.task(id)!.active);
     return manager.task(id)!;
   }
+
+  test(
+    'Resumed snapshots and byte rollback reset the speed baseline',
+    () async {
+      const input = CloudFile(
+        id: 'resumed',
+        name: 'resumed.bin',
+        parentId: '0',
+        size: 1000000,
+      );
+      from.directories['0'] = [input];
+      to.rapidSupported = false;
+      to.uploadOverride = (payload, progress) async =>
+          CloudFile(id: 'saved', name: payload.name, size: payload.size);
+      await manager.close();
+      manager.dispose();
+      final relay = _SnapshotRelay(cloud: cloud, http: transfer, cache: cache);
+      manager = RapidTransferManager(store: store, cloud: cloud, relay: relay);
+      final id = await manager.enqueue(source, [input], target, '0', 'root');
+      final task = manager.task(id)!;
+      await until(
+        () => task.entries.firstOrNull?.status == RapidEntryStatus.downloading,
+      );
+      // Delay the first native snapshot past the speed sampling interval.
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      relay.first.complete();
+      await until(() => relay.snapshots == 1);
+      expect(task.entries.single.downloaded, 900000);
+      expect(task.progress, .45);
+      expect(task.speed, 0);
+      expect(task.downloadSpeed, 0);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      relay.next.complete();
+      await until(() => relay.snapshots == 2);
+      expect(task.downloadSpeed, greaterThan(0));
+      expect(task.uploadSpeed, 0);
+      expect(task.speed, task.downloadSpeed);
+      relay.rollback.complete();
+      await until(() => relay.snapshots == 3);
+      expect(task.entries.single.downloaded, 800000);
+      expect(task.progress, .4);
+      expect(task.speed, 0);
+      expect(task.entries.single.downloadSpeed, 0);
+      relay.finish.complete();
+      await until(() => !task.active);
+      expect(task.succeeded, 1);
+      expect(task.speed, 0);
+    },
+  );
+
+  test(
+    'Relay updates preparing and confirmation immediately without fake bytes',
+    () async {
+      final input = file('phases', 'phases.bin', '0', digest: false);
+      from.directories['0'] = [input];
+      to.rapidSupported = false;
+      final prepare = Completer<void>(), confirm = Completer<void>();
+      var preparing = false, confirming = false;
+      to.uploadOverride = (source, progress) async {
+        progress?.call(
+          UploadProgress(UploadPhase.preparing, source.size, source.size),
+        );
+        preparing = true;
+        await RequestScope.cancellable(prepare.future);
+        progress?.call(UploadProgress(UploadPhase.uploading, 1, source.size));
+        progress?.call(
+          UploadProgress(UploadPhase.finishing, source.size, source.size),
+        );
+        confirming = true;
+        await RequestScope.cancellable(confirm.future);
+        return CloudFile(id: 'saved', name: source.name, size: source.size);
+      };
+      final phases = <String>[];
+      void changed() {
+        final task = manager.tasks.firstOrNull;
+        if (task == null || task.entries.isEmpty) return;
+        final entry = task.entries.single;
+        if (entry.status == RapidEntryStatus.uploading) {
+          phases.add(entry.uploadPhase.name);
+        }
+      }
+
+      manager.addListener(changed);
+      addTearDown(() {
+        manager.removeListener(changed);
+        if (!prepare.isCompleted) prepare.complete();
+        if (!confirm.isCompleted) confirm.complete();
+      });
+      final id = await manager.enqueue(source, [input], target, '0', 'root');
+      await until(() => preparing);
+      final task = manager.task(id)!;
+      final entry = task.entries.single;
+      expect(entry.sent, 0);
+      expect(entry.progress, .5);
+      expect(task.stage, '正在准备上传 1 个');
+      prepare.complete();
+      await until(() => confirming);
+      expect(phases, contains('finishing'));
+      expect(entry.uploadPhase, UploadPhase.finishing);
+      expect(task.stage, '正在确认 1 个');
+      expect(entry.sent, 3);
+      expect(task.progress, closeTo(.99, 1e-9));
+      expect(task.speed, 0);
+      confirm.complete();
+      await until(() => !task.active);
+      expect(entry.progress, 1);
+      expect(task.succeeded, 1);
+      expect(await cache.list().toList(), isEmpty);
+    },
+  );
 
   test(
     'scans all pages, preserves nested and empty folders and deduplicates selection',
@@ -274,8 +436,8 @@ void main() {
       final task = await enqueue([a, b, c]);
       expect(task.count(RapidEntryStatus.duplicate), 1);
       expect(task.count(RapidEntryStatus.uploaded), 2);
-      expect(from.downloads, ['unknown.bin', 'missing.bin']);
-      expect(to.uploads, ['unknown.bin', 'missing.bin']);
+      expect(from.downloads, unorderedEquals(['unknown.bin', 'missing.bin']));
+      expect(to.uploads, unorderedEquals(['unknown.bin', 'missing.bin']));
       expect(requests, 2);
       expect(confirmations, 1);
       expect(await cache.list().toList(), isEmpty);
@@ -390,6 +552,7 @@ void main() {
       final task = await enqueue([a]);
       expect(task.entries.single.payloadReady, true);
       expect(task.entries.single.downloaded, 3);
+      expect(task.progress, .5);
       expect(task.canRetry, true);
       expect(
         await cache
@@ -491,6 +654,238 @@ void main() {
       expect(requests, 1);
     },
   );
+  test(
+    'a delayed target listing after an interrupted upload never repeats it',
+    () async {
+      final input = file('late', 'late.bin', '0', digest: false);
+      from.directories['0'] = [input];
+      to.rapidSupported = false;
+      var uploads = 0, reads = 0;
+      to.uploadOverride = (payload, progress) async {
+        WriteRequestScope.current?.markSent();
+        uploads++;
+        to.directories['0'] = [file('saved', input.name, '0')];
+        throw const HttpRequestFailure('response lost', kind: 'receiveTimeout');
+      };
+      final task = await enqueue([input]);
+      expect(task.entries.single.confirmationPending, isTrue);
+      to.listOverride = (parent) async =>
+          ++reads < 4 ? [] : List.of(to.directories[parent] ?? []);
+      await manager.retry(task.id);
+      await until(() => !task.active);
+      expect(task.count(RapidEntryStatus.uploaded), 1);
+      expect(reads, 4);
+      expect(uploads, 1);
+      expect(requests, 1);
+      expect(task.entries.single.confirmationPending, isFalse);
+      expect(await cache.list().toList(), isEmpty);
+    },
+  );
+  test(
+    'unconfirmed upload stays retryable across restart without another write',
+    () async {
+      final input = file('uncertain', 'uncertain.bin', '0', digest: false);
+      from.directories['0'] = [input];
+      to.rapidSupported = false;
+      var uploads = 0;
+      to.uploadOverride = (payload, progress) async {
+        WriteRequestScope.current?.markSent();
+        uploads++;
+        progress?.call(
+          UploadProgress(UploadPhase.uploading, payload.size, payload.size),
+        );
+        throw const HttpRequestFailure('response lost', kind: 'receiveTimeout');
+      };
+      final task = await enqueue([input]);
+      expect(task.entries.single.confirmationPending, isTrue);
+      expect(task.entries.single.sent, 3);
+      await manager.close();
+      manager.dispose();
+      manager = RapidTransferManager(
+        store: store,
+        cloud: cloud,
+        relay: CrossTransferRelay(cloud: cloud, http: transfer, cache: cache),
+        confirmationWait: (_) async => RequestScope.checkpoint(),
+      );
+      await manager.initialize();
+      final restored = manager.task(task.id)!;
+      for (var retry = 0; retry < 2; retry++) {
+        await manager.retry(restored.id);
+        await until(() => !restored.active);
+        expect(restored.canRetry, isTrue);
+        expect(restored.entries.single.message, contains('仍待确认'));
+        expect(restored.entries.single.confirmationPending, isTrue);
+        expect(restored.entries.single.sent, 3);
+        expect(uploads, 1);
+        expect(requests, 1);
+      }
+      to.directories['0'] = [file('eventually-saved', input.name, '0')];
+      await manager.retry(restored.id);
+      await until(() => !restored.active);
+      expect(restored.count(RapidEntryStatus.uploaded), 1);
+      expect(uploads, 1);
+    },
+  );
+  test(
+    'a receipt survives cancellation and confirms an auto-renamed saved file',
+    () async {
+      final input = file('receipt', 'receipt.bin', '0', digest: false);
+      from.directories['0'] = [input];
+      to.rapidSupported = false;
+      to.uploadOverride = (payload, progress) async {
+        WriteRequestScope.current?.markSent();
+        to.uploads.add(payload.name);
+        final saved = file('receipt-id', 'receipt (1).bin', '0', digest: false);
+        to.directories['0'] = [saved];
+        // The remote write succeeded as the user cancelled the old scope.
+        await manager.cancel(manager.tasks.single.id);
+        return saved;
+      };
+      final task = await enqueue([input]);
+      expect(task.status, RapidTaskStatus.cancelled);
+      expect(task.entries.single.fileId, 'receipt-id');
+      expect(task.entries.single.confirmationPending, isTrue);
+      await manager.retry(task.id);
+      await until(() => !task.active);
+      expect(task.count(RapidEntryStatus.uploaded), 1);
+      expect(task.entries.single.fileId, 'receipt-id');
+      expect(to.uploads, [input.name]);
+      expect(requests, 1);
+    },
+  );
+  test(
+    'same-name file without a verified hash is skipped, not uploaded',
+    () async {
+      final input = file(
+        'unknown-hash',
+        'unknown-hash.bin',
+        '0',
+        digest: false,
+      );
+      from.directories['0'] = [input];
+      to.rapidSupported = false;
+      to.fail.add(input.name);
+      final task = await enqueue([input]);
+      to.directories['0'] = [file('saved', input.name, '0', digest: false)];
+      await manager.retry(task.id);
+      await until(() => !task.active);
+      expect(task.count(RapidEntryStatus.duplicate), 1);
+      expect(task.succeeded, 0);
+      expect(to.uploads, [input.name]);
+      expect(requests, 1);
+    },
+  );
+  test('SHA-1 target identity confirms without requiring an MD5', () async {
+    const digest = 'a9993e364706816aba3e25717850c26c9cd0d89d';
+    final input = file('sha1', 'sha1.bin', '0', digest: false);
+    from.directories['0'] = [input];
+    to.rapidSupported = false;
+    to.fail.add(input.name);
+    final task = await enqueue([input]);
+    expect(task.entries.single.sha1, digest);
+    to.directories['0'] = [
+      CloudFile(
+        id: 'sha1-saved',
+        name: input.name,
+        size: input.size,
+        parentId: '0',
+        hashType: 'SHA-1',
+        hashValue: digest.toUpperCase(),
+      ),
+    ];
+    await manager.retry(task.id);
+    await until(() => !task.active);
+    expect(task.count(RapidEntryStatus.uploaded), 1);
+    expect(to.uploads, [input.name]);
+  });
+  test('other batches cannot replace an unresolved same-name write', () async {
+    final input = file('owner', 'owner.bin', '0', digest: false);
+    from.directories['0'] = [input];
+    to.rapidSupported = false;
+    var uploads = 0;
+    to.uploadOverride = (payload, progress) async {
+      WriteRequestScope.current?.markSent();
+      uploads++;
+      throw const HttpRequestFailure('response lost', kind: 'receiveTimeout');
+    };
+    final original = await enqueue([input]);
+    final another = await enqueue([input]);
+    expect(original.entries.single.confirmationPending, isTrue);
+    expect(another.entries.single.message, contains('先继续原任务'));
+    expect(uploads, 1);
+    expect(requests, 1);
+    to.directories['0'] = [file('saved', input.name, '0')];
+    await manager.retry(original.id);
+    await until(() => !original.active);
+    await manager.retry(another.id);
+    await until(() => !another.active);
+    expect(original.count(RapidEntryStatus.uploaded), 1);
+    expect(another.count(RapidEntryStatus.duplicate), 1);
+    expect(uploads, 1);
+  });
+  test(
+    'unfinished middle parts can restart without blocking on confirmation',
+    () async {
+      final input = file(
+        'partial-upload',
+        'partial-upload.bin',
+        '0',
+        digest: false,
+      );
+      from.directories['0'] = [input];
+      to.rapidSupported = false;
+      to.uploadOverride = (payload, progress) async {
+        final attempt = WriteRequestScope.current!;
+        await attempt.track(() async => const HttpResult(200, '{}'));
+        await attempt.payload(
+          false,
+          () => attempt.track(() async {
+            throw const HttpRequestFailure('offline', kind: 'receiveTimeout');
+          }),
+        );
+        throw StateError('unreachable');
+      };
+      final task = await enqueue([input]);
+      expect(task.entries.single.confirmationPending, isTrue);
+      // An explicit temporary-only response clears any preflight side effects.
+      to.uploadOverride = (payload, progress) async {
+        final attempt = WriteRequestScope.current!;
+        attempt.notSavedYet();
+        await attempt.payload(
+          false,
+          () => attempt.track(() async {
+            throw const HttpRequestFailure('offline', kind: 'receiveTimeout');
+          }),
+        );
+        throw StateError('unreachable');
+      };
+      // Start a distinct filename to exercise a fresh interrupted middle part.
+      final another = file('partial-2', 'partial-2.bin', '0', digest: false);
+      from.directories['0']!.add(another);
+      final partial = await enqueue([another]);
+      expect(partial.entries.single.confirmationPending, isFalse);
+      to.uploadOverride = null;
+      await manager.retry(partial.id);
+      await until(() => !partial.active);
+      expect(partial.count(RapidEntryStatus.uploaded), 1);
+      expect(to.uploads, [another.name]);
+    },
+  );
+  test('delayed rapid acknowledgement does not create a second save', () async {
+    final input = file('rapid-late', 'rapid-late.bin', '0');
+    from.directories['0'] = [input];
+    to.fail.add(input.name);
+    final task = await enqueue([input]);
+    var reads = 0;
+    to.listOverride = (parent) async =>
+        ++reads < 3 ? [] : List.of(to.directories[parent] ?? []);
+    await manager.retry(task.id);
+    await until(() => !task.active);
+    expect(task.count(RapidEntryStatus.reused), 1);
+    expect(to.calls.length, 1);
+    expect(reads, 3);
+    expect(requests, 0);
+  });
   test(
     'rapid rate limit stops without silently starting full download',
     () async {

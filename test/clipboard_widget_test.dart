@@ -228,6 +228,11 @@ void main() {
     tester,
   ) async {
     await render(tester, tab: 3);
+    await tester.scrollUntilVisible(find.text('链接识别'), 150);
+    await tester.ensureVisible(find.text('链接识别'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('链接识别'));
+    await tester.pumpAndSettle();
     await tester.scrollUntilVisible(find.text('自动识别剪贴板链接'), 150);
     await Scrollable.ensureVisible(
       tester.element(find.text('自动识别剪贴板链接')),

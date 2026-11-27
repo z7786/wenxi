@@ -12,6 +12,7 @@ import 'package:asterlink/ui/cloud_accounts_page.dart';
 import 'package:asterlink/ui/github_login_page.dart';
 import 'package:asterlink/ui/loading_indicator.dart';
 import 'package:asterlink/ui/login_page.dart';
+import 'package:asterlink/ui/webdav_login_page.dart';
 import 'support.dart';
 
 // Keep the real state mutation and notification behavior while controlling the
@@ -263,6 +264,10 @@ void main() {
           owner = tester
               .widget<GitHubLoginPage>(find.byType(GitHubLoginPage))
               .accountId;
+        } else if (provider == CloudPlatform.webdav) {
+          owner = tester
+              .widget<WebDavLoginPage>(find.byType(WebDavLoginPage))
+              .accountId;
         } else if ({
           CloudPlatform.pan115,
           CloudPlatform.uc,
@@ -333,7 +338,11 @@ void main() {
       Future<void> finishStorageRoute(Finder ready) async {
         // Encrypted disk I/O runs outside the test's fake clock. Wait for its
         // actual route state before settling the animated loading indicator.
-        for (var attempt = 0; attempt < 100 && ready.evaluate().isEmpty; attempt++) {
+        for (
+          var attempt = 0;
+          attempt < 100 && ready.evaluate().isEmpty;
+          attempt++
+        ) {
           await tester.runAsync(
             () => Future<void>.delayed(const Duration(milliseconds: 10)),
           );
@@ -342,6 +351,7 @@ void main() {
         expect(ready, findsOneWidget);
         await tester.pumpAndSettle();
       }
+
       addTearDown(() async {
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.runAsync(() async {

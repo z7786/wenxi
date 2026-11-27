@@ -17,6 +17,7 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/main.dart';
 import 'package:asterlink/platform/external_open.dart';
 import 'package:asterlink/platform/native_engine.dart' show nativeChannel;
+import 'package:asterlink/playback/playback_runtime.dart';
 import 'package:asterlink/ui/cloud_page.dart';
 import 'package:asterlink/ui/mine_page.dart';
 import 'package:asterlink/ui/parse_page.dart';
@@ -194,6 +195,7 @@ void main() {
               expect(phases, isEmpty);
               return AppBootstrap(
                 initializeRuntime: () async => await DiagnosticRuntime.start(),
+                playbackRuntime: PlaybackRuntime(initialize: () async {}),
                 servicesLoader: () {
                   loads++;
                   return loaded.future;
@@ -242,6 +244,7 @@ void main() {
           initializeRuntime: () async {
             runtimeStarts++;
           },
+          playbackRuntime: PlaybackRuntime(initialize: () async {}),
           servicesLoader: () async {
             if (++attempts == 1) {
               throw const AppException('fixture startup failure');
@@ -274,6 +277,7 @@ void main() {
         await tester.pumpWidget(
           AppBootstrap(
             initializeRuntime: () async {},
+            playbackRuntime: PlaybackRuntime(initialize: () async {}),
             servicesLoader: () async {
               if (++attempts == 1) throw const AppException('fixture retry');
               return app;
@@ -297,6 +301,133 @@ void main() {
       }
     },
   );
+
+  for (final synchronous in [false, true]) {
+    testWidgets(
+      '${synchronous ? 'Synchronous' : 'Pending'} player initialization cannot block parsing and transfers',
+      (tester) async {
+        final store = StateStore.memory({
+          'tasks': [_download('retained').toJson()],
+          'settings': {'darkMode': 'light'},
+        });
+        final app = services(store);
+        await app.initialize();
+        final player = Completer<void>();
+        var starts = 0;
+        final runtime = PlaybackRuntime(
+          initialize: () {
+            starts++;
+            if (synchronous) throw TypeError();
+            return player.future;
+          },
+        );
+        try {
+          await tester.pumpWidget(
+            AppBootstrap(
+              initializeRuntime: () async {},
+              playbackRuntime: runtime,
+              servicesLoader: () async => app,
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          expect(starts, 1);
+          expect(find.byType(MainShell), findsOneWidget);
+          expect(find.byType(StartupFailurePage), findsNothing);
+          final parser = tester.state<ParsePageState>(find.byType(ParsePage));
+          parser.input.text = 'https://pan.quark.cn/s/retained';
+          await tester.pump();
+          expect(find.text('https://pan.quark.cn/s/retained'), findsOneWidget);
+          if (!synchronous) {
+            expect(runtime.ready, isFalse);
+            player.completeError(StateError('player library unavailable'));
+            await tester.pump();
+          }
+          expect(runtime.failure, isNotNull);
+          await tester.tap(find.byKey(const ValueKey('navigation-3')));
+          await tester.pump();
+          expect(find.byType(TransfersPage), findsOneWidget);
+          expect(app.downloads.task('retained')!.status, DownloadStatus.paused);
+          expect(app.downloads.task('retained')!.downloaded, 1024);
+          await tester.tap(find.byKey(const ValueKey('navigation-0')));
+          await tester.pump();
+          expect(find.byType(ParsePage), findsOneWidget);
+          expect(parser.input.text, 'https://pan.quark.cn/s/retained');
+          expect(starts, 1);
+          expect(tester.takeException(), isNull);
+        } finally {
+          if (!player.isCompleted) player.complete();
+          await closeUi(tester, app);
+        }
+      },
+    );
+  }
+
+  for (final failureMethod in [
+    'ensureInitialized',
+    'waitUntilReadyToShow',
+    'show',
+  ]) {
+    testWidgets(
+      'optional desktop $failureMethod failure still opens the app',
+      (tester) async {
+        final root = (await tester.runAsync(
+          () => Directory.systemTemp.createTemp('asterlink-window-recovery-'),
+        ))!;
+        final app = services(StateStore.memory());
+        messenger.setMockMethodCallHandler(
+          const MethodChannel('com.asterlink.app/diagnostics'),
+          (_) async => {'logs': root.path, 'enabled': true},
+        );
+        messenger.setMockMethodCallHandler(
+          const MethodChannel('window_manager'),
+          (call) async {
+            if (call.method == failureMethod) {
+              throw PlatformException(code: 'fixture-window-failure');
+            }
+            if (call.method.startsWith('is')) return false;
+            return true;
+          },
+        );
+        try {
+          await tester.pumpWidget(
+            AppBootstrap(
+              playbackRuntime: PlaybackRuntime(initialize: () async {}),
+              servicesLoader: () async => app,
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          expect(find.byType(MainShell), findsOneWidget);
+          expect(find.byType(StartupFailurePage), findsNothing);
+          expect(
+            DiagnosticLog.active!.entries().where(
+              (entry) =>
+                  entry.event ==
+                  (failureMethod == 'ensureInitialized'
+                      ? 'window.initialize_failed'
+                      : 'window.presentation_failed'),
+            ),
+            hasLength(1),
+          );
+          expect(tester.takeException(), isNull);
+        } finally {
+          await closeUi(tester, app);
+          messenger.setMockMethodCallHandler(
+            const MethodChannel('window_manager'),
+            null,
+          );
+          messenger.setMockMethodCallHandler(
+            const MethodChannel('com.asterlink.app/diagnostics'),
+            null,
+          );
+          DiagnosticRuntime.stop();
+          await tester.runAsync(() => root.delete(recursive: true));
+        }
+      },
+      skip: !Platform.isWindows,
+    );
+  }
 
   testWidgets('Only first-visited tabs build and their state is retained', (
     tester,

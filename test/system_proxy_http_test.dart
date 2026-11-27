@@ -38,6 +38,48 @@ DioJsonHttp client(
 
 void main() {
   test(
+    'A routed subtitle client preserves its request User-Agent across redirects',
+    () async {
+      final requests = <HttpRequest>[];
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((request) async {
+        requests.add(request);
+        if (request.uri.path == '/start') {
+          request.response.statusCode = 302;
+          request.response.headers.set(
+            HttpHeaders.locationHeader,
+            '/subtitle.srt',
+          );
+        } else {
+          request.response.write('subtitle');
+        }
+        await request.response.close();
+      });
+      final dio = Dio()
+        ..httpClientAdapter = SystemProxyHttpClientAdapter(
+          resolve: (_) async => const WindowsProxyRoute('DIRECT', 'direct'),
+          shouldProxy: (_) => true,
+          diagnosticPlatform: '在线字幕',
+          createHttpClient: () => HttpClient()..userAgent = null,
+        );
+      addTearDown(() => dio.close(force: true));
+      final http = DioJsonHttp(client: dio);
+      expect(
+        (await http.get('http://127.0.0.1:${server.port}/start', {
+          HttpHeaders.userAgentHeader: 'fixture-subtitle-agent',
+        })).body,
+        'subtitle',
+      );
+      expect(requests, hasLength(2));
+      expect(
+        requests.map((r) => r.headers.value(HttpHeaders.userAgentHeader)),
+        ['fixture-subtitle-agent', 'fixture-subtitle-agent'],
+      );
+    },
+  );
+
+  test(
     'Existing direct connections cannot bypass a newly enabled or changed proxy',
     () async {
       final directRequests = <HttpRequest>[],

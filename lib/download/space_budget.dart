@@ -29,14 +29,18 @@ class SpaceBudget {
       reserveVolumes(id, {'cache': remaining});
   Future<void> reserveVolumes(
     String id,
-    Map<String, int> remaining,
-  ) => _gate.run(() async {
+    Map<String, int> remaining, {
+    Future<int> Function(String volume)? availableOnVolume,
+  }) => _gate.run(() async {
     for (final entry in remaining.entries) {
       require(entry.value >= 0, '下载空间计算错误');
       // Finished payloads only need room for their destination copy. A full
       // cache volume must not block reading bytes that are already on disk.
       if (entry.value == 0) continue;
-      final free = await (availableOnVolume?.call(entry.key) ?? available());
+      final free =
+          await (availableOnVolume?.call(entry.key) ??
+              this.availableOnVolume?.call(entry.key) ??
+              available());
       final others = _reservations.entries
           .where((e) => e.key != id)
           .fold(0, (sum, e) => sum + (e.value[entry.key] ?? 0));

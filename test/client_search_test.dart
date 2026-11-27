@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
@@ -393,14 +392,13 @@ void main() {
     expect(client.revision, revision);
   });
   test(
-    'encrypted disk cache survives process restart with all networks offline',
+    'plain disk cache survives process restart without a key or network',
     () async {
       final directory = await Directory.systemTemp.createTemp(
         'asterlink-search-cache-',
       );
-      final key = Uint8List.fromList(List<int>.generate(32, (i) => i + 1));
       try {
-        final store = await StateStore.open(directory, testKey: key);
+        final store = await StateStore.open(directory);
         final api = engine(store, (_) async => fixture('one'));
         expect(
           (await api.search('Python', CancelToken(), unavailable).last).items,
@@ -408,12 +406,10 @@ void main() {
         );
         await store.flush();
         final disk = await store.file!.readAsBytes();
-        expect(
-          utf8.decode(disk, allowMalformed: true),
-          isNot(contains('pan.quark.cn')),
-        );
+        expect(decodePlainState(disk), store.data);
+        expect(utf8.decode(disk).contains('pan.quark.cn'), isTrue);
         store.dispose();
-        final reopened = await StateStore.open(directory, testKey: key);
+        final reopened = await StateStore.open(directory);
         final offline = ClientSearchEngine(
           store: reopened,
           endpoint: 'https://backend.example.com',

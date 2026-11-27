@@ -11,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/data/resource_pool_preview.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/resource_search.dart';
 import 'package:asterlink/download/transfer_http.dart';
@@ -23,6 +24,15 @@ import 'support.dart';
 class _ImageConnector extends BrowserTestConnector {
   _ImageConnector(this.bytes) : super(CloudPlatform.quark);
   final Uint8List bytes;
+  List<CloudFile> documents = [];
+  @override
+  Future<List<CloudFile>> list(
+    BrowseSession session,
+    String parentId,
+    Credential? credential,
+  ) => documents.isEmpty
+      ? super.list(session, parentId, credential)
+      : Future.value(documents);
 
   @override
   Future<DownloadSpec> download(
@@ -76,6 +86,9 @@ class _ImageTransfer extends TransferHttp {
   final Uint8List bytes;
   final bool hold;
   final requests = <({String? range, CancelToken token})>[];
+  @override
+  Future<Probe> probe(String url, Map<String, String> headers) async =>
+      Probe(RemoteIdentity(bytes.length, '"preview-v1"', null), false);
 
   @override
   Future<Response<ResponseBody>> stream(
@@ -148,6 +161,10 @@ void main() {
     int connections,
   ) async {
     final directory = Directory.systemTemp.createTempSync('asterlink-preview-');
+    final native = FakeNative();
+    native.content
+      ..clear()
+      ..addAll(transfer.bytes);
     final services = AppServices(
       controlEnabled: false,
       store: StateStore.memory({
@@ -165,7 +182,7 @@ void main() {
       }),
       dataDirectory: directory,
       cacheDirectory: Directory('${directory.path}/cache'),
-      transport: FakeNative(),
+      transport: native,
       files: FakeFiles(Directory('${directory.path}/saved')),
       platformFeatures: false,
       http: FakeHttp(),
@@ -245,6 +262,10 @@ void main() {
       const content = 'print("中文预览")\n';
       final transfer = _ImageTransfer(Uint8List.fromList(utf8.encode(content)));
       final services = await servicesFor(transfer, 1);
+      (services.cloud.connectors[CloudPlatform.quark] as _ImageConnector)
+          .documents = [
+        CloudFile(id: 'text', name: name, size: transfer.bytes.length),
+      ];
       try {
         await tester.pumpWidget(
           MaterialApp(
@@ -260,15 +281,18 @@ void main() {
             ),
           ),
         );
+        await tester.pumpAndSettle();
+        expect(services.downloads.tasks, isEmpty);
+        await tester.tap(find.byKey(const Key('document-download-confirm')));
         for (
           var i = 0;
-          i < 100 && find.byType(TextPreview).evaluate().isEmpty;
+          i < 200 && find.byType(TextPreview).evaluate().isEmpty;
           i++
         ) {
           await tester.runAsync(
             () => Future<void>.delayed(const Duration(milliseconds: 20)),
           );
-          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 20));
         }
         final preview = tester.widget<TextPreview>(find.byType(TextPreview));
         expect(preview.document.text, content);
@@ -283,53 +307,60 @@ void main() {
   }
 
   for (final name in ['合同.pdf', '方案.docx']) {
-    testWidgets('online document preview asks before sharing $name', (
-      tester,
-    ) async {
-      final transfer = _ImageTransfer(Uint8List.fromList([1]));
-      final services = await servicesFor(transfer, 1);
-      try {
-        await tester.pumpWidget(
-          MaterialApp(
-            home: PreviewPage(
-              services,
-              const BrowseSession(
-                platform: CloudPlatform.quark,
-                mode: BrowseMode.personal,
-                title: 'preview test',
-                rootId: 'root',
+    testWidgets(
+      'invalid downloaded document preserves the file and offers external open $name',
+      (tester) async {
+        final transfer = _ImageTransfer(Uint8List.fromList([1]));
+        final services = await servicesFor(transfer, 1);
+        (services.cloud.connectors[CloudPlatform.quark] as _ImageConnector)
+            .documents = [
+          CloudFile(id: 'document', name: name, size: 1),
+        ];
+        try {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: PreviewPage(
+                services,
+                const BrowseSession(
+                  platform: CloudPlatform.quark,
+                  mode: BrowseMode.personal,
+                  title: 'preview test',
+                  rootId: 'root',
+                ),
+                CloudFile(id: 'document', name: name, size: 1),
               ),
-              CloudFile(id: 'document', name: name, size: 1),
             ),
-          ),
-        );
-        for (
-          var i = 0;
-          i < 100 &&
-              find
-                  .byKey(const Key('online-preview-confirm'))
-                  .evaluate()
-                  .isEmpty;
-          i++
-        ) {
-          await tester.runAsync(
-            () => Future<void>.delayed(const Duration(milliseconds: 20)),
           );
-          await tester.pump();
-        }
+          await tester.pumpAndSettle();
+          expect(services.downloads.tasks, isEmpty);
+          await tester.tap(find.byKey(const Key('document-download-confirm')));
+          for (
+            var i = 0;
+            i < 200 && find.text('用其他应用打开').evaluate().isEmpty;
+            i++
+          ) {
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 20)),
+            );
+            await tester.pump(const Duration(milliseconds: 20));
+          }
 
-        expect(find.text('在线预览提示'), findsOneWidget);
-        expect(find.textContaining('临时下载链接和文件内容会发送给第三方'), findsOneWidget);
-        expect(find.byKey(const Key('online-preview-confirm')), findsOneWidget);
-        expect(find.byKey(const Key('online-preview-webview')), findsNothing);
-        expect(transfer.requests, isEmpty);
-        expect(tester.takeException(), isNull);
-      } finally {
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pump();
-        await services.close();
-      }
-    });
+          expect(find.text('暂时无法预览'), findsOneWidget);
+          expect(find.text('用其他应用打开'), findsOneWidget);
+          expect(
+            services.downloads.tasks.single.status,
+            DownloadStatus.completed,
+          );
+          expect(services.downloads.tasks.single.savedPath, isNotNull);
+          expect(transfer.requests, isEmpty);
+          expect(tester.takeException(), isNull);
+        } finally {
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+          await services.close();
+        }
+      },
+    );
   }
 
   testWidgets('pool preview loads text using the new share and new file ID', (
@@ -380,13 +411,30 @@ void main() {
       );
       for (
         var i = 0;
-        i < 100 && find.byType(TextPreview).evaluate().isEmpty;
+        i < 100 &&
+            find
+                .byKey(const Key('document-download-confirm'))
+                .evaluate()
+                .isEmpty;
         i++
       ) {
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 20)),
         );
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      expect(services.downloads.tasks, isEmpty);
+      expect(connector.preparedFile, null);
+      await tester.tap(find.byKey(const Key('document-download-confirm')));
+      for (
+        var i = 0;
+        i < 200 && find.byType(TextPreview).evaluate().isEmpty;
+        i++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump(const Duration(milliseconds: 20));
       }
       expect(api.openCalls, hasLength(1));
       expect(connector.preparedSession!.sourceLink!.shareId, 'pooltext');

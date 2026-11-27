@@ -111,14 +111,14 @@ class _StartupFailurePageState extends State<StartupFailurePage> {
             ? ''
             : await askText(
                 context,
-                '输入旧备份密码',
+                '输入备份密码',
                 secret: true,
                 barrierDismissible: false,
               );
         if (password == null || !mounted) return;
         if (!await _confirm(
               '恢复备份',
-              '将恢复备份中的账号、设置和收藏。原数据会单独保留，已下载文件不会删除。备份中不包含的记录无法还原。',
+              '将恢复备份中包含的数据分类。原数据会单独保留，已下载文件不会删除。备份中不包含的记录无法还原。',
               '验证并恢复',
             ) ||
             !mounted) {

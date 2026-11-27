@@ -27,6 +27,7 @@ class _ControlledFiles extends LanFiles {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory root;
   late LanService sender, receiver;
   late StateStore receiverStore;
@@ -635,15 +636,15 @@ void main() {
   );
 
   test(
-    'A device address opens guidance instead of an expired-share error',
+    'A device address opens private browser pairing without exposing shares or codes',
     () async {
       final shared = await share();
       final response = await fetch(sender.base());
       expect(response.status, 200);
       expect(response.headers['content-type'], startsWith('text/html'));
       final page = utf8.decode(response.bytes);
-      expect(page, contains('这是设备连接地址'));
-      expect(page, contains('完整分享链接'));
+      expect(page, contains('连接这台设备'));
+      expect(page, contains('6 位连接码'));
       expect(page, isNot(contains('过期')));
       expect(page, isNot(contains(shared.manifest.token)));
       expect(page, isNot(contains(shared.manifest.files.single.name)));
@@ -675,7 +676,7 @@ void main() {
           expect(page.status, 200, reason: pageUrl.toString());
           expect((await fetch(pageUrl, method: 'HEAD')).status, 200);
           final downloadPath = RegExp(
-            r'href="([^"]+)"',
+            r'<a href="([^"]+)" download>',
           ).firstMatch(utf8.decode(page.bytes))!.group(1)!;
           final download = await fetch(pageUrl.resolve(downloadPath));
           expect(download.status, 200);
@@ -781,7 +782,9 @@ void main() {
       final ranged = await fetch(empty, headers: {'Range': 'bytes=0-0'});
       expect(ranged.status, 416);
       expect(ranged.headers['content-range'], 'bytes */0');
-      expect((await fetch(sender.shareUrl(shared))).status, 400);
+      final browser = await fetch(sender.shareUrl(shared));
+      expect(browser.status, 200);
+      expect(utf8.decode(browser.bytes), contains('ZIP'));
     },
   );
 

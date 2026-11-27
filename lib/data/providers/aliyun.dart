@@ -1273,7 +1273,9 @@ class AliyunConnector extends CloudConnector {
     require(!task.boolean('exist'), '已有同名文件，请重命名后上传');
     final id = task.str('file_id'), uploadId = task.str('upload_id');
     require(id.isNotEmpty, '阿里未返回上传文件标识');
+    var saved = task;
     if (!task.boolean('rapid_upload')) {
+      io.notSavedYet();
       final parts = task.list('part_info_list').toList()
         ..sort(
           (a, b) =>
@@ -1281,8 +1283,10 @@ class AliyunConnector extends CloudConnector {
         );
       require(uploadId.isNotEmpty && parts.length == count, '阿里未返回完整上传分段');
       for (var i = 0; i < parts.length; i++) {
-        sessions.checkpoint(token);
         require(parts[i].integer('part_number') == i + 1, '阿里上传分段序号异常');
+      }
+      await io.parts(parts.length, (i) async {
+        sessions.checkpoint(token);
         final type = parts[i].str('content_type');
         await io.send(
           parts[i].str('upload_url'),
@@ -1290,16 +1294,29 @@ class AliyunConnector extends CloudConnector {
           end: math.min(source.size, (i + 1) * chunkSize),
           contentType: type,
           includeContentType: type.isNotEmpty,
+          commitsFile: false,
         );
-      }
+      });
+      io.notSavedYet();
       io.progress(UploadPhase.finishing, source.size);
-      await _post('/v2/file/complete', {
+      saved = await _post('/v2/file/complete', {
         'drive_id': drive,
         'file_id': id,
         'upload_id': uploadId,
       }, session: token);
     }
-    return io.confirm(() => list(s, parent, c), id: id);
+    CloudFile? receipt;
+    if (saved.str('file_id').isNotEmpty &&
+        saved.str('name').isNotEmpty &&
+        saved.containsKey('size') &&
+        saved.str('type') == 'file' &&
+        (task.boolean('rapid_upload') || saved.str('status') == 'available')) {
+      require(saved.integer('size', -1) >= 0, '阿里上传回执的文件大小无效，请刷新后确认');
+      final folder = saved.str('parent_file_id');
+      require(folder.isEmpty || folder == parent, '阿里上传回执的目录不一致，请刷新后确认');
+      receipt = file(saved, parent);
+    }
+    return io.confirm(() => list(s, parent, c), id: id, receipt: receipt);
   }
 
   @override

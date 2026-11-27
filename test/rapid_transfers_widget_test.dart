@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/uploads.dart';
 import 'package:asterlink/transfer/rapid_transfer_task.dart';
 import 'package:asterlink/ui/transfers_page.dart';
 import 'package:asterlink/ui/browser_page.dart';
@@ -15,6 +16,7 @@ import 'package:asterlink/upload/upload_task.dart';
 import 'package:asterlink/domain/rapid_transfer.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/ui/app_context_menu.dart';
+import 'package:asterlink/ui/common.dart';
 import 'rapid_transfer_manager_test.dart' show Drive, file;
 import 'browser_test_support.dart';
 import 'support.dart';
@@ -121,13 +123,16 @@ void main() {
       await render();
       expect(painter().fill.value, .25);
       entry.status = RapidEntryStatus.uploading;
+      entry.payloadReady = true;
+      entry.downloaded = 100;
+      entry.uploadPhase = UploadPhase.uploading;
       entry.sent = 50;
       await render();
       expect(painter().fill.value, .75);
       task.status = RapidTaskStatus.completed;
       entry.status = RapidEntryStatus.failed;
       await render();
-      expect(painter().fill.value, 1);
+      expect(painter().fill.value, .75);
       expect(find.byType(TransferProgress), findsOneWidget);
       expect(find.text('已完成'), findsNothing);
       entry.status = RapidEntryStatus.uploaded;
@@ -191,6 +196,7 @@ void main() {
       expect(painter(uploaded).fill.value, 0);
       entry
         ..status = RapidEntryStatus.uploading
+        ..uploadPhase = UploadPhase.uploading
         ..payloadReady = true
         ..downloaded = 100
         ..sent = 25;
@@ -204,6 +210,56 @@ void main() {
       expect(find.text('已完成'), findsOneWidget);
       expect(painter(uploaded).fill.value, .25);
       expect(tester.takeException(), null);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+  testWidgets(
+    'relay confirmation keeps its bar below completion and shows the phase',
+    (tester) async {
+      const session = BrowseSession(
+        platform: CloudPlatform.quark,
+        mode: BrowseMode.personal,
+        title: 'fixture',
+        rootId: '0',
+      );
+      final entry = RapidTransferEntry(
+        const CloudFile(id: 'video', name: 'video.mp4', size: 100),
+        [],
+        status: RapidEntryStatus.uploading,
+        method: CrossTransferMethod.relay,
+        payloadReady: true,
+        downloaded: 100,
+        sent: 100,
+        uploadPhase: UploadPhase.finishing,
+      );
+      final task = RapidTransferTask(
+        id: 'confirming',
+        source: session,
+        target: session,
+        parent: '0',
+        folderName: 'root',
+        selections: [entry.file],
+        createdAt: 1,
+        status: RapidTaskStatus.running,
+        scanned: true,
+        entries: [entry],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: CrossTransferProgress(task, enabled: false)),
+        ),
+      );
+      expect(find.text('确认中'), findsOneWidget);
+      expect(find.text('已完成'), findsOneWidget);
+      final dynamic paint = tester
+          .widget<CustomPaint>(
+            find.byKey(
+              const ValueKey('cross-upload-progress-paint-confirming'),
+            ),
+          )
+          .painter;
+      expect(paint.fill.value, .99);
+      expect(paint.flowing, isFalse);
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
@@ -481,6 +537,21 @@ void main() {
           await tester.tap(find.text('跨盘传输'));
           await tester.pumpAndSettle();
           expect(find.text('跨盘传输 · 选择目标账号'), findsOneWidget);
+          final targetRow = find.ancestor(
+            of: find.text('目标账号'),
+            matching: find.byType(ListTile),
+          );
+          expect(
+            tester
+                .widget<PlatformMark>(
+                  find.descendant(
+                    of: targetRow,
+                    matching: find.byType(PlatformMark),
+                  ),
+                )
+                .platform,
+            CloudPlatform.pan123,
+          );
           await tester.tap(find.text('目标账号'));
           await tester.pumpAndSettle();
           expect(find.text('选择“全部文件”'), findsOneWidget);

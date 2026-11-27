@@ -175,6 +175,45 @@ class PlaybackStreamProxy {
   final int chunkBytes, warmupBytes;
   int _maxCacheBytes;
   int get maxCacheBytes => _maxCacheBytes;
+  Timer? _pressureCooldown;
+
+  /// Preserve the demanded range and the next ready chunk for every reader.
+  /// Limit speculative refill briefly so pressure cannot cause churn.
+  Future<int> trimMemoryAsync() async {
+    if (_closed) return 0;
+    final before = _cachedBytes;
+    _pressureCooldown?.cancel();
+    _pressureCooldown = Timer(const Duration(seconds: 30), () {
+      _pressureCooldown = null;
+      if (_closed) return;
+      for (final reader in _readers.toList()) {
+        _scheduleAhead(reader);
+      }
+      _pump();
+    });
+    for (final segment in _segments.values.toList()) {
+      if (segment.demanders.isNotEmpty ||
+          segment.owners.any(
+            (reader) => reader.pending.entries.any(
+              (entry) =>
+                  identical(entry.value, segment) &&
+                  entry.key >= reader.cursor &&
+                  entry.key <= reader.cursor + 1,
+            ),
+          )) {
+        continue;
+      }
+      for (final owner in segment.owners.toList()) {
+        owner.pending.removeWhere((_, value) => identical(value, segment));
+      }
+      segment.owners.clear();
+      _segments.remove(segment.key);
+      if (segment.bytes != null) _cachedBytes -= segment.bytes!.length;
+      segment.cancel();
+    }
+    return before - _cachedBytes;
+  }
+
   Future<bool> resizeCacheAsync(int bytes) async => resizeCache(bytes);
   bool resizeCache(int bytes) {
     if (_closed || bytes < chunkBytes || !_makeRoom(0, limit: bytes)) {
@@ -919,9 +958,10 @@ class PlaybackStreamProxy {
 
   void _scheduleAhead(_Reader reader) {
     if (reader.stopped) return;
+    final window = _pressureCooldown == null ? _window(reader) : 2;
     for (
       var ahead = reader.cursor + 1;
-      ahead <= math.min(reader.last, reader.cursor + _window(reader) - 1);
+      ahead <= math.min(reader.last, reader.cursor + window - 1);
       ahead++
     ) {
       _requestSegment(reader, ahead, demand: false);
@@ -1059,7 +1099,15 @@ class PlaybackStreamProxy {
     if (_closed || _fetchClient == null) return;
     while (!_paused || _pausedAllowance > 0) {
       final waiting = _segments.values
-          .where((s) => !s.started && !s.cancelled && s.owners.isNotEmpty)
+          .where(
+            (s) =>
+                !s.started &&
+                !s.cancelled &&
+                s.owners.isNotEmpty &&
+                (_pressureCooldown == null ||
+                    s.demanders.isNotEmpty ||
+                    s.owners.any((r) => identical(r.pending[r.cursor + 1], s))),
+          )
           .toList();
       if (waiting.isEmpty) return;
       waiting.sort((a, b) {
@@ -1469,6 +1517,8 @@ class PlaybackStreamProxy {
   Future<void> close() => _closing ??= _close();
   Future<void> _close() async {
     _closed = true;
+    _pressureCooldown?.cancel();
+    _pressureCooldown = null;
     _streamWatch.stop();
     _probeClient?.close(force: true);
     _supersede();

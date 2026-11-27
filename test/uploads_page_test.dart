@@ -236,6 +236,7 @@ void main() {
     'continue all queues only retryable uploads once across filters',
     (tester) async {
       await setup(tester, size: const Size(320, 700), scale: 1.8);
+      await services.updateSettings({'crossTransferConcurrent': 2});
       try {
         expect(find.byKey(const ValueKey('upload-continue-all')), findsNothing);
         provider.fail = true;
@@ -250,9 +251,14 @@ void main() {
         await tester.pumpAndSettle();
         provider.hold = Completer<void>();
         final active = await enqueue('active.txt');
+        final secondActive = await enqueue('second-active.txt');
         final pending = await enqueue('pending.txt');
         await tester.pumpAndSettle();
         expect(services.uploads.task(active)!.status, UploadStatus.running);
+        expect(
+          services.uploads.task(secondActive)!.status,
+          UploadStatus.running,
+        );
         expect(services.uploads.task(pending)!.status, UploadStatus.pending);
         await tester.tap(find.byKey(const ValueKey('upload-filter-2')));
         await tester.pumpAndSettle();
@@ -269,6 +275,10 @@ void main() {
           UploadStatus.completed,
         );
         expect(services.uploads.task(active)!.status, UploadStatus.running);
+        expect(
+          services.uploads.task(secondActive)!.status,
+          UploadStatus.running,
+        );
         expect(find.text('已加入队列 3 个任务'), findsOneWidget);
         expect(button, findsNothing);
         expect(tester.takeException(), isNull);
@@ -278,12 +288,12 @@ void main() {
           services.uploads.tasks.every((t) => !t.canRetry && !t.active),
           true,
         );
-        expect(provider.started, hasLength(9));
+        expect(provider.started, hasLength(10));
         expect(
           provider.started.where((name) => name == 'completed.txt'),
           hasLength(1),
         );
-        expect(provider.maxInFlight, 1);
+        expect(provider.maxInFlight, 2);
       } finally {
         await finish(tester);
       }

@@ -13,6 +13,7 @@ import 'media_backend.dart';
 import 'delegating_backend.dart';
 import 'playback_backend_factory.dart';
 import 'playback_controller.dart';
+import 'playback_runtime.dart';
 import 'playback_sources.dart';
 import 'playback_screen_info.dart';
 
@@ -114,6 +115,9 @@ PlaybackController downloadPlayback(
         await lease.cache.release();
       }
     },
+    initializePlayback: backendFactory == null
+        ? PlaybackRuntime.shared.ensureInitialized
+        : null,
     backendFactory:
         backendFactory ??
         (entry, hardware) => DownloadMediaBackend(

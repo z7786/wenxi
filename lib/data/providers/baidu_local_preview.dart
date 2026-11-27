@@ -5,7 +5,7 @@ import 'package:pointycastle/export.dart' show RC4Engine, KeyParameter;
 import '../../core/json.dart';
 import '../../domain/auth.dart';
 import '../http.dart';
-import 'baidu_link_service.dart';
+import 'baidu_resolved_link.dart';
 
 /// Account preview resolution runs on the device with per-request state.
 class BaiduLocalPreview {

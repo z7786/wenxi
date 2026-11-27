@@ -146,6 +146,9 @@ class RemoteControlService extends ChangeNotifier {
     return RemoteControlConfig(
       revision: cached.revision,
       announcement: cached.announcement,
+      searchAnnouncement: cached.searchAnnouncement?.isActive(now) == true
+          ? cached.searchAnnouncement
+          : null,
       aboutDescription: cached.aboutDescription,
       helpUrl: cached.helpUrl,
       parserHubUrl: cached.parserHubUrl,
@@ -173,6 +176,8 @@ class RemoteControlService extends ChangeNotifier {
                   entry.value.notes,
                   inAppDownloadUrl: entry.value.inAppDownloadUrl,
                   inAppPasscode: entry.value.inAppPasscode,
+                  packageSha256: entry.value.packageSha256,
+                  packageSize: entry.value.packageSize,
                 )
               : entry.value,
       },
@@ -399,6 +404,8 @@ class RemoteControlService extends ChangeNotifier {
       _pollTimer = Timer(until(_nextAttempt), () => unawaited(refresh()));
     }
     final deadlines = <DateTime>[
+      ?_cached?.searchAnnouncement?.startsAt,
+      ?_cached?.searchAnnouncement?.expiresAt,
       for (final p in CloudPlatform.values)
         if (_cached?.cloud(p).enabled == false)
           ?_deadline('clouds.${p.name}', _cached!.cloud(p).expiresAt),

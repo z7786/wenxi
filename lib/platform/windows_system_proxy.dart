@@ -5,9 +5,13 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 
 class WindowsProxyException implements Exception {
-  const WindowsProxyException(this.reason, [this.systemCode]);
+  const WindowsProxyException(this.reason, [this.systemCode]) : cause = null;
+  const WindowsProxyException.connection(this.cause)
+    : reason = 'connection',
+      systemCode = null;
   final String reason;
   final int? systemCode;
+  final Object? cause;
   String get message => switch (reason) {
     'unsupported' => 'Windows 系统代理类型不支持，请使用代理软件的 HTTP 或混合端口',
     'connection' => '通过 Windows 系统代理连接失败，请检查代理软件后重试',

@@ -127,13 +127,15 @@ abstract class PlaybackBackend extends ChangeNotifier {
   Future<void> retrySubtitleFont() async {}
   bool? get hardwareDecodingActive => null;
   void setVideoMonitoringEnabled(bool enabled) {}
+  void setAutomaticRenderQuality(bool enabled) {}
   Future<void> setDecoderCompatibility(bool enabled) async {}
   void setRenderViewport(
     Size viewport,
     double pixelRatio,
     BoxFit fit,
-    double scale,
-  ) {}
+    double scale, {
+    bool stableOrientation = false,
+  }) {}
   Future<void> initialize() async {}
   Future<void> setSubtitlePresentation({
     required double size,
@@ -157,7 +159,7 @@ abstract class PlaybackBackend extends ChangeNotifier {
   Future<void> close();
 }
 
-class MediaKitBackend extends PlaybackBackend {
+class MediaKitBackend extends PlaybackBackend with WidgetsBindingObserver {
   MediaKitBackend({
     required bool video,
     bool hardwareAcceleration = true,
@@ -176,6 +178,8 @@ class MediaKitBackend extends PlaybackBackend {
                libass: video,
              ),
            ) {
+    WidgetsBinding.instance.addObserver(this);
+    _activeInstances.add(_instanceId);
     if (video) {
       _video = VideoController(
         this.player,
@@ -245,6 +249,16 @@ class MediaKitBackend extends PlaybackBackend {
         if (hint != null) {
           _failureHint = hint;
           _hintAt = DateTime.now();
+          if (hint.decoderUnavailable &&
+              native is NativePlayer &&
+              (value.prefix == 'ffmpeg' || value.prefix == 'ffmpeg/video') &&
+              _video != null &&
+              _hardwareAcceleration &&
+              _wantsPlay &&
+              state.playing &&
+              !state.completed) {
+            _reportFailure(hint, origin: 'mediacodec_released');
+          }
         }
       }),
     );
@@ -253,8 +267,6 @@ class MediaKitBackend extends PlaybackBackend {
         if (_closing) return;
         DiagnosticLog.error('player.backend', value, null);
         // media_kit also emits recoverable TCP and decoder log lines here.
-        // Native playback is failed only by END_FILE_REASON_ERROR or by a
-        // demanded proxy read that can no longer return verified bytes.
         if (native is! NativePlayer &&
             !RegExp(
               r'subtitle|sub-add',
@@ -296,6 +308,38 @@ class MediaKitBackend extends PlaybackBackend {
     }
   }
   final Player player;
+  static int _nextInstanceId = 0;
+  static final _activeInstances = <int>{}, _retiringInstances = <int>{};
+  final int _instanceId = ++_nextInstanceId;
+  static Map<String, Object?> get _instanceCounts => {
+    'activePlaybackBackends': _activeInstances.length,
+    'retiringPlaybackBackends': _retiringInstances.length,
+  };
+  bool _trimmingMemory = false;
+  Duration? _memoryPressureAt;
+
+  @override
+  void didHaveMemoryPressure() {
+    if (_closing || _trimmingMemory) return;
+    _memoryPressureAt = _openWatch?.elapsed;
+    _trimmingMemory = true;
+    unawaited(() async {
+      try {
+        final released = await _proxy?.trimMemoryAsync() ?? 0;
+        if (!_closing) {
+          DiagnosticLog.event(
+            'player.memory_trim',
+            fields: {...diagnosticFields, 'releasedProxyBytes': released},
+          );
+        }
+      } catch (error, stack) {
+        if (!_closing) DiagnosticLog.error('player.memory_trim', error, stack);
+      } finally {
+        _trimmingMemory = false;
+      }
+    }());
+  }
+
   final bool _hardwareAcceleration;
   final SubtitleFontStore subtitleFonts;
   SubtitleFont? _subtitleFont;
@@ -315,9 +359,13 @@ class MediaKitBackend extends PlaybackBackend {
   Object? _sampledVideoFormat;
   final Map<String, String> _subtitleProperties = {};
   PlaybackDropPolicy _dropPolicy = PlaybackDropPolicy();
-  Size? _renderViewport, _renderSize;
+  bool _automaticRenderQuality = true;
+  Size? _renderViewport, _renderSize, _renderTarget;
   double _renderPixelRatio = 1, _renderScale = 1;
   BoxFit _renderFit = BoxFit.contain;
+  bool _renderStableOrientation = false;
+  bool _renderUpdating = false;
+  int _renderRevision = 0;
   Timer? _renderTimer;
   bool _copyDecoder = false;
   final _diagnostics = PlaybackDiagnostics();
@@ -364,6 +412,7 @@ class MediaKitBackend extends PlaybackBackend {
         position: state.position,
       );
       if (_enhancedPrefetch &&
+          _wantsPlay &&
           !atEnd &&
           _performanceTimer?.isActive == true &&
           _bufferPolicy.resumeSeconds(
@@ -441,6 +490,16 @@ class MediaKitBackend extends PlaybackBackend {
     _videoMonitoringEnabled = enabled;
     _videoMonitor.reset();
     _dropPolicy.resetWindow();
+    _lastDiagnosticSample = null;
+  }
+
+  @override
+  void setAutomaticRenderQuality(bool enabled) {
+    if (_automaticRenderQuality == enabled) return;
+    _automaticRenderQuality = enabled;
+    _dropPolicy = PlaybackDropPolicy();
+    _nativeMetrics['renderPerformanceFallback'] = false;
+    _scheduleRenderSize();
   }
 
   @override
@@ -590,7 +649,15 @@ class MediaKitBackend extends PlaybackBackend {
   String get streamingDescription => _streamingDescription;
   @override
   Map<String, Object?> get diagnosticFields => {
+    'playbackBackendId': _instanceId,
+    ..._instanceCounts,
     'engine': engineName,
+    'hardwareAccelerationRequested': _hardwareAcceleration,
+    if (_video != null) 'decoderCompatibilityRequested': _copyDecoder,
+    'videoHardwarePixelFormat': ?state.videoParams.hwPixelformat,
+    'videoColorMatrix': ?state.videoParams.colormatrix,
+    'videoColorPrimaries': ?state.videoParams.primaries,
+    'videoColorTransfer': ?state.videoParams.gamma,
     ..._diagnostics.context,
     'transport': _transport,
     'networkTimeoutSeconds': ?_networkTimeoutSeconds,
@@ -726,24 +793,26 @@ class MediaKitBackend extends PlaybackBackend {
 
   @override
   Future<void> setDecoderCompatibility(bool enabled) async {
-    if (_closing ||
-        defaultTargetPlatform != TargetPlatform.android ||
-        !_hardwareAcceleration ||
-        _video == null) {
+    final mode = playbackDecoderMode(
+      defaultTargetPlatform,
+      compatible: enabled,
+    );
+    if (_closing || mode == null || !_hardwareAcceleration || _video == null) {
       return;
     }
     final videoPlatform = await _video!.platform.future;
-    if (!videoPlatform.configuration.enableHardwareAcceleration ||
-        videoPlatform.configuration.hwdec == 'no') {
+    if (videoPlatform.configuration.hwdec == 'no' ||
+        defaultTargetPlatform == TargetPlatform.android &&
+            !videoPlatform.configuration.enableHardwareAcceleration) {
       return;
     }
     final native = player.platform;
     if (native is! NativePlayer) return;
-    _copyDecoder = enabled;
-    await native.setProperty(
-      'hwdec',
-      enabled ? 'mediacodec-copy' : 'mediacodec,mediacodec-copy',
-    );
+    await _propertyGate.run(() async {
+      if (_closing) return;
+      await native.setProperty('hwdec', mode);
+      _copyDecoder = enabled;
+    });
   }
 
   @override
@@ -751,12 +820,14 @@ class MediaKitBackend extends PlaybackBackend {
     Size viewport,
     double pixelRatio,
     BoxFit fit,
-    double scale,
-  ) {
+    double scale, {
+    bool stableOrientation = false,
+  }) {
     _renderViewport = viewport;
     _renderPixelRatio = pixelRatio;
     _renderFit = fit;
     _renderScale = scale;
+    _renderStableOrientation = stableOrientation;
     _scheduleRenderSize();
   }
 
@@ -766,6 +837,7 @@ class MediaKitBackend extends PlaybackBackend {
         _renderViewport == null ||
         !{
           TargetPlatform.android,
+          TargetPlatform.iOS,
           TargetPlatform.windows,
           TargetPlatform.linux,
           TargetPlatform.macOS,
@@ -773,33 +845,68 @@ class MediaKitBackend extends PlaybackBackend {
       return;
     }
     final geometry = videoGeometry;
-    if (geometry == null) return;
-    final target = playbackRenderSize(
-      source: Size(geometry.width.toDouble(), geometry.height.toDouble()),
-      viewport: _renderViewport!,
-      pixelRatio: _renderPixelRatio,
-      fit: _renderFit,
-      scale: _renderScale,
-      quality: _dropPolicy.downgraded ? .75 : 1,
-    );
-    if (target == null || target == _renderSize) return;
+    final target = geometry == null
+        ? null
+        : playbackRenderSize(
+            source: Size(geometry.width.toDouble(), geometry.height.toDouble()),
+            viewport: _renderViewport!,
+            pixelRatio: _renderPixelRatio,
+            fit: _renderFit,
+            scale: _renderScale,
+            quality: _dropPolicy.downgraded ? .75 : 1,
+            stableOrientation:
+                defaultTargetPlatform == TargetPlatform.android &&
+                _renderStableOrientation,
+          );
+    // Repeated player notifications must not postpone the same pending size.
+    // Returning to the applied size also cancels an obsolete queued resize.
+    if (target == _renderTarget) return;
+    _renderTarget = target;
+    _renderRevision++;
     _renderTimer?.cancel();
+    _renderTimer = null;
+    if (target == null || target == _renderSize) return;
+    _queueRenderSize();
+  }
+
+  void _queueRenderSize() {
+    final revision = _renderRevision, target = _renderTarget;
+    if (_closing || target == null) return;
     _renderTimer = Timer(const Duration(milliseconds: 200), () {
+      _renderTimer = null;
+      if (_closing || _renderUpdating) return;
+      _renderUpdating = true;
       unawaited(
-        _propertyGate.run(() async {
-          if (_closing) return;
-          try {
-            await _video!.setSize(
-              width: target.width.toInt(),
-              height: target.height.toInt(),
-            );
-            _renderSize = target;
-            _nativeMetrics['renderWidth'] = target.width.toInt();
-            _nativeMetrics['renderHeight'] = target.height.toInt();
-          } catch (e, stack) {
-            if (!_closing) DiagnosticLog.error('player.render_size', e, stack);
-          }
-        }),
+        _propertyGate
+            .run(() async {
+              if (_closing || revision != _renderRevision) return;
+              try {
+                await _video!.setSize(
+                  width: target.width.toInt(),
+                  height: target.height.toInt(),
+                );
+                _renderSize = target;
+                _nativeMetrics['renderWidth'] = target.width.toInt();
+                _nativeMetrics['renderHeight'] = target.height.toInt();
+              } catch (e, stack) {
+                if (revision == _renderRevision) _renderTarget = null;
+                if (!_closing) {
+                  DiagnosticLog.error('player.render_size', e, stack);
+                }
+              }
+            })
+            .whenComplete(() {
+              _renderUpdating = false;
+              // A native resize may already be running when the phone turns back.
+              // Apply the latest viewport after it completes, including when it
+              // returns to the size that was current before the resize started.
+              if (!_closing &&
+                  _renderTimer == null &&
+                  _renderTarget != null &&
+                  _renderTarget != _renderSize) {
+                _queueRenderSize();
+              }
+            }),
       );
     });
   }
@@ -835,6 +942,7 @@ class MediaKitBackend extends PlaybackBackend {
     });
     _nativeMetrics.clear();
     _lastDiagnosticSample = _lastProgressNotification = null;
+    _memoryPressureAt = null;
     _sampledVideoFormat = null;
     _dropPolicy = PlaybackDropPolicy();
     _videoMonitor.reset();
@@ -876,7 +984,10 @@ class MediaKitBackend extends PlaybackBackend {
       final properties = <String, String>{
         'cache': 'yes',
         'cache-on-disk': 'no',
-        'sub-ass-override': 'no',
+        // Allow the user's size/position controls for ASS dialogue and bitmap
+        // tracks (PGS/DVD). `no` disables both, even though sub-scale/sub-pos
+        // accept writes. `scale` keeps authored fonts, colors and sign layout.
+        'sub-ass-override': 'scale',
         // Keep exact landing while allowing the decoder to discard pre-target
         // frames. No timestamp-changing video filters are installed by the app.
         'hr-seek-framedrop': 'yes',
@@ -1044,16 +1155,25 @@ class MediaKitBackend extends PlaybackBackend {
     _resumeBufferSeconds = resume;
   });
 
-  // Native getProperty is synchronous FFI even though it returns a Future.
-  // Yield an event turn between reads so frame notifications can be serviced.
+  // Native replies are asynchronous and optional metrics have a bounded wait.
+  // Keep an event turn between reads so UI work and surface changes can run.
   Future<String> _readProperty(NativePlayer native, String name) async {
     await Future<void>.delayed(Duration.zero);
-    if (_closing) return '';
+    if (_closing || !_wantsPlay) return '';
     return native.getProperty(name);
   }
 
   Future<void> _samplePerformance() async {
     if (_closing || _sampling || _openWatch == null || _failure != null) return;
+    // Paused sessions retain their buffers but do not query native counters.
+    // Background audio still needs transport adaptation; only video checks stop.
+    if (!_wantsPlay || state.completed) {
+      _dropPolicy.resetWindow();
+      _videoMonitor.reset();
+      _lastDiagnosticSample = null;
+      _directReceiveBytesPerSecond = null;
+      return;
+    }
     _sampling = true;
     try {
       final native = player.platform;
@@ -1073,13 +1193,15 @@ class MediaKitBackend extends PlaybackBackend {
                   speed >= 0
               ? speed
               : null;
+        } on TimeoutException {
+          rethrow;
         } catch (_) {
           _directReceiveBytesPerSecond = null;
         }
         if (_closing) return;
       }
       await _updateResumeBuffer();
-      if (_closing) return;
+      if (_closing || !_wantsPlay) return;
       if (downloadCache == null &&
           {'segmented', 'direct', 'torrent'}.contains(_transport)) {
         final target = _bufferPolicy.forwardTarget(
@@ -1088,12 +1210,15 @@ class MediaKitBackend extends PlaybackBackend {
           rate: state.rate,
           seconds: _enhancedPrefetch ? PlaybackBufferPolicy.forwardSeconds : 8,
         );
-        if (target > _bufferPolicy.forwardBytes &&
+        if ((_memoryPressureAt == null ||
+                _openWatch!.elapsed - _memoryPressureAt! >=
+                    const Duration(seconds: 30)) &&
+            target > _bufferPolicy.forwardBytes &&
             (proxy == null ||
                 await proxy.resizeCacheAsync(
                   _bufferPolicy.proxyBytesFor(target),
                 ))) {
-          if (_closing) return;
+          if (_closing || !_wantsPlay) return;
           await native.setProperty('demuxer-max-bytes', target.toString());
           _bufferPolicy.forwardBytes = target;
         }
@@ -1111,6 +1236,8 @@ class MediaKitBackend extends PlaybackBackend {
             } else {
               nativeBufferedSeconds = null;
             }
+          } on TimeoutException {
+            rethrow;
           } catch (_) {
             // Some demuxers do not expose a cache duration.
           }
@@ -1166,11 +1293,14 @@ class MediaKitBackend extends PlaybackBackend {
         _nativeMetrics.remove('videoPixelFormat');
         _lastDiagnosticSample = null;
       }
-      if (_lastDiagnosticSample == null ||
-          elapsed - _lastDiagnosticSample! >= const Duration(seconds: 10)) {
+      if (_videoMonitoringEnabled &&
+          (_lastDiagnosticSample == null ||
+              elapsed - _lastDiagnosticSample! >=
+                  const Duration(seconds: 10))) {
         _lastDiagnosticSample = elapsed;
         for (final entry in {
           'hwdec-current': 'hwdecCurrent',
+          'hwdec': 'hwdecRequested',
           if (!_nativeMetrics.containsKey('videoCodec'))
             'video-format': 'videoCodec',
           'estimated-vf-fps': 'videoFps',
@@ -1180,18 +1310,21 @@ class MediaKitBackend extends PlaybackBackend {
           'frame-drop-count': 'outputDroppedFrames',
           'avsync': 'avSyncSeconds',
         }.entries) {
-          if (_closing) return;
+          if (_closing || !_wantsPlay || !_videoMonitoringEnabled) return;
           try {
             final value = await _readProperty(native, entry.key);
             if (value.isNotEmpty) {
               _nativeMetrics[entry.value] = num.tryParse(value) ?? value;
             }
+          } on TimeoutException {
+            rethrow;
           } catch (_) {
             // Properties unavailable for this track or older cores are optional.
           }
         }
         final drops = _nativeMetrics['outputDroppedFrames'];
-        if (drops is num &&
+        if (_automaticRenderQuality &&
+            drops is num &&
             _dropPolicy.observe(
               elapsed: elapsed,
               drops: drops.toInt(),
@@ -1208,20 +1341,12 @@ class MediaKitBackend extends PlaybackBackend {
                   (_videoCheckAfter == null || elapsed >= _videoCheckAfter!),
             )) {
           _scheduleRenderSize();
-          // Reduce GPU scaling cost, keep hardware decoding and play intent.
-          for (final entry in const {
-            'scale': 'bilinear',
-            'dscale': 'bilinear',
-            'cscale': 'bilinear',
-            'deband': 'no',
-          }.entries) {
-            await Future<void>.delayed(Duration.zero);
-            if (_closing) return;
-            await native.setProperty(entry.key, entry.value);
-          }
-          _nativeMetrics['renderPerformanceFallback'] = true;
+          // Only output dimensions change; retain the user's scaler settings.
+          _nativeMetrics['renderPerformanceFallback'] = _dropPolicy.downgraded;
           DiagnosticLog.event(
-            'player.render_fallback',
+            _dropPolicy.downgraded
+                ? 'player.render_fallback'
+                : 'player.render_restored',
             fields: diagnosticFields,
           );
         }
@@ -1241,11 +1366,14 @@ class MediaKitBackend extends PlaybackBackend {
   }
 
   Future<void> _sampleVideoOutput(NativePlayer native) async {
-    if (_video == null || _closing) return;
+    if (_video == null || _closing || !_videoMonitoringEnabled || !_wantsPlay) {
+      return;
+    }
     // An unavailable value is also normal before the first output frame. Check
     // support separately so older cores never trigger a false recovery.
     if (_videoFrameInfoSupported == null) {
       final properties = await _readProperty(native, 'property-list');
+      if (properties.isEmpty) return;
       _videoFrameInfoSupported = properties
           .split(',')
           .contains('video-frame-info');
@@ -1464,6 +1592,9 @@ class MediaKitBackend extends PlaybackBackend {
       DiagnosticLog.event('player.transport_closed', fields: diagnosticFields);
     }
     _closing = true;
+    WidgetsBinding.instance.removeObserver(this);
+    _activeInstances.remove(_instanceId);
+    _retiringInstances.add(_instanceId);
     _renderTimer?.cancel();
     _seekQueue.close();
     _diagnostics.stop();
@@ -1479,15 +1610,47 @@ class MediaKitBackend extends PlaybackBackend {
         await _proxy?.close();
         await _restrictedStream?.close();
       } finally {
+        final native = player.platform;
+        if (native is NativePlayer) {
+          unawaited(
+            native.nativeDisposed.then(
+              (_) {
+                _retiringInstances.remove(_instanceId);
+                DiagnosticLog.event(
+                  'player.native_disposed',
+                  fields: {...closeFields, ..._instanceCounts},
+                );
+              },
+              onError: (Object error, StackTrace stack) => DiagnosticLog.error(
+                'player.native_dispose_failed',
+                error,
+                stack,
+                fields: {...closeFields, ..._instanceCounts},
+              ),
+            ),
+          );
+        }
         await player.dispose();
+        if (native is! NativePlayer) _retiringInstances.remove(_instanceId);
         final diagnostics = _diagnostics;
         if (diagnostics.supported && DiagnosticLog.active?.enabled == true) {
-          unawaited(diagnostics.afterClose(closeFields));
+          unawaited(
+            diagnostics.afterClose(
+              closeFields,
+              currentFields: () => _instanceCounts,
+            ),
+          );
           // libmpv termination is deferred for five seconds by media_kit. A
           // second process sample distinguishes that grace period from growth
           // that remains after teardown; neither sample delays route dismissal.
           Timer(const Duration(seconds: 8), () {
-            unawaited(diagnostics.afterClose(closeFields, phase: 'settled'));
+            unawaited(
+              diagnostics.afterClose(
+                closeFields,
+                phase: 'settled',
+                currentFields: () => _instanceCounts,
+              ),
+            );
           });
         }
       }

@@ -16,6 +16,7 @@ import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'support.dart';
+import 'storage_path_support.dart';
 
 class _LocalIo extends HttpOverrides {}
 
@@ -250,6 +251,37 @@ void main() {
         }
         HttpOverrides.global = null;
       });
+
+      test(
+        'cleanup removed destination is recreated before native transfer',
+        () async {
+          await manager.changeDestination(selectedRoot.path);
+          await selectedRoot.delete(recursive: true);
+          final id = await manager.enqueue(
+            DownloadSpec(
+              url: url('/file.bin'),
+              fileName: 'file.bin',
+              expectedSize: content.length,
+            ),
+          );
+          await finish(id);
+          expect(await selectedRoot.exists(), isTrue);
+        },
+      );
+
+      test(
+        'ImDisk path queries do not block real HTTP download and verified publication',
+        () async {
+          final paths = UnsupportedFinalPaths(selectedRoot.path);
+          await paths.run(() async {
+            await manager.changeDestination(selectedRoot.path);
+            final id = await manager.enqueue(spec());
+            await finish(id);
+            expect(await manager.engine.taskDirectory(id).exists(), isFalse);
+          });
+          expect(paths.attempts, isNotEmpty);
+        },
+      );
 
       test(
         'one payload fits when there is not enough room for a second copy',

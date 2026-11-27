@@ -133,6 +133,7 @@ Future<T?> busy<T>(
   BuildContext context,
   Future<T> Function() action, {
   String label = '正在处理…',
+  bool cancellable = true,
 }) async {
   final navigator = Navigator.of(context, rootNavigator: true),
       scope = RequestScope(),
@@ -164,15 +165,16 @@ Future<T?> busy<T>(
           ),
         ),
         actions: [
-          TextButton(
-            onPressed: () {
-              cancelled = true;
-              progress.close(cancelled: true);
-              scope.cancel();
-              navigator.removeRoute(route);
-            },
-            child: const Text('取消'),
-          ),
+          if (cancellable)
+            TextButton(
+              onPressed: () {
+                cancelled = true;
+                progress.close(cancelled: true);
+                scope.cancel();
+                navigator.removeRoute(route);
+              },
+              child: const Text('取消'),
+            ),
         ],
       ),
     ),
@@ -318,6 +320,21 @@ class PlatformMark extends StatelessWidget {
     final name = icon ?? platform?.icon;
     if (name == null) {
       return Icon(CupertinoIcons.link, size: size, color: themeAccent(context));
+    }
+    if (name == 'webdav') {
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: fill(context),
+          borderRadius: BorderRadius.circular(size * .2),
+        ),
+        child: Icon(
+          Icons.dns_outlined,
+          size: size * .65,
+          color: themeAccent(context),
+        ),
+      );
     }
     return ClipRRect(
       borderRadius: BorderRadius.circular(size * .2),

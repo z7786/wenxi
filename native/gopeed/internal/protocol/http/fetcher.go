@@ -628,7 +628,16 @@ func (f *Fetcher) run(index int, ctx context.Context, connectionSlots chan struc
 					return err
 				}
 				connection.setRetryState(false, attempts)
-				reader := NewTimeoutReader(resp.Body, readTimeout)
+				var reader io.Reader = NewTimeoutReader(resp.Body, readTimeout)
+				if profile == "tianyi" {
+					expected := requestRemaining
+					if expected < 0 {
+						expected = f.meta.Res.Size
+					}
+					if expected > 0 {
+						reader = newTianyiBodyReader(reader, expected)
+					}
+				}
 				for {
 					n, err := reader.Read(buf)
 					if n > 0 {

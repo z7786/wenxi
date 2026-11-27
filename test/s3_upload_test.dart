@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
+import 'package:asterlink/data/http_retry.dart';
 import 'package:asterlink/data/uploads/upload_io.dart';
 import 'package:asterlink/domain/uploads.dart';
 import 'support.dart';
@@ -157,7 +158,80 @@ void main() {
         scope.run(() => _upload(UploadIO(http, _source(large: true), null))),
         throwsA(isA<AppException>()),
       );
-      expect(http.calls.map((r) => r.method), ['POST', 'PUT']);
+      expect(http.calls.first.method, 'POST');
+      expect(http.calls.skip(1).every((r) => r.method == 'PUT'), isTrue);
+      expect(
+        http.calls.where((r) => r.method == 'PUT').length,
+        inInclusiveRange(1, 2),
+      );
     },
   );
+  for (final mergeSent in [false, true]) {
+    test(
+      'Multipart cleanup preserves save uncertainty only after merge, merge=$mergeSent',
+      () async {
+        final delegate = FakeHttp((r) async {
+          if (r.uri.queryParameters.containsKey('uploads')) {
+            return const HttpResult(200, '<UploadId>upload</UploadId>');
+          }
+          if (r.method == 'DELETE') {
+            // Losing the abort response cannot create a saved user file.
+            throw const HttpRequestFailure(
+              'abort response lost',
+              kind: 'receiveTimeout',
+            );
+          }
+          if (r.body is HttpUpload) {
+            await (r.body as HttpUpload).open().drain<void>();
+            if (mergeSent || r.uri.queryParameters['partNumber'] == '1') {
+              return const HttpResult(200, '', {
+                'etag': ['"part"'],
+              });
+            }
+          }
+          throw const HttpRequestFailure(
+            'response lost',
+            kind: 'receiveTimeout',
+          );
+        });
+        final attempt = WriteRequestScope();
+        await expectLater(
+          attempt.run(
+            () => _upload(
+              UploadIO(RetryingJsonHttp(delegate), _source(large: true), null),
+            ),
+          ),
+          throwsA(isA<HttpRequestFailure>()),
+        );
+        expect(attempt.mayHaveWritten, mergeSent);
+        expect(delegate.calls.last.method, 'DELETE');
+        expect(
+          delegate.calls.where(
+            (r) =>
+                r.method == 'POST' &&
+                r.uri.queryParameters.containsKey('uploadId'),
+          ),
+          hasLength(mergeSent ? 1 : 0),
+        );
+      },
+    );
+  }
+  test('Lost multipart initialization cannot save a file', () async {
+    final delegate = FakeHttp((r) {
+      expect(r.method, 'POST');
+      expect(r.uri.queryParameters, {'uploads': ''});
+      throw const HttpRequestFailure('offline', kind: 'receiveTimeout');
+    });
+    final attempt = WriteRequestScope();
+    await expectLater(
+      attempt.run(
+        () => _upload(
+          UploadIO(RetryingJsonHttp(delegate), _source(large: true), null),
+        ),
+      ),
+      throwsA(isA<HttpRequestFailure>()),
+    );
+    expect(attempt.mayHaveWritten, isFalse);
+    expect(delegate.calls, hasLength(1));
+  });
 }

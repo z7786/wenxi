@@ -377,9 +377,15 @@ void main() {
         final session = await services.cloud.share(link);
         await fixture.render(tester, session: session);
         await tap(tester, find.byTooltip('收藏分享链接'));
+        final folderId = await services.favorites.createFolder('分享资料');
+        await tester.pumpAndSettle();
+        await tap(tester, find.byType(DropdownButtonFormField<String>));
+        await tap(tester, find.text('分享资料').last);
+        await tap(tester, find.byKey(const Key('favorite-details-save')));
         expect(find.byTooltip('取消收藏分享链接'), findsOneWidget);
         final saved = services.favorites.all.single;
         expect(saved.isShareLink, isTrue);
+        expect(saved.folderId, folderId);
         await tester.pumpWidget(
           MaterialApp(
             theme: appTheme(Brightness.light),

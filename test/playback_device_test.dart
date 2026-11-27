@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show DisplayFeature, DisplayFeatureState, DisplayFeatureType;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -50,6 +51,39 @@ void main() {
     messenger.setMockMethodCallHandler(channel, null);
     messenger.setMockMethodCallHandler(nativeChannel, null);
   });
+
+  test(
+    'Android manual launch carries the video and session without a preferred component',
+    () async {
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      expect(device.supportsExternalPlayer, isTrue);
+      await device.start(video: true);
+      expect(
+        await device.openExternalPlayer(
+          url: 'http://127.0.0.1/video',
+          title: 'movie.mp4',
+          position: const Duration(seconds: 10),
+        ),
+        isTrue,
+      );
+      final request = nativeCalls.single;
+      expect(request.method, 'openExternalPlayer');
+      expect(request.arguments['url'], 'http://127.0.0.1/video');
+      expect(request.arguments['title'], 'movie.mp4');
+      expect(request.arguments['positionMs'], 10000);
+      expect(request.arguments['session'], calls.first.arguments['session']);
+      expect(request.arguments.containsKey('playerComponent'), isFalse);
+      await device.finish();
+      expect(nativeCalls.last.method, 'cancelExternalPlayer');
+      expect(
+        nativeCalls.last.arguments['session'],
+        request.arguments['session'],
+      );
+    },
+  );
 
   test(
     'Android cadence updates are deduplicated and cleared on pause or unknown media',
@@ -378,6 +412,7 @@ void main() {
         'top': 24.0,
         'right': 0.0,
         'bottom': 20.0,
+        'cutout': {'left': 0.0, 'top': 24.0, 'right': 0.0, 'bottom': 0.0},
       };
       const landscapeBounds = {
         'width': 864.0,
@@ -386,6 +421,7 @@ void main() {
         'top': 24.0,
         'right': 20.0,
         'bottom': 0.0,
+        'cutout': {'left': 44.0, 'top': 0.0, 'right': 0.0, 'bottom': 0.0},
       };
       final responses = <Completer<Object?>>[];
       messenger.setMockMethodCallHandler(channel, (call) async {
@@ -407,6 +443,11 @@ void main() {
         const EdgeInsets.only(top: 24, bottom: 20),
       );
       expect(device.systemInsetsFor(landscape), isNull);
+      expect(
+        device.screenDisplayInsetsFor(portrait),
+        const EdgeInsets.only(top: 24),
+      );
+      expect(device.screenDisplayInsetsFor(landscape), EdgeInsets.zero);
       device.didChangeMetrics();
       await Future<void>.delayed(Duration.zero);
       device.didChangeMetrics();
@@ -421,16 +462,30 @@ void main() {
         const EdgeInsets.fromLTRB(44, 24, 20, 0),
       );
       expect(device.systemInsetsFor(portrait), isNull);
+      expect(
+        device.screenDisplayInsetsFor(landscape),
+        const EdgeInsets.only(left: 44),
+      );
+      expect(device.screenDisplayInsetsFor(portrait), EdgeInsets.zero);
       // Landscape direction can change without changing viewport dimensions.
       device.didChangeMetrics();
       await Future<void>.delayed(Duration.zero);
       responses.last.complete({
-        'systemInsets': {...landscapeBounds, 'left': 20.0, 'right': 44.0},
+        'systemInsets': {
+          ...landscapeBounds,
+          'left': 20.0,
+          'right': 44.0,
+          'cutout': {'left': 0.0, 'top': 0.0, 'right': 44.0, 'bottom': 0.0},
+        },
       });
       await Future<void>.delayed(Duration.zero);
       expect(
         device.systemInsetsFor(landscape),
         const EdgeInsets.fromLTRB(20, 24, 44, 0),
+      );
+      expect(
+        device.screenDisplayInsetsFor(landscape),
+        const EdgeInsets.only(right: 44),
       );
       device.didChangeMetrics();
       await Future<void>.delayed(Duration.zero);
@@ -442,9 +497,256 @@ void main() {
       responses.last.complete({'systemInsets': portraitBounds});
       await Future<void>.delayed(Duration.zero);
       expect(device.systemInsetsFor(portrait), isNull);
+      expect(device.screenDisplayInsetsFor(portrait), EdgeInsets.zero);
       expect(
         current.systemInsetsFor(portrait),
         const EdgeInsets.only(top: 24, bottom: 20),
+      );
+      expect(
+        current.screenDisplayInsetsFor(portrait),
+        const EdgeInsets.only(top: 24),
+      );
+    },
+  );
+
+  test(
+    'Native cutout rectangles follow rotation and waterfall edges',
+    () async {
+      const landscape = MediaQueryData(size: Size(904, 407));
+      const portrait = MediaQueryData(size: Size(407, 904));
+      final bounds = <String, Object>{
+        'width': 904.0,
+        'height': 407.0,
+        'left': 44.0,
+        'top': 24.0,
+        'right': 20.0,
+        'bottom': 0.0,
+        'cutout': {
+          'left': 44.0,
+          'top': 0.0,
+          'right': 0.0,
+          'bottom': 0.0,
+          'bounds': [
+            {'left': 0.0, 'top': 183.5, 'right': 44.0, 'bottom': 223.5},
+          ],
+          'waterfall': {'left': 0.0, 'top': 2.0, 'right': 0.0, 'bottom': 2.0},
+        },
+      };
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'begin' || call.method == 'systemInsets') {
+          return {'systemInsets': bounds};
+        }
+        return null;
+      });
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      expect(
+        device.systemInsetsFor(landscape),
+        const EdgeInsets.fromLTRB(44, 24, 20, 0),
+      );
+      expect(
+        device.screenDisplayInsetsFor(landscape),
+        const EdgeInsets.symmetric(vertical: 2),
+      );
+      expect(device.screenDisplayCutoutsFor(landscape), [
+        const Rect.fromLTRB(0, 183.5, 44, 223.5),
+      ]);
+      expect(device.screenDisplayCutoutsFor(portrait), isNull);
+      expect(device.screenDisplayInsetsFor(portrait), EdgeInsets.zero);
+
+      var notifications = 0;
+      device.addListener(() => notifications++);
+      bounds['cutout'] = {
+        'bounds': [
+          {'left': 860.0, 'top': 183.5, 'right': 904.0, 'bottom': 223.5},
+        ],
+        'waterfall': {'left': 0.0, 'top': 2.0, 'right': 0.0, 'bottom': 2.0},
+      };
+      device.didChangeMetrics();
+      await Future<void>.delayed(Duration.zero);
+      expect(notifications, 1);
+      expect(device.screenDisplayCutoutsFor(landscape), [
+        const Rect.fromLTRB(860, 183.5, 904, 223.5),
+      ]);
+
+      bounds['width'] = 407.0;
+      bounds['height'] = 904.0;
+      bounds['cutout'] = {'bounds': <Object>[]};
+      device.didChangeMetrics();
+      await Future<void>.delayed(Duration.zero);
+      expect(device.screenDisplayCutoutsFor(portrait), isEmpty);
+      expect(device.screenDisplayCutoutsFor(landscape), isNull);
+    },
+  );
+
+  test(
+    'Invalid native cutout rectangles retain the safe inset fallback',
+    () async {
+      const media = MediaQueryData(size: Size(904, 407));
+      for (final cutouts in [
+        'invalid',
+        [<String, double>{}],
+        [
+          {'left': -1.0, 'top': 100.0, 'right': 44.0, 'bottom': 140.0},
+        ],
+        [
+          {'left': 0.0, 'top': 140.0, 'right': 44.0, 'bottom': 100.0},
+        ],
+        [
+          {'left': 0.0, 'top': 100.0, 'right': 940.0, 'bottom': 140.0},
+        ],
+      ]) {
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'begin') {
+            return {
+              'systemInsets': {
+                'width': 904.0,
+                'height': 407.0,
+                'left': 44.0,
+                'top': 24.0,
+                'right': 20.0,
+                'bottom': 0.0,
+                'cutout': {
+                  'left': 44.0,
+                  'top': 0.0,
+                  'right': 0.0,
+                  'bottom': 0.0,
+                  'bounds': cutouts,
+                },
+              },
+            };
+          }
+          return null;
+        });
+        final device = NativePlaybackDevice(
+          targetPlatform: TargetPlatform.android,
+        );
+        await device.start(video: true);
+        expect(device.screenDisplayCutoutsFor(media), isNull);
+        expect(
+          device.screenDisplayInsetsFor(media),
+          const EdgeInsets.only(left: 44),
+        );
+        await device.finish();
+      }
+    },
+  );
+
+  test('Flutter cutout features avoid reserving their entire edge', () async {
+    const media = MediaQueryData(
+      size: Size(904, 407),
+      viewPadding: EdgeInsets.only(left: 44),
+      displayFeatures: [
+        DisplayFeature(
+          bounds: Rect.fromLTRB(0, 183.5, 44, 223.5),
+          type: DisplayFeatureType.cutout,
+          state: DisplayFeatureState.unknown,
+        ),
+      ],
+    );
+    final device = NativePlaybackDevice(targetPlatform: TargetPlatform.android);
+    expect(device.screenDisplayInsetsFor(media), EdgeInsets.zero);
+    expect(device.screenDisplayCutoutsFor(media), [
+      const Rect.fromLTRB(0, 183.5, 44, 223.5),
+    ]);
+    await device.finish();
+  });
+
+  test(
+    'Screen insets use current metrics for older or invalid native cutouts',
+    () async {
+      const media = MediaQueryData(
+        size: Size(792, 360),
+        viewPadding: EdgeInsets.only(left: 32),
+      );
+      const bounds = {
+        'width': 792.0,
+        'height': 360.0,
+        'left': 44.0,
+        'top': 48.0,
+        'right': 20.0,
+        'bottom': 24.0,
+      };
+      for (final cutout in [
+        null,
+        {'left': -1.0, 'top': 0.0, 'right': 0.0, 'bottom': 0.0},
+        {'left': 800.0, 'top': 0.0, 'right': 0.0, 'bottom': 0.0},
+        {'left': 44.0},
+      ]) {
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'begin') {
+            return {
+              'systemInsets': {...bounds, 'cutout': ?cutout},
+            };
+          }
+          return null;
+        });
+        final device = NativePlaybackDevice(
+          targetPlatform: TargetPlatform.android,
+        );
+        await device.start(video: true);
+        expect(
+          device.systemInsetsFor(media),
+          const EdgeInsets.fromLTRB(44, 48, 20, 24),
+        );
+        expect(
+          device.screenDisplayInsetsFor(media),
+          const EdgeInsets.only(left: 32),
+        );
+        expect(
+          device.screenDisplayInsetsFor(
+            media.copyWith(viewPadding: EdgeInsets.zero),
+          ),
+          EdgeInsets.zero,
+        );
+        await device.finish();
+      }
+    },
+  );
+
+  test(
+    'Screen cutout changes notify even when control insets and size match',
+    () async {
+      const media = MediaQueryData(size: Size(792, 360));
+      final bounds = {
+        'width': 792.0,
+        'height': 360.0,
+        'left': 44.0,
+        'top': 24.0,
+        'right': 44.0,
+        'bottom': 0.0,
+        'cutout': {'left': 44.0, 'top': 0.0, 'right': 0.0, 'bottom': 0.0},
+      };
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'begin' || call.method == 'systemInsets') {
+          return {'systemInsets': bounds};
+        }
+        return null;
+      });
+      final device = NativePlaybackDevice(
+        targetPlatform: TargetPlatform.android,
+      );
+      addTearDown(device.finish);
+      await device.start(video: true);
+      final controls = device.systemInsetsFor(media);
+      var changes = 0;
+      device.addListener(() => changes++);
+      bounds['cutout'] = {
+        'left': 0.0,
+        'top': 0.0,
+        'right': 44.0,
+        'bottom': 0.0,
+      };
+      device.didChangeMetrics();
+      await Future<void>.delayed(Duration.zero);
+      expect(changes, 1);
+      expect(device.systemInsetsFor(media), controls);
+      expect(
+        device.screenDisplayInsetsFor(media),
+        const EdgeInsets.only(right: 44),
       );
     },
   );

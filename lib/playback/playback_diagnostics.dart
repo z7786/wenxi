@@ -66,7 +66,6 @@ class PlaybackDiagnostics {
     final generation = _generation;
     final context = _context;
     try {
-      final snapshot = fields();
       final memory = await _memory();
       if (_closed || generation != _generation || log?.enabled != true) return;
       if (memory.isEmpty) return;
@@ -77,7 +76,7 @@ class PlaybackDiagnostics {
         'player.memory_sample',
         fields: {
           ...context,
-          ...snapshot,
+          ...fields(),
           'memorySampleIntervalMs': _sampleInterval.inMilliseconds,
           'memoryPhase': first ? 'baseline' : 'playing',
           'memory': memory,
@@ -105,6 +104,7 @@ class PlaybackDiagnostics {
   Future<void> afterClose(
     Map<String, Object?> fields, {
     String phase = 'stopped',
+    Map<String, Object?> Function()? currentFields,
   }) async {
     final log = DiagnosticLog.active;
     if (_readMemory == null || log?.enabled != true) return;
@@ -116,6 +116,7 @@ class PlaybackDiagnostics {
         fields: {
           ..._context,
           ...fields,
+          ...?currentFields?.call(),
           'memoryPhase': phase,
           'memory': memory,
         },

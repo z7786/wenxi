@@ -19,6 +19,7 @@
             android:tint="#FF6961"
             android:contentDescription="@string/lan_qr_close" />
         <TextView
+            android:id="@+id/lan_qr_title"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:layout_toStartOf="@id/lan_qr_cancel"
@@ -36,6 +37,7 @@
         android:layout_height="0dp"
         android:layout_weight="1" />
     <TextView
+        android:id="@+id/lan_qr_hint"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:padding="22dp"

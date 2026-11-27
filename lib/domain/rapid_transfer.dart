@@ -36,5 +36,6 @@ class RapidTransferResult {
 }
 
 class RapidTransferUnavailable extends AppException {
-  const RapidTransferUnavailable(super.message);
+  const RapidTransferUnavailable(super.message, {this.mayHaveSaved = true});
+  final bool mayHaveSaved;
 }

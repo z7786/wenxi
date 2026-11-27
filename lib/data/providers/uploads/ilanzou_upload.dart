@@ -55,11 +55,13 @@ extension _ILanzouUpload on ILanzouConnector {
       final object = base64Url.encode(utf8.encode(key));
       final base =
           'https://upload.qiniup.com/buckets/wpanstore-lanzou/objects/$object/uploads';
-      final init = await http.request(
-        'POST',
-        base,
-        headers: headers,
-        followRedirects: false,
+      final init = await io.temporary(
+        () => http.request(
+          'POST',
+          base,
+          headers: headers,
+          followRedirects: false,
+        ),
       );
       require(init.successful, '蓝奏优享无法创建分段上传');
       final uploadId = init.json.str('uploadId');
@@ -73,11 +75,13 @@ extension _ILanzouUpload on ILanzouConnector {
           headers: headers,
           start: start,
           end: math.min(source.size, start + partSize),
+          commitsFile: false,
         );
         final etag = response.json.str('etag');
         require(etag.isNotEmpty, '蓝奏优享未确认上传分段');
         parts.add({'partNumber': number, 'etag': etag});
       }
+      io.notSavedYet();
       io.progress(UploadPhase.finishing, source.size);
       final commit = await http.postJson('$base/$uploadId', {
         'fname': source.name,

@@ -8,6 +8,7 @@ import 'resource_search_test.dart' show SearchApiFixture, searchHit;
 import 'support.dart' show FakeHttp, jsonResponse;
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   test(
     'provider priority persists and preserves incoming relevance within a provider',
     () async {
@@ -61,8 +62,8 @@ void main() {
         CloudPlatform.uc,
       ]);
       expect(
-        restored.cloudPriority.toSet().length,
-        CloudPlatform.values.length,
+        restored.cloudPriority.toSet(),
+        CloudPlatform.values.where((p) => p != CloudPlatform.webdav).toSet(),
       );
     },
   );

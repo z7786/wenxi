@@ -111,6 +111,7 @@ void main() {
         backendFactory: (entry, hardware) {
           final backend = FakePlaybackBackend(entry.id, [])
             ..hardwareAcceleration = hardware
+            ..describeVideo()
             ..failHardwareOpen = true;
           backends.add(backend);
           return backend;
@@ -120,6 +121,11 @@ void main() {
         await controller.start();
         expect(controller.error, isEmpty);
         expect(controller.usingSoftwareDecoder, isTrue);
+        await controller.background(pictureInPicture: false);
+        expect(backends.last.videoMonitoring, isFalse);
+        controller.foreground();
+        expect(backends.last.videoMonitoring, isTrue);
+
         expect(backends, hasLength(2));
         expect(native.starts, hasLength(1));
         expect(native.stopped, isEmpty);

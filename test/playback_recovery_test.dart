@@ -262,7 +262,7 @@ void main() {
   }
 
   test(
-    'A released decoder reconstructs once, then permits an explicit decoder choice',
+    'A released decoder saves progress without reopening the failed hardware',
     () async {
       await fixture.controller.start();
       final backend = fixture.current;
@@ -270,18 +270,15 @@ void main() {
       backend.emit(backend.state.copyWith(position: position));
       backend
         ..failure = PlaybackFailure.fromLog(
-          'hevc_mediacodec: Failed to dequeue output buffer (status=-542398533)',
+          'amediacodec: Invalid to call at Released state',
         )
         ..fail();
       await until(
-        () => fixture.backends.length == 2 && fixture.controller.ready,
+        () =>
+            fixture.history.bookmark(fixture.entries.first.key)?.position ==
+            position,
       );
-      expect(fixture.current.openedStart, position);
-      expect(fixture.current.openedSource, same(backend.openedSource));
-      fixture.current
-        ..failure = backend.failure
-        ..fail();
-      await Future<void>.delayed(Duration.zero);
+      expect(fixture.backends, hasLength(1));
       expect(fixture.preparations, 1);
       expect(backend.state.playing, isFalse);
       expect(fixture.controller.error, contains('硬件解码器'));

@@ -401,7 +401,7 @@ class UcTvProtocol {
     require(validResponse, 'UC 原文件长度检查失败（HTTP ${probe.status}），请重试');
     require(
       total == size,
-      'UC 授权下载返回的内容与原文件大小不一致，可能受到原站下载限制；请先在 UC 官方客户端确认该文件能否下载',
+      'UC 授权下载返回的内容与原文件大小不一致，可能受到原站下载限制；可在文件菜单选择「下载可播放版本」，或使用 UC 官方客户端',
     );
     return DownloadSpec(
       url: url,

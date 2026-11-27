@@ -19,6 +19,12 @@
 *.jpeg binary
 *.ico binary
 *.zip binary
+# Preserve the upstream document runtime bytes checked by its manifest.
+assets/documents/vendor/** -text linguist-vendored
+assets/documents/*.html text eol=lf
+assets/documents/*.css text eol=lf
+assets/documents/*.js text eol=lf
+assets/documents/*.mjs text eol=lf
 # SSE event fixtures retain the blank line terminating their last event.
 *.sse whitespace=-blank-at-eof
 native/gopeed/vendor/** linguist-vendored

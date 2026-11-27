@@ -86,6 +86,20 @@ void main() {
       expect(second.current.subtitlePresentations.single.size, 12);
       expect(first.current.subtitlePresentations.single.width, 280);
       expect(first.current.subtitlePresentations.single.height, lessThan(200));
+      expect(first.current.lastRenderViewport!.width, 280);
+      expect(first.current.stableRenderOrientation, isFalse);
+      first.current.lastRenderViewport = null;
+      first.current.lastFit = null;
+      first.current.emit(
+        first.current.state.copyWith(position: const Duration(seconds: 20)),
+      );
+      await tester.pump();
+      expect(first.current.lastRenderViewport, isNull);
+      expect(
+        first.current.lastFit,
+        isNull,
+        reason: 'Position changes only rebuild controls',
+      );
       await tester.tap(find.text('主界面操作'));
       await tester.pump();
       expect(mainClicks, 1);

@@ -107,6 +107,7 @@ class SearchApiFixture
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   test('Tianyi share code is not shown as an extraction password', () {
     final hit = ResourceSearchHit.fromRaw({
       'title': '天翼资源',
@@ -455,6 +456,145 @@ void main() {
       expect(search.history, isEmpty);
     },
   );
+
+  test(
+    'incognito keeps existing history and survives restored local state',
+    () async {
+      final api = SearchApiFixture(
+        (_, _) => Stream.value(
+          ResourceSearchBatch([searchHit('cached')], complete: true),
+        ),
+      );
+      final store = StateStore.memory();
+      addTearDown(store.dispose);
+      final search = ResourceSearch(store: store, api: api);
+      addTearDown(search.dispose);
+      expect(search.incognito, isFalse);
+      await search.search('Python');
+      await store.flush();
+      await search.setCloudPriority([CloudPlatform.uc]);
+      await search.setIncognito(true);
+      await search.search('私密搜索');
+      await search.search('python');
+      expect(search.fromCache, isTrue);
+      await search.search('Python', refresh: true);
+      await store.flush();
+      expect(search.history, ['Python']);
+      expect(search.items, isNotEmpty);
+
+      final restoredStore = StateStore.memory(
+        decodePlainState(encodePlainState(store.data)),
+      );
+      addTearDown(restoredStore.dispose);
+      final restored = ResourceSearch(store: restoredStore, api: api);
+      addTearDown(restored.dispose);
+      expect(restored.incognito, isTrue);
+      expect(restored.cloudPriority.first, CloudPlatform.uc);
+      await restored.search('不留记录');
+      await restoredStore.flush();
+      expect(restored.history, ['Python']);
+      await restored.setIncognito(false);
+      await restored.search('正常搜索');
+      await restoredStore.flush();
+      expect(restored.history, ['正常搜索', 'Python']);
+    },
+  );
+
+  test(
+    'All search history survives beyond twelve terms and stays bounded',
+    () async {
+      final store = StateStore.memory();
+      addTearDown(store.dispose);
+      final api = SearchApiFixture(
+        (_, _) => Stream.value(const ResourceSearchBatch([], complete: true)),
+      );
+      final search = ResourceSearch(store: store, api: api);
+      addTearDown(search.dispose);
+      for (var index = 1; index <= 105; index++) {
+        await search.search('资源 $index');
+      }
+      await store.flush();
+      final expected = [for (var index = 105; index >= 6; index--) '资源 $index'];
+      expect(search.allHistory, expected);
+      expect(search.history, expected.take(12).toList());
+      await search.search('资源 6');
+      await store.flush();
+      expect(search.allHistory, ['资源 6', ...expected.take(99)]);
+      final restoredStore = StateStore.memory(
+        decodePlainState(encodePlainState(store.data)),
+      );
+      addTearDown(restoredStore.dispose);
+      final restored = ResourceSearch(store: restoredStore, api: api);
+      addTearDown(restored.dispose);
+      expect(restored.allHistory, search.allHistory);
+      await restored.setIncognito(true);
+      await restored.search('私密资源');
+      await restored.search('资源 105');
+      await restoredStore.flush();
+      expect(restored.allHistory, search.allHistory);
+      await restored.clearHistory();
+      expect(restored.allHistory, isEmpty);
+      expect(restored.history, isEmpty);
+    },
+  );
+
+  test(
+    'Legacy and restored search history keeps valid terms in recent order',
+    () async {
+      final store = StateStore.memory({
+        'resourceSearchHistory': [
+          ' Python ',
+          'python',
+          1,
+          '',
+          ' ',
+          List.filled(121, 'x').join(),
+          for (var index = 1; index <= 28; index++) '旧搜索 $index',
+        ],
+      });
+      addTearDown(store.dispose);
+      final search = ResourceSearch(
+        store: store,
+        api: SearchApiFixture(
+          (_, _) => Stream.value(const ResourceSearchBatch([], complete: true)),
+        ),
+      );
+      addTearDown(search.dispose);
+      final expected = [
+        'Python',
+        for (var index = 1; index <= 28; index++) '旧搜索 $index',
+      ];
+      expect(search.allHistory, expected);
+      await search.search('python');
+      await store.flush();
+      expect(search.allHistory, ['python', ...expected.skip(1)]);
+      expect(search.history, ['python', ...expected.skip(1).take(11)]);
+    },
+  );
+
+  test('queued incognito changes cannot save a private search', () async {
+    final store = StateStore.memory({
+      'resourceSearchHistory': ['原记录'],
+    });
+    addTearDown(store.dispose);
+    final search = ResourceSearch(
+      store: store,
+      api: SearchApiFixture(
+        (_, _) => Stream.value(const ResourceSearchBatch([], complete: true)),
+      ),
+    );
+    addTearDown(search.dispose);
+    final enabling = search.setIncognito(true);
+    await search.search('正在开启');
+    await enabling;
+    await store.flush();
+    expect(search.history, ['原记录']);
+    final disabling = search.setIncognito(false);
+    await search.search('正在关闭');
+    await disabling;
+    await store.flush();
+    expect(search.history, ['原记录']);
+  });
 
   test('total budget stops silent streams and preserves partial results', () {
     fakeAsync((time) {
@@ -888,6 +1028,81 @@ void main() {
     expect(search.items.last.canParse, isFalse);
     expect(search.allItems.first.canParse, isFalse);
   });
+
+  test(
+    'disabled clouds persist and filter cached results without losing their order',
+    () async {
+      final quark = searchHit('quark');
+      final baidu = searchHit('baidu', url: 'https://pan.baidu.com/s/1visible');
+      final other = searchHit(
+        'other',
+        url: 'https://unknown.example/share/one',
+      );
+      final github = searchHit(
+        'github',
+        url: 'https://github.com/example/resource',
+      );
+      final api = SearchApiFixture(
+        (_, _) => Stream.value(
+          ResourceSearchBatch([quark, baidu, other, github], complete: true),
+        ),
+      );
+      final store = StateStore.memory();
+      addTearDown(store.dispose);
+      final search = ResourceSearch(store: store, api: api);
+      addTearDown(search.dispose);
+      expect(search.disabledClouds, isEmpty);
+      await search.search('Python');
+      await store.flush();
+      await search.setIncognito(true);
+      search.filter(CloudPlatform.quark.label);
+      await search.setCloudPriority(
+        [CloudPlatform.baidu, CloudPlatform.quark],
+        disabledClouds: {CloudPlatform.quark},
+      );
+      expect(search.cloudFilter, isNull);
+      expect(
+        search.items.map((hit) => hit.identity),
+        isNot(contains(quark.identity)),
+      );
+      expect(search.enabledItems, hasLength(3));
+      expect(search.allItems, hasLength(4));
+      expect(search.orderedClouds, isNot(contains(CloudPlatform.quark.label)));
+      expect(search.items, containsAll([baidu, other, github]));
+      expect(search.incognito, isTrue);
+      await search.setCloudPriority([CloudPlatform.quark, CloudPlatform.baidu]);
+      expect(search.disabledClouds, {CloudPlatform.quark});
+      expect(search.cloudPriority.first, CloudPlatform.quark);
+      await search.search('python');
+      expect(search.fromCache, isTrue);
+      expect(search.items, hasLength(3));
+      expect(api.calls, hasLength(1));
+
+      final restoredStore = StateStore.memory(
+        decodePlainState(encodePlainState(store.data)),
+      );
+      addTearDown(restoredStore.dispose);
+      final restored = ResourceSearch(store: restoredStore, api: api);
+      addTearDown(restored.dispose);
+      expect(restored.disabledClouds, {CloudPlatform.quark});
+      expect(restored.cloudPriority.first, CloudPlatform.quark);
+      expect(restored.incognito, isTrue);
+      await restored.search('Python');
+      expect(restored.items, hasLength(3));
+      expect(
+        restored.orderedClouds,
+        isNot(contains(CloudPlatform.quark.label)),
+      );
+      await restored.setCloudPriority(
+        restored.cloudPriority,
+        disabledClouds: {},
+      );
+      expect(restored.items.first.identity, quark.identity);
+      expect(restored.items, hasLength(4));
+      expect(restored.orderedClouds.first, CloudPlatform.quark.label);
+      expect(api.calls, hasLength(2));
+    },
+  );
 
   test(
     'Cached search order responds to streamed replacements and saved priorities',

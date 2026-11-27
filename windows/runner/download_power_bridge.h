@@ -19,6 +19,7 @@ class DownloadPowerBridge {
  private:
   DownloadPowerRequest request_;
   DownloadPowerRequest cast_request_;
+  DownloadPowerRequest cast_display_request_{{}, PowerRequestDisplayRequired};
   std::set<std::string> cast_owners_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> cast_channel_;

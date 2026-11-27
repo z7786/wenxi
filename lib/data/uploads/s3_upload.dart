@@ -43,12 +43,12 @@ extension S3Upload on UploadIO {
       int? start,
       int? end,
     }) async {
-      final stamp =
-          '${clock().toUtc().toIso8601String().replaceAll(RegExp(r'[:-]'), '').split('.').first}Z';
-      final date = stamp.substring(0, 8);
       final contentHash = start == null
           ? sha256.convert(utf8.encode(body)).toString()
           : await digest(sha256, start: start, end: end);
+      final stamp =
+          '${clock().toUtc().toIso8601String().replaceAll(RegExp(r'[:-]'), '').split('.').first}Z';
+      final date = stamp.substring(0, 8);
       final headers = <String, String>{
         'host': base.authority,
         'x-amz-content-sha256': contentHash,
@@ -80,7 +80,14 @@ extension S3Upload on UploadIO {
       final url =
           '${base.origin}$path${canonicalQuery.isEmpty ? '' : '?$canonicalQuery'}';
       if (start != null) {
-        return send(url, start: start, end: end, headers: headers);
+        return send(
+          url,
+          start: start,
+          end: end,
+          headers: headers,
+          commitsFile: !parameters.containsKey('uploadId'),
+          retry: !parameters.containsKey('uploadId'),
+        );
       }
       final result = await http.request(
         method,
@@ -103,24 +110,30 @@ extension S3Upload on UploadIO {
       return;
     }
     final uploadId = UploadIO.xmlValue(
-      (await request('POST', {'uploads': ''})).body,
+      (await temporary(() => request('POST', {'uploads': ''}))).body,
       'UploadId',
     );
     require(uploadId.isNotEmpty, '网盘未创建分段上传任务');
     var complete = false;
     try {
-      final etags = <String>[];
-      for (var start = 0; start < file.size; start += chunkSize) {
-        final result = await request(
-          'PUT',
-          {'uploadId': uploadId, 'partNumber': '${etags.length + 1}'},
-          start: start,
-          end: math.min(file.size, start + chunkSize),
+      notSavedYet();
+      final count = (file.size / chunkSize).ceil();
+      final etags = List.filled(count, '');
+      await parts(count, (index) async {
+        final start = index * chunkSize;
+        final result = await retryPart(
+          () => request(
+            'PUT',
+            {'uploadId': uploadId, 'partNumber': '${index + 1}'},
+            start: start,
+            end: math.min(file.size, start + chunkSize),
+          ),
         );
         final etag = result.header('etag');
         require(etag.isNotEmpty, '网盘未确认上传分段');
-        etags.add(etag);
-      }
+        etags[index] = etag;
+      });
+      notSavedYet();
       progress(UploadPhase.finishing, file.size);
       await request('POST', {
         'uploadId': uploadId,
@@ -129,7 +142,7 @@ extension S3Upload on UploadIO {
     } finally {
       if (!complete && RequestScope.current?.isCancelled != true) {
         try {
-          await request('DELETE', {'uploadId': uploadId});
+          await temporary(() => request('DELETE', {'uploadId': uploadId}));
         } catch (_) {}
       }
     }

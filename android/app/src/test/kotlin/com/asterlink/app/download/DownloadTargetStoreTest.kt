@@ -9,6 +9,7 @@ import android.content.pm.ResolveInfo
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
+import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
@@ -44,10 +45,11 @@ import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
+import org.robolectric.annotation.RealObject
 import org.robolectric.shadows.ShadowContentResolver
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [33], manifest = Config.NONE, shadows = [HostAtomicFile::class])
+@Config(sdk = [33], manifest = Config.NONE, shadows = [HostAtomicFile::class, DownloadTargetStoreTest.DocumentQueryTransport::class])
 class DownloadTargetStoreTest {
     private lateinit var context: Context
     private lateinit var provider: Downloads
@@ -608,9 +610,15 @@ class DownloadTargetStoreTest {
         override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
             val file = file(documentId)
             if (!file.exists()) throw FileNotFoundException("ENOENT")
-            return MatrixCursor(arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE)).apply {
-                addRow(arrayOf(documentId, file.name, if (file.isDirectory) DocumentsContract.Document.MIME_TYPE_DIR else "video/mp2t"))
+            val columns = projection ?: arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE)
+            return MatrixCursor(columns).apply {
+                addRow(columns.map { column -> when (column) {
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID -> documentId
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME -> file.name
+                    DocumentsContract.Document.COLUMN_MIME_TYPE -> if (file.isDirectory) DocumentsContract.Document.MIME_TYPE_DIR else "video/mp2t"
+                    else -> null
+                } }.toTypedArray())
             }
         }
         override fun queryChildDocuments(parentDocumentId: String, projection: Array<out String>?, sortOrder: String?): Cursor =
@@ -628,6 +636,17 @@ class DownloadTargetStoreTest {
             return ParcelFileDescriptor.open(lastOpened!!, ParcelFileDescriptor.parseMode(mode))
         }
         override fun deleteDocument(documentId: String) { check(file(documentId).delete()) }
+    }
+
+    /** Match Android's transport translation for DocumentFile's legacy query.
+     * Robolectric otherwise calls DocumentsProvider's unsupported overload. */
+    @Implements(DocumentsProvider::class)
+    class DocumentQueryTransport {
+        @RealObject private lateinit var provider: DocumentsProvider
+
+        @Implementation
+        fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? =
+            provider.query(uri, projection, Bundle.EMPTY, null)
     }
 
     /** Robolectric does not implement pwrite/ftruncate or a real fstat. Keep

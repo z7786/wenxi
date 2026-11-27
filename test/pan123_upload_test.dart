@@ -72,6 +72,7 @@ class _Upload {
   final sent = <int>[];
   void Function()? onWait;
   FutureOr<HttpResult> Function()? complete, poll, list;
+  FutureOr<HttpResult> Function(RecordedRequest)? authorize, payload;
   Json get info => {
     'FileId': 42,
     'ParentFileId': 0,
@@ -100,6 +101,7 @@ class _Upload {
         r.uri.path == '${_base}s3_repare_upload_parts_batch') {
       final part = r.json.integer('partNumberStart');
       expect(r.json['partNumberEnd'], part + 1);
+      if (authorize != null) return await authorize!(r);
       return _ok({
         'presignedUrls': {'$part': 'https://upload.example/$part'},
       });
@@ -107,6 +109,7 @@ class _Upload {
     if (r.uri.host == 'upload.example') {
       sends++;
       expect(r.method, 'PUT');
+      if (payload != null) return await payload!(r);
       sent.addAll(
         await (r.body as HttpUpload).open().expand((c) => c).toList(),
       );
@@ -143,6 +146,69 @@ class _Upload {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  for (final mode in [
+    'expired',
+    'network',
+    'authorization',
+    'persistent',
+    'cancel',
+  ]) {
+    test(
+      '123 recovers the same part with renewed authorization: $mode',
+      () async {
+        final f = _Upload();
+        addTearDown(f.store.dispose);
+        final scope = RequestScope();
+        var grants = 0;
+        final bodies = <List<int>>[];
+        f.authorize = (r) {
+          grants++;
+          expect(r.json['uploadId'], 'same-upload');
+          expect(r.json['partNumberStart'], 1);
+          if (mode == 'authorization' && grants == 1) throw _network;
+          return _ok({
+            'presignedUrls': {'1': 'https://upload.example/1?grant=$grants'},
+          });
+        };
+        f.payload = (r) async {
+          expect(r.uri.queryParameters['grant'], '$grants');
+          final bytes = await (r.body as HttpUpload)
+              .open()
+              .expand((b) => b)
+              .toList();
+          bodies.add(bytes);
+          if (mode == 'cancel') scope.cancel();
+          if (mode == 'persistent' ||
+              mode == 'cancel' ||
+              (mode == 'expired' && f.sends == 1)) {
+            return const HttpResult(
+              403,
+              '<Error><Code>AccessDenied</Code></Error>',
+            );
+          }
+          if (mode == 'network' && f.sends == 1) throw _network;
+          f.sent.addAll(bytes);
+          return const HttpResult(200, '');
+        };
+        if (mode == 'persistent' || mode == 'cancel') {
+          await expectLater(scope.run(f.run), throwsA(isA<AppException>()));
+          expect(grants, mode == 'persistent' ? 3 : 1);
+          expect(f.commits, 0);
+        } else {
+          expect((await scope.run(f.run)).id, '42');
+          expect(grants, 2);
+          expect(f.commits, 1);
+        }
+        for (final bytes in bodies) {
+          expect(bytes, f.bytes);
+        }
+        expect(
+          f.http.calls.where((r) => r.uri.path == '${_base}upload_request'),
+          hasLength(1),
+        );
+      },
+    );
+  }
   for (final asynchronous in [false, true]) {
     test(
       '123 upload manager remains completed when final directory read fails: $asynchronous',

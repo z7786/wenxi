@@ -241,6 +241,7 @@ void main() {
         CloudPlatform.quark,
         (_) => response.future,
       );
+      final cancelledLogin = expectLater(login, throwsA(isA<AppException>()));
       await disable();
       response.complete(
         LoginResult(
@@ -248,7 +249,7 @@ void main() {
           const CloudAccount('new'),
         ),
       );
-      await expectLater(login, throwsA(isA<AppException>()));
+      await cancelledLogin;
       expect(services.vault.credential(CloudPlatform.quark)!.updatedAt, 1);
       var entered = false;
       await expectLater(

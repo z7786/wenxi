@@ -30,12 +30,22 @@ class DelegatingPlaybackBackend extends PlaybackBackend {
   Future<void> setDecoderCompatibility(bool enabled) =>
       delegate.setDecoderCompatibility(enabled);
   @override
+  void setAutomaticRenderQuality(bool enabled) =>
+      delegate.setAutomaticRenderQuality(enabled);
+  @override
   void setRenderViewport(
     Size viewport,
     double pixelRatio,
     BoxFit fit,
-    double scale,
-  ) => delegate.setRenderViewport(viewport, pixelRatio, fit, scale);
+    double scale, {
+    bool stableOrientation = false,
+  }) => delegate.setRenderViewport(
+    viewport,
+    pixelRatio,
+    fit,
+    scale,
+    stableOrientation: stableOrientation,
+  );
   @override
   Widget? buildVideo({required BoxFit fit, double? aspectRatio}) =>
       delegate.buildVideo(fit: fit, aspectRatio: aspectRatio);
@@ -60,6 +70,9 @@ class DelegatingPlaybackBackend extends PlaybackBackend {
   @override
   void setScreenDisplayMonitoringEnabled(bool enabled) =>
       delegate.setScreenDisplayMonitoringEnabled(enabled);
+  @override
+  void setVideoMonitoringEnabled(bool enabled) =>
+      delegate.setVideoMonitoringEnabled(enabled);
   @override
   bool get rendersSubtitlesNatively => delegate.rendersSubtitlesNatively;
   @override

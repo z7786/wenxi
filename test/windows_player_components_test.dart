@@ -53,6 +53,7 @@ void main() {
   WindowsPlayerComponents components(
     String url, {
     PlayerComponentExtractor? extract,
+    String Function()? executablePath,
     bool supported = true,
   }) {
     final value = WindowsPlayerComponents(
@@ -60,6 +61,7 @@ void main() {
       artifact: artifact(url),
       supported: supported,
       http: http,
+      executablePath: executablePath,
       extract:
           extract ??
           (archive, directory, cancel) async {
@@ -277,6 +279,107 @@ void main() {
         )['variant'],
         'compact',
       );
+    },
+  );
+
+  test(
+    'a working full component does not read the compact-library path',
+    () async {
+      const url = 'https://example.test/component';
+      await installed(url);
+      var reads = 0;
+      final value = components(
+        url,
+        executablePath: () {
+          reads++;
+          throw TypeError();
+        },
+      );
+      await value.select(WindowsPlayerVariant.full);
+      final loaded = <String?>[];
+      await value.initializeRuntime(loaded.add);
+      expect(loaded, [p.join(root.path, 'test-x64-v1', 'libmpv-2.dll')]);
+      expect(value.active, WindowsPlayerVariant.full);
+      expect(reads, 0);
+    },
+  );
+
+  test(
+    'failed compact-library loading is retryable and success initializes once',
+    () async {
+      var pathReads = 0, loads = 0;
+      final value = components(
+        'https://example.test/component',
+        executablePath: () {
+          pathReads++;
+          return p.join(root.path, 'app.exe');
+        },
+      );
+      void load(String? path) {
+        expect(path, p.join(root.path, 'libmpv-2.dll'));
+        if (++loads == 1) throw StateError('missing compact library');
+      }
+
+      await expectLater(value.initializeRuntime(load), throwsStateError);
+      await value.initializeRuntime(load);
+      await value.initializeRuntime(load);
+      expect(loads, 2);
+      expect(pathReads, 2);
+    },
+  );
+
+  test(
+    'background initialization prevents component edits until it finishes',
+    () async {
+      final directory = Completer<Directory>();
+      final value = WindowsPlayerComponents(
+        supported: true,
+        directory: () => directory.future,
+        artifact: artifact('https://example.test/component'),
+      );
+      addTearDown(value.close);
+      final loading = value.initializeRuntime(
+        (_) {},
+        bundledLibrary: 'compact.dll',
+      );
+      expect(value.busy, isTrue);
+      expect(
+        () => value.select(WindowsPlayerVariant.full),
+        throwsA(isA<AppException>()),
+      );
+      expect(value.remove, throwsA(isA<AppException>()));
+      expect(
+        () => value.download(acceleration: direct),
+        throwsA(isA<AppException>()),
+      );
+      directory.complete(root);
+      await loading;
+      expect(value.busy, isFalse);
+      await value.select(WindowsPlayerVariant.compact);
+    },
+  );
+
+  test(
+    'runtime waits for an existing selection edit without a deadlock',
+    () async {
+      final directory = Completer<Directory>();
+      final value = WindowsPlayerComponents(
+        supported: true,
+        directory: () => directory.future,
+        artifact: artifact('https://example.test/component'),
+      );
+      addTearDown(value.close);
+      final selection = value.select(WindowsPlayerVariant.compact);
+      final loaded = <String?>[];
+      final loading = value.initializeRuntime(
+        loaded.add,
+        bundledLibrary: 'compact.dll',
+      );
+      directory.complete(root);
+      await selection;
+      await loading;
+      expect(loaded, ['compact.dll']);
+      expect(value.busy, isFalse);
     },
   );
 

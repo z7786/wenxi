@@ -10,7 +10,7 @@
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="AGPL-3.0"></a>
   </p>
   <p>
-    <a href="#安卓界面">安卓界面</a> · <a href="#windows-界面">Windows 界面</a> · <a href="#支持网盘">支持网盘</a> · <a href="#功能">功能</a> · <a href="#下载">下载</a> · <a href="docs/BUILDING.md">编译</a> · <a href="CHANGELOG.md">更新记录</a>
+    <a href="#手机界面">手机界面</a> · <a href="#电脑端界面">电脑端界面</a> · <a href="#支持网盘">支持网盘</a> · <a href="#功能">功能</a> · <a href="#下载">下载</a> · <a href="docs/BUILDING.md">编译</a> · <a href="CHANGELOG.md">更新记录</a>
   </p>
 </div>
 
@@ -113,7 +113,7 @@ Android 可通过通知栏和传输悬浮窗查看后台任务；桌面端传输
 
 ## 下载
 
-在 [Releases](https://github.com/z7786/wenxi/releases) 页面获取安装包。当前版本为 [2.3.0+230](https://github.com/z7786/wenxi/releases/tag/v2.3.0%2B230)，附 `SHA256SUMS.txt` 校验文件。
+在 [Releases](https://github.com/z7786/wenxi/releases) 页面获取安装包，[最新正式版本](https://github.com/z7786/wenxi/releases/latest)附 `SHA256SUMS.txt` 校验文件。
 
 | 平台 | 安装包 | 系统要求 |
 | --- | --- | --- |

@@ -161,6 +161,8 @@ extension _FeijipanUpload on FeijipanConnector {
               headers: headers,
               start: start,
               end: end,
+              commitsFile: !params.containsKey('uploadId'),
+              retry: !params.containsKey('uploadId'),
             );
       require(
         result.successful && !UploadIO.xmlError(result.body),
@@ -175,7 +177,9 @@ extension _FeijipanUpload on FeijipanConnector {
       return;
     }
     final uploadId = UploadIO.xmlValue(
-      (await request('POST', {'uploads': ''}, meta: true)).body,
+      (await io.temporary(
+        () => request('POST', {'uploads': ''}, meta: true),
+      )).body,
       'UploadId',
     );
     require(uploadId.isNotEmpty, '小飞机未创建分段上传');
@@ -183,16 +187,19 @@ extension _FeijipanUpload on FeijipanConnector {
     try {
       final etags = <String>[];
       for (var start = 0; start < io.file.size; start += size) {
-        final r = await request(
-          'PUT',
-          {'partNumber': '${etags.length + 1}', 'uploadId': uploadId},
-          start: start,
-          end: math.min(io.file.size, start + size),
+        final r = await io.retryPart(
+          () => request(
+            'PUT',
+            {'partNumber': '${etags.length + 1}', 'uploadId': uploadId},
+            start: start,
+            end: math.min(io.file.size, start + size),
+          ),
         );
         final etag = r.header('etag');
         require(etag.isNotEmpty, '小飞机未确认上传分段');
         etags.add(etag);
       }
+      io.notSavedYet();
       io.progress(UploadPhase.finishing, io.file.size);
       await request('POST', {
         'uploadId': uploadId,
@@ -201,7 +208,7 @@ extension _FeijipanUpload on FeijipanConnector {
     } finally {
       if (!completed && RequestScope.current?.isCancelled != true) {
         try {
-          await request('DELETE', {'uploadId': uploadId});
+          await io.temporary(() => request('DELETE', {'uploadId': uploadId}));
         } catch (_) {}
       }
     }

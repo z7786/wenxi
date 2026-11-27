@@ -270,4 +270,175 @@ void main() {
       expect(http.closed, isTrue);
     },
   );
+
+  const digest =
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  const installer = 'asterlink-0.6.0+54-windows-x64-setup.exe';
+
+  test('GitHub asset digest and byte size describe the selected package', () {
+    final release =
+        jsonDecode(jsonEncode(githubRelease(files: [installer]))) as Json;
+    (release['assets'] as List).single['digest'] =
+        'sha256:${digest.toUpperCase()}';
+    final update = parse(release, platform: 'windows', architecture: 'x64')!;
+    expect(update.packageSha256, digest);
+    expect(update.packageSize, 123456);
+    for (final invalid in ['sha256:short', 'md5:$digest', null, 123]) {
+      (release['assets'] as List).single['digest'] = invalid;
+      expect(
+        parse(release, platform: 'windows', architecture: 'x64')!.packageSha256,
+        isEmpty,
+      );
+    }
+  });
+
+  test('Checksum manifests match the complete exact file name', () {
+    expect(
+      GitHubReleaseParser.checksumFor(
+        '$digest  $installer.old\n${digest.toUpperCase()} *$installer\r\n'
+        '$digest  $installer\n',
+        installer,
+      ),
+      digest,
+    );
+    for (final name in [
+      'prefix-$installer',
+      installer.toUpperCase(),
+      './$installer',
+    ]) {
+      expect(
+        GitHubReleaseParser.checksumFor('$digest  $name\n', installer),
+        isEmpty,
+      );
+    }
+    expect(
+      () => GitHubReleaseParser.checksumFor(
+        '$digest  $installer\n${'a' * 64}  $installer\n',
+        installer,
+      ),
+      throwsFormatException,
+    );
+  });
+
+  test(
+    'Only the checksum asset from the selected release is fetched',
+    () async {
+      final release = githubRelease(files: [installer, 'SHA256SUMS.txt']);
+      final package = parse(release, platform: 'windows', architecture: 'x64')!;
+      final expected = package.downloadUrl.replace(
+        pathSegments: [
+          ...package.downloadUrl.pathSegments.take(5),
+          'SHA256SUMS.txt',
+        ],
+      );
+      expect(
+        GitHubReleaseParser.checksumUrl(
+          jsonEncode(release),
+          package.downloadUrl,
+        ),
+        expected,
+      );
+      final manifest = (release['assets'] as List).last as Map;
+      for (final invalid in [
+        expected.replace(host: 'images.example.test').toString(),
+        expected.toString().replaceFirst('v0.6.0+54', 'v0.5.0+53'),
+        '${expected.toString()}?token=wrong',
+      ]) {
+        manifest['browser_download_url'] = invalid;
+        expect(
+          GitHubReleaseParser.checksumUrl(
+            jsonEncode(release),
+            package.downloadUrl,
+          ),
+          isNull,
+        );
+      }
+      manifest['browser_download_url'] = expected.toString();
+      final http = FakeControlFetcher()
+        ..respond = (uri) =>
+            uri == expected ? '$digest  $installer\n' : jsonEncode(release);
+      final source = GitHubUpdateService(
+        repository: githubRepository,
+        platform: 'windows',
+        architecture: 'x64',
+        fetcher: http,
+      );
+      addTearDown(source.close);
+      final checked = (await source.check())!;
+      expect(checked.packageSha256, digest);
+      expect(checked.packageSize, package.packageSize);
+      expect(http.calls.last, expected);
+      await source.check();
+      expect(http.calls, hasLength(2));
+    },
+  );
+
+  test('An asset digest needs no additional manifest request', () async {
+    final release = githubRelease(files: [installer, 'SHA256SUMS.txt']);
+    (release['assets'] as List).first['digest'] = 'sha256:$digest';
+    final http = FakeControlFetcher(release);
+    final source = GitHubUpdateService(
+      repository: githubRepository,
+      platform: 'windows',
+      architecture: 'x64',
+      fetcher: http,
+    );
+    addTearDown(source.close);
+    expect((await source.check())!.packageSha256, digest);
+    expect(http.calls, hasLength(1));
+  });
+
+  test(
+    'A failed checksum fetch cannot return a partially checked update',
+    () async {
+      final release = githubRelease(files: [installer, 'SHA256SUMS.txt']);
+      final http = FakeControlFetcher()
+        ..respond = (uri) {
+          if (uri.path.endsWith('SHA256SUMS.txt')) {
+            throw const ControlAccessException(
+              'Checksum unavailable',
+              statusCode: 503,
+            );
+          }
+          return jsonEncode(release);
+        };
+      final source = GitHubUpdateService(
+        repository: githubRepository,
+        platform: 'windows',
+        architecture: 'x64',
+        fetcher: http,
+      );
+      addTearDown(source.close);
+      await expectLater(source.check(), throwsFormatException);
+      await expectLater(source.check(), throwsFormatException);
+      expect(http.calls, hasLength(2));
+      http.respond = (uri) => uri.path.endsWith('SHA256SUMS.txt')
+          ? '$digest  $installer\n'
+          : jsonEncode(release);
+      expect((await source.check(force: true))!.packageSha256, digest);
+    },
+  );
+
+  test('Closing during checksum download discards its late response', () async {
+    final release = githubRelease(files: [installer, 'SHA256SUMS.txt']);
+    final manifest = Completer<String>();
+    final http = FakeControlFetcher()
+      ..respond = (uri) => uri.path.endsWith('SHA256SUMS.txt')
+          ? manifest.future
+          : jsonEncode(release);
+    final source = GitHubUpdateService(
+      repository: githubRepository,
+      platform: 'windows',
+      architecture: 'x64',
+      fetcher: http,
+    );
+    final pending = source.check();
+    final failed = expectLater(pending, throwsStateError);
+    await Future<void>.delayed(Duration.zero);
+    expect(http.calls, hasLength(2));
+    source.close();
+    manifest.complete('$digest  $installer\n');
+    await failed;
+    expect(http.closed, isTrue);
+  });
 }

@@ -21,6 +21,14 @@ class TestCastPlatform extends CastPlatform {
   }
 }
 
+enum TestTvResponse {
+  normal,
+  disconnectBefore,
+  disconnectAfter,
+  truncated,
+  empty,
+}
+
 class TestTv {
   TestTv({this.host = '127.0.0.1'});
   final String host;
@@ -28,7 +36,14 @@ class TestTv {
   RawDatagramSocket? ssdp;
   final events = <String>[];
   final requests =
-      <({String name, Map<String, String> args, HttpHeaders headers})>[];
+      <
+        ({String name, Map<String, String> args, HttpHeaders headers, int port})
+      >[];
+  final connectionPorts = <int>[];
+  final responseSequences = <String, List<TestTvResponse>>{};
+  final responses = <String, TestTvResponse>{};
+  final httpStatuses = <String, int>{};
+  final transportOverrides = <String, Map<String, String>>{};
   final faults = <String, int>{};
   final faultSequences = <String, List<int>>{};
   final barriers = <String, Future<void>>{};
@@ -38,8 +53,10 @@ class TestTv {
   String? trackOverride;
   Duration position = Duration.zero, duration = const Duration(minutes: 10);
   double volume = 35;
+  bool muted = false;
   bool malformed = false;
   bool ignoreSeek = false;
+  bool rejectReusedConnections = false;
   Uri get location => Uri.parse('http://$host:${server.port}/device/root.xml');
   String get description =>
       '<root xmlns="urn:schemas-upnp-org:device-1-0">'
@@ -85,6 +102,14 @@ class TestTv {
 
   Future<void> _handle(HttpRequest request) async {
     try {
+      final port = request.connectionInfo!.remotePort;
+      final reused = connectionPorts.contains(port);
+      connectionPorts.add(port);
+      if (rejectReusedConnections && reused) {
+        events.add('connection_reused');
+        (await request.response.detachSocket(writeHeaders: false)).destroy();
+        return;
+      }
       if (request.method == 'GET') {
         descriptions++;
         await barriers['description'];
@@ -101,7 +126,12 @@ class TestTv {
       final args = {
         for (final e in action.childElements) e.name.local: e.innerText,
       };
-      requests.add((name: name, args: args, headers: request.headers));
+      requests.add((
+        name: name,
+        args: args,
+        headers: request.headers,
+        port: port,
+      ));
       events.add(name);
       if (name == 'SetAVTransportURI') {
         media = args['CurrentURI']!;
@@ -109,6 +139,12 @@ class TestTv {
         position = Duration.zero;
       }
       await barriers[name];
+      final status = httpStatuses[name];
+      if (status != null) {
+        request.response.statusCode = status;
+        request.response.write('receiver rejected this request');
+        return;
+      }
       if (malformed) {
         request.response.write('invalid xml');
         return;
@@ -128,6 +164,14 @@ class TestTv {
         );
         return;
       }
+      final modes = responseSequences[name];
+      final mode = modes != null && modes.isNotEmpty
+          ? modes.removeAt(0)
+          : responses[name] ?? TestTvResponse.normal;
+      if (mode == TestTvResponse.disconnectBefore) {
+        (await request.response.detachSocket(writeHeaders: false)).destroy();
+        return;
+      }
       final result = <String, String>{};
       switch (name) {
         case 'Play':
@@ -142,6 +186,10 @@ class TestTv {
           volume = double.parse(args['DesiredVolume']!);
         case 'GetVolume':
           result['CurrentVolume'] = volume.round().toString();
+        case 'SetMute':
+          muted = args['DesiredMute'] == '1';
+        case 'GetMute':
+          result['CurrentMute'] = muted ? '1' : '0';
         case 'GetTransportInfo':
           result.addAll({
             'CurrentTransportState': transport,
@@ -153,18 +201,43 @@ class TestTv {
             'TrackDuration': castTime(duration),
             'RelTime': castTime(position),
           });
+        case 'GetMediaInfo':
+          result.addAll({
+            'CurrentURI': trackOverride ?? media,
+            'MediaDuration': castTime(duration),
+          });
       }
+      result.addAll(transportOverrides[name] ?? const {});
+      if (mode == TestTvResponse.disconnectAfter) {
+        (await request.response.detachSocket(writeHeaders: false)).destroy();
+        return;
+      }
+      if (mode == TestTvResponse.empty) return;
       request.response.headers.contentType = ContentType(
         'text',
         'xml',
         charset: 'utf-8',
       );
-      request.response.write(
-        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
-        '<s:Body><u:${name}Response xmlns:u="${action.namespaceUri}">'
-        '${result.entries.map((e) => '<${e.key}>${xmlText(e.value)}</${e.key}>').join()}'
-        '</u:${name}Response></s:Body></s:Envelope>',
-      );
+      final body =
+          '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+          '<s:Body><u:${name}Response xmlns:u="${action.namespaceUri}">'
+          '${result.entries.map((e) => '<${e.key}>${xmlText(e.value)}</${e.key}>').join()}'
+          '</u:${name}Response></s:Body></s:Envelope>';
+      if (mode == TestTvResponse.truncated) {
+        final socket = await request.response.detachSocket(writeHeaders: false);
+        socket.add(
+          utf8.encode(
+            'HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\n'
+            'Content-Length: ${utf8.encode(body).length}\r\nConnection: close\r\n\r\n'
+            '${body.substring(0, body.length ~/ 2)}',
+          ),
+        );
+        await socket.flush();
+        await socket.close();
+        socket.destroy();
+        return;
+      }
+      request.response.write(body);
     } finally {
       try {
         await request.response.close();

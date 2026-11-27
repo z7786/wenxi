@@ -504,7 +504,7 @@ void main() {
         [('root', '全部文件')],
       );
       await vault.activate(p, second);
-      final bytes = await BackupRepository(store).create('fixture-password');
+      final bytes = await BackupRepository(store).create('');
       expect(isPlainBackup(bytes), isTrue);
       expect(utf8.decode(bytes), contains('fixture-device-A'));
       final restored = StateStore.memory(), restoredVault = Vault(restored);

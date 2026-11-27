@@ -8,6 +8,7 @@ import '../domain/downloads.dart';
 import '../domain/uc_video_download.dart';
 import '../domain/public_share_route.dart';
 import 'common.dart';
+import 'download_location_picker.dart';
 
 bool canDownloadUcPlayable(BrowseSession session, CloudFile file) =>
     session.platform == CloudPlatform.uc &&
@@ -61,7 +62,8 @@ Future<void> downloadUcPlayable(
               ),
               const SizedBox(height: 16),
               Text(
-                '画质：${quality.label}\n分辨率：${quality.dimensions}\n大小：${formatBytes(quality.size)}',
+                '画质：${quality.label}\n分辨率：${quality.dimensions}\n${quality.segmented ? '预计大小' : '大小'}：${formatBytes(quality.size)}'
+                '${quality.segmented ? '\n保存格式：${quality.extension.toUpperCase()}' : ''}',
                 style: const TextStyle(height: 1.8),
               ),
               const SizedBox(height: 12),
@@ -84,6 +86,8 @@ Future<void> downloadUcPlayable(
       ),
     );
     if (accepted != true || !context.mounted) return;
+    final location = await chooseDownloadLocation(context, services);
+    if (location == null || !context.mounted) return;
     await busy(
       context,
       () => services.cloud.withSession(boundSession, () async {
@@ -92,7 +96,7 @@ Future<void> downloadUcPlayable(
               result.source!['accountRevision'],
           'UC 账号已变化，请重新选择视频',
         );
-        await services.downloads.enqueue(result);
+        await services.downloads.enqueue(result, location: location);
         queued = true;
       }),
       label: '正在添加下载任务…',

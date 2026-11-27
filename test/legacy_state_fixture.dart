@@ -151,10 +151,7 @@ class LegacyBackupFixture extends BackupRepository {
     String password, {
     bool includeBackgroundImages = false,
   }) async {
-    final plain = await super.create(
-      '',
-      includeBackgroundImages: includeBackgroundImages,
-    );
+    final plain = await super.create('');
     return encryptBackup((decryptBackup((plain, '')), password));
   }
 

@@ -6,6 +6,9 @@ import '../download/download_request.dart';
 import '../domain/models.dart';
 import '../domain/baidu_share_route.dart';
 import '../domain/public_share_route.dart';
+import '../domain/quark_share_transfer.dart';
+import '../platform/quark_transfer_device.dart';
+import '../platform/file_access.dart' show safeFileName;
 import '../domain/uploads.dart';
 import '../domain/rapid_transfer.dart';
 import '../domain/auth.dart';
@@ -17,6 +20,8 @@ import '../domain/github_acceleration.dart';
 import 'state_store.dart';
 import 'http.dart';
 import 'http_retry.dart';
+import 'uploads/upload_concurrency.dart';
+import 'cloud_browser_ua.dart';
 import 'cleanup_outbox.dart';
 import 'providers/baidu.dart';
 import 'providers/baidu_public_parser.dart';
@@ -26,6 +31,7 @@ import 'providers/ctfile.dart';
 import 'providers/feijipan.dart';
 import 'providers/pikpak.dart';
 import 'providers/github.dart';
+import 'providers/webdav.dart';
 import 'providers/quark.dart';
 import 'providers/uc.dart';
 import 'providers/pan123.dart';
@@ -44,6 +50,11 @@ import 'providers/xunlei_protocol.dart';
 import 'providers/xunlei_login.dart';
 import 'cloud_command_resolver.dart';
 
+class _CloudWriteTarget {
+  final gate = UploadWorkLimiter(1, reentrant: true);
+  int users = 0;
+}
+
 class CloudRepository {
   CloudRepository(
     JsonHttp transport,
@@ -53,12 +64,15 @@ class CloudRepository {
     this.preparationRetries,
     this.retryWait,
     this.directShareDownloadEnabled,
+    QuarkTransferDevice? quarkTransferDevice,
     GitHubAcceleration Function()? githubAcceleration,
     ParserRuleHub? parserHub,
     DateTime Function()? clock,
   }) : http = transport is RetryingJsonHttp
            ? transport
            : RetryingJsonHttp(transport) {
+    browserUa = CloudBrowserUa(vault);
+    JsonHttp browser(CloudPlatform platform) => browserHttp(platform);
     final devices = XunleiDevices(vault);
     publicPasswords = BaiduPublicPasswords(
       http,
@@ -72,17 +86,18 @@ class CloudRepository {
       hub: parserHub,
     );
     connectors = {
+      CloudPlatform.webdav: WebDavConnector(),
       CloudPlatform.github: GitHubConnector(
         http,
         acceleration: githubAcceleration,
       ),
       CloudPlatform.pikpak: PikPakConnector(
-        http,
+        browser(CloudPlatform.pikpak),
         vault,
         stageCleanup: _stageCleanup,
       ),
       CloudPlatform.feijipan: FeijipanConnector(http, vault),
-      CloudPlatform.ctfile: CtfileConnector(http),
+      CloudPlatform.ctfile: CtfileConnector(browser(CloudPlatform.ctfile)),
       CloudPlatform.baidu: BaiduConnector(
         http,
         store: vault,
@@ -91,6 +106,7 @@ class CloudRepository {
       ),
       CloudPlatform.quark: QuarkConnector(
         http,
+        transferDevice: quarkTransferDevice,
         store: vault,
         stageCleanup: _stageCleanup,
         directShareDownloadEnabled: directShareDownloadEnabled == null
@@ -101,7 +117,7 @@ class CloudRepository {
               ),
       ),
       CloudPlatform.uc: UcConnector(
-        http,
+        browser(CloudPlatform.uc),
         store: vault,
         stageCleanup: _stageCleanup,
         directShareDownloadEnabled: directShareDownloadEnabled == null
@@ -110,44 +126,53 @@ class CloudRepository {
                   directShareDownloadEnabled!(CloudPlatform.uc, authenticated),
       ),
       CloudPlatform.pan123: Pan123Connector(
-        http,
+        browser(CloudPlatform.pan123),
         vault,
         stageCleanup: _stageCleanup,
       ),
       CloudPlatform.xunlei: XunleiConnector(
-        http,
+        browser(CloudPlatform.xunlei),
         vault,
         devices,
         stageCleanup: _stageCleanup,
         passwordLogin: (username, password) =>
             xunleiLogin.password(username, password, rememberPassword: true),
       ),
-      CloudPlatform.c139: C139Connector(http, stageCleanup: _stageCleanup),
+      CloudPlatform.c139: C139Connector(
+        browser(CloudPlatform.c139),
+        stageCleanup: _stageCleanup,
+      ),
       CloudPlatform.tianyi: TianyiConnector(
-        http,
+        browser(CloudPlatform.tianyi),
         store: vault,
         passwordLogin: (username, password) =>
             tianyiLogin.password(username, password),
       ),
-      CloudPlatform.lanzou: LanzouConnector(http),
+      CloudPlatform.lanzou: LanzouConnector(browser(CloudPlatform.lanzou)),
       CloudPlatform.guangya: GuangyaConnector(
-        http,
+        browser(CloudPlatform.guangya),
         vault,
         stageCleanup: _stageCleanup,
       ),
-      CloudPlatform.ilanzou: ILanzouConnector(http, vault),
-      CloudPlatform.weiyun: WeiyunConnector(http, vault),
-      CloudPlatform.wopan: WopanConnector(http, vault),
-      CloudPlatform.pan115: Pan115Connector(http),
+      CloudPlatform.ilanzou: ILanzouConnector(
+        browser(CloudPlatform.ilanzou),
+        vault,
+      ),
+      CloudPlatform.weiyun: WeiyunConnector(
+        browser(CloudPlatform.weiyun),
+        vault,
+      ),
+      CloudPlatform.wopan: WopanConnector(browser(CloudPlatform.wopan), vault),
+      CloudPlatform.pan115: Pan115Connector(browser(CloudPlatform.pan115)),
       CloudPlatform.aliyun: AliyunConnector(
-        http,
+        browser(CloudPlatform.aliyun),
         vault,
         stageCleanup: _stageCleanup,
       ),
     };
-    xunleiLogin = XunleiLoginService(http, devices);
+    xunleiLogin = XunleiLoginService(browser(CloudPlatform.xunlei), devices);
     tianyiLogin = TianyiLoginService(
-      http,
+      browser(CloudPlatform.tianyi),
       connectors[CloudPlatform.tianyi] as TianyiConnector,
     );
     cleanups.executeAction = (action) async {
@@ -278,6 +303,9 @@ class CloudRepository {
     };
   }
   final JsonHttp http;
+  late final CloudBrowserUa browserUa;
+  JsonHttp browserHttp(CloudPlatform platform) =>
+      BrowserUaJsonHttp(http, browserUa, platform);
   final CredentialStore vault;
   final CleanupOutbox cleanups;
   late final BaiduPublicPasswords publicPasswords;
@@ -291,8 +319,12 @@ class CloudRepository {
   final _continuationKey = Object();
   final _readPreparationKey = Object();
 
-  T _withAccount<T>(CloudPlatform p, String? id, T Function() action) =>
-      vault is Vault ? (vault as Vault).withAccount(p, id, action) : action();
+  T _withAccount<T>(CloudPlatform p, String? id, T Function() action) {
+    T scoped() => browserUa.run(p, action);
+    return vault is Vault
+        ? (vault as Vault).withAccount(p, id, scoped)
+        : scoped();
+  }
 
   String? _currentId(CloudPlatform p) =>
       vault is Vault ? (vault as Vault).accountId(p) : null;
@@ -303,10 +335,27 @@ class CloudRepository {
     return (vault as Vault).accountForRevision(p, revision);
   }
 
-  BrowseSession bindSession(BrowseSession session) =>
-      vault is Vault && session.accountId == null
-      ? session.withAccount(_currentId(session.platform))
-      : session;
+  BrowseSession bindSession(BrowseSession session) {
+    if (CloudBrowserUa.supports(session.platform)) {
+      session = BrowseSession(
+        platform: session.platform,
+        mode: session.mode,
+        title: session.title,
+        rootId: session.rootId,
+        sourceLink: session.sourceLink,
+        metadata: {
+          ...session.metadata,
+          CloudBrowserUa.sessionField:
+              session.meta(CloudBrowserUa.sessionField).isEmpty
+              ? browserUa.selected(session.platform)
+              : session.meta(CloudBrowserUa.sessionField),
+        },
+      );
+    }
+    return vault is Vault && session.accountId == null
+        ? session.withAccount(_currentId(session.platform))
+        : session;
+  }
 
   T withSession<T>(BrowseSession session, T Function() action) {
     final id = session.accountId;
@@ -317,7 +366,12 @@ class CloudRepository {
           : id.isEmpty
           ? null
           : id,
-      action,
+      () => browserUa.run(
+        session.platform,
+        action,
+        userAgent: session.meta(CloudBrowserUa.sessionField),
+        locked: session.mode == BrowseMode.share,
+      ),
     );
   }
 
@@ -349,6 +403,33 @@ class CloudRepository {
   CloudConnector connector(CloudPlatform p) => connectors[p]!;
   Credential credential(CloudPlatform p) =>
       vault.credential(p) ?? (throw AccountLoginRequired('请先登录${p.label}'));
+
+  final _writeTargets = <String, _CloudWriteTarget>{};
+
+  /// One destination name across ordinary uploads, folder creation and cross-
+  /// cloud writes. Different names keep running in parallel; a queued cancel
+  /// cannot enter the provider, and nested writes reuse the existing lease.
+  Future<T> withWriteTarget<T>(
+    BrowseSession session,
+    String parent,
+    String name,
+    Future<T> Function() action,
+  ) => withSession(session, () {
+    final key = encoded([
+      session.platform.key,
+      _currentId(session.platform),
+      session.familyId,
+      session.personalSpaceId,
+      session.rootId,
+      parent,
+      name.toLowerCase(),
+    ]);
+    final target = _writeTargets.putIfAbsent(key, _CloudWriteTarget.new);
+    target.users++;
+    return target.gate.run(action).whenComplete(() {
+      if (--target.users == 0) _writeTargets.remove(key);
+    });
+  });
   Future<BrowseSession> personal(
     CloudPlatform p, {
     String? accountId,
@@ -433,6 +514,7 @@ class CloudRepository {
 
   Future<BrowseSession> share(
     ParsedLink link, {
+    bool preferQuarkMobileTransfer = false,
     BaiduShareRoute baiduRoute = BaiduShareRoute.account,
     String? parserSiteId,
     String? parserPasswordGrant,
@@ -442,44 +524,52 @@ class CloudRepository {
     final p = link.platform;
     require(p != null, '此链接不是支持的网盘分享');
     require(p!.supportsShareParsing, p.shareUnavailableMessage);
-    return _withAccount(p, _currentId(p), () async {
-      ensureAvailable(p);
-      final account = vault.credential(p);
-      final provider = connector(p);
-      final result = await OperationProgress.step(
-        OperationStage.verifyShare,
-        () => p != CloudPlatform.baidu && parserSiteId != null
-            ? publicParser.openShare(
-                link,
-                parserSiteId: parserSiteId,
-                passwordGrant: parserPasswordGrant,
-              )
-            : provider is BaiduConnector
-            ? provider.openShare(
-                link,
-                account,
-                route: baiduRoute,
-                parserSiteId: parserSiteId,
-                parserPasswordGrant: parserPasswordGrant,
-              )
-            : provider is CtfileConnector
-            ? provider.openShare(
-                link,
-                account,
-                proof: ctfileProof,
-                accessPass: ctfileAccessPass,
-              )
-            : provider is LanzouConnector
-            ? provider.openShare(link, account, incremental: true)
-            : provider.openShare(link, account),
-      );
-      ensureAvailable(p);
-      require(
-        vault.credential(p)?.updatedAt == account?.updatedAt,
-        '账号已变化，请重新解析分享',
-      );
-      return bindSession(result.withLink(link));
-    });
+    return _withAccount(
+      p,
+      _currentId(p),
+      () => browserUa.run(p, () async {
+        ensureAvailable(p);
+        final account = vault.credential(p);
+        final provider = connector(p);
+        final result = await OperationProgress.step(
+          OperationStage.verifyShare,
+          () => p != CloudPlatform.baidu && parserSiteId != null
+              ? publicParser.openShare(
+                  link,
+                  parserSiteId: parserSiteId,
+                  passwordGrant: parserPasswordGrant,
+                )
+              : provider is BaiduConnector
+              ? provider.openShare(
+                  link,
+                  account,
+                  route: baiduRoute,
+                  parserSiteId: parserSiteId,
+                  parserPasswordGrant: parserPasswordGrant,
+                )
+              : provider is CtfileConnector
+              ? provider.openShare(
+                  link,
+                  account,
+                  proof: ctfileProof,
+                  accessPass: ctfileAccessPass,
+                )
+              : provider is LanzouConnector
+              ? provider.openShare(link, account, incremental: true)
+              : provider.openShare(link, account),
+        );
+        ensureAvailable(p);
+        require(
+          vault.credential(p)?.updatedAt == account?.updatedAt,
+          '账号已变化，请重新解析分享',
+        );
+        return bindSession(
+          preferQuarkMobileTransfer
+              ? QuarkShareTransfer.preferMobile(result.withLink(link))
+              : result.withLink(link),
+        );
+      }, fresh: vault.credential(p) == null),
+    );
   }
 
   Future<ParsedLink> resolveCommand(CloudPlatform platform, String text) async {
@@ -580,7 +670,10 @@ class CloudRepository {
     }
     final link = session.sourceLink;
     require(link != null, '原分享信息缺失，请重新解析');
-    final native = await provider.openShare(link!, account);
+    final native = QuarkShareTransfer.inherit(
+      session,
+      await provider.openShare(link!, account),
+    );
     final parents = <String, List<CloudFile>>{};
     final selected = <CloudFile>[];
     for (final file in files) {
@@ -632,27 +725,56 @@ class CloudRepository {
   Future<RapidTransferResult> rapidTransfer(
     BrowseSession session,
     String parent,
-    RapidTransferFile file,
-  ) => withSession(session, () async {
-    require(
-      session.canManageFiles &&
-          connector(session.platform).canRapidTransferTo(session),
-      '目标网盘不支持秒传',
-    );
-    final owner = credential(session.platform);
-    return RequestScope.guarded(
-      () => connector(
-        session.platform,
-      ).rapidTransfer(session, parent, file, owner),
-      () {
-        ensureAvailable(session.platform);
-        require(
-          sessionCredential(session)?.updatedAt == owner.updatedAt,
-          '目标账号已变化，请重新打开文件列表',
-        );
-      },
-    );
-  });
+    RapidTransferFile file, {
+    Future<void> Function()? beforeWrite,
+    Future<void> Function(RapidTransferResult)? onSaved,
+    Future<void> Function()? onNotSubmitted,
+  }) => withWriteTarget(
+    session,
+    parent,
+    file.name,
+    () => withSession(session, () async {
+      require(
+        session.canManageFiles &&
+            connector(session.platform).canRapidTransferTo(session),
+        '目标网盘不支持秒传',
+      );
+      final owner = credential(session.platform);
+      return RequestScope.guarded(
+        () async {
+          final attempt = WriteRequestScope();
+          RapidTransferResult result;
+          try {
+            RequestScope.checkpoint();
+            await beforeWrite?.call();
+            RequestScope.checkpoint();
+            result = await attempt.run(
+              () => connector(
+                session.platform,
+              ).rapidTransfer(session, parent, file, owner),
+            );
+          } catch (error) {
+            if (!attempt.mayHaveWritten ||
+                error is RapidTransferUnavailable && !error.mayHaveSaved) {
+              await onNotSubmitted?.call();
+            }
+            rethrow;
+          }
+          // Keep a received acknowledgement even if cancellation followed it.
+          await onSaved?.call(result);
+          RequestScope.checkpoint();
+          return result;
+        },
+        () {
+          ensureAvailable(session.platform);
+          require(
+            sessionCredential(session)?.updatedAt == owner.updatedAt,
+            '目标账号已变化，请重新打开文件列表',
+          );
+        },
+      );
+    }),
+  );
 
   Future<BrowseSession> reopenTransferSource(BrowseSession previous) =>
       withSession(previous, () async {
@@ -670,7 +792,10 @@ class CloudRepository {
               ? null
               : previous.meta('ctfileAccessPass'),
         );
-        return fresh.withLink(link).withAccount(previous.accountId);
+        return QuarkShareTransfer.inherit(
+          previous,
+          fresh.withLink(link).withAccount(previous.accountId),
+        );
       });
 
   Future<CloudFile> upload(
@@ -678,56 +803,88 @@ class CloudRepository {
     String parent,
     UploadFile source, {
     UploadProgressCallback? onProgress,
-  }) => _writeFile(session, parent, source.name, (provider, account) {
-    require(provider.canUploadTo(session, parent), '当前目录不支持上传，请先进入代码目录或发布附件');
-    return provider.upload(
-      session,
-      parent,
-      source.guarded(RequestScope.checkpoint),
-      account,
-      onProgress: onProgress,
-    );
-  });
+    Future<void> Function()? beforeWrite,
+    Future<void> Function(CloudFile)? onSaved,
+    Future<void> Function()? onNotSubmitted,
+    Future<void> Function(String)? onAcceptedId,
+  }) => _writeFile(
+    session,
+    parent,
+    source.name,
+    (provider, account) {
+      require(provider.canUploadTo(session, parent), '当前目录不支持上传，请先进入代码目录或发布附件');
+      return provider.upload(
+        session,
+        parent,
+        source.guarded(RequestScope.checkpoint),
+        account,
+        onProgress: onProgress,
+      );
+    },
+    beforeWrite: beforeWrite,
+    onSaved: onSaved,
+    onNotSubmitted: onNotSubmitted,
+    onAcceptedId: onAcceptedId,
+  );
 
   Future<CloudFile> _writeFile(
     BrowseSession session,
     String parent,
     String name,
-    Future<CloudFile> Function(CloudConnector, Credential) action,
-  ) => withSession(session, () async {
-    require(session.canManageFiles, '请在个人网盘中执行此操作');
-    require(
-      name.trim().isNotEmpty &&
-          name != '.' &&
-          name != '..' &&
-          !RegExp(r'[/\\\x00-\x1f\x7f]').hasMatch(name),
-      '文件或文件夹名称无效',
-    );
-    final account = credential(session.platform),
-        provider = connector(session.platform);
-    void guard() {
-      ensureAvailable(session.platform);
+    Future<CloudFile> Function(CloudConnector, Credential) action, {
+    Future<void> Function()? beforeWrite,
+    Future<void> Function(CloudFile)? onSaved,
+    Future<void> Function()? onNotSubmitted,
+    Future<void> Function(String)? onAcceptedId,
+  }) => withWriteTarget(
+    session,
+    parent,
+    name,
+    () => withSession(session, () async {
+      require(session.canManageFiles, '请在个人网盘中执行此操作');
       require(
-        vault.credential(session.platform)?.updatedAt == account.updatedAt,
-        '账号已变化，请重新打开文件列表',
+        name.trim().isNotEmpty &&
+            name != '.' &&
+            name != '..' &&
+            !RegExp(r'[/\\\x00-\x1f\x7f]').hasMatch(name),
+        '文件或文件夹名称无效',
       );
-    }
+      final account = credential(session.platform),
+          provider = connector(session.platform);
+      void guard() {
+        ensureAvailable(session.platform);
+        require(
+          vault.credential(session.platform)?.updatedAt == account.updatedAt,
+          '账号已变化，请重新打开文件列表',
+        );
+      }
 
-    return RequestScope.guarded(() async {
-      RequestScope.checkpoint();
-      final existing = await provider.list(session, parent, account);
-      require(
-        !existing.any(
-          (entry) => entry.name.toLowerCase() == name.toLowerCase(),
-        ),
-        '目录中已有同名项目，请更改名称后重试',
-      );
-      RequestScope.checkpoint();
-      final result = await action(provider, account);
-      RequestScope.checkpoint();
-      return result;
-    }, guard);
-  });
+      return RequestScope.guarded(() async {
+        RequestScope.checkpoint();
+        final existing = await provider.list(session, parent, account);
+        require(
+          !existing.any(
+            (entry) => entry.name.toLowerCase() == name.toLowerCase(),
+          ),
+          '目录中已有同名项目，请更改名称后重试',
+        );
+        final attempt = WriteRequestScope(onAcceptedId: onAcceptedId);
+        CloudFile result;
+        try {
+          RequestScope.checkpoint();
+          await beforeWrite?.call();
+          RequestScope.checkpoint();
+          result = await attempt.run(() => action(provider, account));
+        } catch (_) {
+          if (!attempt.mayHaveWritten) await onNotSubmitted?.call();
+          rethrow;
+        }
+        await onSaved?.call(result);
+        RequestScope.checkpoint();
+        return result;
+      }, guard);
+    }),
+  );
 
   BrowseSession _bindNewDownloadSession(BrowseSession session) {
     // A share opened before login is pinned to an empty owner. New downloads
@@ -757,7 +914,7 @@ class CloudRepository {
           : vault.credential(session.platform);
       return DownloadSpec(
         url: '',
-        fileName: file.name,
+        fileName: file.displayName,
         expectedSize: session.platform.exactFileSize ? file.size : 0,
         profile: PublicShareRoute.uses(session)
             ? PublicShareRoute.profile(session.platform)
@@ -778,7 +935,26 @@ class CloudRepository {
 
   /// Cross-cloud tasks keep the source account selected at enqueue time.
   Future<DownloadSpec> prepareTransfer(BrowseSession session, CloudFile file) =>
-      _prepare(session, file, playback: false);
+      withSession(session, () {
+        if (session.mode != BrowseMode.share ||
+            !{
+              CloudPlatform.quark,
+              CloudPlatform.uc,
+            }.contains(session.platform)) {
+          return _prepare(session, file, playback: false);
+        }
+        final bound = bindSession(session);
+        final revision = vault.credential(session.platform)?.updatedAt;
+        // A queued entry keeps its original file token, even after the batch
+        // reopens its share. Renew the session and file together just before
+        // downloading, under the queued account and the existing read budget.
+        return _prepareReads(bound, revision, () async {
+          final restored = await restoreOrigin(
+            DownloadOrigin(bound, file, revision),
+          );
+          return _prepare(restored.session, restored.file, playback: false);
+        });
+      });
 
   Future<DownloadSpec> preparePlayback(BrowseSession session, CloudFile file) =>
       _prepare(session, file, playback: true);
@@ -870,6 +1046,9 @@ class CloudRepository {
           }
           cleanups.retain(result.cleanup);
           return result.copyWith(
+            headers: PublicShareRoute.uses(session)
+                ? result.headers
+                : browserUa.headers(session.platform, result.headers),
             source: {
               ...DownloadOrigin(session, file, revision).toJson(),
               if (ucPlayable) 'ucVideo': result.source!['ucVideo'],
@@ -1076,6 +1255,9 @@ class CloudRepository {
       );
       session = await share(
         link!,
+        preferQuarkMobileTransfer: QuarkShareTransfer.prefersMobile(
+          origin.session,
+        ),
         baiduRoute: BaiduShareRoute.fromSession(origin.session),
         parserSiteId: origin.session.meta('parserSiteId').isEmpty
             ? null
@@ -1176,7 +1358,8 @@ class CloudRepository {
       }
       final id = directoryId(session, file);
       if (!visited.add(id)) return;
-      final next = relative.isEmpty ? file.name : '$relative/${file.name}';
+      final directory = safeFileName(file.displayName);
+      final next = relative.isEmpty ? directory : '$relative/$directory';
       for (final child in await list(session, id)) {
         await walk(child, next, depth + 1);
       }

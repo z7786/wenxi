@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+from smoke_report import read_report, select_ios_runtime
 
 root = Path(__file__).resolve().parent.parent
 local = root / '.local'
@@ -16,7 +17,10 @@ def sim(*args, **kwargs):
 
 
 runtimes = json.loads(sim('list', 'runtimes', '--json'))['runtimes']
-runtime = next(item for item in reversed(runtimes) if item.get('isAvailable') and 'iOS' in item['name'])
+sdk_version = subprocess.check_output(
+    ['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'], text=True, timeout=30).strip()
+runtime = select_ios_runtime(runtimes, sdk_version)
+print('Simulator runtime: ' + runtime['name'] + '; Xcode SDK: ' + sdk_version, flush=True)
 available = json.loads(sim('list', 'devices', 'available', '--json'))['devices']
 checks = [
     'startup', 'quickjs', 'download', 'coordinatedFileSave', 'freeSpace', 'playback',
@@ -47,8 +51,8 @@ for family in ['iPhone', 'iPad']:
         deadline = time.monotonic() + 150
         while time.monotonic() < deadline:
             files = list(container.rglob('ios-smoke.json'))
-            if files:
-                report = json.loads(files[0].read_text())
+            report = read_report(files[0]) if files else None
+            if report is not None:
                 assert 'error' not in report, (family, report)
                 assert all(report.get(name) for name in checks), (family, report)
                 assert report.get('authorizedMediaReads', 0) > 0, (family, report)

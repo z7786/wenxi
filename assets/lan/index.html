@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>文析助手 · 网页传文件</title>
+  <link rel="stylesheet" href="/web/app.css">
+  <script src="/web/sha256.js" defer></script>
+  <script src="/web/app.js" defer></script>
+</head>
+<body>
+  <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+    <!-- Tabler Icons 3.35.0, MIT. See assets/licenses/Tabler-Icons-LICENSE.txt. -->
+    <symbol id="icon-file" viewBox="0 0 24 24">
+      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z" />
+    </symbol>
+    <symbol id="icon-file-upload" viewBox="0 0 24 24">
+      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z" />
+      <path d="M12 11v6" />
+      <path d="M9.5 13.5l2.5 -2.5l2.5 2.5" />
+    </symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24">
+      <path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2" />
+    </symbol>
+  </svg>
+  <header class="topbar">
+    <div class="navigation">
+      <a class="brand" href="/" aria-label="文析助手网页互传首页">文析助手</a>
+      <span class="navigation-title">设备互联</span>
+      <span class="network">局域网</span>
+    </div>
+  </header>
+  <main>
+    <section id="pair-view" class="pair-view" aria-labelledby="pair-title">
+      <div class="pair-heading">
+        <h1 id="pair-title">连接这台设备</h1>
+        <p class="pair-description">用浏览器收发文件。</p>
+        <p id="pair-help">在文析助手「设备互联」中查看 6 位连接码。</p>
+        <div class="pair-capabilities">
+          <p>发送文件与文件夹<span>从本机选择，或直接拖入网页。</span></p>
+          <p>下载设备分享<span>连接后查看设备分享的文件。</span></p>
+        </div>
+      </div>
+      <form id="pair-form">
+        <div class="form-group">
+          <div class="form-row code-row">
+            <label for="pair-code">连接码</label>
+            <input id="pair-code" name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="6 位数字" aria-describedby="pair-help" required>
+          </div>
+          <div class="form-row">
+            <label for="browser-name">浏览器名称</label>
+            <input id="browser-name" name="name" type="text" maxlength="64" value="网页浏览器" autocomplete="off" required>
+          </div>
+        </div>
+        <p id="pair-error" class="error form-error" role="alert" hidden></p>
+        <button id="pair-submit" class="primary" type="submit">连接设备</button>
+        <p class="footnote pair-footnote">请保持文析助手的设备互联开启。</p>
+      </form>
+    </section>
+    <section id="transfer-view" hidden>
+      <div class="device-group">
+        <div class="device-identity">
+          <p class="device-label">已连接设备</p>
+          <h1 id="device-name">这台设备</h1>
+        </div>
+        <button id="disconnect" class="text-button" type="button">断开连接</button>
+      </div>
+      <p id="connection-error" class="notice error" role="alert" hidden></p>
+      <div class="transfer-layout">
+        <section class="send-panel" aria-labelledby="send-title">
+          <div class="section-heading"><h2 id="send-title">发送到设备</h2></div>
+          <div id="dropzone" class="dropzone" aria-describedby="upload-help">
+            <svg class="drop-icon" aria-hidden="true" focusable="false"><use href="#icon-file-upload" /></svg>
+            <p class="drop-title"><span class="drag-hint">将文件拖到这里</span><span class="touch-hint">选择要发送的文件</span></p>
+            <p class="drop-description">选择后自动发送，支持多个文件</p>
+            <div class="picker-actions">
+              <label class="file-button primary" for="file-input">
+                <span>选择文件</span>
+                <input id="file-input" type="file" multiple aria-label="选择要发送的文件">
+              </label>
+              <label id="folder-button" class="file-button secondary" for="folder-input">
+                <span>选择文件夹</span>
+                <input id="folder-input" type="file" webkitdirectory multiple aria-label="选择要发送的文件夹">
+              </label>
+            </div>
+          </div>
+          <p id="upload-help" class="footnote">中断后可重试，同名文件自动编号。</p>
+          <div class="section-heading queue-heading"><h3>发送队列</h3><span id="queue-count">0 个文件</span></div>
+          <div class="queue-group">
+            <p id="queue-empty" class="empty">还没有选择文件</p>
+            <ul id="upload-list" class="file-list" aria-label="发送队列"></ul>
+            <div id="queue-actions" class="queue-actions" hidden>
+              <button id="retry-all" class="text-button" type="button">重试未完成</button>
+              <button id="cancel-all" class="text-button destructive" type="button">取消未完成</button>
+            </div>
+          </div>
+        </section>
+        <section class="receive-panel" aria-labelledby="receive-title">
+          <div class="section-heading"><h2 id="receive-title">从设备下载</h2><button id="refresh" class="text-button" type="button">刷新</button></div>
+          <div class="shares-group">
+            <p id="shares-empty" class="empty">这台设备暂时没有分享文件</p>
+            <ul id="share-list" class="file-list" aria-label="可下载的分享"></ul>
+          </div>
+          <p class="footnote">在文析助手中创建文件或文件夹分享后，会显示在这里。</p>
+          <p class="footnote download-note">保存位置和进度见浏览器下载列表。单文件支持续传；ZIP 中断后需重新下载。</p>
+        </section>
+      </div>
+      <p class="page-footnote">关闭文析助手或设备互联后，连接会结束。</p>
+    </section>
+  </main>
+  <noscript><p class="notice">此页面需要启用 JavaScript 才能连接和上传文件。单个文件的完整分享链接仍可直接下载。</p></noscript>
+</body>
+</html>

@@ -33,9 +33,11 @@ class CloudSearchHistory {
   Future<void> remember(BrowseSession session, String term) async {
     term = term.trim();
     if (term.isEmpty || term.length > 120) return;
+    if (store.data.obj('resourceSearch').boolean('incognito')) return;
     if (read(session).firstOrNull == term) return;
     final key = _key(session), value = term;
     await store.change((draft) {
+      if (draft.obj('resourceSearch').boolean('incognito')) return;
       final recent = _read(draft, key);
       final all = draft.obj('cloudSearchHistory')..remove(key);
       while (all.length >= 80) {

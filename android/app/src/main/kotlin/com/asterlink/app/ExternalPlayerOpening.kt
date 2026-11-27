@@ -38,58 +38,78 @@ class ExternalPlayerOpening(
             val current = activity()?.takeUnless { it.isFinishing || it.isDestroyed }
                 ?: throw FileOpenFailure("activity", "请回到播放器后重试")
             val intent = prepare(url, title, positionMs)
-            val targets = targets(intent)
-            if (targets.isEmpty()) throw FileOpenFailure("no_player", "未找到可播放此视频的第三方播放器，请先安装 VLC、MX Player 等播放器")
-            val labels = targets.map { it.loadLabel(context.packageManager).toString() }
-            val recent = history.getString("recent", "").orEmpty().split('\n')
-            val adapter = object : ArrayAdapter<String>(current, android.R.layout.select_dialog_item, labels) {
-                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                    val view = super.getView(position, convertView, parent) as TextView
-                    val icon = targets[position].loadIcon(context.packageManager)
-                    val size = (32 * current.resources.displayMetrics.density).toInt()
-                    icon.setBounds(0, 0, size, size)
-                    view.setCompoundDrawablesRelative(icon, null, null, null)
-                    view.compoundDrawablePadding = (16 * current.resources.displayMetrics.density).toInt()
-                    view.text = labels[position] + if (targets[position].activityInfo.packageName in recent) "  · 最近使用" else ""
-                    return view
-                }
+            choose(current, intent, "选择第三方播放器", session) { target, error ->
+                if (target == null) complete(false, error)
+                else try {
+                    launch(current, intent, target)
+                    complete(true, null)
+                } catch (error: Exception) { complete(false, failure(error)) }
             }
-            var completed = false
-            fun finish(opened: Boolean, error: FileOpenFailure? = null) {
-                if (completed) return
-                completed = true
-                complete(opened, error)
+        } catch (error: Exception) {
+            complete(false, failure(error))
+        }
+    }
+
+    private fun launch(current: Activity, intent: Intent, target: ResolveInfo) {
+        val info = target.activityInfo
+        current.startActivity(Intent(intent).setComponent(ComponentName(info.packageName, info.name)))
+        val recent = history.getString("recent", "").orEmpty().split('\n')
+        // Once launched, the app owns the stream even if saving recent history fails.
+        runCatching {
+            history.edit().putString("recent", (listOf(info.packageName) +
+                recent.filter { it.isNotBlank() && it != info.packageName }).take(12).joinToString("\n")).apply()
+        }
+    }
+
+    private fun choose(current: Activity, intent: Intent, title: String, session: String, complete: (ResolveInfo?, FileOpenFailure?) -> Unit) {
+        val targets = targets(intent)
+        if (targets.isEmpty()) throw FileOpenFailure("no_player", "未找到可播放此视频的第三方播放器，请先安装 VLC、MX Player 等播放器")
+        val labels = targets.map { it.loadLabel(context.packageManager).toString() }
+        val recent = history.getString("recent", "").orEmpty().split('\n')
+        val adapter = object : ArrayAdapter<String>(current, android.R.layout.select_dialog_item, labels) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = super.getView(position, convertView, parent) as TextView
+                val icon = targets[position].loadIcon(context.packageManager)
+                val size = (32 * current.resources.displayMetrics.density).toInt()
+                icon.setBounds(0, 0, size, size)
+                view.setCompoundDrawablesRelative(icon, null, null, null)
+                view.compoundDrawablePadding = (16 * current.resources.displayMetrics.density).toInt()
+                view.text = labels[position] + if (targets[position].activityInfo.packageName in recent) "  · 最近使用" else ""
+                return view
             }
-            val chooser = AlertDialog.Builder(current)
-                .setTitle("选择第三方播放器")
-                .setAdapter(adapter, null)
-                .setNegativeButton("取消") { _, _ -> finish(false) }
-                .create()
-            owner = current
-            this.session = session
-            dialog = chooser
-            var choosing = false
-            chooser.setOnDismissListener {
-                if (dialog === chooser) { dialog = null; owner = null; this.session = null }
-                if (!choosing) finish(false)
-            }
+        }
+        var completed = false
+        fun finish(target: ResolveInfo?, error: FileOpenFailure? = null) {
+            if (completed) return
+            completed = true
+            complete(target, error)
+        }
+        val chooser = AlertDialog.Builder(current)
+            .setTitle(title)
+            .setAdapter(adapter, null)
+            .setNegativeButton("取消") { _, _ -> finish(null) }
+            .create()
+        owner = current
+        this.session = session
+        dialog = chooser
+        var choosing = false
+        chooser.setOnDismissListener {
+            if (dialog === chooser) { dialog = null; owner = null; this.session = null }
+            if (!choosing) finish(null)
+        }
+        try {
             chooser.show()
             chooser.listView.setOnItemClickListener { _, _, index, _ ->
                 choosing = true
-                val target = targets[index].activityInfo
+                val target = targets[index]
                 chooser.dismiss()
-                try {
-                    current.startActivity(Intent(intent).setComponent(ComponentName(target.packageName, target.name)))
-                    history.edit().putString("recent", (listOf(target.packageName) +
-                        recent.filter { it.isNotBlank() && it != target.packageName }).take(12).joinToString("\n")).apply()
-                    finish(true)
-                } catch (error: Exception) { finish(false, failure(error)) }
+                finish(target)
             }
         } catch (error: Exception) {
-            dialog = null
-            owner = null
-            this.session = null
-            complete(false, failure(error))
+            chooser.setOnDismissListener(null)
+            if (dialog === chooser) { dialog = null; owner = null; this.session = null }
+            chooser.dismiss()
+            throw error
         }
     }
 
@@ -114,17 +134,21 @@ class ExternalPlayerOpening(
     }
 
     @Suppress("DEPRECATION")
-    fun targets(intent: Intent): List<ResolveInfo> {
-        val collator = Collator.getInstance()
-        val recent = history.getString("recent", "").orEmpty().split('\n')
+    private fun eligibleTargets(intent: Intent): List<ResolveInfo> {
         val types = listOfNotNull(intent.type, "video/*", "application/x-mpegurl".takeIf { intent.type?.contains("mpegurl") == true }).distinct()
         return types.flatMap { type -> context.packageManager.queryIntentActivities(Intent(intent).setDataAndType(intent.data, type), PackageManager.MATCH_DEFAULT_ONLY) }
             .filter {
                 val info = it.activityInfo
                 info != null && info.packageName != context.packageName && info.exported && info.enabled &&
+                    info.applicationInfo?.enabled != false &&
                     (info.permission == null || context.checkSelfPermission(info.permission) == PackageManager.PERMISSION_GRANTED)
             }
-            .distinctBy { it.activityInfo.packageName }
+    }
+
+    fun targets(intent: Intent): List<ResolveInfo> {
+        val collator = Collator.getInstance()
+        val recent = history.getString("recent", "").orEmpty().split('\n')
+        return eligibleTargets(intent).distinctBy { it.activityInfo.packageName }
             .sortedWith { a, b ->
                 val left = recent.indexOf(a.activityInfo.packageName).takeIf { it >= 0 } ?: Int.MAX_VALUE
                 val right = recent.indexOf(b.activityInfo.packageName).takeIf { it >= 0 } ?: Int.MAX_VALUE

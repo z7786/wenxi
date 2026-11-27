@@ -54,6 +54,59 @@ Json row({
 };
 
 void main() {
+  test('PikPak net aliases preserve share IDs and six-character passcodes', () {
+    const id = 'Share_123AbC-XyZ9876543210';
+    const url = 'https://mypikpak.net/s/$id';
+    for (final (text, normalized) in [
+      ('$url 访问密码：abc123', url),
+      ('mypikpak.net/s/$id 访问密码：abc123', url),
+      (
+        r'https\://mypikpak.net/s/'
+            '$id 访问密码：abc123',
+        url,
+      ),
+      (
+        'HTTP://WWW.MYPIKPAK.NET/s/$id?pass_code=abc123',
+        'http://www.mypikpak.net/s/$id?pass_code=abc123',
+      ),
+      ('$url#/list?pwd=abc123', '$url#/list?pwd=abc123'),
+    ]) {
+      final link = LinkParser.parse(text).single;
+      expect(link.kind, LinkKind.cloudShare, reason: text);
+      expect(link.platform, platform, reason: text);
+      expect(link.url, normalized, reason: text);
+      expect(link.shareId, id, reason: text);
+      expect(link.passcode, 'abc123', reason: text);
+    }
+    expect(
+      LinkParser.normalize(
+        r'https\://mypikpak.net/s/'
+        '$id',
+      ),
+      url,
+    );
+    expect(
+      LinkParser.normalize(
+        r'HTTPS\://MYPIKPAK.NET/s/'
+        '$id?b=2&a=%2b+%20#frag',
+      ),
+      '$url?b=2&a=%2b+%20#frag',
+    );
+  });
+
+  test('PikPak copied Markdown and adjacent password labels stay usable', () {
+    for (final host in ['mypikpak.com', 'mypikpak.net']) {
+      final url = 'https://$host/s/Share_123-Xyz';
+      for (final text in ['[$url]($url) 访问密码：abc123', '$url（访问密码：abc123）']) {
+        final link = LinkParser.parse(text).single;
+        expect(link.url, url, reason: text);
+        expect(link.kind, LinkKind.cloudShare, reason: text);
+        expect(link.shareId, 'Share_123-Xyz', reason: text);
+        expect(link.passcode, 'abc123', reason: text);
+      }
+    }
+  });
+
   test('Long PikPak passcodes stay intact and unrelated paths are ignored', () {
     expect(
       LinkParser.parse(
@@ -200,14 +253,24 @@ void main() {
     expect(parsed.platform, platform);
     expect(parsed.passcode, 'k123');
     expect(LinkParser.shareId(platform, parsed.url), 'Share_123');
-    expect(
-      LinkParser.shareId(platform, 'https://mypikpak.com/drive/all'),
-      isNull,
-    );
-    expect(
-      LinkParser.shareId(platform, 'https://mypikpak.com.evil.test/s/x'),
-      isNull,
-    );
+    for (final host in ['mypikpak.com', 'mypikpak.net']) {
+      for (final url in [
+        'https://$host/',
+        'https://$host/drive/all',
+        'https://$host/help/s/abc',
+        'https://$host.evil.test/s/abc',
+        'https://not$host/s/abc',
+        'https://$host@evil.test/s/abc',
+        'https://example.test/?url=https://$host/s/abc',
+      ]) {
+        expect(LinkParser.shareId(platform, url), isNull, reason: url);
+        expect(
+          LinkParser.parse(url).where((link) => link.isCloudShare),
+          isEmpty,
+          reason: url,
+        );
+      }
+    }
     expect(platform.shareRequiresAccount, isFalse);
   });
 
