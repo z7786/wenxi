@@ -1048,4 +1048,105 @@ void main() {
       store.dispose();
     },
   );
+
+  test(
+    'Transient network error during password renewal does not block auto-login',
+    () async {
+      final f = _Fixture();
+      await f.seed();
+      var failSignIn = true;
+      f.override = (r) {
+        if (r.uri.path.endsWith('/sign_in') && failSignIn) {
+          throw const HttpRequestFailure(
+            '网络连接失败',
+            kind: 'connectionError',
+            retryable: true,
+          );
+        }
+        return null;
+      };
+      await expectLater(
+        f.connector.account(f.initial),
+        throwsA(isA<HttpRequestFailure>()),
+      );
+      expect(f.vault.credential(_platform)!.field('autoLoginBlocked'), isEmpty);
+      failSignIn = false;
+      expect((await f.connector.account(f.initial)).used, 5);
+    },
+  );
+
+  test('Listing HTTP 429 caps Retry-After delay at 30 seconds', () async {
+    final waits = <Duration>[];
+    late _Fixture f;
+    f = _Fixture(
+      listWait: (delay) async {
+        waits.add(delay);
+        f.now = f.now.add(delay);
+      },
+    )..oldAccepted = true;
+    await f.seed();
+    var requests = 0;
+    f.override = (_) => requests++ == 0
+        ? const HttpResult(429, 'not-json', {
+            'retry-after': ['3600'],
+          })
+        : null;
+    expect(await f.connector.list(_personal, '0', f.initial), hasLength(1));
+    expect(waits, [const Duration(seconds: 30)]);
+  });
+
+  test('loginUuid evicts failed future on transient vault write error', () async {
+    final inner = Vault(StateStore.memory());
+    var failPut = true;
+    final flaky = _FlakyUuidStore(inner, () => failPut);
+    final connector = Pan123Connector(FakeHttp(), flaky);
+    await expectLater(connector.loginUuid(), throwsA(isA<StateError>()));
+    failPut = false;
+    final uuid = await connector.loginUuid();
+    expect(uuid, isNotEmpty);
+    expect(await connector.loginUuid(), uuid);
+  });
+}
+
+class _FlakyUuidStore implements CredentialStore {
+  _FlakyUuidStore(this.inner, this.shouldFail);
+  final Vault inner;
+  final bool Function() shouldFail;
+  @override
+  Credential? credential(CloudPlatform platform) => inner.credential(platform);
+  @override
+  String? secret(String key) => inner.secret(key);
+  @override
+  Future<void> putCredential(CloudPlatform platform, Credential credential) =>
+      inner.putCredential(platform, credential);
+  @override
+  Future<bool> replaceCredential(
+    CloudPlatform platform,
+    Credential? expected,
+    Credential replacement, {
+    bool Function()? canCommit,
+  }) => inner.replaceCredential(
+    platform,
+    expected,
+    replacement,
+    canCommit: canCommit,
+  );
+  @override
+  Future<bool> putSecretForCredential(
+    CloudPlatform platform,
+    Credential expected,
+    String key,
+    String value,
+  ) => inner.putSecretForCredential(platform, expected, key, value);
+  @override
+  Future<void> removeCredential(CloudPlatform platform) =>
+      inner.removeCredential(platform);
+  @override
+  Future<void> putSecret(String key, String value) async {
+    if (shouldFail()) throw StateError('transient storage failure');
+    await inner.putSecret(key, value);
+  }
+
+  @override
+  Future<void> removeSecret(String key) => inner.removeSecret(key);
 }

@@ -5,6 +5,7 @@ import AsterLinkCore
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let coreQueue = DispatchQueue(label: "com.asterlink.app.download")
+  private let metadataQueue = DispatchQueue(label: "com.asterlink.app.metadata", qos: .userInitiated)
   private var originalBrightness: CGFloat?
   private lazy var documents = AppleDocuments()
   private var scanner: AppleQrScanner?
@@ -62,14 +63,21 @@ import AsterLinkCore
           guard let path = args["path"] as? String else {
             result(FlutterError(code: "arguments", message: "存储路径无效", details: nil)); return
           }
-          var folder = URL(fileURLWithPath: path)
-          while !FileManager.default.fileExists(atPath: folder.path) && folder.path != "/" {
-            folder.deleteLastPathComponent()
+          self.metadataQueue.async {
+            var folder = URL(fileURLWithPath: path)
+            while !FileManager.default.fileExists(atPath: folder.path) && folder.path != "/" {
+              folder.deleteLastPathComponent()
+            }
+            do {
+              let attributes = try FileManager.default.attributesOfFileSystem(forPath: folder.path)
+              let bytes = attributes[.systemFreeSize] as? NSNumber ?? -1
+              DispatchQueue.main.async { result(["bytes": bytes]) }
+            } catch {
+              DispatchQueue.main.async {
+                result(FlutterError(code: "storage", message: "无法读取剩余空间", details: nil))
+              }
+            }
           }
-          do {
-            let attributes = try FileManager.default.attributesOfFileSystem(forPath: folder.path)
-            result(["bytes": attributes[.systemFreeSize] as? NSNumber ?? -1])
-          } catch { result(FlutterError(code: "storage", message: "无法读取剩余空间", details: nil)) }
         } else if call.method == "gopeed" {
           guard let method = args["method"] as? String,
                 let encoded = args["args"] as? String else {

@@ -139,28 +139,8 @@ extension _LanHttpDiscovery on LanService {
             !(addresses.contains(endpoint.host) && endpoint.port == port),
       ),
     );
+    if (pending.isEmpty) return false;
     final workers = min(12, pending.length);
-    var reachable = false;
-    await Future.wait([
-      for (var i = 0; i < workers; i++)
-        () async {
-          while (running && !scope.token.isCancelled && pending.isNotEmpty) {
-            reachable =
-                await _probeHttpPeer(pending.removeFirst(), scope) || reachable;
-          }
-        }(),
-    ]);
-    return reachable;
-  }
-
-  Future<bool> _probeHttpPeer(
-    Uri endpoint,
-    RequestScope scope, {
-    String? expectedId,
-  }) async {
-    if (!running || _httpProbes.containsKey(endpoint)) return false;
-    _httpProbes[endpoint] = scope;
-    final server = _server;
     final client = HttpClient()
       ..findProxy = ((_) => 'DIRECT')
       ..connectionTimeout = const Duration(milliseconds: 650)
@@ -168,10 +148,54 @@ extension _LanHttpDiscovery on LanService {
     final cancelled = scope.token.whenCancel.asStream().listen(
       (_) => client.close(force: true),
     );
+    var reachable = false;
+    try {
+      await Future.wait([
+        for (var i = 0; i < workers; i++)
+          () async {
+            while (running && !scope.token.isCancelled && pending.isNotEmpty) {
+              reachable =
+                  await _probeHttpPeer(
+                    pending.removeFirst(),
+                    scope,
+                    client: client,
+                  ) ||
+                  reachable;
+            }
+          }(),
+      ]);
+    } finally {
+      client.close(force: true);
+      await cancelled.cancel();
+    }
+    return reachable;
+  }
+
+  Future<bool> _probeHttpPeer(
+    Uri endpoint,
+    RequestScope scope, {
+    String? expectedId,
+    HttpClient? client,
+  }) async {
+    if (!running || _httpProbes.containsKey(endpoint)) return false;
+    _httpProbes[endpoint] = scope;
+    final server = _server;
+    final ownsClient = client == null;
+    final http =
+        client ??
+        (HttpClient()
+          ..findProxy = ((_) => 'DIRECT')
+          ..connectionTimeout = const Duration(milliseconds: 650)
+          ..autoUncompress = false);
+    final cancelled = ownsClient
+        ? scope.token.whenCancel.asStream().listen(
+            (_) => http.close(force: true),
+          )
+        : null;
     try {
       final info = await _json(
         endpoint.replace(path: '/v1/info', query: '', fragment: ''),
-        client: client,
+        client: http,
         retry: false,
         timeout: const Duration(milliseconds: 650),
         maxBytes: 8192,
@@ -193,7 +217,7 @@ extension _LanHttpDiscovery on LanService {
           endpoint.replace(path: '/v1/discover', query: '', fragment: ''),
           method: 'POST',
           body: {'protocol': lanProtocol, 'id': id, 'name': name, 'port': port},
-          client: client,
+          client: http,
           retry: false,
           timeout: const Duration(milliseconds: 650),
           maxBytes: 8192,
@@ -204,8 +228,8 @@ extension _LanHttpDiscovery on LanService {
       // Unreachable and unrelated LAN hosts are normal during discovery.
       return false;
     } finally {
-      client.close(force: true);
-      await cancelled.cancel();
+      if (ownsClient) http.close(force: true);
+      await cancelled?.cancel();
       if (_httpProbes[endpoint] == scope) _httpProbes.remove(endpoint);
     }
   }

@@ -165,7 +165,7 @@ void main() {
           );
         }
         await tester.pumpAndSettle();
-        expect(calls.single.$1, 'explorer.exe');
+        expect(calls.single.$1, windowsSystemExecutable('explorer.exe'));
         expect(calls.single.$2, ['/select,', document]);
         expect(find.byType(PlayerPage), findsNothing);
         await tester.tap(find.byTooltip('播放视频'));

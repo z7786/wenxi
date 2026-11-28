@@ -60,19 +60,25 @@ type Progress struct {
 	Uploaded int64 `json:"uploaded"`
 }
 
+func init() {
+	zerolog.ErrorStackMarshaler = pkgerrors.MarshalStack
+}
+
 type Downloader struct {
 	Logger          *logger.Logger
 	ExtensionLogger *logger.Logger
 
-	cfg          *DownloaderConfig
-	fetcherCache map[string]fetcher.Fetcher
-	storage      Storage
-	tasks        []*Task
-	waitTasks    []*Task
-	watchedTasks sync.Map
-	listener     Listener
+	cfg           *DownloaderConfig
+	fetcherCache  map[string]fetcher.Fetcher
+	storage       Storage
+	tasks         []*Task
+	waitTasks     []*Task
+	watchedTasks  sync.Map
+	startingTasks sync.Map
+	listener      Listener
 
 	lock               *sync.Mutex
+	tasksLock          sync.RWMutex
 	fetcherMapLock     *sync.RWMutex
 	checkDuplicateLock *sync.Mutex
 	closed             atomic.Bool
@@ -99,7 +105,6 @@ func NewDownloader(cfg *DownloaderConfig) *Downloader {
 		extensions: make([]*Extension, 0),
 	}
 
-	zerolog.ErrorStackMarshaler = pkgerrors.MarshalStack
 	d.Logger = logger.NewLogger(cfg.ProductionMode, filepath.Join(cfg.StorageDir, "logs", "core.log"))
 	d.ExtensionLogger = logger.NewLogger(cfg.ProductionMode, filepath.Join(cfg.StorageDir, "logs", "extension.log"))
 	if cfg.ProductionMode {
@@ -164,11 +169,15 @@ func (d *Downloader) Setup() error {
 			}
 		}
 	}
-	d.tasks = tasks
 	// sort by create time
-	sort.Slice(d.tasks, func(i, j int) bool {
-		return d.tasks[i].CreatedAt.Before(d.tasks[j].CreatedAt)
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
 	})
+	d.lock.Lock()
+	d.tasksLock.Lock()
+	d.tasks = tasks
+	d.tasksLock.Unlock()
+	d.lock.Unlock()
 
 	// load extensions from storage
 	var extensions []*Extension
@@ -178,19 +187,25 @@ func (d *Downloader) Setup() error {
 	if extensions == nil {
 		extensions = make([]*Extension, 0)
 	}
+	d.tasksLock.Lock()
 	d.extensions = extensions
+	d.tasksLock.Unlock()
 
 	// handle upload
 	go func() {
-		for _, task := range d.tasks {
+		for _, task := range d.GetTasks() {
+			task.statusLock.Lock()
+			var uploader fetcher.Uploader
 			if task.Status == base.DownloadStatusDone && task.Uploading {
 				if err := d.restoreTask(task); err != nil {
 					d.Logger.Error().Stack().Err(err).Msgf("task upload restore fetcher failed, task id: %s", task.ID)
 				}
-				if uploader, ok := task.fetcher.(fetcher.Uploader); ok {
-					if err := uploader.Upload(); err != nil {
-						d.Logger.Error().Stack().Err(err).Msgf("task upload failed, task id: %s", task.ID)
-					}
+				uploader, _ = task.fetcher.(fetcher.Uploader)
+			}
+			task.statusLock.Unlock()
+			if uploader != nil {
+				if err := uploader.Upload(); err != nil {
+					d.Logger.Error().Stack().Err(err).Msgf("task upload failed, task id: %s", task.ID)
 				}
 			}
 		}
@@ -199,16 +214,20 @@ func (d *Downloader) Setup() error {
 	// calculate download speed every tick
 	go func() {
 		for !d.closed.Load() {
-			if len(d.tasks) > 0 {
-				for _, task := range d.tasks {
+			tasks := d.GetTasks()
+			if len(tasks) > 0 {
+				for _, task := range tasks {
 					func() {
 						task.statusLock.Lock()
 						defer task.statusLock.Unlock()
 						if task.Status != base.DownloadStatusRunning && !task.Uploading {
 							return
 						}
-						// check if task is deleted
+						// check if task is deleted or still initializing in doStart
 						if d.GetTask(task.ID) == nil || task.fetcher == nil {
+							return
+						}
+						if _, starting := d.startingTasks.Load(task.ID); starting {
 							return
 						}
 
@@ -305,15 +324,18 @@ func (d *Downloader) Resolve(req *base.Request) (rr *ResolveResult, err error) {
 		return
 	}
 
-	res, err := d.triggerOnResolve(req)
-	if err != nil {
-		return
-	}
-	if res != nil && len(res.Files) > 0 {
-		rr = &ResolveResult{
-			Res: res,
+	if d.hasExtensions() {
+		var res *base.Resource
+		res, err = d.triggerOnResolve(req)
+		if err != nil {
+			return
 		}
-		return
+		if res != nil && len(res.Files) > 0 {
+			rr = &ResolveResult{
+				Res: res,
+			}
+			return
+		}
 	}
 
 	fetcher, err := d.buildFetcher(req.URL)
@@ -353,10 +375,12 @@ func (d *Downloader) notifyRunning() {
 
 func (d *Downloader) remainRunningCount() int {
 	runningCount := 0
-	for _, t := range d.tasks {
+	for _, t := range d.GetTasks() {
+		t.statusLock.Lock()
 		if t.Status == base.DownloadStatusRunning {
 			runningCount++
 		}
+		t.statusLock.Unlock()
 	}
 	return d.cfg.MaxRunning - runningCount
 }
@@ -424,15 +448,17 @@ func (d *Downloader) Pause(filter *TaskFilter) (err error) {
 }
 
 func (d *Downloader) pauseAll() (err error) {
+	var tasks []*Task
 	func() {
 		d.lock.Lock()
 		defer d.lock.Unlock()
 
 		// Clear wait tasks
 		d.waitTasks = d.waitTasks[:0]
+		tasks = d.GetTasks()
 	}()
 
-	for _, task := range d.tasks {
+	for _, task := range tasks {
 		if err = d.doPause(task); err != nil {
 			return
 		}
@@ -464,12 +490,17 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 		needPauseCount := needRunningCount - remainRunningCount
 		if needPauseCount > 0 {
 			pausedCount := 0
-			for _, task := range d.tasks {
-				if task.Status == base.DownloadStatusRunning {
+			for _, task := range d.GetTasks() {
+				task.statusLock.Lock()
+				running := task.Status == base.DownloadStatusRunning
+				task.statusLock.Unlock()
+				if running {
 					if err = d.doPause(task); err != nil {
 						return
 					}
+					task.statusLock.Lock()
 					task.Status = base.DownloadStatusWait
+					task.statusLock.Unlock()
 					d.waitTasks = append(d.waitTasks, task)
 					pausedCount++
 				}
@@ -483,7 +514,9 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 			if len(realContinueTasks) < needRunningCount {
 				realContinueTasks = append(realContinueTasks, task)
 			} else {
+				task.statusLock.Lock()
 				task.Status = base.DownloadStatusWait
+				task.statusLock.Unlock()
 				d.waitTasks = append(d.waitTasks, task)
 			}
 		}
@@ -507,8 +540,10 @@ func (d *Downloader) continueAll() (err error) {
 		defer d.lock.Unlock()
 		// calculate how many tasks can be continued, can't exceed maxRunning
 		remainCount := d.remainRunningCount()
-		for _, task := range d.tasks {
-			if task.Status != base.DownloadStatusRunning && task.Status != base.DownloadStatusDone {
+		for _, task := range d.GetTasks() {
+			task.statusLock.Lock()
+			canContinue := task.Status != base.DownloadStatusRunning && task.Status != base.DownloadStatusDone
+			if canContinue {
 				if len(continuedTasks) < remainCount {
 					continuedTasks = append(continuedTasks, task)
 				} else {
@@ -516,6 +551,7 @@ func (d *Downloader) continueAll() (err error) {
 					d.waitTasks = append(d.waitTasks, task)
 				}
 			}
+			task.statusLock.Unlock()
 		}
 	}()
 
@@ -562,13 +598,19 @@ func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
 		d.lock.Lock()
 		defer d.lock.Unlock()
 
+		d.tasksLock.Lock()
 		for _, id := range deleteIds {
 			for i, t := range d.tasks {
 				if t.ID == id {
-					d.tasks = append(d.tasks[:i], d.tasks[i+1:]...)
+					copy(d.tasks[i:], d.tasks[i+1:])
+					d.tasks[len(d.tasks)-1] = nil
+					d.tasks = d.tasks[:len(d.tasks)-1]
 					break
 				}
 			}
+		}
+		d.tasksLock.Unlock()
+		for _, id := range deleteIds {
 			for i, t := range d.waitTasks {
 				if t.ID == id {
 					d.waitTasks = append(d.waitTasks[:i], d.waitTasks[i+1:]...)
@@ -595,10 +637,11 @@ func (d *Downloader) deleteAll() (err error) {
 		d.lock.Lock()
 		defer d.lock.Unlock()
 
-		for _, task := range d.tasks {
-			deleteTasksTemp = append(deleteTasksTemp, task)
-		}
+		d.tasksLock.Lock()
+		deleteTasksTemp = make([]*Task, len(d.tasks))
+		copy(deleteTasksTemp, d.tasks)
 		d.tasks = make([]*Task, 0)
+		d.tasksLock.Unlock()
 		d.waitTasks = make([]*Task, 0)
 	}()
 
@@ -632,6 +675,13 @@ func (d *Downloader) Stats(id string) (sr any, err error) {
 
 func (d *Downloader) doDelete(task *Task, force bool) (err error) {
 	err = func() error {
+		task.statusLock.Lock()
+		defer task.statusLock.Unlock()
+		task.runVersion.Add(1)
+		task.cancelResolve()
+		task.lock.Lock()
+		defer task.lock.Unlock()
+
 		if err := d.storage.Delete(bucketTask, task.ID); err != nil {
 			return err
 		}
@@ -693,12 +743,24 @@ func (d *Downloader) Clear() error {
 			return err
 		}
 	}
+	d.lock.Lock()
+	d.tasksLock.Lock()
 	d.tasks = make([]*Task, 0)
 	d.extensions = make([]*Extension, 0)
+	d.tasksLock.Unlock()
+	d.waitTasks = make([]*Task, 0)
+	d.lock.Unlock()
 	if err := d.storage.Clear(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (d *Downloader) hasExtensions() bool {
+	d.tasksLock.RLock()
+	has := len(d.extensions) > 0
+	d.tasksLock.RUnlock()
+	return has
 }
 
 func (d *Downloader) Listener(fn Listener) {
@@ -720,6 +782,8 @@ func (d *Downloader) emit(eventKey EventKey, task *Task, errs ...error) {
 }
 
 func (d *Downloader) GetTask(id string) *Task {
+	d.tasksLock.RLock()
+	defer d.tasksLock.RUnlock()
 	for _, task := range d.tasks {
 		if task.ID == id {
 			return task
@@ -729,14 +793,19 @@ func (d *Downloader) GetTask(id string) *Task {
 }
 
 func (d *Downloader) GetTasks() []*Task {
-	return d.tasks
+	d.tasksLock.RLock()
+	defer d.tasksLock.RUnlock()
+	tasks := make([]*Task, len(d.tasks))
+	copy(tasks, d.tasks)
+	return tasks
 }
 
 // GetTasksByFilter get tasks by filter, if filter is nil, return all tasks
 // return tasks and if match all tasks
 func (d *Downloader) GetTasksByFilter(filter *TaskFilter) []*Task {
+	snapshot := d.GetTasks()
 	if filter == nil || filter.IsEmpty() {
-		return d.tasks
+		return snapshot
 	}
 
 	idMatch := func(task *Task) bool {
@@ -750,34 +819,44 @@ func (d *Downloader) GetTasksByFilter(filter *TaskFilter) []*Task {
 		}
 		return false
 	}
-	statusMatch := func(task *Task) bool {
+	statusMatch := func(taskStatus base.Status) bool {
 		if len(filter.Statuses) == 0 {
 			return true
 		}
 		for _, status := range filter.Statuses {
-			if task.Status == status {
+			if taskStatus == status {
 				return true
 			}
 		}
 		return false
 	}
-	notStatusMatch := func(task *Task) bool {
+	notStatusMatch := func(taskStatus base.Status) bool {
 		if len(filter.NotStatuses) == 0 {
 			return true
 		}
 		for _, status := range filter.NotStatuses {
-			if task.Status == status {
+			if taskStatus == status {
 				return false
 			}
 		}
 		return true
 	}
 
+	needStatus := len(filter.Statuses) > 0 || len(filter.NotStatuses) > 0
 	tasks := make([]*Task, 0)
-	for _, task := range d.tasks {
-		if idMatch(task) && statusMatch(task) && notStatusMatch(task) {
-			tasks = append(tasks, task)
+	for _, task := range snapshot {
+		if !idMatch(task) {
+			continue
 		}
+		if needStatus {
+			task.statusLock.Lock()
+			status := task.Status
+			task.statusLock.Unlock()
+			if !statusMatch(status) || !notStatusMatch(status) {
+				continue
+			}
+		}
+		tasks = append(tasks, task)
 	}
 	return tasks
 }
@@ -816,9 +895,15 @@ func (d *Downloader) watch(task *Task) {
 		d.watchedTasks.Delete(task.ID)
 	}()
 
+	task.statusLock.Lock()
+	uploading := task.Uploading
+	done := task.Status == base.DownloadStatusDone
+	f := task.fetcher
+	task.statusLock.Unlock()
+
 	// wait task upload done
-	if task.Uploading {
-		if uploader, ok := task.fetcher.(fetcher.Uploader); ok {
+	if uploading {
+		if uploader, ok := f.(fetcher.Uploader); ok {
 			go func() {
 				err := uploader.WaitUpload()
 				if err != nil {
@@ -829,19 +914,21 @@ func (d *Downloader) watch(task *Task) {
 
 				// Check if the task is deleted
 				if d.GetTask(task.ID) != nil {
+					task.statusLock.Lock()
 					task.Uploading = false
 					task.Progress.UploadSpeed = 0
 					d.storage.Put(bucketTask, task.ID, task.clone())
+					task.statusLock.Unlock()
 				}
 			}()
 		}
 	}
 
-	if task.Status == base.DownloadStatusDone {
+	if done {
 		return
 	}
 
-	err := task.fetcher.Wait()
+	err := f.Wait()
 	// A synchronous Android pause/delete must not be undone by a late result.
 	task.statusLock.Lock()
 	defer task.statusLock.Unlock()
@@ -870,7 +957,9 @@ func (d *Downloader) watch(task *Task) {
 	d.emit(EventKeyDone, task)
 	d.emit(EventKeyFinally, task, err)
 	d.notifyRunning()
-	d.triggerOnDone(task)
+	if d.hasExtensions() {
+		d.triggerOnDone(task)
+	}
 
 	if e, ok := task.Meta.Opts.Extra.(*http.OptsExtra); ok {
 		downloadFilePath := task.Meta.SingleFilepath()
@@ -895,8 +984,15 @@ func (d *Downloader) watch(task *Task) {
 
 func (d *Downloader) doOnError(task *Task, err error) {
 	d.Logger.Warn().Err(err).Msgf("task download failed, task id: %s", task.ID)
+	task.timer.Pause()
 	task.updateStatus(base.DownloadStatusError)
-	d.triggerOnError(task, err)
+	if d.hasExtensions() {
+		func() {
+			task.statusLock.Unlock()
+			defer task.statusLock.Lock()
+			d.triggerOnError(task, err)
+		}()
+	}
 	if task.Status == base.DownloadStatusError {
 		d.emit(EventKeyError, task, err)
 		d.emit(EventKeyFinally, task, err)
@@ -994,11 +1090,15 @@ func (d *Downloader) doCreate(f fetcher.Fetcher, opts *base.Options) (taskId str
 		d.lock.Lock()
 		defer d.lock.Unlock()
 
+		d.tasksLock.Lock()
 		d.tasks = append(d.tasks, task)
+		d.tasksLock.Unlock()
 
 		remainRunningCount := d.remainRunningCount()
 		if remainRunningCount == 0 {
+			task.statusLock.Lock()
 			task.Status = base.DownloadStatusWait
+			task.statusLock.Unlock()
 			d.waitTasks = append(d.waitTasks, task)
 			return
 		}
@@ -1034,11 +1134,14 @@ func (d *Downloader) doStart(task *Task) (err error) {
 		isCreate = task.Status == base.DownloadStatusReady
 		runVersion = task.runVersion.Add(1)
 		task.downloadRate.reset(task.receivedBytes(task.fetcher.Progress().TotalDownloaded()), time.Now())
+		task.Progress.Speed = 0
 		if uploader, ok := task.fetcher.(fetcher.Uploader); ok {
 			task.uploadRate.reset(uploader.UploadedBytes(), time.Now())
 			task.Progress.UploadSpeed = 0
 		}
+		task.timer.Start()
 		task.updateStatus(base.DownloadStatusRunning)
+		d.startingTasks.Store(task.ID, runVersion)
 
 		return
 	})
@@ -1051,56 +1154,68 @@ func (d *Downloader) doStart(task *Task) (err error) {
 	}
 
 	handler := func() error {
-		task.lock.Lock()
-		defer task.lock.Unlock()
-		if task.runVersion.Load() != runVersion {
-			return nil
-		}
-
-		d.triggerOnStart(task)
-		if task.Meta.Res == nil {
-			err := task.resolveForRun(runVersion)
-			if err != nil {
-				return err
+		started, err := func() (bool, error) {
+			defer d.startingTasks.CompareAndDelete(task.ID, runVersion)
+			task.lock.Lock()
+			defer task.lock.Unlock()
+			if task.runVersion.Load() != runVersion {
+				return false, nil
 			}
-			task.Meta.Res = task.fetcher.Meta().Res
-		}
-		if task.runVersion.Load() != runVersion {
-			return nil
-		}
 
-		if isCreate {
-			if task.fetcherManager.AutoRename() {
-				d.checkDuplicateLock.Lock()
-				defer d.checkDuplicateLock.Unlock()
-				task.Meta.Opts.Name = util.ReplaceInvalidFilename(task.Meta.Opts.Name)
-				// check if the download file is duplicated and rename it automatically.
-				if task.Meta.Res.Name != "" {
-					task.Meta.Res.Name = util.ReplaceInvalidFilename(task.Meta.Res.Name)
-					fullDirPath := task.Meta.FolderPath()
-					newName, err := util.CheckDuplicateAndRename(fullDirPath)
-					if err != nil {
-						return err
-					}
-					task.Meta.Opts.Name = newName
-				} else {
-					task.Meta.Res.Files[0].Name = util.ReplaceInvalidFilename(task.Meta.Res.Files[0].Name)
-					fullFilePath := task.Meta.SingleFilepath()
-					newName, err := util.CheckDuplicateAndRename(fullFilePath)
-					if err != nil {
-						return err
-					}
-					task.Meta.Opts.Name = newName
+			if d.hasExtensions() {
+				d.triggerOnStart(task)
+			}
+			if task.Meta.Res == nil {
+				err := task.resolveForRun(runVersion)
+				if err != nil {
+					return false, err
 				}
+				task.Meta.Res = task.fetcher.Meta().Res
+			}
+			if task.runVersion.Load() != runVersion {
+				return false, nil
 			}
 
-			task.Meta.Res.CalcSize(task.Meta.Opts.SelectFiles)
-		}
+			if isCreate {
+				if task.fetcherManager.AutoRename() {
+					d.checkDuplicateLock.Lock()
+					defer d.checkDuplicateLock.Unlock()
+					task.Meta.Opts.Name = util.ReplaceInvalidFilename(task.Meta.Opts.Name)
+					// check if the download file is duplicated and rename it automatically.
+					if task.Meta.Res.Name != "" {
+						task.Meta.Res.Name = util.ReplaceInvalidFilename(task.Meta.Res.Name)
+						fullDirPath := task.Meta.FolderPath()
+						newName, err := util.CheckDuplicateAndRename(fullDirPath)
+						if err != nil {
+							return false, err
+						}
+						task.Meta.Opts.Name = newName
+					} else {
+						task.Meta.Res.Files[0].Name = util.ReplaceInvalidFilename(task.Meta.Res.Files[0].Name)
+						fullFilePath := task.Meta.SingleFilepath()
+						newName, err := util.CheckDuplicateAndRename(fullFilePath)
+						if err != nil {
+							return false, err
+						}
+						task.Meta.Opts.Name = newName
+					}
+				}
 
-		task.Progress.Speed = 0
-		task.timer.Start()
-		if err := task.fetcher.Start(); err != nil {
+				task.Meta.Res.CalcSize(task.Meta.Opts.SelectFiles)
+			}
+
+			if err := task.fetcher.Start(); err != nil {
+				return false, err
+			}
+			return true, nil
+		}()
+		if err != nil || !started {
 			return err
+		}
+		task.statusLock.Lock()
+		defer task.statusLock.Unlock()
+		if task.runVersion.Load() != runVersion || task.Status != base.DownloadStatusRunning || d.closed.Load() || d.GetTask(task.ID) == nil {
+			return nil
 		}
 		if err := d.saveTask(task); err != nil {
 			return err
@@ -1122,6 +1237,7 @@ func (d *Downloader) doStart(task *Task) (err error) {
 }
 
 func (d *Downloader) doPause(task *Task) (err error) {
+	var pauseVersion uint64
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
 		if task.Status == base.DownloadStatusPause || task.Status == base.DownloadStatusDone {
 			isReturn = true
@@ -1129,7 +1245,7 @@ func (d *Downloader) doPause(task *Task) (err error) {
 		}
 
 		task.updateStatus(base.DownloadStatusPause)
-		task.runVersion.Add(1)
+		pauseVersion = task.runVersion.Add(1)
 		task.timer.Pause()
 		task.cancelResolve()
 		return
@@ -1144,12 +1260,22 @@ func (d *Downloader) doPause(task *Task) (err error) {
 
 	handler := func() error {
 		task.lock.Lock()
-		defer task.lock.Unlock()
-
+		if task.runVersion.Load() != pauseVersion {
+			task.lock.Unlock()
+			return nil
+		}
 		if task.fetcher != nil {
 			if err := task.fetcher.Pause(); err != nil {
+				task.lock.Unlock()
 				return err
 			}
+		}
+		task.lock.Unlock()
+
+		task.statusLock.Lock()
+		defer task.statusLock.Unlock()
+		if task.runVersion.Load() != pauseVersion || d.closed.Load() || d.GetTask(task.ID) == nil || task.Status != base.DownloadStatusPause {
+			return nil
 		}
 		if err := d.storage.Put(bucketTask, task.ID, task.clone()); err != nil {
 			return err

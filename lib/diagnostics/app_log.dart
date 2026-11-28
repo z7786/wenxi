@@ -176,8 +176,9 @@ class DiagnosticLog extends ChangeNotifier {
           ? null
           : LogRedactor.text(error, limit: 3500);
       final now = clock().toUtc();
+      final cleanFields = fields.isEmpty ? null : LogRedactor.value(fields);
       final fingerprint =
-          '$cleanEvent|$level|$message|${LogRedactor.json(fields)}';
+          '$cleanEvent|$level|$message|${cleanFields == null ? '{}' : jsonEncode(cleanFields)}';
       final last = _recent[fingerprint];
       if (level != 'fatal' &&
           last != null &&
@@ -201,7 +202,7 @@ class DiagnosticLog extends ChangeNotifier {
           'errorType': LogRedactor.text(error.runtimeType, limit: 100),
         'message': ?message,
         if (stack != null) 'stack': LogRedactor.text(stack, limit: 9000),
-        if (fields.isNotEmpty) 'fields': LogRedactor.value(fields),
+        'fields': ?cleanFields,
         if (_suppressed > 0) 'suppressedRepeats': _suppressed,
       };
       var line = jsonEncode(entry);
@@ -290,19 +291,21 @@ class DiagnosticLog extends ChangeNotifier {
     }
   }
 
+  static final _logFilePattern = RegExp(
+    r'^app-[0-9]+-[a-f0-9]+-[0-9]+\.jsonl$',
+  );
+
   List<File> _files() {
     final root = directory;
     if (root == null || !root.existsSync()) return [];
-    return root
-        .listSync(followLinks: false)
-        .whereType<File>()
-        .where(
-          (file) => RegExp(
-            r'^app-[0-9]+-[a-f0-9]+-[0-9]+\.jsonl$',
-          ).hasMatch(p.basename(file.path)),
-        )
-        .toList()
-      ..sort((a, b) => a.lastModifiedSync().compareTo(b.lastModifiedSync()));
+    final entries = <({File file, DateTime modified})>[];
+    for (final entity in root.listSync(followLinks: false)) {
+      if (entity is File && _logFilePattern.hasMatch(p.basename(entity.path))) {
+        entries.add((file: entity, modified: entity.lastModifiedSync()));
+      }
+    }
+    entries.sort((a, b) => a.modified.compareTo(b.modified));
+    return [for (final entry in entries) entry.file];
   }
 
   void _prune() {

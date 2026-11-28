@@ -664,4 +664,49 @@ void main() {
       expect(http.calls.where((r) => r.uri.path == '/ws/vod/results'), isEmpty);
     },
   );
+
+  test(
+    'WAF cookie jar retains 409 challenge cookies without leaking non-409 session cookies',
+    () async {
+      var challenges = 0;
+      final sentCookies = <String?>[];
+      final http = FakeHttp((r) {
+        sentCookies.add(r.headers['Cookie']);
+        if ((r.headers['Cookie'] ?? '').contains('waf=ok')) {
+          return HttpResult(
+            200,
+            jsonEncode({
+              'code': 200,
+              'totalPage': 1,
+              'list': [_row(12)],
+            }),
+            {
+              'set-cookie': [
+                'session=account-a-secret; Path=/; Secure',
+                'share_ctx=share-a-secret; Path=/; Secure',
+              ],
+            },
+          );
+        }
+        challenges++;
+        return const HttpResult(409, '<html>challenge</html>', {
+          'content-type': ['text/html'],
+          'set-cookie': ['waf=ok; Path=/; Secure'],
+        });
+      });
+      final v = await _vault();
+      final connector = FeijipanConnector(http, v, now: () => _stamp);
+      await connector.list(_personal(), '0', v.credential(_platform));
+      await connector.list(_personal(), '0', v.credential(_platform));
+      expect(challenges, 1);
+      expect(sentCookies, hasLength(3));
+      expect(sentCookies[0], isNull);
+      expect(sentCookies[1], 'waf=ok');
+      expect(sentCookies[2], 'waf=ok');
+      for (final header in sentCookies) {
+        expect(header ?? '', isNot(contains('account-a-secret')));
+        expect(header ?? '', isNot(contains('share-a-secret')));
+      }
+    },
+  );
 }

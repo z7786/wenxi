@@ -61,13 +61,22 @@ class _QuarkLoginPageState extends State<QuarkLoginPage> {
     final username = saved?.field('username') ?? '';
     if (QuarkLoginService.validMobile(username)) _mobile.text = username;
     _mobile.addListener(_mobileChanged);
+  }
+
+  void _startResendTicker() {
+    _ticker?.cancel();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!_active) return;
-      final resendExpired = _resendAt != null && _seconds == 0;
-      if (_seconds > 0 || resendExpired) {
-        setState(() {
-          if (resendExpired) _resendAt = null;
-        });
+      if (!_active || _resendAt == null) {
+        _ticker?.cancel();
+        _ticker = null;
+        return;
+      }
+      if (_seconds <= 0) {
+        _ticker?.cancel();
+        _ticker = null;
+        setState(() => _resendAt = null);
+      } else {
+        setState(() {});
       }
     });
   }
@@ -188,6 +197,7 @@ class _QuarkLoginPageState extends State<QuarkLoginPage> {
               _status = status;
               if (status == '正在发送验证码…' && _seconds == 0) {
                 _resendAt = DateTime.now().add(const Duration(seconds: 60));
+                _startResendTicker();
               }
             });
           },

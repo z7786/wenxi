@@ -164,6 +164,54 @@ void main() {
   );
 
   test(
+    'Failed PAC evaluations are evicted so subsequent retries can succeed',
+    () async {
+      var attempts = 0;
+      const config = WindowsProxyConfig(
+        autoConfigUrl: 'http://pac.test/flaky',
+      );
+      final resolver = WindowsSystemProxy(
+        readConfig: () async => config,
+        resolveAuto: (_, _) async {
+          attempts++;
+          if (attempts == 1) {
+            throw const WindowsProxyException('pac_timeout');
+          }
+          return const WindowsProxyConfig(proxy: '127.0.0.1:7890');
+        },
+      );
+      await expectLater(
+        resolver.resolve(url),
+        throwsA(isA<WindowsProxyException>()),
+      );
+      expect((await resolver.resolve(url)).value, 'PROXY 127.0.0.1:7890');
+      expect(attempts, 2);
+    },
+  );
+
+  test('Short config TTL caches config reads and refreshes after expiry', () async {
+    var now = DateTime(2026, 11, 26, 12, 0, 0);
+    var reads = 0;
+    var config = const WindowsProxyConfig(proxy: '127.0.0.1:7890');
+    final resolver = WindowsSystemProxy(
+      readConfig: () async {
+        reads++;
+        return config;
+      },
+      clock: () => now,
+      configCacheTtl: const Duration(seconds: 3),
+    );
+    expect((await resolver.resolve(url)).value, 'PROXY 127.0.0.1:7890');
+    config = const WindowsProxyConfig(proxy: '127.0.0.1:10808');
+    now = now.add(const Duration(seconds: 2));
+    expect((await resolver.resolve(url)).value, 'PROXY 127.0.0.1:7890');
+    expect(reads, 1);
+    now = now.add(const Duration(seconds: 2));
+    expect((await resolver.resolve(url)).value, 'PROXY 127.0.0.1:10808');
+    expect(reads, 2);
+  });
+
+  test(
     'WinHTTP evaluates a real local PAC away from the UI thread',
     () async {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);

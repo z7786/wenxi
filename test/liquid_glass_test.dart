@@ -571,4 +571,31 @@ void main() {
       }
     },
   );
+
+  test('appTheme memoizes ThemeData by parameters', () {
+    final first = appTheme(
+      Brightness.light,
+      palette: AppPalette.blue,
+      glassStyle: GlassStyle.clear,
+    );
+    final second = appTheme(
+      Brightness.light,
+      palette: AppPalette.blue,
+      glassStyle: GlassStyle.clear,
+    );
+    final dark = appTheme(
+      Brightness.dark,
+      palette: AppPalette.blue,
+      glassStyle: GlassStyle.clear,
+    );
+    final lowPower = appTheme(
+      Brightness.light,
+      palette: AppPalette.blue,
+      glassStyle: GlassStyle.clear,
+      glassLowPower: true,
+    );
+    expect(identical(first, second), isTrue);
+    expect(identical(first, dark), isFalse);
+    expect(identical(first, lowPower), isFalse);
+  });
 }

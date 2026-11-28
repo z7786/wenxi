@@ -134,6 +134,19 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
   }
 }
 
+typedef _AppThemeKey = (
+  Brightness,
+  TargetPlatform,
+  String?,
+  AppPalette,
+  GlassStyle,
+  bool,
+  bool,
+);
+
+const _appThemeCacheLimit = 32;
+final _appThemeCache = <_AppThemeKey, ThemeData>{};
+
 ThemeData appTheme(
   Brightness brightness, {
   String? fontFamily,
@@ -142,6 +155,20 @@ ThemeData appTheme(
   bool glassControls = false,
   bool glassLowPower = false,
 }) {
+  final key = (
+    brightness,
+    defaultTargetPlatform,
+    fontFamily,
+    palette,
+    glassStyle,
+    glassControls,
+    glassLowPower,
+  );
+  final cached = _appThemeCache.remove(key);
+  if (cached != null) {
+    _appThemeCache[key] = cached;
+    return cached;
+  }
   final dark = brightness == Brightness.dark;
   final windows = defaultTargetPlatform == TargetPlatform.windows;
   final resolvedFont = fontFamily ?? (windows ? 'Microsoft YaHei UI' : null);
@@ -164,7 +191,7 @@ ThemeData appTheme(
         surfaceContainer: Color(tones.fill),
         outlineVariant: Color(tones.border),
       );
-  return ThemeData(
+  final theme = ThemeData(
     useMaterial3: true,
     brightness: brightness,
     colorScheme: colors,
@@ -237,4 +264,9 @@ ThemeData appTheme(
       waitDuration: Duration(milliseconds: 500),
     ),
   );
+  if (_appThemeCache.length >= _appThemeCacheLimit) {
+    _appThemeCache.remove(_appThemeCache.keys.first);
+  }
+  _appThemeCache[key] = theme;
+  return theme;
 }

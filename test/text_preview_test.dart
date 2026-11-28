@@ -23,9 +23,10 @@ class _Transfer extends TransferHttp {
     this.ignoreRange = false,
     this.hold = false,
     this.wrongRange = false,
+    this.stallStream = false,
   });
   final Uint8List content;
-  final bool ignoreRange, hold, wrongRange;
+  final bool ignoreRange, hold, wrongRange, stallStream;
   final ready = Completer<void>();
   CancelToken? token;
   int delivered = 0;
@@ -42,6 +43,23 @@ class _Transfer extends TransferHttp {
     if (hold) {
       await cancel!.whenCancel;
       throw cancel.cancelError!;
+    }
+    if (stallStream) {
+      final controller = StreamController<Uint8List>();
+      controller.onCancel = controller.close;
+      if (content.isNotEmpty) {
+        delivered += content.length;
+        controller.add(content);
+      }
+      final stallHeaders = {
+        'content-length': ['${content.length + 10}'],
+      };
+      return Response(
+        requestOptions: RequestOptions(path: url),
+        statusCode: 200,
+        headers: Headers.fromMap(stallHeaders),
+        data: ResponseBody(controller.stream, 200, headers: stallHeaders),
+      );
     }
     final length = ignoreRange
         ? content.length
@@ -248,6 +266,28 @@ void main() {
       scope.cancel();
       await cancelled;
       expect(held.token!.isCancelled, true);
+    },
+  );
+  test(
+    'remote text throws TimeoutException and cancels when stream stalls',
+    () async {
+      final stalled = _Transfer(
+        Uint8List.fromList(utf8.encode('hello')),
+        stallStream: true,
+      );
+      addTearDown(() => stalled.dio.close(force: true));
+      await expectLater(
+        TextPreviewLoader.remote(
+          stalled,
+          const DownloadSpec(
+            url: 'https://example.com/stalled.txt',
+            fileName: 'stalled.txt',
+          ),
+          streamTimeout: const Duration(milliseconds: 50),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      expect(stalled.token!.isCancelled, true);
     },
   );
   test('local Windows files use the same decoder', () async {

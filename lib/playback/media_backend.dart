@@ -349,7 +349,8 @@ class MediaKitBackend extends PlaybackBackend with WidgetsBindingObserver {
   VideoController? _video;
   final _subscriptions = <StreamSubscription<Object?>>[];
   bool _closing = false;
-  bool _surfaceReady = false, _sampling = false;
+  bool _surfaceReady = false;
+  Future<void>? _sampleTask;
   int _sourceBytes = 0;
   Timer? _performanceTimer;
   PlaybackMetrics _metrics = PlaybackMetrics();
@@ -1163,8 +1164,10 @@ class MediaKitBackend extends PlaybackBackend with WidgetsBindingObserver {
     return native.getProperty(name);
   }
 
-  Future<void> _samplePerformance() async {
-    if (_closing || _sampling || _openWatch == null || _failure != null) return;
+  Future<void> _samplePerformance() {
+    if (_closing || _sampleTask != null || _openWatch == null || _failure != null) {
+      return _sampleTask ?? Future.value();
+    }
     // Paused sessions retain their buffers but do not query native counters.
     // Background audio still needs transport adaptation; only video checks stop.
     if (!_wantsPlay || state.completed) {
@@ -1172,9 +1175,24 @@ class MediaKitBackend extends PlaybackBackend with WidgetsBindingObserver {
       _videoMonitor.reset();
       _lastDiagnosticSample = null;
       _directReceiveBytesPerSecond = null;
-      return;
+      return Future.value();
     }
-    _sampling = true;
+    final task = _runPerformanceSample();
+    _sampleTask = task;
+    void clear() {
+      if (identical(_sampleTask, task)) _sampleTask = null;
+    }
+
+    unawaited(
+      task.then<void>(
+        (_) => clear(),
+        onError: (Object _, StackTrace _) => clear(),
+      ),
+    );
+    return task;
+  }
+
+  Future<void> _runPerformanceSample() async {
     try {
       final native = player.platform;
       if (native is! NativePlayer) return;
@@ -1360,8 +1378,6 @@ class MediaKitBackend extends PlaybackBackend with WidgetsBindingObserver {
       }
     } catch (e, stack) {
       if (!_closing) DiagnosticLog.error('player.performance_sample', e, stack);
-    } finally {
-      _sampling = false;
     }
   }
 
@@ -1542,12 +1558,26 @@ class MediaKitBackend extends PlaybackBackend with WidgetsBindingObserver {
     _seekTarget = position;
     _metrics.seek(position, _openWatch?.elapsed ?? Duration.zero);
     _stallMonitor.reset();
+    Timer? interruptTimer;
     try {
       await _proxy?.prepareSeekAsync();
       await _updateResumeBuffer();
       if (_closing) return;
+      final proxy = _proxy;
+      if (proxy != null) {
+        if (player.state.buffering) {
+          proxy.interruptReadForSeek();
+        } else {
+          interruptTimer = Timer(const Duration(milliseconds: 300), () {
+            if (!_closing && revision == _seekRevision) {
+              proxy.interruptReadForSeek();
+            }
+          });
+        }
+      }
       await player.seek(position);
     } finally {
+      interruptTimer?.cancel();
       if (revision == _seekRevision) {
         _seeking = false;
         _videoCheckAfter =
@@ -1596,7 +1626,7 @@ class MediaKitBackend extends PlaybackBackend with WidgetsBindingObserver {
     _activeInstances.remove(_instanceId);
     _retiringInstances.add(_instanceId);
     _renderTimer?.cancel();
-    _seekQueue.close();
+    final seekDrain = _seekQueue.close();
     _diagnostics.stop();
     _performanceTimer?.cancel();
     _cancelTransportChecks();
@@ -1604,12 +1634,14 @@ class MediaKitBackend extends PlaybackBackend with WidgetsBindingObserver {
     for (final subscription in _subscriptions) {
       await subscription.cancel();
     }
-    await _propertyGate.run(() async {});
     try {
       try {
         await _proxy?.close();
         await _restrictedStream?.close();
       } finally {
+        await seekDrain;
+        await _sampleTask;
+        await _propertyGate.run(() async {});
         final native = player.platform;
         if (native is NativePlayer) {
           unawaited(

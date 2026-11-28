@@ -133,21 +133,22 @@ class FeijipanConnector extends PersonalCloudConnector {
     'Accept-Language': 'zh-CN',
   };
 
+  final _wafJar = LoginCookieJar({
+    'feijipan.com',
+    'www.feijipan.com',
+    'api.feijipan.com',
+  });
+
   Future<HttpResult> _request(String method, String url, {Json? body}) async =>
       (await _requestWithIdentity(method, url, body: body)).response;
 
   Future<({HttpResult response, DesktopBrowserUa identity})>
   _requestWithIdentity(String method, String url, {Json? body}) async {
     var uri = Uri.parse(url);
-    LoginCookieJar freshCookies() => LoginCookieJar({
-      'feijipan.com',
-      'www.feijipan.com',
-      'api.feijipan.com',
-    });
-    var jar = freshCookies(), verificationRetries = 0;
+    var verificationRetries = 0;
     while (true) {
       RequestScope.checkpoint();
-      final cookies = jar.header(uri);
+      final cookies = _wafJar.header(uri);
       final identity = _identity.current;
       final response = await http.request(
         method,
@@ -161,7 +162,6 @@ class FeijipanConnector extends PersonalCloudConnector {
         followRedirects: false,
       );
       RequestScope.checkpoint();
-      jar.absorb(uri, response);
       if (response.status == 403 &&
           _uaRetryPaths.contains(uri.path) &&
           _browserBlocked(response) &&
@@ -185,12 +185,15 @@ class FeijipanConnector extends PersonalCloudConnector {
               (match) => '${match[1]}${_identity.current.version}',
             );
         uri = Uri.parse(url);
-        jar = freshCookies();
+        _wafJar.clear();
         verificationRetries = 0;
         continue;
       }
       if (response.status == 409 &&
-          response.header('content-type').contains('text/html')) {
+          response.header('content-type').toLowerCase().contains('text/html')) {
+        _wafJar
+          ..clear()
+          ..absorb(uri, response);
         if (verificationRetries++ == 0) continue;
         throw const AppException('小飞机的访问验证未通过，请稍后重试或使用网页登录');
       }

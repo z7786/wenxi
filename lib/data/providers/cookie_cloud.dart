@@ -975,7 +975,7 @@ class _CookieCloudHttp extends JsonHttp {
   Future<bool> _refresh() {
     checkpoint();
     final session = current!, owner = current!.owner;
-    if (!quark || owner == null) return _refreshSession();
+    if (owner == null) return _refreshSession();
     final accounts = store;
     final accountId = accounts is Vault
         ? accounts.accountId(platform) ?? owner.label
@@ -999,8 +999,6 @@ class _CookieCloudHttp extends JsonHttp {
         });
     return RequestScope.cancellable(pending);
   }
-
-  bool get quark => platform == CloudPlatform.quark;
 
   Future<bool> _refreshSession() async {
     final session = current!;

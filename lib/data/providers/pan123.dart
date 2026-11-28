@@ -49,16 +49,23 @@ class Pan123Connector extends CloudConnector {
   static const webUa =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
   static const dartUa = 'Dart/3.12 (dart:io)';
-  Future<String> loginUuid() => _uuids.putIfAbsent(
-    vault is Vault ? (vault as Vault).accountId(platform) ?? '' : '',
-    () => (() async {
+  Future<String> loginUuid() {
+    final key = vault is Vault ? (vault as Vault).accountId(platform) ?? '' : '';
+    final cached = _uuids[key];
+    if (cached != null) return cached;
+    late final Future<String> pending;
+    pending = (() async {
       final existing = vault.secret('pan123.login_uuid');
       if (existing?.isNotEmpty == true) return existing!;
       final uuid = newId().replaceAll('-', '');
       await vault.putSecret('pan123.login_uuid', uuid);
       return uuid;
-    })(),
-  );
+    })().catchError((Object error, StackTrace stack) {
+      if (identical(_uuids[key], pending)) _uuids.remove(key);
+      Error.throwWithStackTrace(error, stack);
+    });
+    return _uuids[key] = pending;
+  }
   Json check(Json j) {
     if (_expiredCodes.contains(j.integer('code', -1))) throw _expired;
     if ({100011, 429}.contains(j.integer('code', -1))) {
@@ -379,8 +386,13 @@ class Pan123Connector extends CloudConnector {
         fields: {'platform': platform.key},
       );
       return replacement;
-    } catch (_) {
+    } catch (error) {
       _owner(owner);
+      if (error is HttpRequestFailure ||
+          error is! AppException ||
+          RequestScope.current?.isCancelled == true) {
+        rethrow;
+      }
       await _blockAutoLogin(owner);
       _owner(owner);
       throw _autoFailed;
@@ -650,6 +662,10 @@ class Pan123Connector extends CloudConnector {
                     failure.retryAfter,
                   ).difference(now().toUtc());
                 } catch (_) {}
+              }
+              if (serverDelay != null &&
+                  serverDelay > const Duration(seconds: 30)) {
+                serverDelay = const Duration(seconds: 30);
               }
               if (serverDelay != null && serverDelay > delay) {
                 delay = serverDelay;

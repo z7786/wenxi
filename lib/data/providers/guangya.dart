@@ -136,7 +136,10 @@ class GuangyaConnector extends CloudConnector {
           'authType': 'passwordToken',
           'autoLoginBlocked': '0',
         });
+      } on HttpRequestFailure {
+        rethrow;
       } on AppException {
+        sessions.checkpoint(session);
         await sessions.update(session, {'autoLoginBlocked': '1'});
         throw const AccountLoginRequired('光鸭自动登录未完成，请重新登录并完成安全验证');
       }

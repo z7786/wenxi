@@ -40,8 +40,14 @@ type httpProbeResult struct {
 
 type httpProbeJob struct {
 	cancel context.CancelFunc
+	expiry *time.Timer
 	result httpProbeResult
 }
+
+var (
+	httpProbeContentRangePattern = regexp.MustCompile(`^bytes 0-(\d+)/(\d+)$`)
+	httpProbeJobExpiry           = 90 * time.Second
+)
 
 var httpProbes = struct {
 	sync.Mutex
@@ -70,12 +76,24 @@ func StartHttpProbe(value string) error {
 	defer httpProbes.Unlock()
 	if previous := httpProbes.jobs[input.ID]; previous != nil {
 		previous.cancel()
+		if previous.expiry != nil {
+			previous.expiry.Stop()
+		}
 	} else if len(httpProbes.jobs) >= 16 {
 		return errors.New("too many HTTP probes")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	job := &httpProbeJob{cancel: cancel, result: httpProbeResult{Status: "running"}}
 	httpProbes.jobs[input.ID] = job
+	// Bound retention even if the caller never calls StopHttpProbe.
+	job.expiry = time.AfterFunc(httpProbeJobExpiry, func() {
+		httpProbes.Lock()
+		defer httpProbes.Unlock()
+		if httpProbes.jobs[input.ID] == job {
+			cancel()
+			delete(httpProbes.jobs, input.ID)
+		}
+	})
 	go func() {
 		defer cancel()
 		transport := &http.Transport{
@@ -153,7 +171,7 @@ func performHTTPProbe(ctx context.Context, input httpProbeInput, client *http.Cl
 			return httpProbeResult{Status: "error", ErrorKind: "content"}
 		}
 		if response.StatusCode == http.StatusPartialContent {
-			match := regexp.MustCompile(`^bytes 0-(\d+)/(\d+)$`).FindStringSubmatch(response.Header.Get("Content-Range"))
+			match := httpProbeContentRangePattern.FindStringSubmatch(response.Header.Get("Content-Range"))
 			if len(match) != 3 {
 				return httpProbeResult{Status: "error", ErrorKind: "content"}
 			}
@@ -199,6 +217,9 @@ func StopHttpProbe(id string) {
 	defer httpProbes.Unlock()
 	if job := httpProbes.jobs[id]; job != nil {
 		job.cancel()
+		if job.expiry != nil {
+			job.expiry.Stop()
+		}
 		delete(httpProbes.jobs, id)
 	}
 }
@@ -208,6 +229,9 @@ func closeHTTPProbes() {
 	defer httpProbes.Unlock()
 	for id, job := range httpProbes.jobs {
 		job.cancel()
+		if job.expiry != nil {
+			job.expiry.Stop()
+		}
 		delete(httpProbes.jobs, id)
 	}
 }

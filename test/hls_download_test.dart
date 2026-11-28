@@ -184,4 +184,89 @@ void main() {
       );
     },
   );
+
+  test(
+    'HLS reserves space ahead by step instead of under-reserving small chunks',
+    () async {
+      HttpOverrides.global = _LocalHttp();
+      final root = await Directory.systemTemp.createTemp('hls-reserve-');
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen((request) async {
+        try {
+          if (request.uri.path == '/index.m3u8') {
+            request.response.headers.contentType = ContentType(
+              'application',
+              'vnd.apple.mpegurl',
+            );
+            request.response.write(
+              '#EXTM3U\n#EXT-X-TARGETDURATION:4\n'
+              '#EXTINF:4,\npart1.ts\n#EXTINF:4,\npart2.ts\n#EXT-X-ENDLIST\n',
+            );
+          } else {
+            request.response.add([1, 2, 3, 4]);
+          }
+        } finally {
+          await request.response.close();
+        }
+      });
+      final store = StateStore.memory({
+        'settings': {'retries': 0},
+      });
+      final files = _MeteredFiles(
+        Directory(p.join(root.path, 'saved')),
+        // Enough for 32 MiB margin + a few bytes, but below the 16 MiB
+        // reserve-ahead window (plus destination copy + margin).
+        available: 40 * 1024 * 1024,
+      );
+      final http = TransferHttp();
+      final manager = DownloadManager(
+        store: store,
+        engine: GopeedEngine(
+          FakeNative(),
+          store,
+          Vault(store),
+          Directory(p.join(root.path, 'native')),
+          Directory(p.join(root.path, 'cache')),
+        ),
+        files: files,
+        cleanups: CleanupOutbox(store, FakeHttp()),
+        http: http,
+        refreshSource: (_) async => throw StateError('No cloud source'),
+      );
+      addTearDown(() async {
+        await manager.close();
+        manager.dispose();
+        http.dio.close(force: true);
+        await server.close(force: true);
+        await root.delete(recursive: true);
+        HttpOverrides.global = null;
+      });
+      await manager.initialize();
+      final id = await manager.enqueue(
+        DownloadSpec(
+          url: 'http://127.0.0.1:${server.port}/index.m3u8',
+          fileName: 'clip.m3u8',
+        ),
+      );
+      await until(
+        () => !manager.task(id)!.active && manager.activeCount == 0,
+      );
+      final task = manager.task(id)!;
+      expect(task.status, DownloadStatus.failed);
+      expect(task.error, contains('存储空间不足'));
+      expect(files.freeBytesCalls, greaterThanOrEqualTo(1));
+    },
+  );
+}
+
+class _MeteredFiles extends FakeFiles {
+  _MeteredFiles(super.directory, {required this.available});
+  int available;
+  int freeBytesCalls = 0;
+
+  @override
+  Future<int> freeBytes(String path) async {
+    freeBytesCalls++;
+    return available;
+  }
 }

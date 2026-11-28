@@ -50,27 +50,32 @@ void main() {
   float amount = u_lens.z * shortest;
   float distance = min(roundedRectDistance(centered, halfSize, radius), 0.0);
   float t = clamp(1.0 + distance / rimHeight, 0.0, 1.0);
-  float displacement = (1.0 - sqrt(max(1.0 - t * t, 0.0))) * amount;
-  float gradientRadius = min(radius * 1.5, shortest * 0.5);
-  vec2 normal = safeNormal(
-      roundedRectNormal(centered, halfSize, gradientRadius)
-      + u_lens.w * safeNormal(centered));
-  vec2 refracted = p - displacement * normal;
-  vec4 color = sampleContent(refracted);
-  if (u_optics.x > 0.0 && displacement > 0.0) {
-    float dispersion = clamp(u_optics.x, 0.0, 0.3);
-    // Bound the color fringe to the rim and reconstruct straight RGB before
-    // premultiplying with a shared alpha. Mixing premultiplied channels from
-    // samples with different opacity produces white or dark color halos.
-    vec2 separated = min(displacement * dispersion, shortest * 0.04) * normal;
-    vec4 red = sampleContent(refracted + separated);
-    vec4 blue = sampleContent(refracted - separated);
-    float alpha = (red.a + color.a + blue.a) / 3.0;
-    vec3 rgb = vec3(
-        red.r / max(red.a, 0.0001),
-        color.g / max(color.a, 0.0001),
-        blue.b / max(blue.a, 0.0001));
-    color = vec4(clamp(rgb, 0.0, 1.0) * alpha, alpha);
+  vec4 color;
+  if (t <= 0.0) {
+    color = sampleContent(p);
+  } else {
+    float displacement = (1.0 - sqrt(max(1.0 - t * t, 0.0))) * amount;
+    float gradientRadius = min(radius * 1.5, shortest * 0.5);
+    vec2 normal = safeNormal(
+        roundedRectNormal(centered, halfSize, gradientRadius)
+        + u_lens.w * safeNormal(centered));
+    vec2 refracted = p - displacement * normal;
+    color = sampleContent(refracted);
+    if (u_optics.x > 0.0 && displacement > 0.0) {
+      float dispersion = clamp(u_optics.x, 0.0, 0.3);
+      // Bound the color fringe to the rim and reconstruct straight RGB before
+      // premultiplying with a shared alpha. Mixing premultiplied channels from
+      // samples with different opacity produces white or dark color halos.
+      vec2 separated = min(displacement * dispersion, shortest * 0.04) * normal;
+      vec4 red = sampleContent(refracted + separated);
+      vec4 blue = sampleContent(refracted - separated);
+      float alpha = (red.a + color.a + blue.a) / 3.0;
+      vec3 rgb = vec3(
+          red.r / max(red.a, 0.0001),
+          color.g / max(color.a, 0.0001),
+          blue.b / max(blue.a, 0.0001));
+      color = vec4(clamp(rgb, 0.0, 1.0) * alpha, alpha);
+    }
   }
   float luminance = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
   color.rgb = clamp(mix(vec3(luminance), color.rgb, u_optics.y),

@@ -6,6 +6,30 @@ class _LanStreamFailure implements Exception {
   const _LanStreamFailure();
 }
 
+final _lanIpv4HostPattern = RegExp(
+  r'^([0-9]{1,3}(?:\.[0-9]{1,3}){3})(?::([1-9][0-9]{0,4}))?$',
+);
+final _lanIpv6HostPattern = RegExp(
+  r'^\[([0-9a-fA-F:.]+)\](?::([1-9][0-9]{0,4}))?$',
+);
+
+String? _parseLanHostHeader(String? raw) {
+  if (raw == null || raw.isEmpty) return null;
+  final match =
+      _lanIpv4HostPattern.firstMatch(raw) ??
+      _lanIpv6HostPattern.firstMatch(raw);
+  if (match == null) return null;
+  final host = match.group(1)!;
+  final portText = match.group(2);
+  if (portText != null) {
+    final parsedPort = int.tryParse(portText);
+    if (parsedPort == null || parsedPort < 1 || parsedPort > 65535) {
+      return null;
+    }
+  }
+  return isLanAddress(host) ? host : null;
+}
+
 extension _LanServer on LanService {
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
@@ -33,10 +57,7 @@ extension _LanServer on LanService {
       final forwarded = _forwardedSession(request);
       final remote = forwarded?.address ?? physicalRemote!.address;
       final host = request.headers.value(HttpHeaders.hostHeader);
-      require(
-        host != null && isLanAddress(Uri.parse('http://$host').host),
-        '无效的设备地址',
-      );
+      require(_parseLanHostHeader(host) != null, '无效的设备地址');
       final origin = request.headers.value('origin');
       require(origin == null || origin == 'http://$host', '不允许跨站请求');
       response.headers.set('X-Content-Type-Options', 'nosniff');

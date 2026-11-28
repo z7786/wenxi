@@ -317,37 +317,55 @@ class _FloatingSurfaceState extends State<_FloatingSurface> {
   PlaybackController get controller => widget.controller;
   Timer? _subtitleTimer;
   Object? _subtitleLayout;
-  Object? _surfaceState;
-  Object _snapshot() => (
-    controller.backend,
-    controller.preferences,
-    controller.videoGeometry,
-    controller.state.subtitle.join('\n'),
-    controller.state.buffering,
-    controller.error,
-  );
+  Object? _presentation;
+
+  Object _readPresentation() {
+    final backend = controller.backend;
+    final prefs = controller.preferences;
+    final subtitleText = prefs.subtitles
+        ? controller.state.subtitle.where((line) => line.isNotEmpty).join('\n')
+        : '';
+    return (
+      backend,
+      backend?.rendersSubtitlesNatively,
+      backend?.usesSubtitleOverlay,
+      prefs.videoOffsetX,
+      prefs.videoOffsetY,
+      prefs.videoScale,
+      prefs.videoRotation,
+      prefs.fit,
+      prefs.aspectRatio,
+      controller.videoGeometry,
+      prefs.subtitles,
+      prefs.subtitleBackgroundArgb,
+      subtitleText,
+      controller.state.buffering,
+      controller.error.isNotEmpty,
+    );
+  }
 
   @override
   void initState() {
     super.initState();
-    _surfaceState = _snapshot();
-    controller.addListener(_onSurfaceChanged);
-  }
-
-  void _onSurfaceChanged() {
-    final next = _snapshot();
-    if (next == _surfaceState || !mounted) return;
-    setState(() => _surfaceState = next);
+    _presentation = _readPresentation();
+    controller.addListener(_onControllerChanged);
   }
 
   @override
   void didUpdateWidget(covariant _FloatingSurface oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.controller != controller) {
-      oldWidget.controller.removeListener(_onSurfaceChanged);
-      controller.addListener(_onSurfaceChanged);
-      _surfaceState = _snapshot();
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onControllerChanged);
+      _presentation = _readPresentation();
+      widget.controller.addListener(_onControllerChanged);
     }
+  }
+
+  void _onControllerChanged() {
+    final next = _readPresentation();
+    if (next == _presentation) return;
+    _presentation = next;
+    if (mounted) setState(() {});
   }
 
   void _syncSubtitles(BoxConstraints box) {
@@ -382,8 +400,8 @@ class _FloatingSurfaceState extends State<_FloatingSurface> {
 
   @override
   void dispose() {
+    controller.removeListener(_onControllerChanged);
     _subtitleTimer?.cancel();
-    controller.removeListener(_onSurfaceChanged);
     super.dispose();
   }
 

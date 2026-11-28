@@ -472,4 +472,27 @@ void main() {
       restored.dispose();
     },
   );
+
+  test(
+    'Transient HttpRequestFailure during renewal does not block auto-login',
+    () async {
+      final f = _Fixture(key);
+      await f.seed();
+      var failNetwork = true;
+      f.override = (r) {
+        if (r.uri.path.endsWith('/loginSubmit.do') && failNetwork) {
+          throw const HttpRequestFailure(
+            '网络连接失败',
+            kind: 'connectionError',
+            retryable: true,
+          );
+        }
+        return null;
+      };
+      await expectLater(f.list(), throwsA(isA<HttpRequestFailure>()));
+      expect(f.saved.field('autoLoginBlocked'), isEmpty);
+      failNetwork = false;
+      expect((await f.list()).single.id, _file.id);
+    },
+  );
 }

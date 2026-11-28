@@ -29,8 +29,13 @@ class PlaybackSeekQueue {
     }
   }
 
-  void close() {
+  Future<void> close() async {
     _closed = true;
     _pending = null;
+    try {
+      await _running;
+    } catch (_) {
+      // Callers of seek() observe any failure; close() only waits for drain.
+    }
   }
 }

@@ -20,7 +20,7 @@ void main() {
         run: (_, _) async => fail('No shutdown expected'),
       );
       await windows.revealFile(file.path);
-      expect(calls.single.$1, 'explorer.exe');
+      expect(calls.single.$1, windowsSystemExecutable('explorer.exe'));
       expect(calls.single.$2, ['/select,', p.normalize(file.path)]);
       calls.clear();
       await windows.revealFile(root.path);
@@ -48,7 +48,10 @@ void main() {
         run: (command, arguments) async => calls.add((command, arguments)),
       );
       await windows.shutdown();
-      expect(calls.single.$1, 'shutdown.exe');
+      expect(
+        calls.single.$1,
+        windowsSystemExecutable(r'System32\shutdown.exe'),
+      );
       expect(calls.single.$2, ['/s', '/t', '0']);
       final unavailable = WindowsActions(
         supported: false,
@@ -67,7 +70,10 @@ void main() {
     );
     await windows.hibernate();
     expect(calls, hasLength(1));
-    expect(calls.single.$1, 'shutdown.exe');
+    expect(
+      calls.single.$1,
+      windowsSystemExecutable(r'System32\shutdown.exe'),
+    );
     expect(calls.single.$2, ['/h']);
     final unavailable = WindowsActions(
       supported: false,
@@ -90,8 +96,46 @@ void main() {
       );
       await expectLater(windows.hibernate(), throwsA(same(error)));
       expect(calls, hasLength(1));
-      expect(calls.single.$1, 'shutdown.exe');
+      expect(
+        calls.single.$1,
+        windowsSystemExecutable(r'System32\shutdown.exe'),
+      );
       expect(calls.single.$2, ['/h']);
     },
   );
+
+  test('SystemRoot validation resolves absolute roots and rejects unsafe values', () {
+    expect(windowsSystemRoot({}), r'C:\Windows');
+    expect(windowsSystemRoot({'SystemRoot': r'D:\Windows\'}), r'D:\Windows');
+    expect(windowsSystemRoot({'SYSTEMROOT': r'E:\WINNT'}), r'E:\WINNT');
+    expect(
+      windowsSystemExecutable(
+        r'System32\WindowsPowerShell\v1.0\powershell.exe',
+        {'SystemRoot': r'D:\Windows'},
+      ),
+      r'D:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+    );
+    for (final invalid in [
+      '',
+      'Windows',
+      r'\\server\share\Windows',
+      r'C:\Windows\..\Evil',
+      r'C:\Windows\.\Evil',
+      r'C:\Windows\.',
+      r'C:\Windows\\Sub',
+      r'C:\Windows\.. \Evil',
+      r'C:\Windows\...\Evil',
+      r'C:\Windows\Sub.',
+      r'C:\Windows\Sub \Evil',
+      r'C:\',
+      'C:/Windows',
+      'C:\\Windows\nEvil',
+    ]) {
+      expect(
+        windowsSystemRoot({'SystemRoot': invalid}),
+        r'C:\Windows',
+        reason: 'Expected fallback for invalid SystemRoot: $invalid',
+      );
+    }
+  });
 }

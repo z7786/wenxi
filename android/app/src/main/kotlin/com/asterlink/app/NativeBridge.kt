@@ -28,7 +28,8 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
     var activity: Activity? = null
     private val channel = MethodChannel(engine.dartExecutor.binaryMessenger, "com.asterlink.app/native")
     private val main = Handler(Looper.getMainLooper())
-    private val io = Executors.newFixedThreadPool(3)
+    private val heavyIo = Executors.newFixedThreadPool(3)
+    private val fastIo = Executors.newFixedThreadPool(2)
     private val lanFiles = LanFiles(context)
     private val uploadFiles = LanFiles(context)
     private val lanQrScanner = LanQrScanner { activity }
@@ -71,6 +72,12 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
     private var pendingTransferTab: String? = null
     init { channel.setMethodCallHandler(::handle) }
     fun emit(method: String, value: Any? = null) { main.post { channel.invokeMethod(method, value) } }
+    fun cancelPendingPicker() {
+        val pending = picker ?: return
+        picker = null
+        documentBytes = null
+        pending.success(null)
+    }
     fun receiveIntent(intent: Intent?, id: String) {
         if (intent?.action == "com.asterlink.app.OPEN_TRANSFERS") {
             pendingTransferTab = intent.getStringExtra("transferTab") ?: "downloads"
@@ -101,7 +108,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             return
         }
         if (call.method == "readStateKey" || call.method == "writeStateKey") {
-            io.execute {
+            fastIo.execute {
                 val bytes = call.argument<ByteArray>("value")
                 try {
                     val namespace = call.argument<String>("namespace").orEmpty()
@@ -126,7 +133,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         }
         if (call.method == "flushStateKeyStorage") {
             val namespace = call.argument<String>("namespace")
-            io.execute {
+            fastIo.execute {
                 try {
                     val saved = StateKeyPersistence.flush(context, namespace)
                     main.post { result.success(saved) }
@@ -217,7 +224,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         if (call.method == "savePlayerScreenshot") {
             val bytes = call.argument<ByteArray>("bytes")
             val name = call.argument<String>("name").orEmpty()
-            io.execute {
+            fastIo.execute {
                 try {
                     require(bytes != null)
                     val saved = PlayerScreenshotSaver(context).save(name, bytes)
@@ -296,7 +303,12 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         val verificationKey = if (call.method == "verifyDownloadTarget")
             "${call.argument<String>("id")}:${call.argument<Number>("token")?.toLong()}" else null
         val verification = verificationKey?.let { AtomicBoolean(false).also { flag -> verifications[it] = flag } }
-        val executor = if (call.method == "gopeed") nativeWorker else io
+        val executor = when (call.method) {
+            "gopeed" -> nativeWorker
+            "saveFile", "verifyDownloadTarget", "lanRead", "uploadRead",
+            "uploadScan", "lanScan", "prepareAppUpdate", "legacySnapshot" -> heavyIo
+            else -> fastIo
+        }
         executor.execute {
             try {
                 val value: Any? = when (call.method) {
@@ -425,7 +437,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             picker = null; documentBytes = null
             val uri = data?.data
             if (resultCode != Activity.RESULT_OK || uri == null || bytes == null) { result.success(null); return true }
-            io.execute {
+            heavyIo.execute {
                 try {
                     context.contentResolver.openOutputStream(uri, "w")?.use { it.write(bytes); it.flush() } ?: error("Cannot write")
                     main.post { result.success(uri.toString()) }

@@ -276,6 +276,27 @@ void main() {
     },
   );
 
+  test('Retry-After delays are capped at 30 seconds', () async {
+    for (final retryAfter in [
+      '3600',
+      HttpDate.format(DateTime.now().toUtc().add(const Duration(minutes: 10))),
+    ]) {
+      var requests = 0;
+      final transport = FakeHttp(
+        (_) => ++requests == 1
+            ? HttpResult(429, '{}', {
+                'retry-after': [retryAfter],
+              })
+            : jsonResponse({}),
+      );
+      final delays = <Duration>[];
+      await _scope(delays: delays).run(
+        () => RetryingJsonHttp(transport).get('https://example.test/read'),
+      );
+      expect(delays, [const Duration(seconds: 30)]);
+    }
+  });
+
   test('The retry budget is shared by the entire preparation', () async {
     final counts = <String, int>{};
     final transport = FakeHttp((request) {

@@ -401,3 +401,66 @@ func TestPlainStorageReopensWithoutAnyKey(t *testing.T) {
 		t.Fatalf("plain state not retained: %v %v %v", found, readErr, value)
 	}
 }
+
+func TestCloseCleansUpAfterPauseAndSaveError(t *testing.T) {
+	storage, payload, key := openTestCore(t)
+	apiMu.Lock()
+	taskIDs["missing-stale-task"] = "nonexistent-core-task-id"
+	apiMu.Unlock()
+
+	err := Close()
+	if err == nil {
+		t.Fatal("expected Close to return PauseAndSave error for missing task")
+	}
+	if core != nil {
+		t.Fatal("Close left core non-nil after PauseAndSave error")
+	}
+	if len(taskIDs) != 0 {
+		t.Fatalf("Close left taskIDs populated: %v", taskIDs)
+	}
+	stateMu.RLock()
+	remainingStates, remainingGens := len(states), len(generations)
+	stateMu.RUnlock()
+	if remainingStates != 0 || remainingGens != 0 {
+		t.Fatalf("Close left states=%d generations=%d", remainingStates, remainingGens)
+	}
+	// Verify DB was closed cleanly and can be reopened immediately.
+	if err := Open(storage, payload, key); err != nil {
+		t.Fatalf("Open after failed Close returned error: %v", err)
+	}
+}
+
+func TestEncryptedStoragePopConcurrentReads(t *testing.T) {
+	dir := t.TempDir()
+	store, err := newEncryptedStorage(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Setup([]string{"save"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put("save", "cp1", map[string]int{"offset": 4096}); err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			var out map[string]int
+			if err := store.Pop("save", "cp1", &out); err != nil {
+				errCh <- err
+				return
+			}
+			if out["offset"] != 4096 {
+				errCh <- fmt.Errorf("unexpected popped offset: %v", out)
+				return
+			}
+			errCh <- nil
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

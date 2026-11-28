@@ -520,22 +520,27 @@ func Close() error {
 	if core == nil {
 		return nil
 	}
+	var closeErr error
 	for _, taskID := range taskIDs {
 		if err := core.PauseAndSave(taskID); err != nil {
-			return err
+			closeErr = errors.Join(closeErr, err)
 		}
 	}
 	if discoveryStorage != nil {
 		corebt.RememberDiscovery()
 		_ = discoveryStorage.Put("bt-discovery", "nodes", btpolicy.SnapshotDiscovery())
 	}
-	err := core.Close()
+	if err := core.Close(); err != nil {
+		closeErr = errors.Join(closeErr, err)
+	}
 	discoveryStorage = nil
+	ed2kRuntime = nil
 	core = nil
+	taskIDs = map[string]string{}
 	outputfile.Clear()
 	stateMu.Lock()
 	generations = map[string]string{}
 	states = map[string]snapshot{}
 	stateMu.Unlock()
-	return err
+	return closeErr
 }

@@ -1360,6 +1360,15 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
       final idle = search.phase == ResourceSearchPhase.idle;
       final items = displayedItems();
       final shown = math.min(visibleLimit, items.length);
+      final itemIndices = <String, int>{};
+      if (!idle && items.isNotEmpty) {
+        for (var i = 0; i < shown; i++) {
+          itemIndices.putIfAbsent(
+            'resource-result-${items[i].identity}',
+            () => i,
+          );
+        }
+      }
       final waiting = waitingResults;
       return Scaffold(
         backgroundColor: widget.embedded ? Colors.transparent : null,
@@ -1560,17 +1569,10 @@ class _ResourceSearchPageState extends State<ResourceSearchPage>
                                     return row;
                                   },
                                   childCount: shown,
-                                  findChildIndexCallback: (key) {
-                                    if (key is! ValueKey<String>) return null;
-                                    final index = items.indexWhere(
-                                      (hit) =>
-                                          'resource-result-${hit.identity}' ==
-                                          key.value,
-                                    );
-                                    return index < 0 || index >= shown
-                                        ? null
-                                        : index;
-                                  },
+                                  findChildIndexCallback: (key) =>
+                                      key is ValueKey<String>
+                                      ? itemIndices[key.value]
+                                      : null,
                                 ),
                               ),
                             ),
@@ -1805,16 +1807,31 @@ class ResourceSearchResultRow extends StatelessWidget {
   final VoidCallback onOpen, onCopy, onDetails;
   final ResourceLinkHealth? health;
 
-  TextSpan title(BuildContext context) {
+  static final _whitespacePattern = RegExp(r'\s+');
+  static final _sizePattern = RegExp(
+    r'\b\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|TiB|GiB|MiB)\b',
+    caseSensitive: false,
+  );
+  static final _dateSplitPattern = RegExp(r'[ T]');
+  static String? _cachedKeyword;
+  static RegExp? _cachedKeywordPattern;
+
+  static RegExp? _highlightPattern(String keyword) {
+    if (_cachedKeyword == keyword) return _cachedKeywordPattern;
     final terms = keyword
-        .split(RegExp(r'\s+'))
+        .split(_whitespacePattern)
         .where((t) => t.isNotEmpty)
         .take(8);
-    if (terms.isEmpty) return TextSpan(text: hit.title);
-    final pattern = RegExp(
-      terms.map(RegExp.escape).join('|'),
-      caseSensitive: false,
-    );
+    _cachedKeyword = keyword;
+    _cachedKeywordPattern = terms.isEmpty
+        ? null
+        : RegExp(terms.map(RegExp.escape).join('|'), caseSensitive: false);
+    return _cachedKeywordPattern;
+  }
+
+  TextSpan title(BuildContext context) {
+    final pattern = _highlightPattern(keyword);
+    if (pattern == null) return TextSpan(text: hit.title);
     final spans = <InlineSpan>[];
     var offset = 0;
     for (final match in pattern.allMatches(hit.title)) {
@@ -1838,10 +1855,7 @@ class ResourceSearchResultRow extends StatelessWidget {
     final description = hit.description.isNotEmpty
         ? hit.description
         : hit.category;
-    final size = RegExp(
-      r'\b\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|TiB|GiB|MiB)\b',
-      caseSensitive: false,
-    ).firstMatch(description)?.group(0);
+    final size = _sizePattern.firstMatch(description)?.group(0);
     final colors = Theme.of(context).colorScheme;
     final large = MediaQuery.textScalerOf(context).scale(14) > 23;
     final titleAndDescription = Column(
@@ -1887,7 +1901,7 @@ class ResourceSearchResultRow extends StatelessWidget {
         if (hit.date.isNotEmpty)
           _ResourceMetadata(
             icon: CupertinoIcons.clock,
-            text: hit.date.split(RegExp(r'[ T]')).first,
+            text: hit.date.split(_dateSplitPattern).first,
           ),
       ],
     );

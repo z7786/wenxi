@@ -223,3 +223,40 @@ func TestHTTPProbeCancelAndReplacement(t *testing.T) {
 		t.Fatalf("stop left a probe registered: %+v", result)
 	}
 }
+
+func TestHTTPProbeExpiryEvictsUncollectedJob(t *testing.T) {
+	previousExpiry := httpProbeJobExpiry
+	httpProbeJobExpiry = 80 * time.Millisecond
+	t.Cleanup(func() {
+		httpProbeJobExpiry = previousExpiry
+		closeHTTPProbes()
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "4")
+		_, _ = w.Write([]byte("done"))
+	}))
+	defer server.Close()
+
+	data, _ := json.Marshal(httpProbeInput{ID: "expire-me", URL: server.URL})
+	if err := StartHttpProbe(string(data)); err != nil {
+		t.Fatal(err)
+	}
+	result := waitProbeTest(t, "expire-me")
+	if result.Status != "done" {
+		t.Fatalf("expected done before expiry, got %+v", result)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := HttpProbeStatus("expire-me")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status == `{"status":"cancelled"}` {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatal("uncollected HTTP probe job was not evicted after expiry")
+}

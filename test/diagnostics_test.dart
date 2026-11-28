@@ -122,6 +122,89 @@ void main() {
       expect(clean['nan'], 'NaN');
       expect(clean.toString(), isNot(contains('private-hidden')));
     });
+
+    test('Redacts full JWTs, extra URI schemes, and provider secret keys', () {
+      const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwcml2YXRlIn0.sig~tail-123';
+      final input = [
+        'Bearer $jwt',
+        'ed2k://|file|private.mkv|1234|ABC123|/',
+        'ftp://user@example.invalid/private.zip',
+        'rtsp://media.example.invalid/live/private-stream',
+        'rtmp://media.example.invalid/live/private-key',
+        'ctfile_session=private-ct; phpdisk_info=private-php; ylogin=private-yl',
+        'rmkey=private-rm; os_sso_sid=private-sso; ud_id=private-ud; openid=private-oid; seid=private-seid',
+      ].join('\n');
+      final cleanText = LogRedactor.text(input);
+      for (final secret in [
+        'eyJhbGci',
+        'eyJzdWIi',
+        'sig~tail-123',
+        'private.mkv',
+        'private.zip',
+        'private-stream',
+        'private-key',
+        'private-ct',
+        'private-php',
+        'private-yl',
+        'private-rm',
+        'private-sso',
+        'private-ud',
+        'private-oid',
+        'private-seid',
+      ]) {
+        expect(cleanText, isNot(contains(secret)), reason: secret);
+      }
+      final cleanJson = LogRedactor.json({
+        'ctfile_session': 'private-ct',
+        'phpdisk_info': 'private-php',
+        'ylogin': 'private-yl',
+        'rmkey': 'private-rm',
+        'os_sso_sid': 'private-sso',
+        'ud_id': 'private-ud',
+        'openid': 'private-oid',
+        'seid': 'private-seid',
+      });
+      expect(cleanJson, isNot(contains('private-')));
+    });
+
+    test(
+      'Preserves releaseId/parseId while redacting standalone seid keys and pairs',
+      () {
+        final cleanText = LogRedactor.text(
+          'releaseId=rel-123 parseId=parse-456 baseId=base-789 '
+          'browseId=browse-10 responseId=resp-20 '
+          'seid=private-lower SEID=private-upper',
+        );
+        expect(cleanText, contains('releaseId=rel-123'));
+        expect(cleanText, contains('parseId=parse-456'));
+        expect(cleanText, contains('baseId=base-789'));
+        expect(cleanText, contains('browseId=browse-10'));
+        expect(cleanText, contains('responseId=resp-20'));
+        expect(cleanText, isNot(contains('private-lower')));
+        expect(cleanText, isNot(contains('private-upper')));
+
+        final cleanJson =
+            jsonDecode(
+                  LogRedactor.json({
+                    'releaseId': 'rel-123',
+                    'parseId': 'parse-456',
+                    'baseId': 'base-789',
+                    'browseId': 'browse-10',
+                    'responseId': 'resp-20',
+                    'seid': 'private-lower',
+                    'SEID': 'private-upper',
+                  }),
+                )
+                as Map;
+        expect(cleanJson['releaseId'], 'rel-123');
+        expect(cleanJson['parseId'], 'parse-456');
+        expect(cleanJson['baseId'], 'base-789');
+        expect(cleanJson['browseId'], 'browse-10');
+        expect(cleanJson['responseId'], 'resp-20');
+        expect(cleanJson['seid'], LogRedactor.hidden);
+        expect(cleanJson['SEID'], LogRedactor.hidden);
+      },
+    );
   });
 
   group('Local diagnostic recorder', () {

@@ -37,12 +37,24 @@ class CloudThumbnailImage extends ImageProvider<CloudThumbnailImage> {
         }.contains(uri.path);
   }
 
+  static HttpClient? _sharedClient;
+
+  static HttpClient _pooledClient() => _sharedClient ??= HttpClient()
+    ..connectionTimeout = const Duration(seconds: 12)
+    ..maxConnectionsPerHost = 6
+    ..idleTimeout = const Duration(seconds: 15);
+
   Future<Uint8List> loadBytes({HttpClient? client}) async {
     if (!requiresAccount(uri, platform) || _cookie.isEmpty) {
       throw const HttpException('缩略图来源或账号无效');
     }
-    final transport = client ?? HttpClient();
-    transport.connectionTimeout = const Duration(seconds: 12);
+    final ownsClient = client != null || HttpOverrides.current != null;
+    final transport =
+        client ??
+        (HttpOverrides.current != null ? HttpClient() : _pooledClient());
+    if (ownsClient) {
+      transport.connectionTimeout = const Duration(seconds: 12);
+    }
     var target = uri;
     var authenticated = true;
     try {
@@ -99,7 +111,7 @@ class CloudThumbnailImage extends ImageProvider<CloudThumbnailImage> {
       }
       throw const HttpException('缩略图重定向过多');
     } finally {
-      transport.close(force: true);
+      if (ownsClient) transport.close(force: true);
     }
   }
 

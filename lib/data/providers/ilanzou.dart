@@ -75,16 +75,17 @@ class ILanzouConnector extends PersonalCloudConnector {
     'Accept-Language': 'zh-CN',
   };
 
+  final _wafJar = LoginCookieJar({
+    'ilanzou.com',
+    'www.ilanzou.com',
+    'apis.ilanzou.com',
+  });
+
   Future<HttpResult> _request(String method, String url, {Json? body}) async {
     final uri = Uri.parse(url);
-    final jar = LoginCookieJar({
-      'ilanzou.com',
-      'www.ilanzou.com',
-      'apis.ilanzou.com',
-    });
     for (var attempt = 0; attempt < 2; attempt++) {
       RequestScope.checkpoint();
-      final cookies = jar.header(uri);
+      final cookies = _wafJar.header(uri);
       final response = await http.request(
         method,
         url,
@@ -94,9 +95,11 @@ class ILanzouConnector extends PersonalCloudConnector {
         followRedirects: false,
       );
       RequestScope.checkpoint();
-      jar.absorb(uri, response);
       if (response.status == 409 &&
-          response.header('content-type').contains('text/html')) {
+          response.header('content-type').toLowerCase().contains('text/html')) {
+        _wafJar
+          ..clear()
+          ..absorb(uri, response);
         if (attempt == 0) continue;
         throw const AppException('蓝奏优享的访问验证未通过，请稍后重试或使用网页登录');
       }

@@ -67,19 +67,30 @@ class _DownloadsPageState extends State<DownloadsPage>
   String? _selectionNotice;
   final _selected = <String>{};
   int filter = 0;
+  void _syncRefreshTimer() {
+    if (widget.active) {
+      _refreshTimer ??= Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => _checkFiles(),
+      );
+    } else {
+      _refreshTimer?.cancel();
+      _refreshTimer = null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.services.downloads.addListener(_downloadsChanged);
     files.addListener(_pruneSelection);
-    _refreshTimer = Timer.periodic(
-      const Duration(seconds: 30),
-      (_) => _checkFiles(),
-    );
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _checkFiles(force: true),
-    );
+    _syncRefreshTimer();
+    if (widget.active) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _checkFiles(force: true),
+      );
+    }
   }
 
   void _downloadsChanged() {
@@ -149,8 +160,10 @@ class _DownloadsPageState extends State<DownloadsPage>
     if (!widget.active && oldWidget.active) {
       _selected.clear();
       _setSelecting(false);
+      _syncRefreshTimer();
     }
     if (widget.active && !oldWidget.active) {
+      _syncRefreshTimer();
       WidgetsBinding.instance.addPostFrameCallback(
         (_) => _checkFiles(force: true),
       );
@@ -187,19 +200,33 @@ class _DownloadsPageState extends State<DownloadsPage>
   };
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: Listenable.merge([
-      widget.services.downloads,
-      widget.services.store,
-      widget.services.downloadShutdown,
-      files,
-    ]),
+    animation: widget.active
+        ? Listenable.merge([
+            widget.services.downloads,
+            widget.services.store,
+            widget.services.downloadShutdown,
+            files,
+          ])
+        : const AlwaysStoppedAnimation<int>(0),
     builder: (context, _) {
       final manager = widget.services.downloads, all = manager.tasks;
       final concurrent = widget.services.settings.concurrent;
       final concurrencyOptions = {1, 2, 3, 5, 8, 16, 32, concurrent}.toList()
         ..sort();
       final groups = List.generate(6, (_) => <DownloadTask>[]);
+      var activeCount = 0, completedCount = 0, failedCount = 0, issueCount = 0;
       for (final task in all) {
+        if (task.active) activeCount++;
+        if (task.status == DownloadStatus.completed) {
+          completedCount++;
+          final state = files.state(task);
+          if (state == FileAvailability.missing ||
+              state == FileAvailability.inaccessible) {
+            issueCount++;
+          }
+        } else if (task.status == DownloadStatus.failed) {
+          failedCount++;
+        }
         if (!accepts(task, filter)) continue;
         final rank = switch (task.status) {
           DownloadStatus.running => 0,
@@ -228,11 +255,11 @@ class _DownloadsPageState extends State<DownloadsPage>
           children: [
             TransferFilterBar(
               entries: [
-                for (var i = 0; i < 5; i++)
-                  (
-                    ['全部', '进行中', '已完成', '失败', '文件异常'][i],
-                    all.where((t) => accepts(t, i)).length,
-                  ),
+                ('全部', all.length),
+                ('进行中', activeCount),
+                ('已完成', completedCount),
+                ('失败', failedCount),
+                ('文件异常', issueCount),
               ],
               selected: filter,
               keyPrefix: 'download-filter',

@@ -3,8 +3,71 @@ package http
 import (
 	"context"
 	"io"
+	"net"
+	"sync"
 	"time"
 )
+
+type readTimeoutConn struct {
+	net.Conn
+	timeout            time.Duration
+	mu                 sync.Mutex
+	callerReadDeadline time.Time
+}
+
+func wrapDialReadTimeout(dial func(ctx context.Context, network, addr string) (net.Conn, error), timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dial(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		if timeout <= 0 {
+			return conn, nil
+		}
+		return &readTimeoutConn{Conn: conn, timeout: timeout}, nil
+	}
+}
+
+func (c *readTimeoutConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.callerReadDeadline = t
+	err := c.Conn.SetDeadline(t)
+	c.mu.Unlock()
+	return err
+}
+
+func (c *readTimeoutConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.callerReadDeadline = t
+	err := c.Conn.SetReadDeadline(t)
+	c.mu.Unlock()
+	return err
+}
+
+func (c *readTimeoutConn) applyReadDeadline() {
+	if c.timeout <= 0 {
+		return
+	}
+	c.mu.Lock()
+	effective := time.Now().Add(c.timeout)
+	if !c.callerReadDeadline.IsZero() && c.callerReadDeadline.Before(effective) {
+		effective = c.callerReadDeadline
+	}
+	_ = c.Conn.SetReadDeadline(effective)
+	c.mu.Unlock()
+}
+
+func (c *readTimeoutConn) Read(b []byte) (int, error) {
+	c.applyReadDeadline()
+	return c.Conn.Read(b)
+}
+
+func (c *readTimeoutConn) Write(b []byte) (int, error) {
+	// Refresh read deadline when sending a new request over a reused pooled
+	// connection whose background readLoop is already blocked in Peek.
+	c.applyReadDeadline()
+	return c.Conn.Write(b)
+}
 
 type TimeoutReader struct {
 	reader  io.Reader

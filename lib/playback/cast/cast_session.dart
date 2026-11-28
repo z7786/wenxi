@@ -22,6 +22,7 @@ class CastSession extends ChangeNotifier {
     this.device,
     this.source, {
     DlnaClient? client,
+    DlnaClient? pollClient,
     CastPlatform? platform,
     Future<InternetAddress> Function(CastDevice)? localAddress,
     ExternalPlaybackStream Function(DownloadSpec, InternetAddress)?
@@ -32,6 +33,13 @@ class CastSession extends ChangeNotifier {
     this.seekConfirmationTimeout = const Duration(seconds: 4),
     this.prepareSource = true,
   }) : client = client ?? DlnaClient(),
+       _pollClient =
+           pollClient ??
+           (client == null || client.runtimeType == DlnaClient
+               ? DlnaClient(
+                   timeout: client?.timeout ?? const Duration(seconds: 8),
+                 )
+               : client),
        platform = platform ?? CastPlatform(),
        localAddress = localAddress ?? CastNetworkRoute().localAddress,
        streamFactory =
@@ -41,6 +49,7 @@ class CastSession extends ChangeNotifier {
   final CastDevice device;
   final DownloadSpec source;
   final DlnaClient client;
+  final DlnaClient _pollClient;
   final CastPlatform platform;
   final Future<InternetAddress> Function(CastDevice) localAddress;
   final ExternalPlaybackStream Function(DownloadSpec, InternetAddress)
@@ -600,7 +609,7 @@ class CastSession extends ChangeNotifier {
         Map<String, String> transport = const {};
         if (_transportSupported) {
           try {
-            transport = await client.transport(device, 'GetTransportInfo');
+            transport = await _pollClient.transport(device, 'GetTransportInfo');
             _transportFaults = 0;
           } on CastSoapException catch (e) {
             if (!e.unsupported && !(e.code == 501 && ++_transportFaults >= 3)) {
@@ -618,7 +627,7 @@ class CastSession extends ChangeNotifier {
         Map<String, String> position = const {};
         if (_positionSupported) {
           try {
-            position = await client.transport(device, 'GetPositionInfo');
+            position = await _pollClient.transport(device, 'GetPositionInfo');
             _positionFaults = 0;
           } on CastSoapException catch (e) {
             if (!e.unsupported && !(e.code == 501 && ++_positionFaults >= 3)) {
@@ -636,7 +645,7 @@ class CastSession extends ChangeNotifier {
         final track = position['TrackURI'];
         if (!_transportSupported && !_positionSupported) {
           // Missing telemetry is not evidence of a disconnected TV.
-          await client.describe(device.description);
+          await _pollClient.describe(device.description);
           _check();
         }
         final trackUri = Uri.tryParse(track ?? '');
@@ -747,10 +756,11 @@ class CastSession extends ChangeNotifier {
         if (_polls++ % 5 == 0 && device.rendering != null) {
           bool volumeAvailable;
           try {
-            final volume = await client.action(device.rendering!, 'GetVolume', {
-              'InstanceID': '0',
-              'Channel': 'Master',
-            });
+            final volume = await _pollClient.action(
+              device.rendering!,
+              'GetVolume',
+              {'InstanceID': '0', 'Channel': 'Master'},
+            );
             _check();
             final value = double.tryParse(volume['CurrentVolume'] ?? '');
             volumeAvailable = value != null && value.isFinite;
@@ -762,10 +772,12 @@ class CastSession extends ChangeNotifier {
           }
           if (_muteQueryAvailable) {
             try {
-              final result = await client.action(device.rendering!, 'GetMute', {
-                'InstanceID': '0',
-                'Channel': 'Master',
-              }, const Duration(seconds: 2));
+              final result = await _pollClient.action(
+                device.rendering!,
+                'GetMute',
+                {'InstanceID': '0', 'Channel': 'Master'},
+                const Duration(seconds: 2),
+              );
               _check();
               final value = switch (result['CurrentMute']?.toLowerCase()) {
                 '1' || 'true' || 'yes' => true,
@@ -854,6 +866,9 @@ class CastSession extends ChangeNotifier {
     _closed = true;
     _timer?.cancel();
     _elapsed.stop();
+    if (!identical(_pollClient, client)) {
+      _pollClient.close();
+    }
     _event('closed', {
       'position_s': bookmarkState.position.inSeconds,
       'poll_failures': _failures,
@@ -861,7 +876,9 @@ class CastSession extends ChangeNotifier {
     await _commands.run(() async {
       if (_ownsTransport) {
         try {
-          await client.transport(device, 'Stop');
+          await client
+              .transport(device, 'Stop')
+              .timeout(const Duration(seconds: 2));
         } catch (_) {}
       }
     });

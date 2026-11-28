@@ -41,4 +41,21 @@ void main() {
     await retry.seek(const Duration(seconds: 1));
     expect(count, 2);
   });
+  test(
+    'Closing awaits an in-flight seek and absorbs its error without throwing',
+    () async {
+      final gate = Completer<void>();
+      var closeFinished = false;
+      final queue = PlaybackSeekQueue((_) => gate.future);
+      final inflight = queue.seek(const Duration(seconds: 5));
+      await Future<void>.delayed(Duration.zero);
+      final closing = queue.close().then((_) => closeFinished = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(closeFinished, isFalse);
+      gate.completeError(StateError('aborted'));
+      await expectLater(inflight, throwsStateError);
+      await closing;
+      expect(closeFinished, isTrue);
+    },
+  );
 }

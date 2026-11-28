@@ -584,7 +584,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       passwordUnavailable = false,
       passwordSent = false,
       passwordFallback = false;
-  double progress = 0;
+  final ValueNotifier<double> _progress = ValueNotifier<double>(0);
   String get _initialStatus => _target.platform == CloudPlatform.xunlei
       ? '小米账号可在网页底部「更多方式」中登录，完成后自动保存'
       : '完成网页登录后将自动保存登录信息';
@@ -1750,7 +1750,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       if (_current(web)) unawaited(_poll());
     },
     onProgressChanged: (web, value) {
-      if (_current(web)) setState(() => progress = value / 100);
+      if (_current(web)) _progress.value = value / 100;
     },
     onReceivedError: (web, request, error) {
       if (!_current(web)) return;
@@ -1802,10 +1802,10 @@ class _WebLoginPageState extends State<WebLoginPage>
       controller = null;
       checkingWeb = null;
       _windows.clear();
+      _progress.value = 0;
       setState(() {
         ready = false;
         error = '';
-        progress = 0;
         status = _initialStatus;
         _baiduView = null;
         _baiduState = {};
@@ -1819,10 +1819,10 @@ class _WebLoginPageState extends State<WebLoginPage>
       return;
     }
     if (error.isNotEmpty) {
+      _progress.value = 0;
       setState(() {
         error = '';
         ready = false;
-        progress = 0;
         status = _initialStatus;
       });
       await _initialize();
@@ -1856,6 +1856,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     WidgetsBinding.instance.removeObserver(this);
     _cancel();
     diagnostics.close(completed: completed);
+    _progress.dispose();
     super.dispose();
   }
 
@@ -1885,7 +1886,13 @@ class _WebLoginPageState extends State<WebLoginPage>
       ],
       child: Column(
         children: [
-          if (progress < 1 && ready) LinearProgressIndicator(value: progress),
+          if (ready)
+            ValueListenableBuilder<double>(
+              valueListenable: _progress,
+              builder: (_, value, _) => value < 1
+                  ? LinearProgressIndicator(value: value)
+                  : const SizedBox.shrink(),
+            ),
           if (_webCompatibilityHint.isNotEmpty && ready)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 9, 16, 0),

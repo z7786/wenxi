@@ -4,7 +4,8 @@ import Photos
 import Darwin
 
 final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
-  private let queue = DispatchQueue(label: "com.asterlink.app.documents")
+  private let metadataQueue = DispatchQueue(label: "com.asterlink.app.documents.metadata")
+  private let transferQueue = DispatchQueue(label: "com.asterlink.app.documents.transfer")
   private let bookmarkKey = "asterlink.directoryBookmarks"
   private var folders = [String: URL]()
   private var movedPaths = [String: String]()
@@ -101,7 +102,8 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
     guard permitted(source) else {
       result(FlutterError(code: "upload", message: "上传目录授权已失效，请重新选择文件夹", details: nil)); return
     }
-    queue.async {
+    let targetQueue = (method == "uploadRead" || method == "uploadScan") ? transferQueue : metadataQueue
+    targetQueue.async {
       do {
         let value: Any?
         switch method {
@@ -248,7 +250,7 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
     transferLock.unlock()
     previous?.cancel()
     let token = args["token"] as? NSNumber ?? 0
-    queue.async {
+    transferQueue.async {
       var saved: URL?
       do {
         try transfer.check()
@@ -401,7 +403,7 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
     guard let path = args["path"] as? String else { result("missing"); return }
     let url = fileURL(path)
     guard permitted(url) else { result("inaccessible"); return }
-    queue.async {
+    metadataQueue.async {
       var availability = "inaccessible"
       var coordination: NSError?
       NSFileCoordinator().coordinate(readingItemAt: url, options: .withoutChanges,
@@ -432,7 +434,7 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
     guard permitted(url) else {
       result(FlutterError(code: "storage", message: "目录权限已失效，请重新选择目录", details: nil)); return
     }
-    queue.async {
+    metadataQueue.async {
       var coordination: NSError?, operation: Error?
       NSFileCoordinator().coordinate(writingItemAt: url, options: .forDeleting,
         error: &coordination) { item in
@@ -504,7 +506,7 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
       .appendingPathComponent("document-export-" + UUID().uuidString, isDirectory: true)
     let file = folder.appendingPathComponent(name)
     exportPreparing = true
-    queue.async {
+    transferQueue.async {
       do {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try bytes.data.write(to: file, options: .atomic)
@@ -582,7 +584,7 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
   private func clearExport() {
     if let directory = exportDirectory {
       exportDirectory = nil
-      queue.async { try? FileManager.default.removeItem(at: directory) }
+      metadataQueue.async { try? FileManager.default.removeItem(at: directory) }
     }
   }
 
@@ -656,7 +658,7 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
     guard let path = args["path"] as? String, path.hasPrefix("/") else {
       result(FlutterError(code: "storage", message: "存储路径无效", details: nil)); return
     }
-    queue.async {
+    metadataQueue.async {
       do {
         let attributes = try FileManager.default.attributesOfFileSystem(forPath: path)
         let values = try URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeSupportsHardLinksKey])
@@ -679,9 +681,13 @@ final class AppleDocuments: NSObject, UIDocumentPickerDelegate, UIAdaptivePresen
           source.hasPrefix("/"), target.hasPrefix("/"), source != target else {
       result(FlutterError(code: "storage", message: "文件保存位置无效", details: nil)); return
     }
-    queue.async {
+    let sourceURL = fileURL(source), targetURL = fileURL(target)
+    guard sourceURL.path != targetURL.path, permitted(sourceURL), permitted(targetURL) else {
+      result(FlutterError(code: "storage", message: "目录权限已失效，请重新选择目录", details: nil)); return
+    }
+    metadataQueue.async {
       do {
-        try FileManager.default.linkItem(atPath: source, toPath: target)
+        try FileManager.default.linkItem(at: sourceURL, to: targetURL)
         DispatchQueue.main.async { result(true) }
       } catch {
         // The Dart copy path remains available for cloud providers and volumes

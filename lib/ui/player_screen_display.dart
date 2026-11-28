@@ -172,6 +172,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
   final _elapsed = Stopwatch()..start();
   final _speed = PlaybackScreenSpeed();
   Timer? _timer;
+  Duration? _timerInterval;
   PlaybackBackend? _monitored;
   bool _foreground = true;
   List<(String, String)> _lines = const [];
@@ -186,18 +187,47 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
     _startTimer();
   }
 
+  Duration? _desiredTimerInterval() {
+    final items = widget.controller.preferences.screenDisplay.items;
+    var hasTime = false;
+    for (final item in items) {
+      if (item == PlaybackScreenItem.title ||
+          item == PlaybackScreenItem.resolution) {
+        continue;
+      }
+      if (item == PlaybackScreenItem.time) {
+        hasTime = true;
+        continue;
+      }
+      return const Duration(milliseconds: 250);
+    }
+    return hasTime ? const Duration(seconds: 1) : null;
+  }
+
   void _startTimer() {
     _timer?.cancel();
+    _timer = null;
+    _timerInterval = null;
     if (!_foreground) {
       return;
     }
-    _timer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+    final interval = _desiredTimerInterval();
+    if (interval == null) {
+      return;
+    }
+    _timerInterval = interval;
+    _timer = Timer.periodic(interval, (_) {
       if (widget.controller.closed) {
         _timer?.cancel();
+        _timer = null;
+        _timerInterval = null;
         return;
       }
       final previous = _lines;
       _sample();
+      if (_desiredTimerInterval() != _timerInterval) {
+        _startTimer();
+      }
       if (!_sameLines(previous, _lines)) setState(() {});
     });
   }
@@ -214,6 +244,9 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
   void didUpdateWidget(PlayerScreenDisplay oldWidget) {
     super.didUpdateWidget(oldWidget);
     _sample();
+    if (_desiredTimerInterval() != _timerInterval) {
+      _startTimer();
+    }
   }
 
   @override
@@ -225,6 +258,8 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
       if (mounted) setState(() {});
     } else {
       _timer?.cancel();
+      _timer = null;
+      _timerInterval = null;
       _monitored?.setScreenDisplayMonitoringEnabled(false);
       _monitored = null;
     }

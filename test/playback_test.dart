@@ -807,6 +807,32 @@ void main() {
       await fixture.controller.release(source);
       expect(fixture.leases[source.url], 0);
     });
+    test(
+      'Rapid track switches await pending retirement before creating the next backend',
+      () async {
+        await fixture.controller.start();
+        final first = fixture.current;
+        final closeGate = Completer<void>();
+        addTearDown(() {
+          if (!closeGate.isCompleted) closeGate.complete();
+        });
+        first.closeBarrier = closeGate.future;
+        final secondLoad = fixture.controller.load(1);
+        await until(() => fixture.events.contains('closing:${first.name}'));
+        final thirdLoad = fixture.controller.load(2);
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(fixture.backends.length, 1);
+        closeGate.complete();
+        await Future.wait([secondLoad, thirdLoad]);
+        final closedIdx = fixture.events.indexOf('closed:${first.name}');
+        final initIdx = fixture.events.indexOf(
+          'initialize:${fixture.current.name}',
+        );
+        expect(closedIdx, greaterThanOrEqualTo(0));
+        expect(closedIdx, lessThan(initIdx));
+        expect(fixture.controller.index, 2);
+      },
+    );
   });
   test(
     'Subtitle staging limits size, keeps bytes, and only writes inside its own directory',

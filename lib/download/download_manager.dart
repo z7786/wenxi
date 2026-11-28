@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:collection/collection.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -73,6 +74,11 @@ String _aliyunAccountGroup(DownloadSpec spec) {
 
 class _GuestDownloadBatch {
   bool notified = false;
+}
+
+class _TaskGate {
+  final gate = AsyncGate();
+  int users = 0;
 }
 
 class _Run {
@@ -152,7 +158,7 @@ class DownloadManager extends ChangeNotifier {
   final _tasks = DownloadTaskIndex();
   final _running = <String, _Run>{};
   final _unsettledRuns = <_Run>{};
-  final _controls = <String, AsyncGate>{};
+  final _controls = <String, _TaskGate>{};
   final _fileTransfers = <Future<DownloadBatchResult>>{};
   final _guestDownloadBatches = <String, _GuestDownloadBatch>{};
   final _pumpGate = AsyncGate();
@@ -163,7 +169,7 @@ class DownloadManager extends ChangeNotifier {
   final _exportProgress = <String, double>{};
   final _postWaiters = <Completer<void>>[];
   final _playbackHolds = <String, int>{};
-  final _cacheAccess = <String, AsyncGate>{};
+  final _cacheAccess = <String, _TaskGate>{};
   final _readable = <String, DownloadReadableState>{};
   final _directTargets = <String, DirectDownloadTarget>{};
   int _torrentPlaybackHolds = 0;
@@ -222,7 +228,7 @@ class DownloadManager extends ChangeNotifier {
     require(!_closing, '应用正在退出');
     final current = _tasks[id];
     require(current != null && canPlayOnline(current), '此下载任务无法在线播放');
-    await (_cacheAccess[id] ??= AsyncGate()).run(() async {
+    await _withCacheAccess(id, () async {
       require(!_closing && _tasks.containsKey(id), '下载任务已关闭');
       _playbackHolds[id] = (_playbackHolds[id] ?? 0) + 1;
     });
@@ -343,7 +349,7 @@ class DownloadManager extends ChangeNotifier {
     int start,
     int end,
     RemoteIdentity identity,
-  ) => (_cacheAccess[id] ??= AsyncGate()).run(() async {
+  ) => _withCacheAccess(id, () async {
     final state = _readable[id];
     if (state == null ||
         start < 0 ||
@@ -1289,8 +1295,25 @@ class DownloadManager extends ChangeNotifier {
     });
     _schedule();
   });
+  Future<T> _runTaskGate<T>(
+    Map<String, _TaskGate> gates,
+    String id,
+    Future<T> Function() action,
+  ) {
+    final entry = gates.putIfAbsent(id, _TaskGate.new);
+    entry.users++;
+    return entry.gate.run(action).whenComplete(() {
+      if (--entry.users == 0 && identical(gates[id], entry)) {
+        gates.remove(id);
+      }
+    });
+  }
+
   Future<T> _control<T>(String id, Future<T> Function() action) =>
-      (_controls[id] ??= AsyncGate()).run(action);
+      _runTaskGate(_controls, id, action);
+
+  Future<T> _withCacheAccess<T>(String id, Future<T> Function() action) =>
+      _runTaskGate(_cacheAccess, id, action);
   Future<void> _stop(String id) async {
     final run = _running[id];
     if (run != null) {
@@ -2131,7 +2154,7 @@ class DownloadManager extends ChangeNotifier {
   });
 
   Future<void> _deleteCache(String id) =>
-      (_cacheAccess[id] ??= AsyncGate()).run(() => _deleteCacheUnlocked(id));
+      _withCacheAccess(id, () => _deleteCacheUnlocked(id));
 
   Future<void> _deleteCacheUnlocked(String id) async {
     _readable.remove(id);
@@ -2171,7 +2194,7 @@ class DownloadManager extends ChangeNotifier {
   Future<DirectDownloadTarget?> _openDirectTarget(String id, _Run run) async {
     if (!_tasks[id]!.directOutput) return null;
     await engine.requireDirectOutput();
-    return (_cacheAccess[id] ??= AsyncGate()).run(() async {
+    return _withCacheAccess(id, () async {
       run.check();
       final task = _tasks[id]!;
       final target = _directTargets[id] ??= await files.openDownloadTarget(
@@ -2191,7 +2214,7 @@ class DownloadManager extends ChangeNotifier {
     String id, {
     bool forget = false,
     bool onlyIfUnused = false,
-  }) => (_cacheAccess[id] ??= AsyncGate()).run(() async {
+  }) => _withCacheAccess(id, () async {
     if (onlyIfUnused && _playbackHolds.containsKey(id)) return;
     await _releaseDirectTargetUnlocked(id, forget: forget);
   });
@@ -2212,6 +2235,7 @@ class DownloadManager extends ChangeNotifier {
   Future<void> _markCompleted(String id, String savedPath) async {
     final task = _tasks[id];
     if (task == null) return;
+    _guestDownloadBatches.remove(id);
     _tasks[id] = task.update({
       'status': 'completed',
       'savedPath': savedPath,
@@ -2227,7 +2251,7 @@ class DownloadManager extends ChangeNotifier {
 
   Future<void> _cleanCompletedDownload(String id) async {
     await engine.remove(id);
-    final cleaned = await (_cacheAccess[id] ??= AsyncGate()).run(() async {
+    final cleaned = await _withCacheAccess(id, () async {
       if (_playbackHolds.containsKey(id)) return false;
       await _deleteCacheUnlocked(id);
       await _releaseDirectTargetUnlocked(id, forget: files.directDownloads);
@@ -2254,7 +2278,8 @@ class DownloadManager extends ChangeNotifier {
 
   Future<String> _finishStoredTarget(String id, Json state) async {
     if (state.boolean('published')) return state.str('uri');
-    final target = await (_cacheAccess[id] ??= AsyncGate()).run(
+    final target = await _withCacheAccess(
+      id,
       () async => _directTargets[id] ??= await files.openDownloadTarget(
         id: id,
         name: state.str('name'),
@@ -2982,7 +3007,7 @@ class DownloadManager extends ChangeNotifier {
     final target = await _openDirectTarget(id, run);
     // The native resume can discard an evicted or truncated payload. Do not
     // reuse the previous run's intervals until its new snapshot arrives.
-    await (_cacheAccess[id] ??= AsyncGate()).run(() async {
+    await _withCacheAccess(id, () async {
       run.check();
       _readable.remove(id);
       if (reset && target != null) {
@@ -3540,6 +3565,8 @@ class DownloadManager extends ChangeNotifier {
     });
     final speedClock = Stopwatch()..start();
     var received = 0;
+    var lastReserved = -1;
+    const hlsReserveStep = 16 * 1024 * 1024;
     run.check();
     final handle = await output.open(mode: FileMode.append);
     try {
@@ -3551,6 +3578,7 @@ class DownloadManager extends ChangeNotifier {
           run.check();
           await handle.truncate(retained);
           await handle.setPosition(retained);
+          if (attempt > 0) lastReserved = -1;
           var segmentBytes = 0;
           try {
             final response = await http.streamDownload(
@@ -3563,12 +3591,14 @@ class DownloadManager extends ChangeNotifier {
             }
             await for (final chunk in response.data!.stream) {
               run.check();
-              await _reserve(
-                id,
-                run,
-                retained + segmentBytes + chunk.length,
-                retained + segmentBytes,
-              );
+              final current = retained + segmentBytes;
+              final needed = current + chunk.length;
+              if (lastReserved < 0 || needed > lastReserved) {
+                final target =
+                    current + math.max<int>(chunk.length, hlsReserveStep);
+                await _reserve(id, run, target, current);
+                lastReserved = target;
+              }
               await handle.writeFrom(chunk);
               segmentBytes += chunk.length;
               received += chunk.length;
@@ -3590,7 +3620,7 @@ class DownloadManager extends ChangeNotifier {
                 'index': index + 1,
                 'bytes': retained,
               },
-            });
+            }, progress: true);
             success = true;
             break;
           } catch (e) {

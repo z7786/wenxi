@@ -904,15 +904,24 @@ void main() {
         )).status,
         400,
       );
-      expect(
-        (await fetch(
-          target,
-          method: 'POST',
-          headers: {'Host': 'example.com'},
-          body: {},
-        )).status,
-        400,
-      );
+      for (final badHost in [
+        'example.com',
+        'evil@127.0.0.1:${sender.port}',
+        '127.0.0.1:${sender.port}/path',
+        '127.0.0.1:${sender.port}#frag',
+        '127.0.0.1:99999',
+      ]) {
+        expect(
+          (await fetch(
+            target,
+            method: 'POST',
+            headers: {'Host': badHost},
+            body: {},
+          )).status,
+          400,
+          reason: badHost,
+        );
+      }
       expect(
         (await fetch(target, method: 'POST', body: '{broken')).status,
         400,

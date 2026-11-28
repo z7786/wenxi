@@ -781,17 +781,28 @@ double _resourceCoverTextHeight(
       .ceilToDouble();
 }
 
+final _movieResourcePattern = RegExp(
+  '电影|影视|电视剧|动画|4K|1080',
+  caseSensitive: false,
+);
+final _bookResourcePattern = RegExp(
+  '书|学习|课程|教程|考研|PDF|EPUB',
+  caseSensitive: false,
+);
+final _musicResourcePattern = RegExp('音乐|音频|有声|MP3|FLAC', caseSensitive: false);
+final _appResourcePattern = RegExp('软件|工具|应用|安装|APP|APK', caseSensitive: false);
+
 IconData resourceTypeIcon(String text) {
-  if (RegExp('电影|影视|电视剧|动画|4K|1080', caseSensitive: false).hasMatch(text)) {
+  if (_movieResourcePattern.hasMatch(text)) {
     return Icons.movie_outlined;
   }
-  if (RegExp('书|学习|课程|教程|考研|PDF|EPUB', caseSensitive: false).hasMatch(text)) {
+  if (_bookResourcePattern.hasMatch(text)) {
     return Icons.menu_book_outlined;
   }
-  if (RegExp('音乐|音频|有声|MP3|FLAC', caseSensitive: false).hasMatch(text)) {
+  if (_musicResourcePattern.hasMatch(text)) {
     return Icons.headphones_rounded;
   }
-  if (RegExp('软件|工具|应用|安装|APP|APK', caseSensitive: false).hasMatch(text)) {
+  if (_appResourcePattern.hasMatch(text)) {
     return Icons.apps_rounded;
   }
   return Icons.folder_outlined;

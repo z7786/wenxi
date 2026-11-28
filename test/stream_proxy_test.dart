@@ -1993,4 +1993,77 @@ void main() {
       expect(origin.cookies, everyElement(isNull));
     },
   );
+
+  test(
+    'Small metadata probes do not swallow a pending seek before the media range arrives',
+    () async {
+      expect(await proxy.start(), isTrue);
+      origin.delay = const Duration(milliseconds: 40);
+      final old = read(
+        0,
+        origin.bytes.length - 1,
+      ).then<Object>((bytes) => bytes, onError: (Object error) => error);
+      await until(() => origin.calls.length > 1);
+      proxy.prepareSeek();
+      expect(proxy.diagnosticFields['seekPending'], isTrue);
+      final tailStart = origin.bytes.length - 128;
+      expect(
+        await read(tailStart, origin.bytes.length - 1),
+        origin.bytes.sublist(tailStart),
+      );
+      expect(proxy.diagnosticFields['seekPending'], isTrue);
+      expect(proxy.generation, 0);
+      expect(await read(300000, 330000), origin.bytes.sublist(300000, 330001));
+      expect(await old, isA<HttpException>());
+      expect(proxy.generation, 1);
+      expect(proxy.diagnosticFields['seekPending'], isFalse);
+      expect(failures, isEmpty);
+    },
+  );
+
+  test(
+    'Demanded media segment preempts in-flight speculative work when blocked by connection budget',
+    () async {
+      proxy.connections = 2;
+      expect(await proxy.start(), isTrue);
+      final gate = Completer<void>();
+      origin.firstPacketBytes = 1024;
+      origin.bodyRemainderBarrier = gate.future;
+      final first = read(
+        0,
+        origin.bytes.length - 1,
+      ).then<Object>((value) => value, onError: (Object error) => error);
+      try {
+        await until(() => proxy.activeRequests == 2);
+        origin.firstPacketBytes = null;
+        expect(
+          await read(300000, 308191).timeout(const Duration(seconds: 2)),
+          origin.bytes.sublist(300000, 308192),
+        );
+        expect(proxy.activeRequests, lessThanOrEqualTo(2));
+        expect(proxy.bufferedBytes, lessThanOrEqualTo(proxy.maxCacheBytes));
+        expect(proxy.generation, 0);
+        expect(failures, isEmpty);
+      } finally {
+        gate.complete();
+        await first;
+      }
+    },
+  );
+
+  test(
+    'Upstream failure before first delivered byte returns HTTP 502 Bad Gateway',
+    () async {
+      expect(await proxy.start(), isTrue);
+      origin.statusFor = (_, end, _) => end > 1023 ? 403 : 0;
+      final request = await client.getUrl(proxy.uri);
+      request.headers.set('Range', 'bytes=16384-24575');
+      final response = await request.close();
+      expect(response.statusCode, HttpStatus.badGateway);
+      expect(response.contentLength, 0);
+      expect(await response.expand((e) => e).toList(), isEmpty);
+      expect(failures.single.status, 403);
+      expect(proxy.diagnosticFields['servedBytes'], 0);
+    },
+  );
 }
